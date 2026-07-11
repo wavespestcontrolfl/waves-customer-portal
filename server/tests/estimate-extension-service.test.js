@@ -1,4 +1,5 @@
 const {
+  extendEstimate,
   computeExtensionExpiry,
   extensionStatusUpdate,
   EXTENDABLE_STATUSES,
@@ -55,6 +56,26 @@ describe('extensionStatusUpdate (view-blocking status revival)', () => {
     // in-flight send machinery.
     expect(extensionStatusUpdate({ status: 'sending', sent_at: PAST, expires_at: FUTURE }, NOW)).toBe(null);
     expect(extensionStatusUpdate({ status: 'sending', sent_at: null, viewed_at: null, expires_at: PAST }, NOW)).toBe(null);
+  });
+});
+
+describe('extendEstimate validation (pre-write throws)', () => {
+  it('refuses a LIVE sending claim — in-flight finalization owns status and expiry', async () => {
+    // Thrown BEFORE any DB access: an extension mid-send would either be
+    // overwritten by the send's final expires_at write or steal its claim.
+    await expect(extendEstimate({
+      estimate: { id: 1, status: 'sending', expires_at: FUTURE },
+      days: 7,
+      entryPoint: 'test',
+      workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 400 });
+    // Null expiry = mid-send window not written yet: also live, also refused.
+    await expect(extendEstimate({
+      estimate: { id: 1, status: 'sending', expires_at: null },
+      days: 7,
+      entryPoint: 'test',
+      workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 400 });
   });
 });
 

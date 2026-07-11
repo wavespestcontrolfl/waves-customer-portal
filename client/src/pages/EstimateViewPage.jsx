@@ -3437,7 +3437,20 @@ export default function EstimateViewPage() {
         <NotFoundCard
           token={token}
           extensionEligible={extensionEligible}
-          onExtended={() => { loadEstimate().catch(() => {}); }}
+          onExtended={() => {
+            // Refresh semantics, NOT a first load: the initial 404 never
+            // marked the view counted, so a bare loadEstimate() would flip
+            // loading=true — swapping this card for the skeleton, stranding
+            // the skeleton forever on a network rejection, and losing the
+            // "You're all set" state on a 5xx. As a refresh the card stays
+            // up until /data actually 200s (then the live estimate renders
+            // in place); on failure nothing changes and the card—with its
+            // success copy and retry button—survives. The server counts the
+            // revived estimate's first real view regardless (?refresh=1 is
+            // only honored once viewed_at is set).
+            initialViewCountedRef.current = true;
+            loadEstimate().catch(() => {});
+          }}
         />
       </Page>
     );

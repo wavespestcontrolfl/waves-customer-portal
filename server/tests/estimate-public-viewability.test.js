@@ -130,22 +130,3 @@ describe('isEstimateExtensionRequestEligible (expired-page "Request an extension
     expect(isEstimateExtensionRequestEligible({ status: 'sending', sent_at: PAST, expires_at: null })).toBe(false);
   });
 });
-
-describe('estimateDataCanHoldExtensionStamps (button flag ↔ POST fail-closed parity)', () => {
-  const { estimateDataCanHoldExtensionStamps } = require('../routes/estimate-public');
-
-  it('accepts object and NULL estimate_data (claims COALESCE NULL into {})', () => {
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: { foo: 1 } })).toBe(true);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: '{"foo":1}' })).toBe(true);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: null })).toBe(true);
-    expect(estimateDataCanHoldExtensionStamps({})).toBe(true);
-  });
-
-  it('rejects blobs that cannot hold the dedupe/burn stamps', () => {
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: '"just a string"' })).toBe(false);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: '[1,2]' })).toBe(false);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: [1, 2] })).toBe(false);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: 'not json at all' })).toBe(false);
-    expect(estimateDataCanHoldExtensionStamps({ estimate_data: '42' })).toBe(false);
-  });
-});

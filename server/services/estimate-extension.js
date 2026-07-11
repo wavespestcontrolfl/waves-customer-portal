@@ -99,6 +99,16 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   if (!EXTENDABLE_STATUSES.includes(estimate.status)) {
     throw validationError(`Only sent / viewed / expired estimates can be extended. Current status: ${estimate.status}.`);
   }
+  // A LIVE 'sending' claim belongs to an in-flight send: its finalization
+  // writes status + the real expires_at when it completes, so extending now
+  // would either be overwritten or steal the claim mid-send. Only a STALE
+  // claim — one whose expiry window already lapsed — is extendable (that row
+  // is definitionally a crashed send: claims live seconds, windows days).
+  // This also keeps the admin route's old behavior of refusing mid-send rows.
+  if (estimate.status === 'sending'
+    && !(estimate.expires_at && new Date(estimate.expires_at) < new Date())) {
+    throw validationError('Estimate is mid-send — wait for the send to finish before extending.');
+  }
   if (estimate.archived_at) {
     throw validationError('Estimate is archived. Unarchive first.');
   }

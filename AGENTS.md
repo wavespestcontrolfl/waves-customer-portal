@@ -310,28 +310,34 @@ finding and warns on P1. Reviewers must return JSON matching
   not-found screen. Estimate token format gate (same slug-or-64-hex regex as
   the slots router), generic 404 — unknown token, malformed token, ineligible
   row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
-  behind GATE_ESTIMATE_EXTENSION_REQUEST. Eligibility requires a PUBLISHED
-  estimate (sent_at/viewed_at set — the expiration sweep flips never-sent
-  drafts to 'expired' too, and those must never qualify) that is past
-  expires_at or sweep-expired, not accepted/declined/archived; non-object
-  estimate_data fails CLOSED (generic 404 — the stamps below would be
-  unrecordable). Concurrency: an atomic 24h-dedupe `extensionRequestedAt`
-  claim inside estimate_data (conditional UPDATE so concurrent POSTs can't
-  fan out duplicates; released on failure). First request per estimate
-  AUTO-GRANTS a 7-day extension via the shared
+  behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
+  gate is off so a dark probe sees only generic 404s, never a revealing 429,
+  and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
+  requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
+  sweep flips never-sent drafts to 'expired' too, and those must never
+  qualify) that is past expires_at or sweep-expired, not
+  accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+  lifetime auto-grant burn live in DEDICATED estimates columns
+  (`extension_requested_at` / `extension_auto_granted_at`, migration
+  20260711000001 — never estimate_data, whose full-blob writers could erase
+  jsonb stamps and un-burn the cap), claimed by one atomic conditional
+  UPDATE so concurrent POSTs can't fan out duplicates. First request per
+  estimate AUTO-GRANTS a 7-day extension via the shared
   services/estimate-extension.js core (same expiry anchoring, status
   revival, and `estimate_extended` SMS as the admin extend route —
-  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage; the
-  write is guarded on the snapshot's status/archived_at and never moves an
-  expiry backwards, 409 on conflict), capped at ONE per estimate lifetime by
-  an `extensionAutoGrantedAt` stamp burned ATOMICALLY in the same claim
-  UPDATE before any mutation (fail-closed: a failed grant releases both
-  stamps best-effort; a failed release stays burned) so a public endpoint
-  can't become an infinite self-serve snooze; repeat requests fall back to
-  notify-office-only. Every path raises an in-app admin notification (the
-  auto-grant alert retries once and error-logs on double failure; the
-  notify-only path treats the notification as the deliverable and releases
-  its claim + 500s when it can't persist); response carries only
+  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage;
+  post-write SMS plumbing never throws; the write is guarded on the
+  snapshot's status/archived_at and never moves an expiry backwards, 409 on
+  conflict; LIVE 'sending' claims are refused — only date-expired stale
+  ones extend), burned ATOMICALLY in the same claim UPDATE before any
+  mutation. Failure handling is fail-closed: provably pre-write errors
+  (400/409) release both stamps; ambiguous errors keep the BURN but release
+  the dedupe stamp so a retry reaches the notify-office path instead of a
+  false alreadyRequested. Repeat requests fall back to notify-office-only.
+  Every path raises an in-app admin notification (the auto-grant alert
+  retries once and error-logs on double failure; the notify-only path
+  treats the notification as the deliverable and releases its claim + 500s
+  when it can't persist); response carries only
   success/autoExtended/expiresAt/smsSent — no PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers

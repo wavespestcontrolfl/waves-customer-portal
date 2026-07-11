@@ -95,6 +95,13 @@ const extensionRequestLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  // Dark-launch contract: with the gate off this endpoint must be an
+  // indistinguishable generic 404 — a 429 on the sixth probe would reveal it
+  // exists. The limiter only engages once the feature is live.
+  skip: () => !featureGates.isEnabled('estimateExtensionRequest'),
+  // Shared key generator: /64-collapsed IPv6 fallback, so a client can't
+  // rotate addresses within their subnet to evade the 5/hour ceiling.
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
 });
 
@@ -9147,49 +9154,31 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
-    // Fail CLOSED on malformed estimate_data: a non-object blob (never seen
-    // in practice) cannot hold the dedupe/burn stamps, and granting without
-    // recordable stamps would make this public endpoint an unbounded snooze
-    // button. The /data 404 flag applies the same check, so the SPA never
-    // offers a button this path would reject.
-    if (!estimateDataCanHoldExtensionStamps(estimate)) {
-      logger.warn(`[estimate-extension-request] non-object estimate_data on estimate ${estimate.id} — failing closed`);
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-
-    const nowIso = new Date().toISOString();
-    // 24h dedupe window, shared by both claim shapes below. CASE (not OR)
-    // because Postgres doesn't guarantee OR short-circuit order — a malformed
-    // stamp value must hit the format guard as claimable, never the
-    // ::timestamptz cast (which would 500 the request on bad JSON metadata).
-    const DEDUPE_OPEN_SQL = `(CASE
-      WHEN COALESCE(estimate_data->>'extensionRequestedAt', '') = '' THEN true
-      WHEN (estimate_data->>'extensionRequestedAt') !~ '^\\d{4}-\\d{2}-\\d{2}T' THEN true
-      ELSE (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours'
-    END)`;
-    const OBJECT_SQL = "jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'";
-
     const NotificationService = require('../services/notification-service');
     const expiredLine = estimate.expires_at
       ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
       : 'link expired';
 
+    // Both stamps live in DEDICATED estimates columns (migration
+    // 20260711000001), NOT estimate_data — the blob has full read-modify-
+    // write writers (e.g. the membership-snapshot reconciler) that could
+    // silently erase jsonb stamps and un-burn the lifetime cap. Columns are
+    // immune to blob races and need no shape/format/cast guards.
+    const DEDUPE_OPEN = (b) => b.whereNull('extension_requested_at')
+      .orWhere('extension_requested_at', '<', db.raw("NOW() - interval '24 hours'"));
+
     // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
-    // checks the 24h dedupe AND the unburned cap AND records BOTH stamps
-    // (extensionRequestedAt + extensionAutoGrantedAt), so the burn is atomic
-    // with the claim: concurrent POSTs can't double-grant, and there is no
-    // window where an extension exists without its burn. Burn-BEFORE-grant is
-    // the fail-closed direction — if the extension then fails we release the
-    // stamps best-effort, and if THAT fails the customer merely loses the
-    // self-serve grant (office path still works), never gains extras.
+    // checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
+    // the burn is atomic with the claim: concurrent POSTs can't double-grant,
+    // and there is no window where an extension exists without its burn.
+    // Burn-BEFORE-grant is the fail-closed direction.
     const autoClaimed = await db('estimates')
       .where({ id: estimate.id })
-      .whereRaw(`${OBJECT_SQL} AND ${DEDUPE_OPEN_SQL} AND COALESCE(estimate_data->>'extensionAutoGrantedAt', '') = ''`)
+      .whereNull('extension_auto_granted_at')
+      .where(DEDUPE_OPEN)
       .update({
-        estimate_data: db.raw(
-          "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true), '{extensionAutoGrantedAt}', to_jsonb(?::text), true)",
-          [nowIso, nowIso],
-        ),
+        extension_requested_at: db.fn.now(),
+        extension_auto_granted_at: db.fn.now(),
       });
 
     if (autoClaimed) {
@@ -9205,23 +9194,26 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
           smsMetadata: { original_message_type: 'estimate_extended_auto' },
         });
       } catch (err) {
-        // Release both stamps ONLY for errors known to be pre-write —
-        // validation 400s and the guarded write's 409, both thrown before or
-        // instead of any mutation (post-write SMS plumbing inside
-        // extendEstimate never throws; see its POST-WRITE INVARIANT). Any
-        // other error is ambiguous — the expiry write may have committed —
-        // and un-burning the lifetime cap over a granted extension would let
-        // this token self-serve another "first" grant once it lapses. Stay
-        // burned: fail closed (codex P2, 2026-07-11).
-        if (err.statusCode === 400 || err.statusCode === 409) {
-          await db('estimates').where({ id: estimate.id }).update({
-            estimate_data: db.raw(
-              "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN (estimate_data - 'extensionRequestedAt') - 'extensionAutoGrantedAt' ELSE estimate_data END",
-            ),
-          }).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
-        } else {
+        // Errors known to be pre-write — validation 400s and the guarded
+        // write's 409, both thrown before or instead of any mutation
+        // (post-write SMS plumbing inside extendEstimate never throws; see
+        // its POST-WRITE INVARIANT) — release BOTH stamps: nothing happened,
+        // a later retry may auto-grant. Any other error is ambiguous (the
+        // expiry write may have committed), so the BURN stays — un-burning
+        // over a granted extension would let this token self-serve another
+        // "first" grant once it lapses — but the DEDUPE stamp is released so
+        // the customer's retry reaches the notify-office path below and a
+        // human sees it, instead of a false "alreadyRequested" for 24h with
+        // nothing delivered.
+        const knownPreWrite = err.statusCode === 400 || err.statusCode === 409;
+        if (!knownPreWrite) {
           logger.error(`[estimate-extension-request] ambiguous auto-grant failure for estimate ${estimate.id} — keeping burn (fail closed)`);
         }
+        await db('estimates').where({ id: estimate.id }).update(
+          knownPreWrite
+            ? { extension_requested_at: null, extension_auto_granted_at: null }
+            : { extension_requested_at: null },
+        ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -9258,13 +9250,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // the dedupe window): try the plain 24h notify-only claim.
     const claimed = await db('estimates')
       .where({ id: estimate.id })
-      .whereRaw(`${OBJECT_SQL} AND ${DEDUPE_OPEN_SQL}`)
-      .update({
-        estimate_data: db.raw(
-          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true)",
-          [nowIso],
-        ),
-      });
+      .where(DEDUPE_OPEN)
+      .update({ extension_requested_at: db.fn.now() });
     if (!claimed) {
       return res.json({ success: true, alreadyRequested: true });
     }
@@ -9281,11 +9268,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
     );
     if (!notification) {
-      await db('estimates').where({ id: estimate.id }).update({
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
-        ),
-      }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+      await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
+        .catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
       return res.status(500).json({ error: 'extension_request_failed' });
     }
 
@@ -10725,20 +10709,6 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate.sent_at && !estimate.viewed_at) return false;
   if (estimate.status === 'expired') return true;
   return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
-}
-
-// Whether estimate_data can hold the extension-request dedupe/burn stamps:
-// an object (or NULL — the claim UPDATEs COALESCE it into '{}'). A string/
-// array/number blob can't be jsonb_set, so the POST fails closed AND the
-// /data 404 must not advertise the button (the flag and the endpoint must
-// agree, or the SPA renders a button that can only 404).
-function estimateDataCanHoldExtensionStamps(estimate = {}) {
-  if (estimate.estimate_data == null) return true;
-  let parsed = estimate.estimate_data;
-  if (typeof parsed === 'string') {
-    try { parsed = JSON.parse(parsed); } catch { return false; }
-  }
-  return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed);
 }
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
@@ -14582,12 +14552,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // re-checks eligibility + gate server-side regardless. The flag is only
       // ever INCLUDED when true — an explicit `false` here would distinguish
       // real-but-ineligible tokens (drafts, archived, send_failed) from
-      // unknown ones and break the generic-404 contract. The stampable-shape
-      // check mirrors the POST's fail-closed guard — a malformed-blob row
-      // must not advertise a button whose endpoint would 404.
+      // unknown ones and break the generic-404 contract.
       if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)
-        && estimateDataCanHoldExtensionStamps(estimate)) {
+        && isEstimateExtensionRequestEligible(estimate)) {
         return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
       }
       return res.status(404).json({ error: 'Estimate not found' });
@@ -15094,7 +15061,6 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
-module.exports.estimateDataCanHoldExtensionStamps = estimateDataCanHoldExtensionStamps;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
