@@ -164,6 +164,73 @@ describe('termite-bait bundles split into per-service sections (buildPricingBund
   });
 });
 
+describe('solo termite-bait estimates (no pest, no mosquito)', () => {
+  // A monitoring-only estimate has no cadence ladder of its own, so the v1
+  // build falls back to a pest-shaped quarterly entry. The section must
+  // still render the flat-monthly plan as per-check pricing with monthly
+  // billing — never "$105/quarter".
+  function soloTermiteEstimate() {
+    return {
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'draft',
+      monthly_total: 35,
+      annual_total: 420,
+      onetime_total: 639,
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        inputs: {
+          svcTermiteBait: true,
+          homeSqFt: '1998', lotSqFt: '10017', stories: '1',
+          isCommercial: 'NO', customerName: 'Solo Termite',
+          address: '123 Monitoring Way, Sarasota, FL 34235',
+        },
+        result: {
+          hasRecurring: true,
+          hasOneTime: true,
+          totals: { year1: 1059, year2: 420, year2mo: 35 },
+          oneTime: {
+            items: [{
+              name: 'Advance Installation', price: 639,
+              detail: '23 stations · 223 linear ft perimeter',
+              service: 'termite_bait_installation',
+            }],
+            total: 639,
+          },
+          recurring: {
+            tier: 'Bronze',
+            discount: 0,
+            serviceCount: 1,
+            monthlyTotal: 35,
+            grandTotal: 35,
+            annualAfterDiscount: 420,
+            services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35 }],
+          },
+          results: {
+            pestTiers: [],
+            tmBait: {
+              system: 'advance', selectedSystem: 'advance', ai: 639, bmo: 35, pmo: 65,
+              sta: 23, perim: 223, monitoringTier: 'basic', quoteRequired: false,
+              requiresMeasurement: false,
+            },
+          },
+        },
+      },
+    };
+  }
+
+  test('renders per-check pricing with monthly billing, not a quarterly price', async () => {
+    const bundle = await buildPricingBundle(soloTermiteEstimate());
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite).toBeTruthy();
+    const entry = termite.frequencies[0];
+    expect(entry.key).toBe('recurring');
+    expect(entry.monthly).toBeCloseTo(35, 2);
+    // Per-check display pricing: $35/mo × 12 ÷ 4 checks = $105/check.
+    expect(entry.perTreatment).toBeCloseTo(105, 2);
+    expect(entry.visitsPerYear).toBe(4);
+  });
+});
+
 describe('stale-snapshot bypass guards', () => {
   // Snapshots frozen before the split: the termite row has neither a
   // per-visit price nor `monthly`, so the fast path would keep serving the

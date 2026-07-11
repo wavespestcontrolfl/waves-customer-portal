@@ -13217,13 +13217,27 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
   if (!isOneTimeOnly && recurringKeys.length === 1) {
     const key = recurringKeys[0];
     const category = categoryForRecurringServiceKey(key) || serviceCategory;
+    // Solo flat-monthly services (termite bait monitoring) have no ladder of
+    // their own, so the v1 build falls back to the pest-shaped quarterly
+    // entry — which would render the monthly plan as a "$X/quarter" price.
+    // Shape the section entry through the same flat-monthly path the
+    // split-bundle sections use: a single 'recurring' entry with per-check
+    // display pricing and the "Billed $X/mo" clarification.
+    const soloTermiteFrequencies = key === 'termite_bait'
+      ? sectionFrequenciesForRecurringService(
+        key,
+        (recurringRows.find(([rowKey]) => rowKey === key) || [])[1] || {},
+        frequencies,
+        recurringDiscount,
+      )
+      : [];
     return [buildServiceSection({
       key,
       category,
       label: recurringServiceDisplayName(key) || serviceLabelForCategory(category),
       isRecurring: true,
       isPest: key === 'pest_control',
-      frequencies,
+      frequencies: soloTermiteFrequencies.length ? soloTermiteFrequencies : frequencies,
       // Solo pest AND solo mosquito carry the $99 membership setup (owner
       // directive 2026-07-10 evening); the fee only exists on the payload
       // when the mix qualifies, so attach whenever it was pushed.
@@ -13506,9 +13520,23 @@ function withCombinedLowConfidenceRange(combined, range) {
 }
 
 function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) {
-  const contractPayload = Array.isArray(payload.frequencies)
+  const basePayload = Array.isArray(payload.frequencies)
     ? { ...payload, frequencies: payload.frequencies.map(normalizePricingFrequencyTotals) }
     : payload;
+  // Normalize breakdown labels BEFORE sections are built: the per-service
+  // oneTimeContribution rows and the top-level breakdown must be the SAME
+  // row objects, or the client's exclusion identity (service|label|amount)
+  // mismatches across the raw-key/friendly label boundary and an embedded
+  // row totals twice in the standalone card.
+  const contractPayload = basePayload.oneTimeBreakdown && Array.isArray(basePayload.oneTimeBreakdown.items)
+    ? {
+      ...basePayload,
+      oneTimeBreakdown: {
+        ...basePayload.oneTimeBreakdown,
+        items: basePayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel),
+      },
+    }
+    : basePayload;
   // The WIDE case is force-converted to a site-confirmation quote upstream
   // (resolveEstimateQuoteRequirement), so gate the range on !forceSiteQuote.
   const lowConfidenceRange = commercialLowConfidenceRange(estData);
@@ -13548,12 +13576,8 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   const askChips = oneTimeBreakdownItems.some(isBoraCareOneTimeItem) && !askChipsBase.includes(BORA_CARE_ASK_CHIP)
     ? Array.from(new Set([BORA_CARE_ASK_CHIP, ...askChipsBase])).slice(0, 6)
     : askChipsBase;
-  // Engine-backed Bora-Care rows can arrive with the raw service key as their
-  // label; map those to the friendly category label so the React breakdown header
-  // and rows never show "bora_care" to customers (mirrors the SSR/invoice labels).
-  const normalizedOneTimeBreakdown = contractPayload.oneTimeBreakdown && Array.isArray(contractPayload.oneTimeBreakdown.items)
-    ? { ...contractPayload.oneTimeBreakdown, items: contractPayload.oneTimeBreakdown.items.map(normalizeBreakdownItemLabel) }
-    : contractPayload.oneTimeBreakdown;
+  // (Breakdown labels were normalized up top, before sections were built —
+  // the embedded contribution rows and this breakdown are the same objects.)
   const sectionQuoteRequired = services.some((section) => section.quoteRequired === true);
   return {
     ...contractPayload,
@@ -13561,7 +13585,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     combinedRecurring,
     renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
     askChips,
-    oneTimeBreakdown: normalizedOneTimeBreakdown,
+    oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
   };
 }
