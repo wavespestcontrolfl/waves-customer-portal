@@ -80,6 +80,7 @@ function buildPassJson({
   reviewUrl,
   referralUrl,
   portalUrl,
+  cardUrl = null,
 }) {
   const techFirst = firstNameOf(techName);
   const secondaryFields = [
@@ -102,6 +103,9 @@ function buildPassJson({
     backgroundColor: 'rgb(4,57,94)',
     foregroundColor: 'rgb(255,255,255)',
     labelColor: 'rgb(155,212,234)',
+    // Native App Store banner on the pass back — the pass advertises the
+    // Waves app without burning a field (numeric Apple ID of the iOS app).
+    associatedStoreIdentifiers: [6782775654],
     barcodes: [{
       format: 'PKBarcodeFormatQR',
       message: reviewUrl,
@@ -124,6 +128,14 @@ function buildPassJson({
         value: location.phone,
       }],
       backFields: [
+        // The pass is the pocket shortcut; the DESIGNED experience (glass,
+        // socials, app badges, branded QR) is the card page — link it first.
+        ...(cardUrl ? [{
+          key: 'card',
+          label: 'YOUR FULL WAVES CARD',
+          value: cardUrl,
+          attributedValue: `<a href="${cardUrl}">Open your Waves card</a>`,
+        }] : []),
         {
           key: 'text',
           label: techFirst ? `TEXT ${techFirst.toUpperCase()}` : 'TEXT US',
@@ -255,6 +267,7 @@ async function generateForToken(token) {
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,
     portalUrl: publicPortalUrl(),
+    cardUrl: `${publicPortalUrl()}/card/${card.share_token}`,
   });
 
   const files = { 'pass.json': Buffer.from(JSON.stringify(passJson)) };
