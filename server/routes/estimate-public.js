@@ -9236,6 +9236,12 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
       if (!autoNotification) {
         logger.error(`[estimate-extension-request] auto-grant admin notification failed twice for estimate ${estimate.id} — grant stands, office unnotified`);
+        // Free the 24h dedupe window (the burn stays) so a retry during a
+        // notification outage reaches the notify-only fallback below and
+        // pages the office about the grant, instead of `alreadyRequested`
+        // hiding a self-serve extension nobody heard about for a day.
+        await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
+          .catch((e) => logger.warn(`[estimate-extension-request] dedupe release after alert failure failed for estimate ${estimate.id}: ${e.message}`));
       }
 
       return res.status(201).json({

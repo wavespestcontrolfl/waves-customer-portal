@@ -77,6 +77,18 @@ describe('extendEstimate validation (pre-write throws)', () => {
       workflow: 'test',
     })).rejects.toMatchObject({ statusCode: 400 });
   });
+
+  it('refuses a STALE sending row with no publication evidence — re-send, not extend', async () => {
+    // No sent_at/viewed_at means the crashed send never reached the customer:
+    // there is no link to extend, and the row would stay status='sending' for
+    // the stale-send recovery to flip to send_failed later.
+    await expect(extendEstimate({
+      estimate: { id: 1, status: 'sending', expires_at: PAST, sent_at: null, viewed_at: null },
+      days: 7,
+      entryPoint: 'test',
+      workflow: 'test',
+    })).rejects.toMatchObject({ statusCode: 400 });
+  });
 });
 
 describe('EXTENDABLE_STATUSES', () => {

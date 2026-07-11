@@ -105,9 +105,18 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // claim — one whose expiry window already lapsed — is extendable (that row
   // is definitionally a crashed send: claims live seconds, windows days).
   // This also keeps the admin route's old behavior of refusing mid-send rows.
-  if (estimate.status === 'sending'
-    && !(estimate.expires_at && new Date(estimate.expires_at) < new Date())) {
-    throw validationError('Estimate is mid-send — wait for the send to finish before extending.');
+  if (estimate.status === 'sending') {
+    if (!(estimate.expires_at && new Date(estimate.expires_at) < new Date())) {
+      throw validationError('Estimate is mid-send — wait for the send to finish before extending.');
+    }
+    // A stale send that never reached the customer (no sent_at/viewed_at)
+    // has no link to extend, and extensionStatusUpdate would leave it
+    // 'sending' — pushing expires_at forward on a row the stale-send
+    // recovery will later flip to send_failed, killing the refreshed link.
+    // The right tool for that row is a re-send.
+    if (!estimate.sent_at && !estimate.viewed_at) {
+      throw validationError('This send crashed before reaching the customer — re-send the estimate instead of extending.');
+    }
   }
   if (estimate.archived_at) {
     throw validationError('Estimate is archived. Unarchive first.');
@@ -201,6 +210,14 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
             entryPoint,
             metadata: { days_added: parsedDays, ...smsMetadata },
           });
+          // GATE_TWILIO_SMS off yields a "successful" gate-blocked outcome
+          // (sent:true, providerMessageId:'gate-blocked') so automations
+          // upstream don't retry — but here `sent` feeds customer-facing
+          // "we texted you" copy and the admin alert, so a suppressed send
+          // must read as unsent.
+          if (smsResult?.sent && smsResult.providerMessageId === 'gate-blocked') {
+            smsResult = { ...smsResult, sent: false, reason: 'sms_gate_off' };
+          }
         }
       }
     } catch (err) {
