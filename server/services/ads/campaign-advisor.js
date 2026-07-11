@@ -4,6 +4,7 @@ const BudgetManager = require('./budget-manager');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const { parseLooseJson } = require('../../utils/llm-json');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -211,11 +212,11 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         }]
       });
 
-      let advice;
-      try {
-        advice = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-      } catch {
-        advice = { raw: response.content[0].text, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
+      const rawText = response.content[0].text;
+      let advice = parseLooseJson(rawText);
+      if (!advice) {
+        logger.warn(`[campaign-advisor] daily advice JSON parse failed (len=${String(rawText).length}); head: ${String(rawText).slice(0, 300)}`);
+        advice = { raw: rawText, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse structured output.' };
       }
 
       advice.date = etDateString(now);
