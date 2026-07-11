@@ -7035,4 +7035,10 @@ CallRecordingProcessor._test = {
   labeledTranscriptPreservesWords,
 };
 
+// Production contract for the re-transcription backfill (NOT test-only):
+// same transcriber + same hallucination guard the live path uses, so a
+// backfilled transcript can never be lower-integrity than a live one.
+CallRecordingProcessor.transcribeRecording = transcribeRecording;
+CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
+
 module.exports = CallRecordingProcessor;

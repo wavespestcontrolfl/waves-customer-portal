@@ -1024,6 +1024,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // HOURLY :40 — Call re-transcription backfill (voice-corpus training).
+  // Upgrades consented legacy recordings to diarized transcripts (batch-
+  // capped); the nightly miner then folds them into the voice corpus. One
+  // attempt per call ever; no-ops once the backlog drains.
+  // =========================================================================
+  cron.schedule('40 * * * *', async () => {
+    // Both gates: this job exists ONLY to feed the corpus miner — paying to
+    // re-transcribe while the miner is dark would upgrade transcripts nobody
+    // consumes.
+    if (!isEnabled('callRetranscribeBackfill') || !isEnabled('voiceCorpusMiner')) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { runRetranscriptionBackfill } = require('./call-retranscription-backfill');
+      await runExclusive('call-retranscribe-backfill', () => runRetranscriptionBackfill());
+    } catch (err) {
+      logger.error(`Call re-transcription backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:30AM ET — Voice-profile distiller (brand-voice loop, Loop 2).
   // Runs after the 2:45am corpus miner so each day's calls/texts feed the
   // voice profile the next morning (owner directive 2026-07-11: train on the
