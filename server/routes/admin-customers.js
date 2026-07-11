@@ -1672,7 +1672,7 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
         .orderBy('created_at', 'desc')
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
-          'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+          'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
@@ -1750,6 +1750,9 @@ router.get('/:id/schedule-estimates', async (req, res, next) => {
       return {
         id: estimate.id,
         token: estimate.token,
+        // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
+        // customer sees on the public quote page, cited by the provenance card.
+        estimateSlug: estimate.estimate_slug || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,

@@ -33,6 +33,11 @@
 //                          "Lawn Care · Monthly" / "Pest Control · Quarterly"
 //                          so nobody re-opens the estimate to answer "what
 //                          did they sign up for". Optional; omitted → hidden.
+//   estimateRef  string  — human-facing estimate number (estimate_slug,
+//                          "EST-2026-0254") shown in the header so the quote
+//                          can be referenced without opening it. Same number
+//                          the customer sees on the public quote page.
+//                          Optional; omitted/null → header shows no number.
 //   style        object  — optional outer wrapper style (margins, etc.)
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
@@ -285,8 +290,9 @@ function depositRow(deposit) {
   return null;
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, style }) {
   const quoted = Number(quotedTotal) || 0;
+  const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
   // Accepted service mix — prefer the estimate's own wording (estimateLabel)
   // over the catalog-matched name so the card reads like the quote did.
@@ -318,13 +324,18 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   return (
     <div style={style}>
       <div style={{ background: BLUE.bg, border: `1px solid ${BLUE.border}`, borderRadius: 4, padding: '10px 12px' }}>
-        {/* Header: FROM ESTIMATE · Quoted $X */}
+        {/* Header: FROM ESTIMATE EST-2026-NNNN · Quoted $X */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink }}>
+          <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: BLUE.ink, whiteSpace: 'nowrap' }}>
             From Estimate
           </span>
+          {refLabel && (
+            <span style={{ fontSize: 11, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {refLabel}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums' }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
             Quoted {money(quoted)}
           </span>
         </div>
@@ -356,7 +367,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
         )}
 
         {serviceLines.length > 0 && (
-          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 4 }}>
+          <div style={{ marginTop: 8, borderTop: `1px solid ${BLUE.border}`, paddingTop: 6 }}>
+            {/* Micro-label so the rows read as the estimate's accepted service
+                mix, not this appointment's line items. */}
+            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: MUTED }}>
+              Estimate includes
+            </div>
             {serviceLines.map((line, i) => (
               <div key={`${line.name}-${i}`} style={lineStyle}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>

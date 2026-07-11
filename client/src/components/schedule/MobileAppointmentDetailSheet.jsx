@@ -465,6 +465,7 @@ export default function MobileAppointmentDetailSheet({
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}
             lines={estimateSource.lines}
+            estimateRef={estimateSource.estimateSlug}
             style={{ marginTop: 16 }}
           />
         )}
