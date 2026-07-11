@@ -256,6 +256,48 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Bi-Monthly Pest Control Service');
   });
 
+  test('a negated cadence is a decline: "I don\'t want quarterly, just the wasp nest" stays', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want quarterly, just the wasp nest.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: no monthly for me, one visit please.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('a NEGATIVE agent confirmation is not a plan offer', () => {
+    const t = [
+      'Caller: I have a wasp nest.',
+      'Agent: so just the nest, not quarterly service?',
+      'Caller: yes.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('an accepted COUNTEROFFER after a decline converts, with the counteroffer cadence', () => {
+    const t = [
+      "Caller: I don't want a monthly plan.",
+      'Agent: understood — we can do quarterly instead.',
+      'Caller: yes, that works.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Quarterly Pest Control Service');
+  });
+
+  test('seeded-DB recurring alias names are recognized for cadence retargeting', () => {
+    expect(applyRecurringIntentDefault(
+      lead({ matched_service: 'General Pest Control Service (Semiannual)' }),
+      'Caller: could you come every other month?'
+    ).matched_service).toBe('Bi-Monthly Pest Control Service');
+  });
+
+  test('historical cadence mentions are not new plan interest', () => {
+    expect(applyRecurringIntentDefault(
+      lead(),
+      'Caller: I used to have quarterly service, but now I just need the wasp nest removed.'
+    ).matched_service).toBe('Bee / Wasp Nest Removal Service');
+    // A present-tense quarterly ask still converts.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: can you set me up on quarterly?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
