@@ -326,6 +326,14 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'redaction_placeholder' };
     }
 
+    // (3.7) House rule: no prices in customer SMS — a reply quoting a dollar
+    //       amount never auto-sends; a human quotes prices deliberately.
+    //       Deterministic, independent of the LLM verifier.
+    if (suggest.hasPriceQuote(reply)) {
+      logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
+      return { sent: false, reason: 'price_quote' };
+    }
+
     // (4) Server-enforced graduation eligibility — re-checked live every send.
     const graduation = require('./sms-graduation');
     const elig = await graduation.evaluateAutoSendEligibility({ intent });

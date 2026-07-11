@@ -49,6 +49,19 @@ function hasRedactionPlaceholder(text) {
   return REDACTION_PLACEHOLDER_RE.test(String(text || ''));
 }
 
+// House rule: no prices in customer SMS — billing amounts belong on invoices
+// and in a human's hands, and the July 2026 live judge readout showed the
+// drafter INVENTING dollar figures (a quoted "$415.75" that appeared nowhere
+// in the facts). Deterministic and verifier-independent like the placeholder
+// guard: a draft carrying a dollar-ish amount stays shadow / never auto-sends.
+// Matches "$50", "$ 1,200.50", "USD 50", "50 dollars", "2 bucks". False
+// positives are acceptable — they fail toward human review, never toward a
+// customer send.
+const PRICE_QUOTE_RE = /\$\s?\d|\bUSD\s?\d|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks)\b/i;
+function hasPriceQuote(text) {
+  return PRICE_QUOTE_RE.test(String(text || ''));
+}
+
 const SUGGESTED_STATUS = 'suggested';
 const SUGGEST_WORKFLOW = 'sms_house_voice_suggest';
 const SUGGEST_AGENT_NAME = 'House Voice Drafter';
@@ -662,6 +675,7 @@ module.exports = {
   SENT_STATUSES,
   isEscalationIntent,
   hasRedactionPlaceholder,
+  hasPriceQuote,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,

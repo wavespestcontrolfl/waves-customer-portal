@@ -587,12 +587,20 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] draft copied a redaction placeholder — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
 
+    // House rule: no prices in customer SMS. The live judge caught the drafter
+    // inventing dollar figures — a draft quoting any amount stays shadow (the
+    // judge still covers it); a human quotes prices when one is warranted.
+    const replyHasPrice = suggestMode.hasPriceQuote(parsed.reply);
+    if (replyHasPrice) {
+      logger.warn(`[sms-shadow] draft quotes a price — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+    }
+
     // Only verified-clean drafts (verify loop converged) may leave the silent
     // shadow lane — a draft still asserting unsupported facts after the
     // revision budget is never shown to a human OR sent to a customer; it
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
-    if (row?.id && converged && !replyHasPlaceholder) {
+    if (row?.id && converged && !replyHasPlaceholder && !replyHasPrice) {
       if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,

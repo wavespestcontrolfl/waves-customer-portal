@@ -12,6 +12,7 @@ const {
   EXPIRY_HOURS,
   isEscalationIntent,
   hasRedactionPlaceholder,
+  hasPriceQuote,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
@@ -31,6 +32,28 @@ describe('hasRedactionPlaceholder — never deliver a copied corpus placeholder'
     expect(hasRedactionPlaceholder('')).toBe(false);
     expect(hasRedactionPlaceholder(null)).toBe(false);
     expect(hasRedactionPlaceholder('See item [1] on your invoice')).toBe(false); // unrelated brackets
+  });
+});
+
+describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
+  test('detects dollar-sign amounts in every shape the drafter has invented', () => {
+    expect(hasPriceQuote('Your total is $415.75.')).toBe(true); // the live judge catch
+    expect(hasPriceQuote('That service runs $99')).toBe(true);
+    expect(hasPriceQuote('roughly $ 1,200.50 for the year')).toBe(true);
+    expect(hasPriceQuote('USD 50 per visit')).toBe(true);
+  });
+
+  test('detects spelled-out amounts', () => {
+    expect(hasPriceQuote('about 50 dollars per month')).toBe(true);
+    expect(hasPriceQuote('should be 2 bucks')).toBe(true);
+  });
+
+  test('price-free replies pass, including numbers that are not money', () => {
+    expect(hasPriceQuote('Your next service is Tuesday between 1:00 PM and 3:00 PM.')).toBe(false);
+    expect(hasPriceQuote('We treated 2 ant mounds near the lanai.')).toBe(false);
+    expect(hasPriceQuote('Invoice #04395 was emailed to you.')).toBe(false);
+    expect(hasPriceQuote('')).toBe(false);
+    expect(hasPriceQuote(null)).toBe(false);
   });
 });
 
