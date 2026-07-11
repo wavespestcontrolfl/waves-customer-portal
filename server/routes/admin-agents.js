@@ -1603,4 +1603,48 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
   }
 });
 
+// GET /voice-profiles — Loop 2 review surface: the pending profile (if any),
+// the currently approved one, and recent history. Read-only.
+router.get('/voice-profiles', async (req, res, next) => {
+  try {
+    const rows = await db('voice_profiles')
+      .select('id', 'version', 'profile_text', 'source_stats', 'model', 'status', 'reviewed_by', 'reviewed_at', 'created_at')
+      .orderBy('version', 'desc')
+      .limit(10);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      gateEnabled: require('../config/feature-gates').isEnabled('voiceProfileDistiller'),
+      pending: rows.find((r) => r.status === 'pending') || null,
+      approved: rows.find((r) => r.status === 'approved') || null,
+      history: rows,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /voice-profiles/:id/review — one-click approve/reject of a PENDING
+// profile (Loop 2's human gate; nothing auto-applies without this click).
+// Approving supersedes the previously approved version server-side; every
+// review writes an activity_log audit row.
+router.post('/voice-profiles/:id/review', async (req, res, next) => {
+  try {
+    const { reviewVoiceProfile } = require('../services/voice-profile-distiller');
+    const action = String(req.body?.action || '').trim();
+    const result = await reviewVoiceProfile({ id: req.params.id, action, reviewedBy: actorName(req) });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+
+    await db('activity_log').insert({
+      admin_user_id: req.technicianId || null,
+      action: 'voice_profile_reviewed',
+      description: `Voice profile v${result.version} ${result.status}`,
+      metadata: JSON.stringify({ source: 'agents_hub', profile_id: req.params.id, action }),
+    });
+
+    res.json({ version: result.version, status: result.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
