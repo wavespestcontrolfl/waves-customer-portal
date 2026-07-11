@@ -2188,9 +2188,23 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
-    if (!invoice.stripe_payment_intent_id
-      || String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+    if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
+    }
+    // A stale id can be a legitimate lost-response recovery: a prior
+    // /update-amount took the replacement path (fresh PI minted, invoice
+    // repointed) but the response never reached the client, so its network
+    // retry still carries the dead PI's id. Never touch the caller-supplied
+    // PI on a mismatch — retarget the tender lock to the invoice's CURRENT
+    // PI and return it as `replaced` with its clientSecret so the pay page
+    // re-mounts Elements instead of stranding the session.
+    const retargeted = String(invoice.stripe_payment_intent_id) !== String(paymentIntentId);
+    const effectivePaymentIntentId = String(invoice.stripe_payment_intent_id);
+    if (retargeted) {
+      logger.warn(
+        `[stripe] update-amount got stale PI ${paymentIntentId} for invoice ${invoiceId}; `
+        + `retargeting to current PI ${effectivePaymentIntentId}`,
+      );
     }
 
     // Never save a third-party payer's card onto the homeowner account (see
@@ -2243,8 +2257,8 @@ const StripeService = {
     }
 
     try {
-      const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
-      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
+      const paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+      logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
       return {
         paymentIntentId: paymentIntent.id,
         base,
@@ -2252,6 +2266,7 @@ const StripeService = {
         total: base,
         cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
         surchargeRateBps: CONFIGURED_COST_BPS,
+        ...(retargeted ? { replaced: true, clientSecret: paymentIntent.client_secret } : {}),
       };
     } catch (err) {
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
@@ -2262,10 +2277,10 @@ const StripeService = {
       // defense is preserved.
       if (isIncompatibleAttachedMethodError(err)) {
         logger.warn(
-          `[stripe] PI ${paymentIntentId} tender switch blocked by attached PM; `
+          `[stripe] PI ${effectivePaymentIntentId} tender switch blocked by attached PM; `
           + `recreating for method=${selectedMethodCategory}`,
         );
-        return this.replaceInvoicePaymentIntentForTender(invoiceId, paymentIntentId, {
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, {
           paymentMethodTypes,
           metadata: updateParams.metadata,
           customer: updateParams.customer || null,
@@ -2275,7 +2290,7 @@ const StripeService = {
           methodCategory: selectedMethodCategory,
         });
       }
-      logger.error(`[stripe] PI update failed for ${paymentIntentId}: ${err.message}`);
+      logger.error(`[stripe] PI update failed for ${effectivePaymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
     }
   },

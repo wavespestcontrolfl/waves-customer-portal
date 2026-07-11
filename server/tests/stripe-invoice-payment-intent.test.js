@@ -539,14 +539,54 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     }));
   });
 
-  test('updates reject PaymentIntents that are not bound to the invoice', async () => {
-    invoiceRow.stripe_payment_intent_id = 'pi_other';
+  test('updates reject when the invoice has no PaymentIntent at all', async () => {
+    invoiceRow.stripe_payment_intent_id = null;
     const StripeService = require('../services/stripe');
 
     await expect(
       StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
     ).rejects.toThrow(/does not belong/);
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a stale PI id retargets to the invoice\'s CURRENT PI and returns it as replaced (lost-response retry recovery)', async () => {
+    // A prior /update-amount can take the replacement path (fresh PI minted,
+    // invoice repointed) with the response lost in transit — the client's
+    // network retry then still carries the dead PI's id. The caller-supplied
+    // stale PI must never be updated; the tender lock applies to the invoice's
+    // current PI, returned with replaced+clientSecret so Elements re-mounts.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.update.mockImplementation(async (id, params) => ({
+      id,
+      client_secret: `cs_${id}`,
+      ...params,
+    }));
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card');
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(1);
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_current', expect.objectContaining({
+      amount: 7500,
+      payment_method_types: ['card'],
+    }));
+    expect(result).toMatchObject({
+      paymentIntentId: 'pi_current',
+      base: 75,
+      surcharge: 0,
+      total: 75,
+      replaced: true,
+      clientSecret: 'cs_pi_current',
+    });
+  });
+
+  test('a matching PI id does NOT report replaced (no spurious Elements re-mount)', async () => {
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+
+    expect(result.replaced).toBeUndefined();
+    expect(result.clientSecret).toBeUndefined();
   });
 
   test('tender updates clear stale surcharge-finalization metadata (merge-delete via empty strings)', async () => {
