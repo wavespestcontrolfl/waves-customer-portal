@@ -1,18 +1,16 @@
 /**
  * Pure-function tests for the Wallet pass builder — no DB, no signing.
  * (Signing is exercised against the real certs on the rig; these lock the
- * pass.json structure, the DATE-string formatting trap, and the
- * unconfigured-env gate.)
+ * pass.json structure and the unconfigured-env gate.)
  */
 
 const {
   walletConfigured,
   buildPassJson,
-  __private: { etDateLabel },
 } = require('../services/wallet-pass');
 
 const BASE = {
-  card: { id: 'card-uuid-1', customer_latitude: 27.33, customer_longitude: -82.37 },
+  card: { id: 'card-uuid-1' },
   customerFirstName: 'Lena',
   memberSinceYear: 2026,
   techName: 'Adam Benetti',
@@ -25,66 +23,55 @@ const BASE = {
   reviewUrl: 'https://portal.wavespestcontrol.com/l/g4mty',
   referralUrl: 'https://portal.wavespestcontrol.com/r/LENA25',
   portalUrl: 'https://portal.wavespestcontrol.com',
+  cardUrl: 'https://portal.wavespestcontrol.com/card/abc',
 };
 
 describe('wallet-pass buildPassJson', () => {
   test('builds a generic navy pass with the tracked review QR', () => {
-    const p = buildPassJson({ ...BASE, nextVisitLabel: 'Sep 9' });
+    const p = buildPassJson(BASE);
     expect(p.passTypeIdentifier).toBe('pass.com.wavespestcontrol.card');
     expect(p.teamIdentifier).toBe('BMNXJ4Q89M');
     expect(p.serialNumber).toBe('card-uuid-1');
     expect(p.backgroundColor).toBe('rgb(4,57,94)');
+    expect(p.description).toBe('Digital business card');
     expect(p.barcodes).toEqual([expect.objectContaining({
       format: 'PKBarcodeFormatQR',
       message: 'https://portal.wavespestcontrol.com/l/g4mty',
+      altText: 'Review Waves on Google',
     })]);
     expect(p.generic.primaryFields[0].value).toBe('Adam Benetti');
     expect(p.generic.headerFields[0]).toEqual(expect.objectContaining({ label: 'CUSTOMER SINCE', value: '2026' }));
-    const next = p.generic.secondaryFields.find((f) => f.key === 'next_visit');
-    expect(next.value).toBe('Sep 9');
-    // Messages preview stacks description above organizationName — the
-    // description must not repeat the company name.
-    expect(p.description).toBe('Digital business card');
     expect(p.generic.auxiliaryFields[0]).toEqual(expect.objectContaining({
       label: 'TEXT OR CALL ADAM',
       value: '(941) 297-2606',
     }));
   });
 
-  test('omits next-visit field and locations when data is missing', () => {
-    const p = buildPassJson({
-      ...BASE,
-      card: { id: 'card-uuid-2', customer_latitude: null, customer_longitude: null },
-      nextVisitLabel: null,
-    });
+  test('static pass carries NO next-visit field and NO customer coordinates', () => {
+    // Codex #2592: no PassKit update plumbing → a next-visit date would sit
+    // stale forever, and home coordinates in a downloadable pkpass leak to
+    // anyone holding the file.
+    const p = buildPassJson(BASE);
     expect(p.generic.secondaryFields.map((f) => f.key)).toEqual(['customer']);
     expect(p.locations).toBeUndefined();
   });
 
-  test('lock-screen relevance carries the customer coordinates', () => {
-    const p = buildPassJson(BASE);
-    expect(p.locations).toEqual([expect.objectContaining({ latitude: 27.33, longitude: -82.37 })]);
-    expect(p.locations[0].relevantText).toContain('Adam');
+  test('already-reviewed customers get a card-link QR, not a review ask', () => {
+    const p = buildPassJson({ ...BASE, hasLeftGoogleReview: true });
+    expect(p.barcodes).toEqual([expect.objectContaining({
+      message: 'https://portal.wavespestcontrol.com/card/abc',
+      altText: 'Open your Waves card',
+    })]);
   });
 
-  test('back fields carry card link, tappable contact, portal, referral, license', () => {
-    const p = buildPassJson({ ...BASE, cardUrl: 'https://portal.wavespestcontrol.com/card/abc' });
+  test('back fields carry card link, tappable contact, portal, referral, socials, license', () => {
+    const p = buildPassJson(BASE);
     const keys = p.generic.backFields.map((f) => f.key);
     expect(keys).toEqual(['card', 'text', 'call', 'portal', 'referral', 'website', 'instagram', 'facebook', 'license']);
     expect(p.generic.backFields[0].attributedValue).toContain('/card/abc');
     expect(p.generic.backFields[1].attributedValue).toContain('sms:+19412972606');
     expect(keys[keys.length - 1]).toBe('license');
     expect(p.associatedStoreIdentifiers).toEqual([6782775654]);
-  });
-});
-
-describe('wallet-pass etDateLabel (pg DATE string trap)', () => {
-  test('formats YYYY-MM-DD from string parts — never through Date/UTC', () => {
-    expect(etDateLabel('2026-09-09')).toBe('Sep 9');
-    expect(etDateLabel('2026-01-01')).toBe('Jan 1');
-    expect(etDateLabel('2026-12-31T00:00:00.000Z')).toBe('Dec 31');
-    expect(etDateLabel('garbage')).toBeNull();
-    expect(etDateLabel(null)).toBeNull();
   });
 });
 

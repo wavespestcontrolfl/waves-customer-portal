@@ -31,8 +31,6 @@ const TEAM_ID_DEFAULT = 'BMNXJ4Q89M';
 const ASSET_DIR = path.join(__dirname, '..', 'assets', 'wallet');
 const ASSET_FILES = ['icon.png', 'icon@2x.png', 'icon@3x.png', 'logo.png', 'logo@2x.png', 'logo@3x.png'];
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 function walletConfigured() {
   return Boolean(
     process.env.PASS_SIGNER_CERT_B64
@@ -47,18 +45,6 @@ function loadCerts() {
     signerCert: Buffer.from(process.env.PASS_SIGNER_CERT_B64, 'base64'),
     signerKey: Buffer.from(process.env.PASS_SIGNER_KEY_B64, 'base64'),
   };
-}
-
-/**
- * 'YYYY-MM-DD' → 'Sep 9' WITHOUT going through Date: pg DATE strings parsed
- * by new Date() land at UTC midnight, which renders as the previous ET day
- * (the house timestamptz trap) — so format from the string parts directly.
- */
-function etDateLabel(dateStr) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr || ''));
-  if (!m) return null;
-  const month = MONTHS[Number(m[2]) - 1];
-  return month ? `${month} ${Number(m[3])}` : null;
 }
 
 function firstNameOf(fullName) {
@@ -76,19 +62,19 @@ function buildPassJson({
   memberSinceYear,
   techName,
   location,
-  nextVisitLabel = null,
   reviewUrl,
   referralUrl,
   portalUrl,
   cardUrl = null,
+  hasLeftGoogleReview = false,
 }) {
   const techFirst = firstNameOf(techName);
+  // No NEXT VISIT on the static pass (Codex P2 #2592): without PassKit
+  // update plumbing (webServiceURL/authenticationToken) the date would sit
+  // stale in Wallet forever. Returns with the pass-update follow-up.
   const secondaryFields = [
     { key: 'customer', label: 'CUSTOMER', value: customerFirstName || 'Waves customer' },
   ];
-  if (nextVisitLabel) {
-    secondaryFields.push({ key: 'next_visit', label: 'NEXT VISIT', value: nextVisitLabel });
-  }
 
   const passJson = {
     formatVersion: 1,
@@ -106,12 +92,22 @@ function buildPassJson({
     // Native App Store banner on the pass back — the pass advertises the
     // Waves app without burning a field (numeric Apple ID of the iOS app).
     associatedStoreIdentifiers: [6782775654],
-    barcodes: [{
-      format: 'PKBarcodeFormatQR',
-      message: reviewUrl,
-      messageEncoding: 'iso-8859-1',
-      altText: 'Review Waves on Google',
-    }],
+    // Customers flagged has_left_google_review keep a useful QR — it opens
+    // their full card instead of re-asking for a review (mirrors the card
+    // page's suppression; Codex P2 #2592).
+    barcodes: [hasLeftGoogleReview && cardUrl
+      ? {
+        format: 'PKBarcodeFormatQR',
+        message: cardUrl,
+        messageEncoding: 'iso-8859-1',
+        altText: 'Open your Waves card',
+      }
+      : {
+        format: 'PKBarcodeFormatQR',
+        message: reviewUrl,
+        messageEncoding: 'iso-8859-1',
+        altText: 'Review Waves on Google',
+      }],
     generic: {
       headerFields: memberSinceYear
         ? [{ key: 'since', label: 'CUSTOMER SINCE', value: String(memberSinceYear) }]
@@ -190,18 +186,10 @@ function buildPassJson({
     },
   };
 
-  // Lock-screen relevance at the customer's own address (≤10 allowed; one).
-  const lat = card.customer_latitude;
-  const lng = card.customer_longitude;
-  if (lat != null && lng != null && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) {
-    passJson.locations = [{
-      latitude: Number(lat),
-      longitude: Number(lng),
-      relevantText: techFirst
-        ? `Your Waves card — ${techFirst} is a text away.`
-        : 'Your Waves card — we’re a text away.',
-    }];
-  }
+  // NO pass locations: embedding the customer's home coordinates in a
+  // downloadable .pkpass leaks them to anyone holding the file (Codex P1
+  // #2592). Lock-screen relevance can return later with coarse/rounded
+  // coords alongside the pass-update plumbing.
 
   return passJson;
 }
@@ -220,7 +208,7 @@ async function generateForToken(token) {
 
   const customer = await db('customers')
     .where({ id: card.customer_id })
-    .first('id', 'first_name', 'member_since', 'created_at', 'latitude', 'longitude', 'deleted_at', 'referral_code');
+    .first('id', 'first_name', 'member_since', 'created_at', 'deleted_at', 'referral_code', 'has_left_google_review');
   if (!customer || customer.deleted_at) return null;
 
   let techName = null;
@@ -246,43 +234,18 @@ async function generateForToken(token) {
     if (promoter?.referral_link) referralUrl = promoter.referral_link;
   } catch { /* table optional in older envs */ }
 
-  // Next upcoming visit (DATE column — format from string parts, see
-  // etDateLabel). pending/confirmed only; anything else isn't "booked".
-  let nextVisitLabel = null;
-  try {
-    const next = await db('scheduled_services')
-      .where({ customer_id: customer.id })
-      .whereIn('status', ['pending', 'confirmed'])
-      .where('scheduled_date', '>=', db.raw("(now() at time zone 'America/New_York')::date"))
-      .orderBy('scheduled_date', 'asc')
-      .first('scheduled_date');
-    if (next?.scheduled_date) {
-      const raw = next.scheduled_date instanceof Date
-        ? next.scheduled_date.toISOString().slice(0, 10)
-        : String(next.scheduled_date);
-      nextVisitLabel = etDateLabel(raw);
-    }
-  } catch (err) {
-    // PII: error class only, matching the card-service logging rule.
-    logger.warn(`[wallet-pass] next-visit lookup skipped (customerId=${customer.id} errType=${err?.name || 'Error'})`);
-  }
-
   const memberSince = customer.member_since || customer.created_at;
   const passJson = buildPassJson({
-    card: {
-      ...card,
-      customer_latitude: customer.latitude,
-      customer_longitude: customer.longitude,
-    },
+    card,
     customerFirstName: customer.first_name,
     memberSinceYear: memberSince ? new Date(memberSince).getFullYear() : null,
     techName,
     location,
-    nextVisitLabel,
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,
     portalUrl: publicPortalUrl(),
     cardUrl: `${publicPortalUrl()}/card/${card.share_token}`,
+    hasLeftGoogleReview: !!customer.has_left_google_review,
   });
 
   const files = { 'pass.json': Buffer.from(JSON.stringify(passJson)) };
@@ -327,5 +290,5 @@ module.exports = {
   walletConfigured,
   generateForToken,
   buildPassJson,
-  __private: { etDateLabel, firstNameOf },
+  __private: { firstNameOf },
 };
