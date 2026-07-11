@@ -383,6 +383,94 @@ const checks = [
     `,
   },
   {
+    key: 'daily_summary_total_mismatch',
+    description: 'Daily summary totals or timestamps differ from entries grouped by ET work date',
+    sql: `
+      WITH entry_raw AS (
+        SELECT technician_id,
+          (clock_in::timestamptz AT TIME ZONE 'America/New_York')::date AS work_date,
+          COALESCE(SUM(duration_minutes) FILTER (
+            WHERE entry_type = 'shift'
+          ), 0) AS shift_minutes,
+          COALESCE(SUM(duration_minutes) FILTER (
+            WHERE entry_type = 'job'
+          ), 0) AS job_minutes,
+          COALESCE(SUM(duration_minutes) FILTER (
+            WHERE entry_type = 'drive'
+          ), 0) AS drive_minutes,
+          COALESCE(SUM(duration_minutes) FILTER (
+            WHERE entry_type = 'break'
+          ), 0) AS break_minutes,
+          COALESCE(SUM(duration_minutes) FILTER (
+            WHERE entry_type = 'admin_time'
+          ), 0) AS admin_minutes,
+          COUNT(*) FILTER (
+            WHERE entry_type = 'job'
+          )::integer AS job_count,
+          MIN(clock_in::timestamptz) FILTER (
+            WHERE entry_type = 'shift'
+          ) AS first_clock_in,
+          MAX(clock_out::timestamptz) FILTER (
+            WHERE entry_type = 'shift'
+          ) AS last_clock_out
+        FROM time_entries
+        WHERE status IN ('completed', 'edited')
+        GROUP BY technician_id, work_date
+      ), entry_totals AS (
+        SELECT technician_id, work_date,
+               ROUND(shift_minutes, 2) AS shift_minutes,
+               ROUND(job_minutes, 2) AS job_minutes,
+               ROUND(drive_minutes, 2) AS drive_minutes,
+               ROUND(break_minutes, 2) AS break_minutes,
+               ROUND(admin_minutes, 2) AS admin_minutes,
+               job_count, first_clock_in, last_clock_out,
+               CASE WHEN shift_minutes > 0
+                 THEN ROUND((job_minutes / shift_minutes) * 100, 2)
+                 ELSE 0::numeric
+               END AS utilization_pct
+        FROM entry_raw
+      ), daily AS (
+        SELECT summary.*, to_jsonb(summary) AS day_json
+        FROM time_entry_daily_summary summary
+      )
+      SELECT d.id AS daily_summary_id, d.technician_id, d.work_date,
+             d.total_shift_minutes, e.shift_minutes AS entry_shift_minutes,
+             d.total_job_minutes, e.job_minutes AS entry_job_minutes,
+             d.total_drive_minutes, e.drive_minutes AS entry_drive_minutes,
+             d.total_break_minutes, e.break_minutes AS entry_break_minutes,
+             NULLIF(d.day_json ->> 'total_admin_minutes', '')::numeric AS total_admin_minutes,
+             e.admin_minutes AS entry_admin_minutes,
+             d.job_count, e.job_count AS entry_job_count,
+             NULLIF(d.day_json ->> 'first_clock_in', '')::timestamptz AS first_clock_in,
+             e.first_clock_in AS entry_first_clock_in,
+             NULLIF(d.day_json ->> 'last_clock_out', '')::timestamptz AS last_clock_out,
+             e.last_clock_out AS entry_last_clock_out,
+             d.utilization_pct, e.utilization_pct AS entry_utilization_pct
+      FROM daily d
+      LEFT JOIN entry_totals e
+        ON d.technician_id = e.technician_id
+       AND d.work_date = e.work_date
+      WHERE d.total_shift_minutes
+              IS DISTINCT FROM COALESCE(e.shift_minutes, 0::numeric)
+         OR d.total_job_minutes
+              IS DISTINCT FROM COALESCE(e.job_minutes, 0::numeric)
+         OR d.total_drive_minutes
+              IS DISTINCT FROM COALESCE(e.drive_minutes, 0::numeric)
+         OR d.total_break_minutes
+              IS DISTINCT FROM COALESCE(e.break_minutes, 0::numeric)
+         OR NULLIF(d.day_json ->> 'total_admin_minutes', '')::numeric
+              IS DISTINCT FROM COALESCE(e.admin_minutes, 0::numeric)
+         OR d.job_count IS DISTINCT FROM COALESCE(e.job_count, 0)
+         OR NULLIF(d.day_json ->> 'first_clock_in', '')::timestamptz
+              IS DISTINCT FROM e.first_clock_in
+         OR NULLIF(d.day_json ->> 'last_clock_out', '')::timestamptz
+              IS DISTINCT FROM e.last_clock_out
+         OR d.utilization_pct
+              IS DISTINCT FROM COALESCE(e.utilization_pct, 0::numeric)
+      ORDER BY d.work_date, d.technician_id, d.id
+    `,
+  },
+  {
     key: 'duplicate_daily_summary_ids',
     description: 'Daily summary identifier is null or duplicated',
     sql: `
@@ -419,6 +507,22 @@ const checks = [
       WHERE d.status = 'approved'
         AND COALESCE(w.status, '') <> 'approved'
       ORDER BY d.work_date, d.technician_id
+    `,
+  },
+  {
+    key: 'approved_week_nonapproved_daily_summaries',
+    description: 'Approved weekly summary contains a daily summary not marked approved',
+    sql: `
+      SELECT w.id AS weekly_summary_id, w.technician_id, w.week_start,
+             d.id AS daily_summary_id, d.work_date, d.status AS daily_status
+      FROM time_weekly_summary w
+      JOIN time_entry_daily_summary d
+        ON d.technician_id = w.technician_id
+       AND d.work_date >= w.week_start
+       AND d.work_date < (w.week_start + INTERVAL '7 days')
+      WHERE w.status = 'approved'
+        AND d.status IS DISTINCT FROM 'approved'
+      ORDER BY w.week_start, w.technician_id, d.work_date, d.id
     `,
   },
   {

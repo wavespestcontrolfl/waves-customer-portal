@@ -24,6 +24,21 @@ describe('Staff time schema rollout audit contract', () => {
     expect(byKey.approved_week_total_mismatch.sql).toMatch(/to_jsonb\(summary\)/);
     expect(byKey.approved_week_total_mismatch.sql).not.toMatch(/w\.total_job_minutes/);
     expect(byKey.duplicate_daily_summaries.sql).toMatch(/HAVING COUNT\(\*\) > 1/);
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /AT TIME ZONE 'America\/New_York'/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /shift_minutes[\s\S]*job_minutes[\s\S]*drive_minutes[\s\S]*break_minutes[\s\S]*admin_minutes/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /job_count[\s\S]*first_clock_in[\s\S]*last_clock_out/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /status IN \('completed', 'edited'\)[\s\S]*LEFT JOIN[\s\S]*utilization_pct/,
+    );
+    expect(byKey.approved_week_nonapproved_daily_summaries.sql).toMatch(
+      /w\.status = 'approved'[\s\S]*d\.status IS DISTINCT FROM 'approved'/,
+    );
   });
 
   test('counts findings in PostgreSQL and strips the internal count field', async () => {
