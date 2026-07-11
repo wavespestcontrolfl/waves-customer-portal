@@ -1583,6 +1583,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         deposit={linkedEstimate.deposit}
                         payment={linkedEstimate.payment}
                         lines={linkedEstimate.lines}
+                        estimateRef={linkedEstimate.estimateSlug}
                         style={{ marginTop: 10 }}
                       />
                       {/* Billing term for the accept-on-book. Annual prepay is

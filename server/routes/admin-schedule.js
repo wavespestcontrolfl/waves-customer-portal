@@ -5654,7 +5654,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     const est = await db('estimates')
       .where({ id: svc.source_estimate_id })
       .first(
-        'id', 'customer_id', 'token', 'estimate_data',
+        'id', 'customer_id', 'token', 'estimate_data', 'estimate_slug',
         'monthly_total', 'annual_total', 'onetime_total',
         'bill_by_invoice', 'created_at', 'status',
         'service_interest', 'waveguard_tier',
@@ -5704,6 +5704,10 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       linked: true,
       estimateId: est.id,
       estimateToken: est.token,
+      // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
+      // customer sees on the public quote page, so the provenance card can
+      // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
+      estimateSlug: est.estimate_slug || null,
       quotedTotal,
       monthlyTotal: Number(est.monthly_total || 0),
       annualTotal: Number(est.annual_total || 0),
