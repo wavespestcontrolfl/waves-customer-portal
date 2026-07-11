@@ -307,7 +307,8 @@ finding and warns on P1. Reviewers must return JSON matching
   dark behind ONE_TIME_CARD_HOLD).
   `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
   per-service details-packet PDF for the estimate view's "full details"
-  buttons; dark behind GATE_SERVICE_DETAILS_PDF — 404 when off; estimate
+  buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
+  404 when off; estimate
   token format gate, generic 404, isEstimateCustomerViewable gate identical
   to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
   draft can never produce a customer-facing document), serviceKey must be

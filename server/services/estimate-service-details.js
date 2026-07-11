@@ -15,8 +15,8 @@
 //
 // Requested BY the customer from their own estimate page and delivered only
 // to the contact info already on the estimate — email (PDF attached) or SMS
-// (tokened link to the same PDF). The whole surface is dark behind
-// GATE_SERVICE_DETAILS_PDF until the owner approves this copy.
+// (tokened link to the same PDF). Live by default (owner approved this copy
+// 2026-07-11); GATE_SERVICE_DETAILS_PDF=false is the kill switch.
 // ============================================================
 
 const db = require('../models/db');
