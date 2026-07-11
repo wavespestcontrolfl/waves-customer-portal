@@ -4998,6 +4998,31 @@ router.put('/:id/status', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
+    // Outbound-callback booking confirmed by the office → arm the 72h/24h
+    // reminders that were deferred at booking time. The AI call pipeline creates
+    // these PENDING and intentionally skips reminder registration (the reminder
+    // cron doesn't skip 'pending', so arming at booking would text the customer
+    // before this confirmation). Idempotent (registerAppointment dedupes by
+    // scheduled_service_id) + best-effort; sendConfirmation:false = arm reminders
+    // only, the office owns any confirmation message.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        try {
+          const AppointmentReminders = require('../services/appointment-reminders');
+          await AppointmentReminders.registerAppointment(
+            svc.id,
+            svc.customer_id,
+            `${dateOnly(svc.scheduled_date)}T${svc.window_start || '09:00'}`,
+            svc.service_type,
+            'admin_manual',
+            { sendConfirmation: false },
+          );
+          logger.info(`[admin-schedule] Armed reminders for confirmed outbound-review booking ${svc.id}`);
+        } catch (e) { logger.error(`[admin-schedule] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
+      }
+    }
+
     // En-route: track-transitions flip (which fires the customer SMS
     // with track link) + in-app notification. markEnRoute is
     // internally idempotent (atomic guard on track_state='scheduled',

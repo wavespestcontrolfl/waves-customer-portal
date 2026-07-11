@@ -76,6 +76,7 @@ const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView } = require('../utils/extraction-compat');
 const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -5315,9 +5316,20 @@ const CallRecordingProcessor = {
     // when the service was UNCLEAR (noMatch) under fail-open, so the existing
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
-    const canCreateAppointmentFromCall = !isOutboundCall(call)
-      && !genericBookingUnbookable
+    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
+    // confirmed booking on an OUTBOUND call still creates the appointment — but
+    // PENDING/needs-review (status/consent/SMS handled below). It requires a
+    // REAL resolved service (a catalog row, or ok on a non-generic service):
+    // the Waves-Assessment generic fallback is inbound-only (see above), so an
+    // unclear/generic outbound call stays unbooked for the office.
+    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
+    const outboundCanCreate = outboundReviewBooking
+      && !resolvedGenericOnly
+      && (!!callBookingCatalogRow || serviceResolution.ok);
+    const canCreateAppointmentFromCall = !genericBookingUnbookable
+      && (inboundCanCreate || outboundCanCreate);
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
@@ -5805,11 +5817,16 @@ const CallRecordingProcessor = {
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
+                  // Outbound-callback bookings land PENDING/needs-review (the
+                  // office confirms in dispatch, which arms reminders); inbound
+                  // confirmed bookings auto-confirm as before.
+                  status: outboundReviewBooking ? 'pending' : 'confirmed',
+                  customer_confirmed: !outboundReviewBooking,
+                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
                   notes: [
-                    'Booked via phone call.',
+                    outboundReviewBooking
+                      ? 'Booked via outbound callback — CONFIRM with customer before dispatch.'
+                      : 'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
                     priceInfo.price != null
@@ -5842,7 +5859,11 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  source_action: 'ai_call_pipeline',
+                  // Distinct marker for a pending outbound-review booking so the
+                  // customer self-service routes (schedule.js) hide/refuse it
+                  // until the office confirms — same dispatch-owned treatment as
+                  // a call follow-up.
+                  source_action: outboundReviewBooking ? CALL_OUTBOUND_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -5857,19 +5878,31 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
-                  // A phone-booked appointment is the deal closing — convert the
-                  // call's lead to won in the SAME transaction (mirrors the
-                  // admin-leads schedule-appointment route), so the conversion
-                  // can't commit without the appointment row. Every other booking
-                  // path already converts; this one silently didn't, stranding
-                  // phone-booked callers as `new` in the pipeline.
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: created.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
+                  if (outboundReviewBooking) {
+                    // A pending outbound-callback booking is NOT a closed deal
+                    // yet — the office confirms it first. Do NOT convert the lead
+                    // to won (that would show a phantom closed sale in pipeline/
+                    // conversion metrics that reverts if staff reject the review).
+                    // The lead closes from the office confirmation path instead.
+                    // Surface the pending booking for that review.
+                    await trx('triage_items')
+                      .insert(buildTriageItem({ callLogId: call.id, flag: 'outbound_booking_review', extraction: v2ApprovedExtraction || extracted, severity: 'advisory' }))
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                  } else {
+                    // A phone-booked appointment is the deal closing — convert the
+                    // call's lead to won in the SAME transaction (mirrors the
+                    // admin-leads schedule-appointment route), so the conversion
+                    // can't commit without the appointment row. Every other booking
+                    // path already converts; this one silently didn't, stranding
+                    // phone-booked callers as `new` in the pipeline.
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: created.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
                 }
@@ -5959,7 +5992,13 @@ const CallRecordingProcessor = {
               // rows are corrected by the office (or a dedicated backfill).
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused) {
+              if (!scheduleWasReused && outboundReviewBooking) {
+                // A pending outbound booking must NOT arm reminders yet — the
+                // reminder cron doesn't skip 'pending', so this would text the
+                // customer before the office confirms. Reminders are armed at
+                // the office-confirm transition (admin-schedule) instead.
+                logger.info(`[call-proc] Outbound review booking ${svc.id} PENDING — reminders armed on office confirm`);
+              } else if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -6032,7 +6071,13 @@ const CallRecordingProcessor = {
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && v2SmsBlocked) {
+          if (scheduledServiceId && outboundReviewBooking) {
+            // Pending outbound booking — never auto-text a "confirmed" appt the
+            // customer hasn't been re-confirmed on. Keep scheduledServiceId so
+            // the downstream audit doesn't treat this as a skipped booking.
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
+          } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
