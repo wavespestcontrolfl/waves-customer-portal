@@ -61,7 +61,8 @@ describe('candidateQuery — mirrors the miner posture, clear of the live proces
     expect(flat).toContain('["where",["call_recording_consent_disclaimer_played",true]]');
     expect(flat).toContain('["whereNull",["retranscribed_at"]]');
     expect(flat).toContain(`["where",["retranscribe_attempts","<",${MAX_ATTEMPTS}]]`);
-    expect(flat).toMatch(/INTERVAL '1 day'/);
+    // 7 days = the live lane's longest retry horizon (Codex r4 P1)
+    expect(flat).toMatch(/INTERVAL '7 days'/);
     expect(flat).toMatch(/NOT ILIKE '%agent:%'/);
     expect(flat).toContain('["whereNull",["call_outcome"]]');
     expect(flat).toContain('["orWhereNotIn",["call_outcome",["wrong_number","spam"]]]');

@@ -25,9 +25,10 @@
  *     only after MAX_ATTEMPTS — an OpenAI outage must not burn the backlog.
  *
  * Candidates mirror the miner exactly: inbound, consent disclaimer played,
- * not wrong_number/spam — and at least a day old, far clear of the live
- * processor's 10-minute-delayed window, with a still-undiarized re-check in
- * the guarded UPDATE so a live result is never clobbered. Self-terminating:
+ * not wrong_number/spam (by outcome OR processing_status) — and at least 7
+ * days old, past the live processor's longest retry horizon, so the live
+ * lane and this job never contend for a row; the guarded UPDATE re-checks
+ * still-undiarized so a live result is never clobbered. Self-terminating:
  * zero candidates → no-op. Spend bounded by the batch cap.
  *
  * PII: never log transcript bodies or full phone numbers.
@@ -51,9 +52,12 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     .whereNot('recording_url', '')
     .whereNull('retranscribed_at')
     .where('retranscribe_attempts', '<', MAX_ATTEMPTS)
-    // At least a day old: legacy calls by definition, and safely clear of the
-    // live processor's delayed window so the two never race on one row.
-    .whereRaw("created_at < NOW() - INTERVAL '1 day'")
+    // Past the live processor's LONGEST retry horizon (extraction_failed
+    // retries are bounded at 7 days; the other retry statuses resolve within
+    // hours), so nothing the live lane still owns is ever grabbed here and
+    // parked as processed — a stuck-but-current call keeps its shot at the
+    // normal extraction/lead/appointment path.
+    .whereRaw("created_at < NOW() - INTERVAL '7 days'")
     .whereRaw(UNDIARIZED_SQL)
     // The miner drops wrong_number/spam — don't pay to transcribe them.
     // NULL outcome stays eligible (NOT IN is UNKNOWN on NULL).
