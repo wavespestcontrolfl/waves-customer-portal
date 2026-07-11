@@ -1585,8 +1585,14 @@ const StripeService = {
     };
     let idempotencyKey;
     const attemptReason = reason || 'requested_by_customer';
+    // Bounced attempts leave the amounts untouched (nothing was returned),
+    // so a retry after a bounce sees the SAME tag and priorCents — without
+    // the bounce-count suffix it would reuse the dead attempt's key and
+    // Stripe's idempotency layer would hand back the bounced refund object
+    // instead of creating a new refund.
+    const bouncedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
     const persistPendingAttempt = async () => {
-      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
+      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}${bouncedIds.length ? `_b${bouncedIds.length}` : ''}`;
       await db('payments').where({ id: paymentId }).update({
         metadata: JSON.stringify({
           ...meta,
@@ -1740,28 +1746,54 @@ const StripeService = {
     }
     const isFullRefund = totalRefundedCents >= paidCents;
 
-    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
-    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
-    // Merge against LIVE metadata — the charge.refunded webhook may have
-    // stamped concurrently, and clearedMeta is a pre-call snapshot that would
-    // otherwise erase that stamp.
+    // LIVE metadata read — the charge.refunded / refund.failed webhooks may
+    // have written stamps or bounce fences while this attempt was in flight,
+    // and clearedMeta is a pre-call snapshot that would otherwise erase them.
+    let liveMeta = null;
     try {
       const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
-      let liveMeta = {};
       try {
         liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
       } catch { liveMeta = {}; }
-      const mergedStamps = new Set([
-        ...(Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
-        ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
-        ...(refund?.id ? [refund.id] : []),
-      ]);
-      if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
-    } catch (mergeErr) {
-      logger.warn(`[stripe] stamped-refund merge read failed for payment ${paymentId}: ${mergeErr.message}`);
-      const prior = Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : [];
-      if (refund?.id && !prior.includes(refund.id)) clearedMeta.stamped_refund_ids = [...prior, refund.id];
+    } catch (liveErr) {
+      logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
+      liveMeta = null; // unknown — fall back to the loaded snapshot below
     }
+
+    // A refund whose FAILURE was already recorded must never be stamped as
+    // returned money: when the original attempt's ledger write failed, the
+    // pending marker survives its own refund's bounce, and the retry's
+    // idempotent key replay hands back the ORIGINAL bounced refund object
+    // as if newly created. Stamping it would record money Stripe kept — and
+    // handleRefundFailed would never rewind it (the bounce is already
+    // fenced, so the event replay is a no-op). Abort: clear the pending
+    // marker (the next attempt derives a fresh bounce-suffixed key) and
+    // tell the operator the truth.
+    const bounceFence = new Set([
+      ...bouncedIds,
+      ...(liveMeta && Array.isArray(liveMeta.failed_refund_ids) ? liveMeta.failed_refund_ids : []),
+    ]);
+    if (refund?.id && bounceFence.has(refund.id)) {
+      const abortMeta = { ...(liveMeta || clearedMeta) };
+      for (const k of ['pending_refund_key', 'pending_refund_request', 'pending_refund_base', 'pending_refund_gross', 'pending_refund_reason', 'pending_refund_at']) {
+        delete abortMeta[k];
+      }
+      await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) }).catch(() => {});
+      logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted, nothing stamped`);
+      throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
+    }
+    // Preserve concurrently-recorded bounce fences of OTHER refunds — the
+    // wholesale metadata write below must not erase them.
+    if (bounceFence.size) clearedMeta.failed_refund_ids = [...bounceFence];
+
+    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
+    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
+    const mergedStamps = new Set([
+      ...(liveMeta && Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
+      ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
+      ...(refund?.id ? [refund.id] : []),
+    ]);
+    if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
 
     try {
       await db('payments')

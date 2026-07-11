@@ -1993,20 +1993,33 @@ async function handleRefundFailed(refund) {
       }
     }
     if (dep) {
-      const failed = Array.isArray(dep.failed_refund_ids)
-        ? dep.failed_refund_ids
-        : (typeof dep.failed_refund_ids === 'string' ? JSON.parse(dep.failed_refund_ids || '[]') : []);
-      if (failed.includes(refundId)) return; // replay — already recorded + notified
+      const parseFence = (v) => {
+        if (Array.isArray(v)) return v;
+        if (typeof v === 'string') { try { return JSON.parse(v || '[]'); } catch { return []; } }
+        return [];
+      };
+      if (parseFence(dep.failed_refund_ids).includes(refundId)) return; // replay — already recorded + notified
       // Fence + notification commit ATOMICALLY (same invariant as the
       // payments-backed revert below): a notify failure must roll the fence
       // back and throw so Stripe retries — a committed fence with a lost
       // notification would send the retry into the replay check above and
-      // ack silently, erasing the only operator signal.
+      // ack silently, erasing the only operator signal. The fence list is
+      // RE-READ under the row lock: two overlapping bounces for different
+      // partial refunds would otherwise both write from the pre-transaction
+      // snapshot, and the loser's id would vanish — un-fencing its late
+      // charge.refunded.
       await db.transaction(async (trx) => {
+        const locked = await trx('estimate_deposits')
+          .where({ id: dep.id })
+          .forUpdate()
+          .first('failed_refund_ids', 'status');
+        if (!locked) return;
+        const failed = parseFence(locked.failed_refund_ids);
+        if (failed.includes(refundId)) return; // recorded while we waited on the lock
         await trx('estimate_deposits')
           .where({ id: dep.id })
           .update({ failed_refund_ids: JSON.stringify([...failed, refundId]), updated_at: new Date() });
-        await insertBounceNotification(trx, `Deposit ${dep.id} (status ${dep.status}): the failed refund id was recorded — the deposit reversal will refuse this refund's late creation event. If the deposit was already flipped to refunded, restore its ledger manually.`);
+        await insertBounceNotification(trx, `Deposit ${dep.id} (status ${locked.status || dep.status}): the failed refund id was recorded — the deposit reversal will refuse this refund's late creation event. If the deposit was already flipped to refunded, restore its ledger manually.`);
       });
       return;
     }

@@ -391,6 +391,52 @@ describe('StripeService.refund', () => {
     expect(pendingMeta.pending_refund_gross).toBe(4116);
   });
 
+  test('a replay that hands back an already-BOUNCED refund aborts and clears the marker (nothing stamped)', async () => {
+    // The original attempt reached Stripe but its ledger write failed, so
+    // the pending marker survived — then the refund bounced and
+    // handleRefundFailed fenced re_1. The retry's key replay returns the
+    // ORIGINAL bounced refund object; stamping it would record money Stripe
+    // kept, and the bounce webhook would never rewind it (already fenced).
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 60 * 1000).toISOString(),
+      failed_refund_ids: ['re_1'],
+    });
+    const StripeService = loadService();
+    await expect(StripeService.refund('pay-1', { amount: 40 }))
+      .rejects.toThrow(/already bounced at the bank/);
+
+    // Exactly one write: the marker clear. No refund_amount stamp, no
+    // stamped_refund_ids entry, and the bounce fence survives.
+    expect(updatePayments).toHaveBeenCalledTimes(1);
+    const written = updatePayments.mock.calls[0][0];
+    expect(written.refund_amount).toBeUndefined();
+    const meta = JSON.parse(written.metadata);
+    expect(meta.pending_refund_key).toBeUndefined();
+    expect(meta.failed_refund_ids).toEqual(['re_1']);
+    expect(meta.stamped_refund_ids).toBeUndefined();
+  });
+
+  test('the attempt AFTER a bounce derives a bounce-suffixed key and stamps the new refund', async () => {
+    // Amounts were never stamped for the bounced attempt, so tag and
+    // priorCents are unchanged — without the _b suffix the new attempt
+    // would reuse the dead key and Stripe would replay the bounced refund.
+    paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_1'] });
+    stripeClient.refunds.create = jest.fn(async (params) => ({
+      id: 're_2', status: 'succeeded', amount: params.amount, created: 1780000100,
+    }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    const [, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0_b1');
+    const finalMeta = JSON.parse(updatePayments.mock.calls[1][0].metadata);
+    expect(finalMeta.stamped_refund_ids).toEqual(['re_2']);
+    // The fence record survives the wholesale metadata write.
+    expect(finalMeta.failed_refund_ids).toEqual(['re_1']);
+  });
+
   test("STALE 'rest' marker: a later dashboard PARTIAL is NOT adopted as the full refund", async () => {
     // The original full-remaining attempt never reached Stripe; someone
     // later issued a $25 dashboard partial. Adopting it would clear the
