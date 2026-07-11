@@ -115,6 +115,13 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
   });
 
+  test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'Acme Lawn Care');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Acme Lawn Care/.test(f.message))).toBe(true);
+  });
+
   test('finding D: a service-named business option is not swallowed by the category regex', () => {
     for (const name of ['National Pest Control', 'Bug Off Pest Service', "Bob's Bug Service"]) {
       const t = CATEGORY_TABLE.replace('National chain', name);

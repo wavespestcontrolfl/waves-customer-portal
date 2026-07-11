@@ -131,7 +131,11 @@ const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reli
 // Broad pest-industry suffix set so business names with less-common suffixes
 // (e.g. "HomeTeam Pest Defense", "Gulf Coast Termite Specialists") are still
 // recognized — a proper-noun lead + any of these.
-const INDUSTRY_SUFFIX_SRC = '(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+(?:Control|Management|Solutions?|Services?|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?)|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest';
+// "Care" included so "Acme Lawn Care" is business-shaped — the gate's own
+// PROVIDER_NOUN treats "lawn care" as a provider noun, and with the
+// generic-header default now fail-open, omitting it would let unallowlisted
+// lawn-care company columns publish unreviewed (Codex P1 on this PR).
+const INDUSTRY_SUFFIX_SRC = '(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+(?:Control|Management|Solutions?|Services?|Care|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?)|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest';
 const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`;
 function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 
