@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 
 const WEEKLY_OT_THRESHOLD = 2400; // 40 hours in minutes
 
@@ -27,6 +28,7 @@ async function clockIn(technicianId, { lat, lng, notes, source } = {}) {
       clock_in_lng: lng || null,
       notes: notes || null,
       source: source || 'app',
+      staff_write_generation: ACTIVE_WRITE_GENERATION,
     })
     .returning('*');
 
@@ -128,6 +130,7 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
       customer_id: customerId,
       service_type: serviceType,
       source: 'app',
+      staff_write_generation: ACTIVE_WRITE_GENERATION,
     })
     .returning('*');
 
@@ -196,6 +199,7 @@ async function startBreak(technicianId) {
       status: 'active',
       clock_in: new Date(),
       source: 'app',
+      staff_write_generation: ACTIVE_WRITE_GENERATION,
     })
     .returning('*');
 

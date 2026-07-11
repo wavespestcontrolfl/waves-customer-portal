@@ -9,6 +9,7 @@ const timeTracking = require('../services/time-tracking');
 const matcher = require('../services/geofence-matcher');
 const geofenceHandler = require('../services/geofence-handler');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -135,6 +136,7 @@ router.post('/:id/undo-stop', async (req, res, next) => {
       .where({ id: stoppedEntryId, technician_id: req.technicianId })
       .update({
         status: 'active',
+        staff_write_generation: ACTIVE_WRITE_GENERATION,
         clock_out: null,
         clock_out_lat: null,
         clock_out_lng: null,
