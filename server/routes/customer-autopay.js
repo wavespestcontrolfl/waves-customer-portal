@@ -135,8 +135,13 @@ router.get('/', async (req, res, next) => {
     const autopayFunding = customerAutopayEnabled
       ? await resolveAutopayCardFunding(chargeableAutopayMethod)
       : null;
-    const nextCharge = customerAutopayEnabled && !nonMonthlyBilling
-      ? computeChargeAmount(customer.monthly_rate || 0, chargeableAutopayMethod.method_type, { funding: autopayFunding })
+    // NULL monthly_rate = unpriced (manual quote pending), never $0: the
+    // monthly cron filters monthly_rate > 0 and will not charge, so
+    // projecting "Next charge: $0.00 on <date>" is false. Serialize null and
+    // let the portal render an unpriced state (NULL-not-$0 rule).
+    const hasMonthlyRate = Number(customer.monthly_rate) > 0;
+    const nextCharge = customerAutopayEnabled && !nonMonthlyBilling && hasMonthlyRate
+      ? computeChargeAmount(customer.monthly_rate, chargeableAutopayMethod.method_type, { funding: autopayFunding })
       : null;
 
     let state = 'disabled';
@@ -153,7 +158,7 @@ router.get('/', async (req, res, next) => {
       autopay_payment_method_id: hasAutopayMethod ? chargeableAutopayMethod.id : null,
       billing_day: customer.billing_day || 1,
       billing_mode: billingMode,
-      next_charge_date: nonMonthlyBilling ? null : customer.next_charge_date,
+      next_charge_date: nonMonthlyBilling || !hasMonthlyRate ? null : customer.next_charge_date,
       next_charge_amount: nextCharge?.total ?? null,
       next_charge_base_amount: nextCharge?.base ?? null,
       next_charge_surcharge_amount: nextCharge?.surcharge ?? null,

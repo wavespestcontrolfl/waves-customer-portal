@@ -66,6 +66,7 @@ import {
   RotateCw,
   CalendarPlus,
   DollarSign,
+  Pencil,
 } from "lucide-react";
 
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
@@ -2449,6 +2450,17 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                         <RowActionsMenu
                           label={`Actions for ${e.customerName || "estimate"}`}
                           items={[
+                            canEditEstimateInPlace(e) && {
+                              key: "edit",
+                              label: "Edit estimate",
+                              icon: <Pencil size={16} strokeWidth={1.75} />,
+                              title:
+                                "Reopen in the builder — saving updates this estimate and its existing customer link",
+                              onClick: () =>
+                                navigate(
+                                  `/admin/estimates?editEstimateId=${e.id}`,
+                                ),
+                            },
                             ["draft", "sent", "viewed"].includes(e.status) && {
                               key: "one-time",
                               label: e.showOneTimeOption
@@ -2679,6 +2691,7 @@ const PREFILL_PARAM_KEYS = [
   "customerPhone",
   "customerEmail",
   "serviceInterest",
+  "editEstimateId",
   "first_name",
   "last_name",
   "phone",
@@ -2887,6 +2900,28 @@ function mobileStatusClass(status) {
   )
     return "text-waves-blue";
   return "text-ink-tertiary";
+}
+
+// Mirrors the server's revise guard (estimateReviseBlock): archived, terminal
+// (accepted/declined/expired), mid-send, and commercial-proposal rows can't be
+// edited in place — proposals have their own editor (CommercialProposalModal).
+// Tokenless rows (quote-wizard mirrors / legacy imports, the same set
+// canSendEstimate hides) are excluded too: "edit in place" means updating the
+// customer's existing link, and these rows have no link to keep stable.
+const EDITABLE_ESTIMATE_STATUSES = [
+  "draft",
+  "scheduled",
+  "sent",
+  "viewed",
+  "send_failed",
+];
+function canEditEstimateInPlace(estimate) {
+  return (
+    EDITABLE_ESTIMATE_STATUSES.includes(estimate.status) &&
+    !!String(estimate.token || "").trim() &&
+    !estimate.isCommercialProposal &&
+    !estimate.archivedAt
+  );
 }
 
 function canMarkEstimateWon(estimate) {
@@ -3198,6 +3233,15 @@ function MobileEstimateRow({
       <RowActionsMenu
         label={`Actions for ${customerName}`}
         items={[
+          canEditEstimateInPlace(estimate) && {
+            key: "edit",
+            label: "Edit estimate",
+            icon: <Pencil size={16} strokeWidth={1.75} />,
+            title:
+              "Reopen in the builder — saving updates this estimate and its existing customer link",
+            onClick: () =>
+              navigate(`/admin/estimates?editEstimateId=${estimate.id}`),
+          },
           ["draft", "sent", "viewed"].includes(estimate.status) && canSend && {
             key: "send",
             label: estimate.status === "draft" ? "Send estimate" : "Resend estimate",
@@ -3784,6 +3828,9 @@ export default function EstimatesPageV2() {
       customerEmail: params.get("customerEmail") || params.get("email") || "",
       serviceInterest:
         params.get("serviceInterest") || params.get("service_interest") || "",
+      // Reopen this existing estimate in the builder for in-place editing
+      // (set by the row menus' "Edit estimate" action).
+      editEstimateId: params.get("editEstimateId") || "",
     };
   }, []);
 
@@ -3798,7 +3845,8 @@ export default function EstimatesPageV2() {
     prefill.customerName ||
     prefill.customerPhone ||
     prefill.customerEmail ||
-    prefill.serviceInterest
+    prefill.serviceInterest ||
+    prefill.editEstimateId
   );
   const initialTab = TABS.some((t) => t.key === searchParams.get("tab"))
     ? searchParams.get("tab")
@@ -3837,7 +3885,8 @@ export default function EstimatesPageV2() {
       incoming.customerName ||
       incoming.customerPhone ||
       incoming.customerEmail ||
-      incoming.serviceInterest
+      incoming.serviceInterest ||
+      incoming.editEstimateId
     );
     const tabParam = searchParams.get("tab");
     const hasTabParam = TABS.some((t) => t.key === tabParam);
@@ -3895,6 +3944,7 @@ export default function EstimatesPageV2() {
       customerPhone: "",
       customerEmail: "",
       serviceInterest: "",
+      editEstimateId: "",
     });
   }, [activeTab, hasPrefill]);
 
@@ -3931,6 +3981,7 @@ export default function EstimatesPageV2() {
                 customerPhone: "",
                 customerEmail: "",
                 serviceInterest: "",
+                editEstimateId: "",
               });
               selectTab("new");
             }}
@@ -3950,6 +4001,7 @@ export default function EstimatesPageV2() {
           initialCustomerPhone={prefill.customerPhone}
           initialCustomerEmail={prefill.customerEmail}
           initialServiceInterest={prefill.serviceInterest}
+          editEstimateId={prefill.editEstimateId}
         />
       )}
       {activeTab === "pricing" && (

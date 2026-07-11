@@ -1044,13 +1044,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY SUN 3:15AM ET — Voice-profile distiller (brand-voice loop,
-  // Loop 2). Distills the redacted corpus into a style-only voice profile,
-  // parked as a PENDING voice_profiles row for one-click approval in the
-  // Agents hub — nothing auto-applies. One DEEP call per run; skips itself
-  // when a pending profile awaits review or no new corpus accrued.
+  // DAILY 3:30AM ET — Voice-profile distiller (brand-voice loop, Loop 2).
+  // Runs after the 2:45am corpus miner so each day's calls/texts feed the
+  // voice profile the next morning (owner directive 2026-07-11: train on the
+  // data as it happens, hands-off). Exception-based review: a GREEN profile
+  // auto-applies (audit-logged); anything flagged parks + bells. At most one
+  // DEEP call per day; idle days skip on no-new-corpus.
   // =========================================================================
-  cron.schedule('15 3 * * 0', async () => {
+  cron.schedule('30 3 * * *', async () => {
     if (!isEnabled('voiceProfileDistiller')) return;
     logger.info('Running: Voice-profile distiller');
     try {

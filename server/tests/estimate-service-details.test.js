@@ -110,4 +110,23 @@ describe('service-details PDF renderer', () => {
       expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
     }
   });
+
+  test('product-image callouts obey the public-registry chokepoint', async () => {
+    // With an EMPTY registry, every image that names a specific product is
+    // filtered out — a name the owner hasn't approved for the public
+    // registry must not leak through a caption (codex #2611).
+    const mosquito = await buildServiceDetailsContent('mosquito', {});
+    expect(mosquito.productImages).toBeNull();
+    const termite = await buildServiceDetailsContent('termite_bait', {});
+    expect(termite.productImages).toBeNull();
+    // Generic imagery (no product name: surfactant, fertilizer bags) still
+    // renders without registry approval.
+    const pest = await buildServiceDetailsContent('pest_control', {});
+    expect(pest.productImages.images.map((i) => i.file)).toEqual(['product-surfactant.png']);
+    const lawn = await buildServiceDetailsContent('lawn_care', {});
+    expect(lawn.productImages.images.map((i) => i.file)).toEqual([
+      'product-lesco-fertilizer-bag.png',
+      'product-lesco-am-micros.png',
+    ]);
+  });
 });

@@ -1173,10 +1173,11 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
 
   // updateResult mimics knex's affected-row count for the CONDITIONAL flip;
   // 0 = the row transitioned under us and the handler must re-read.
-  function reversalDb({ row, updates = [], updateResult = 1 }) {
+  function reversalDb({ row, updates = [], updateResult = 1, cols = { failed_refund_ids: {} } }) {
     return (table) => {
       if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
       return {
+        columnInfo: async () => cols,
         where(criteria) {
           if (criteria && criteria.id) {
             return {
@@ -1255,6 +1256,40 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     const result = await handleDepositChargeReversed('pi_1', 'charge.refunded');
     expect(result.replay).toBe(true);
     expect(updates).toHaveLength(0);
+  });
+
+  it('a refund whose failure was already recorded is REFUSED — the ledger never flips for money Stripe kept', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', failed_refund_ids: ['re_bounced'] },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_bounced' });
+    expect(result).toEqual({ handled: true, bounced: true });
+    expect(updates).toHaveLength(0);
+  });
+
+  it('a refund NOT in the failed fence still reverses normally', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', failed_refund_ids: ['re_bounced'] },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_ok' });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload.status).toBe('refunded');
+  });
+
+  it('pre-migration (no failed_refund_ids column) skips the fence and reverses', async () => {
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00' },
+      updates,
+      cols: {},
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { refundId: 're_any' });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload.status).toBe('refunded');
   });
 
   it('the flip is CONDITIONAL on the state the alert decision used', async () => {

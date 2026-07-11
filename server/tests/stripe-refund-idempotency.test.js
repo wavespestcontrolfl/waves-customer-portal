@@ -113,7 +113,11 @@ describe('StripeService.refund', () => {
       refund_amount: 40,
       stripe_refund_id: 're_1',
     }));
-    expect(JSON.parse(finalArgs.metadata).pending_refund_key).toBeUndefined();
+    const finalMeta = JSON.parse(finalArgs.metadata);
+    expect(finalMeta.pending_refund_key).toBeUndefined();
+    // The refund is recorded as STAMPED so a later bounce stays attributable
+    // even after a newer partial overwrites stripe_refund_id.
+    expect(finalMeta.stamped_refund_ids).toEqual(['re_1']);
   });
 
   test('retry after a webhook repair replays the ORIGINAL attempt key (no second refund)', async () => {
@@ -362,6 +366,77 @@ describe('StripeService.refund', () => {
     expect(Date.parse(pendingMeta.pending_refund_at)).toBeGreaterThan(Date.now() - 60000);
   });
 
+  test('STALE LEGACY marker on a surcharged payment: the fresh attempt is re-grossed, not the legacy base', async () => {
+    // The replay path forces the legacy UNGROSSED amount (verbatim-key
+    // rule), but once Stripe's list proves that attempt never landed, the
+    // retry is a NEW attempt — it must send base + prorated surcharge and
+    // derive a fresh key, or the customer is shorted the surcharge share.
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+    });
+    stripeClient.refunds.list = jest.fn(async () => ({ data: [] }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    // base 10000¢, surcharge 290¢ → $40 base grosses to 4000+round(4000×290/10000)=4116¢.
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(4116);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4116_0');
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(pendingMeta.pending_refund_base).toBe('4000');
+    expect(pendingMeta.pending_refund_gross).toBe(4116);
+  });
+
+  test('a replay that hands back an already-BOUNCED refund aborts and clears the marker (nothing stamped)', async () => {
+    // The original attempt reached Stripe but its ledger write failed, so
+    // the pending marker survived — then the refund bounced and
+    // handleRefundFailed fenced re_1. The retry's key replay returns the
+    // ORIGINAL bounced refund object; stamping it would record money Stripe
+    // kept, and the bounce webhook would never rewind it (already fenced).
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date(Date.now() - 60 * 1000).toISOString(),
+      failed_refund_ids: ['re_1'],
+    });
+    const StripeService = loadService();
+    await expect(StripeService.refund('pay-1', { amount: 40 }))
+      .rejects.toThrow(/already bounced at the bank/);
+
+    // Exactly one write: the marker clear. No refund_amount stamp, no
+    // stamped_refund_ids entry, and the bounce fence survives.
+    expect(updatePayments).toHaveBeenCalledTimes(1);
+    const written = updatePayments.mock.calls[0][0];
+    expect(written.refund_amount).toBeUndefined();
+    const meta = JSON.parse(written.metadata);
+    expect(meta.pending_refund_key).toBeUndefined();
+    expect(meta.failed_refund_ids).toEqual(['re_1']);
+    expect(meta.stamped_refund_ids).toBeUndefined();
+  });
+
+  test('the attempt AFTER a bounce derives a bounce-suffixed key and stamps the new refund', async () => {
+    // Amounts were never stamped for the bounced attempt, so tag and
+    // priorCents are unchanged — without the _b suffix the new attempt
+    // would reuse the dead key and Stripe would replay the bounced refund.
+    paymentRow.metadata = JSON.stringify({ failed_refund_ids: ['re_1'] });
+    stripeClient.refunds.create = jest.fn(async (params) => ({
+      id: 're_2', status: 'succeeded', amount: params.amount, created: 1780000100,
+    }));
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    const [, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0_b1');
+    const finalMeta = JSON.parse(updatePayments.mock.calls[1][0].metadata);
+    expect(finalMeta.stamped_refund_ids).toEqual(['re_2']);
+    // The fence record survives the wholesale metadata write.
+    expect(finalMeta.failed_refund_ids).toEqual(['re_1']);
+  });
+
   test("STALE 'rest' marker: a later dashboard PARTIAL is NOT adopted as the full refund", async () => {
     // The original full-remaining attempt never reached Stripe; someone
     // later issued a $25 dashboard partial. Adopting it would clear the
@@ -423,5 +498,102 @@ describe('StripeService.refund', () => {
     await expect(StripeService.refund('pay-1', { amount: 40 }))
       .rejects.toThrow(/Could not verify the earlier refund attempt/);
     expect(stripeClient.refunds.create).not.toHaveBeenCalled();
+  });
+
+  // ── Prorated surcharge gross-up (card-brand rule) ─────────────────────
+  // The operator enters BASE dollars; the Stripe refund adds the prorated
+  // share of the recorded card_surcharge via computeRefundSurcharge (the one
+  // surcharge authority), tracked cumulatively in metadata so successive
+  // partials sum to the exact surcharge with no drift.
+
+  test('partial refund on a surcharged payment grosses up by the prorated share', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    // base 10000¢, surcharge 290¢ → $50 base refunds round(5000×290/10000)=145¢ share.
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(5145);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_5145_0');
+
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(pendingMeta.pending_refund_base).toBe('5000');
+    expect(pendingMeta.pending_refund_gross).toBe(5145);
+
+    const finalArgs = updatePayments.mock.calls[1][0];
+    expect(finalArgs.refund_amount).toBe(51.45);
+    expect(finalArgs.refunded_surcharge_cents).toBe(145);
+  });
+
+  test('second partial completes the surcharge exactly and flips to refunded', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.refund_amount = '51.45';
+    paymentRow.refunded_surcharge_cents = 145;
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    // Remaining surcharge = 290−145 = 145¢ → 5000+145; series totals 10290¢ = paid.
+    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(5145);
+    const finalArgs = updatePayments.mock.calls[1][0];
+    expect(finalArgs.status).toBe('refunded');
+    expect(finalArgs.refund_amount).toBe(102.9);
+    expect(finalArgs.refunded_surcharge_cents).toBe(290);
+  });
+
+  test('gross-up is capped at the remaining balance (never over-refunds)', async () => {
+    // A prior $60 refund recorded with no surcharge tracking (legacy):
+    // remaining = 10290−6000 = 4290¢; $42 base + full remaining share (290¢)
+    // would be 4490¢ → capped to 4290¢.
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.refund_amount = '60.00';
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 42 });
+
+    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(4290);
+  });
+
+  test('LEGACY marker replay on a surcharged payment resends the ORIGINAL ungrossed amount', async () => {
+    // A pending marker written before the gross-up shipped has no
+    // pending_refund_gross — its original Stripe request was the entered
+    // amount exactly. Recomputing a grossed amount against the stored key
+    // would hit Stripe's changed-params idempotency rejection, clear the
+    // marker, and open a double-refund window.
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date().toISOString(),
+    });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(4000);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0');
+  });
+
+  test('replay of a grossed attempt matches on the ENTERED base and resends the stored gross', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.surcharge_amount_cents = 290;
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_5145_0',
+      pending_refund_request: '5145',
+      pending_refund_base: '5000',
+      pending_refund_gross: 5145,
+      pending_refund_at: new Date().toISOString(),
+    });
+    const StripeService = loadService();
+    // Operator retries by re-entering the same $50 they typed the first time.
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(5145);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_5145_0');
+    // No pending re-persist — the only update is the final record+clear.
+    expect(updatePayments).toHaveBeenCalledTimes(1);
   });
 });

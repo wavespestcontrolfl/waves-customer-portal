@@ -7,6 +7,9 @@
  *    cadence equals the booking series cadence (else fail closed, so a monthly
  *    quote isn't billed onto a quarterly series, and non-pest/no-series bookings
  *    stay price-less);
+ *  - ANCHORED to the annual: follow-ups bill the floored quotient, the first
+ *    visit absorbs the remainder cents, so first + (visits−1)×followUp equals
+ *    the quoted annual to the cent (no per-visit-rounding drift);
  *  - service binding via serviceKeyFor; fail closed on any supplemental
  *    recurring program (rodent/palm) in EITHER recurring container;
  *  - all estimate shapes read via the converter's extractor.
@@ -86,7 +89,25 @@ describe('resolveBookingVisitPrice — linked estimate (shapes, service + cadenc
   test('engineResult shape, service + cadence match', () => {
     const estimate = { id: 'e1', annual_total: 387.96, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 96.99, visitsPerYear: 4 }] } } };
     expect(resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q }))
-      .toEqual({ amount: 96.99, sourceEstimateId: 'e1', serviceKey: 'pest_control' });
+      .toEqual({ amount: 96.99, followUpAmount: 96.99, sourceEstimateId: 'e1', serviceKey: 'pest_control' });
+  });
+
+  test('ANCHOR: non-divisible annual — first visit absorbs the remainder, series sums to the cent', () => {
+    const estimate = { id: 'e8', annual_total: 387.97, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 32.33, perApp: 97, visitsPerYear: 4 }] } } };
+    const priced = resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q });
+    expect(priced.amount).toBe(97.00);
+    expect(priced.followUpAmount).toBe(96.99);
+    const totalCents = Math.round(priced.amount * 100) + (Q - 1) * Math.round(priced.followUpAmount * 100);
+    expect(totalCents).toBe(38797);
+  });
+
+  test('ANCHOR: the old rounded-quotient drift case (500.02/4) no longer overbills', () => {
+    // round(500.02/4) = 125.01 → ×4 = 500.04, 2¢ over the quote. Anchored:
+    // 125.02 + 3×125.00 = 500.02 exactly.
+    const estimate = { id: 'e9', annual_total: 500.02, estimate_data: { engineResult: { lineItems: [{ service: 'pest_control', monthly: 41.67, perApp: 125, visitsPerYear: 4 }] } } };
+    const priced = resolveBookingVisitPrice({ estimate, serviceKey: 'pest_control', bookingVisits: Q });
+    expect(priced.amount).toBe(125.02);
+    expect(priced.followUpAmount).toBe(125.00);
   });
 
   test('V2 result.recurring.services with an estimate-level discount', () => {

@@ -143,12 +143,14 @@ const gates = {
   // customer-visible effect; spend bounded by RETRANSCRIBE_BATCH_LIMIT.
   callRetranscribeBackfill: process.env.GATE_CALL_RETRANSCRIBE_BACKFILL !== 'false',
 
-  // Voice-Profile Distiller (brand-voice loop, Loop 2) — weekly distillation
-  // of the redacted corpus into a style-only voice profile, PARKED as a
-  // pending voice_profiles row for one-click approval in the Agents hub.
-  // Nothing auto-applies; no sends, no customer-visible effect; prod opt-in
-  // per house pattern.
-  voiceProfileDistiller: isProd ? process.env.GATE_VOICE_PROFILE_DISTILLER === 'true' : true,
+  // Voice-Profile Distiller (brand-voice loop, Loop 2) — DAILY distillation
+  // of the redacted corpus into a style-only voice profile. Exception-based:
+  // green auto-applies, flagged parks for review in the Agents hub. DEFAULT
+  // ON (owner directive 2026-07-11: hands-off — merging this IS the flip);
+  // kill switch GATE_VOICE_PROFILE_DISTILLER=false. Deliberately not the
+  // opt-in pattern: no sends, no customer-visible effect (sole consumer is
+  // the owner-activation-gated phone agent), ≤1 DEEP call/day.
+  voiceProfileDistiller: process.env.GATE_VOICE_PROFILE_DISTILLER !== 'false',
 
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
@@ -413,6 +415,16 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Bounce-triggered call-audio email re-verification: a hard bounce on a
+  // call-captured address re-runs the source RECORDING through transcription
+  // (letter-fidelity contact pass) + a deterministic name-anchored candidate
+  // generator, and cards the ranked corrections for the owner's read-back
+  // confirm. Writes nothing to the customer, sends nothing. LIVE BY DEFAULT
+  // (owner call 2026-07-11: bounces are rare, the card is pure upside) —
+  // GATE_CALL_BOUNCE_REVERIFY=false is the kill switch (stops the
+  // transcription spend; bounces then behave as before: domain-corrector
+  // recovery + admin alert only).
+  callBounceReverify: process.env.GATE_CALL_BOUNCE_REVERIFY !== 'false',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message

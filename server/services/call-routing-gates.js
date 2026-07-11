@@ -139,6 +139,9 @@ function buildTriageItem({
     do_not_contact_requested: 'customer_field_conflict',
     lead_creation_failed: 'customer_field_conflict',
     name_email_mismatch: 'name_review',
+    // Hard bounce on a call-captured email → audio re-verification proposed
+    // candidates for the owner's read-back confirm (email-bounce-reverify.js).
+    email_bounce_reverify: 'name_review',
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',
