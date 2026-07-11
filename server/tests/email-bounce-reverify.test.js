@@ -188,7 +188,7 @@ describe('reverifyBouncedEmailFromCall — annotated second address survives a n
       makeChain({ rows: [callRow] }),                                  // findSourceCall
       makeChain({ returning: ['card1'] }),                             // claim insert (mutex won)
       makeChain({ first: { payload: JSON.stringify(cardPayload) } }),  // mid-read: annotated addresses
-      makeChain({ first: { payload: JSON.stringify(cardPayload) } }),  // re-read before final write
+      makeChain({ first: { payload: JSON.stringify(cardPayload), status: 'open' } }),  // re-read before final write
       makeChain({}),                                                   // final card update
     ];
     db.mockImplementation(() => queue.shift());
@@ -242,7 +242,7 @@ describe('reverifyBouncedEmailFromCall — CAS delete loses to a concurrent anno
       makeChain({ first: { payload: JSON.stringify(bare), updated_at: 't1' } }),   // read: nothing pending → attempt delete
       deleteChain,                                                                 // CAS delete LOSES (0 rows — annotation won)
       makeChain({ first: { payload: JSON.stringify(withSecond), updated_at: 't2' } }), // re-read: annotation visible
-      makeChain({ first: { payload: JSON.stringify(withSecond) } }),               // re-read before final write
+      makeChain({ first: { payload: JSON.stringify(withSecond), status: 'open' } }),               // re-read before final write
       makeChain({}),                                                               // final card update
     ];
     db.mockImplementation(() => queue.shift());
@@ -255,6 +255,110 @@ describe('reverifyBouncedEmailFromCall — CAS delete loses to a concurrent anno
     expect(payload.bounced_email).toBe('apitz6958@yahoo.com');
     expect(payload.additional_bounced_emails).toEqual(['zzqqxx@yahoo.com']);
     expect(queue).toHaveLength(0); // exactly this sequence, no stray DB work
+  });
+});
+
+describe('reverifyBouncedEmailFromCall — card closed mid-analysis reopens when candidates land', () => {
+  test('operator resolved the analyzing placeholder → final write reopens the card and the call', async () => {
+    const db = require('../models/db');
+    const callRow = {
+      id: 'call1',
+      recording_url: 'https://recordings/x.mp3',
+      recording_duration_seconds: 60,
+      duration_seconds: 60,
+      customer_id: null,
+      ai_extraction: JSON.stringify({ first_name: 'Adam', last_name: 'Pitts' }),
+    };
+    const analyzing = { bounced_email: 'apitz6958@yahoo.com', analyzing: true };
+    const updateSpy = jest.fn(() => Promise.resolve(1));
+    const makeChain = (terminal) => {
+      const chain = {};
+      for (const m of ['whereNotNull', 'whereRaw', 'select', 'modify', 'where', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'onConflict', 'ignore', 'insert']) {
+        chain[m] = jest.fn(() => chain);
+      }
+      chain.first = jest.fn(() => Promise.resolve(terminal.first));
+      chain.returning = jest.fn(() => Promise.resolve(terminal.returning));
+      chain.update = updateSpy;
+      chain.del = jest.fn(() => Promise.resolve(1));
+      chain.then = (res, rej) => Promise.resolve(terminal.rows || []).then(res, rej);
+      return chain;
+    };
+    const queue = [
+      makeChain({ rows: [callRow] }),                                                       // findSourceCall
+      makeChain({ returning: ['card1'] }),                                                  // claim insert
+      makeChain({ first: { payload: JSON.stringify(analyzing), updated_at: 't1' } }),       // loop read → primary cards
+      makeChain({ first: { payload: JSON.stringify(analyzing), status: 'resolved' } }),     // re-read: operator closed it
+      makeChain({}),                                                                        // final card update (reopen)
+      makeChain({}),                                                                        // call_log review_status resync
+    ];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await reverifyBouncedEmailFromCall({ bouncedEmail: 'apitz6958@yahoo.com' });
+
+    expect(res.carded).toBe(true);
+    expect(updateSpy).toHaveBeenCalledTimes(2);
+    const cardWrite = updateSpy.mock.calls[0][0];
+    expect(cardWrite.status).toBe('open');
+    expect(cardWrite.resolved_at).toBeNull();
+    expect(JSON.parse(cardWrite.payload).email_candidates[0].value).toBe('apitts6958@yahoo.com');
+    expect(updateSpy.mock.calls[1][0].review_status).toBe('open');
+    expect(queue).toHaveLength(0);
+  });
+});
+
+describe('reverifyBouncedEmailFromCall — late second bounce on a FINISHED card', () => {
+  test('annotation computes the read-back from the stored decode — no second transcription', async () => {
+    const db = require('../models/db');
+    const callRow = {
+      id: 'call1',
+      recording_url: 'https://recordings/x.mp3',
+      recording_duration_seconds: 60,
+      duration_seconds: 60,
+      customer_id: null,
+      ai_extraction: JSON.stringify({ first_name: 'Adam', last_name: 'Pitts' }),
+    };
+    // First pass finished for a DIFFERENT address; the decode is on the card.
+    const finished = {
+      bounced_email: 'other123@yahoo.com',
+      email_as_heard: 'other123@yahoo.com',
+      email_candidates: [{ value: 'others123@yahoo.com', confidence: 0.7 }],
+      decoder_candidates_all: [{ value: 'apitts6958@yahoo.com', confidence: 0.9 }],
+    };
+    const updateSpy = jest.fn(() => Promise.resolve(1));
+    const makeChain = (terminal) => {
+      const chain = {};
+      for (const m of ['whereNotNull', 'whereRaw', 'select', 'modify', 'where', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'onConflict', 'ignore', 'insert']) {
+        chain[m] = jest.fn(() => chain);
+      }
+      chain.first = jest.fn(() => Promise.resolve(terminal.first));
+      chain.returning = jest.fn(() => Promise.resolve(terminal.returning));
+      chain.update = updateSpy;
+      chain.del = jest.fn(() => Promise.resolve(1));
+      chain.then = (res, rej) => Promise.resolve(terminal.rows || []).then(res, rej);
+      return chain;
+    };
+    const queue = [
+      makeChain({ rows: [callRow] }),   // findSourceCall
+      makeChain({ returning: [] }),     // claim insert LOSES — card already open
+      makeChain({ first: { id: 'card1', payload: JSON.stringify(finished), updated_at: 't1' } }), // annotation read
+      makeChain({}),                    // CAS annotation update (wins)
+    ];
+    db.mockImplementation(() => queue.shift());
+    const CallProc = require('../services/call-recording-processor');
+    CallProc.transcribeRecording.mockClear();
+
+    const res = await reverifyBouncedEmailFromCall({ bouncedEmail: 'apitz6958@yahoo.com' });
+
+    expect(res).toEqual({ skipped: 'card_open' });
+    expect(CallProc.transcribeRecording).not.toHaveBeenCalled(); // decode reused, never re-paid
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(updateSpy.mock.calls[0][0].payload);
+    expect(payload.additional_bounced_emails).toEqual(['apitz6958@yahoo.com']);
+    expect(payload.additional_reverifications).toHaveLength(1);
+    expect(payload.additional_reverifications[0].bounced_email).toBe('apitz6958@yahoo.com');
+    expect(payload.additional_reverifications[0].email_candidates[0].value).toBe('apitts6958@yahoo.com');
+    expect(payload.additional_reverifications[0].confirmation_question).toContain('A-P-I-T-T-S');
+    expect(queue).toHaveLength(0);
   });
 });
 

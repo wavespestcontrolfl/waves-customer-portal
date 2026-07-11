@@ -234,21 +234,49 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
       // annotate it rather than silently dropping the second bounce — the
       // office re-listens to the same audio once for both.
       try {
-        const openCard = await db('triage_items')
-          .where({ call_log_id: call.id, reason_code: 'email_bounce_reverify' })
-          .whereIn('status', ['open', 'in_progress'])
-          .first('id', 'payload');
-        const payload = typeof openCard?.payload === 'string' ? JSON.parse(openCard.payload) : (openCard?.payload || null);
-        if (payload && payload.bounced_email && payload.bounced_email !== bounced) {
+        // CAS retry: the worker's final write and this annotation race on the
+        // same payload column — an unconditional update from a stale read
+        // would clobber whichever wrote first. Condition on updated_at and
+        // re-read on a miss, mirroring the worker's delete CAS.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const openCard = await db('triage_items')
+            .where({ call_log_id: call.id, reason_code: 'email_bounce_reverify' })
+            .whereIn('status', ['open', 'in_progress'])
+            .first('id', 'payload', 'updated_at');
+          const payload = typeof openCard?.payload === 'string' ? JSON.parse(openCard.payload) : (openCard?.payload || null);
+          if (!payload || !payload.bounced_email || payload.bounced_email === bounced) break;
           const extra = Array.isArray(payload.additional_bounced_emails) ? payload.additional_bounced_emails : [];
-          if (!extra.includes(bounced)) {
-            extra.push(bounced);
-            await db('triage_items').where({ id: openCard.id }).update({
-              payload: JSON.stringify({ ...payload, additional_bounced_emails: extra }),
+          if (extra.includes(bounced)) break;
+          extra.push(bounced);
+          const updated = { ...payload, additional_bounced_emails: extra };
+          // If the first pass already FINISHED, no worker will re-enter the
+          // candidate loop for this card — compute this address's read-back
+          // right here from the decode stored on the card (all local, no
+          // provider work). While analyzing, the worker's re-read loop picks
+          // the annotation up instead.
+          if (!payload.analyzing && Array.isArray(payload.decoder_candidates_all)) {
+            const v1 = (() => { try { return JSON.parse(call.ai_extraction) || {}; } catch { return {}; } })();
+            const knownBad = new Set([payload.bounced_email, ...extra, matchEmail]);
+            const cands = mergeCandidates({
+              bouncedEmail: bounced,
+              decoderCandidates: filterDecoderCandidatesToBounced(payload.decoder_candidates_all, bounced),
+              nameCandidates: nameAnchoredEmailCandidates({ bouncedEmail: bounced, firstName: v1.first_name, lastName: v1.last_name }),
+            }).filter((c) => !knownBad.has(c.value));
+            if (cands.length) {
+              updated.additional_reverifications = [
+                ...(Array.isArray(payload.additional_reverifications) ? payload.additional_reverifications : []),
+                { bounced_email: bounced, email_as_heard: bounced, email_candidates: cands, confirmation_question: buildReadbackQuestion(cands[0].value) },
+              ];
+            }
+          }
+          const won = await db('triage_items')
+            .where({ id: openCard.id, updated_at: openCard.updated_at })
+            .update({
+              payload: JSON.stringify(updated),
               summary: `${payload.bounced_email} and ${extra.length} more address(es) from this call hard-bounced — confirm on the read-back`,
               updated_at: new Date(),
             });
-          }
+          if (won) break;
         }
       } catch (e) { logger.warn(`[bounce-reverify] open-card annotation failed open: ${e.message}`); }
       return { skipped: 'card_open' };
@@ -346,7 +374,7 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     // Re-read before the final write: a SECOND bounced address can have been
     // annotated onto the claim row while transcription ran — a fresh payload
     // object must not clobber additional_bounced_emails.
-    const currentRow = await db('triage_items').where({ id: cardId }).first('payload').catch(() => null);
+    const currentRow = await db('triage_items').where({ id: cardId }).first('payload', 'status').catch(() => null);
     const currentPayload = typeof currentRow?.payload === 'string'
       ? (() => { try { return JSON.parse(currentRow.payload); } catch { return {}; } })()
       : (currentRow?.payload || {});
@@ -355,8 +383,26 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     const otherBounced = [...new Set([
       bounced,
       ...(Array.isArray(currentPayload.additional_bounced_emails) ? currentPayload.additional_bounced_emails : [])
-        .map((e) => String(e || '').trim().toLowerCase()),
+        .map(norm),
     ])].filter((e) => EMAIL_RE.test(e) && e !== carded.address);
+    // Each OTHER address gets its own read-back block when the decode
+    // supports one (same local computation the annotation path uses for
+    // late arrivals) — otherwise the office would see only the primary's
+    // candidates for a card that covers several bounced addresses.
+    const knownBadFinal = new Set([carded.address, ...otherBounced, matchEmail, ...alsoExcludeNorm]);
+    const additionalReverifications = otherBounced
+      .map((addr) => {
+        const cands = candidatesFor(addr, knownBadFinal);
+        return cands.length
+          ? { bounced_email: addr, email_as_heard: addr, email_candidates: cands, confirmation_question: buildReadbackQuestion(cands[0].value) }
+          : null;
+      })
+      .filter(Boolean);
+    // An operator can resolve/dismiss the placeholder while transcription
+    // runs — they acted on "analyzing…", not on evidence. Candidates landing
+    // reopens the card so the correction can't hide in a closed bucket while
+    // the bad address stays on file.
+    const wasClosed = !!currentRow && !['open', 'in_progress'].includes(currentRow.status);
     await db('triage_items')
       .where({ id: cardId })
       .update({
@@ -369,10 +415,21 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
           confirmation_question: buildReadbackQuestion(candidates[0].value),
           transcriber: { provider: result.provider || null, contact_pass: !!result.contactPassTranscript },
           customer_id: customerId || call.customer_id || null,
+          // The raw decode, kept on the card so a bounce arriving AFTER this
+          // write can get its read-back computed locally instead of paying
+          // for a second transcription (see the annotation path).
+          decoder_candidates_all: allDecoderCandidates.slice(0, 24).map((c) => ({ value: c.value, confidence: c.confidence })),
           ...(otherBounced.length ? { additional_bounced_emails: otherBounced } : {}),
+          ...(additionalReverifications.length ? { additional_reverifications: additionalReverifications } : {}),
         }),
         updated_at: new Date(),
+        ...(wasClosed ? { status: 'open', resolved_at: null } : {}),
       });
+    if (wasClosed) {
+      // The call-level bookkeeping followed the mid-analysis close; an open
+      // triage row exists again, so the call is back in review.
+      await db('call_log').where({ id: call.id }).update({ review_status: 'open', updated_at: new Date() }).catch(() => {});
+    }
 
     logger.info(`[bounce-reverify] Carded ${candidates.length} candidate(s) for bounced address (call ${call.id})`);
     return { carded: true, callId: call.id, candidates };

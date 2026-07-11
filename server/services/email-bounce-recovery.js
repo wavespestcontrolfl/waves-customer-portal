@@ -546,15 +546,22 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
         // Audio re-verification lane (gated, best-effort): the domain
         // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
-        // "P-I-T-T-S"), but the source recording can settle them. Deliberately
+        // "P-I-T-T-S"), but the source recording can settle them. ONLY when
+        // the corrector had NO candidate: the lane anchors its candidates to
+        // the bounced address's own domain, so running it while a domain
+        // correction exists (has_attachments, suppressed, low-confidence…)
+        // could card variants of the KNOWN-SUSPECT domain for read-back while
+        // the alert above already carries the real suggestion. Deliberately
         // NOT awaited — re-transcription takes tens of seconds and this runs
         // off the bounce webhook; the result is a Needs-Review card, nothing
         // time-coupled to this handler.
-        try {
-          const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
-          reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
-            .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
-        } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
+        if (!candidate) {
+          try {
+            const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+            reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
+              .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
+          } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
+        }
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
       return { skipped: decision.status };

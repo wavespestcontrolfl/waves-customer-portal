@@ -121,6 +121,17 @@ export function ConfirmEvidence({ payload }) {
       label: emailCandidates.length === 1 ? "Likely" : "Candidates",
       value: emailCandidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
     },
+    // One bounce-reverify card can cover SEVERAL bounced addresses from the
+    // same call — each verified one gets its own heard/candidates/read-back
+    // rows, or the office only ever sees the primary's.
+    ...(Array.isArray(p.additional_reverifications) ? p.additional_reverifications : []).flatMap((r) => [
+      r.email_as_heard && { label: "Also bounced", value: r.email_as_heard },
+      Array.isArray(r.email_candidates) && r.email_candidates.length > 0 && {
+        label: r.email_candidates.length === 1 ? "Likely" : "Candidates",
+        value: r.email_candidates.map((c) => `${c.value}${typeof c.confidence === "number" ? ` (${Math.round(c.confidence * 100)}%)` : ""}`).join(" · "),
+      },
+      r.confirmation_question && { label: "Then ask", value: `“${r.confirmation_question}”` },
+    ]),
     // Quarantine-arbiter findings: without these rows the operator sees only
     // the original ambiguous candidates and re-does the DNS/ownership work
     // the arbiter already did.
@@ -414,6 +425,11 @@ export default function TriageInboxTabV2() {
                 // Bounce follow-up cards aren't call verdicts — the server
                 // rejects accept/deny on them; they resolve individually.
                 const isBounceCard = isTriage && item.reason_code === "email_bounce_reverify";
+                // While the re-transcription is still running the card is a
+                // placeholder — resolving it would bury the candidates the
+                // worker is about to write (the worker reopens a card closed
+                // mid-analysis, but don't invite it).
+                const isAnalyzing = isBounceCard && !!parsePayload(item.payload)?.analyzing;
                 return (
                   <div
                     key={isTriage ? item.id : item.route_decision_id}
@@ -463,11 +479,11 @@ export default function TriageInboxTabV2() {
                             <Button
                               size="sm"
                               variant="primary"
-                              disabled={actioning === busyKey}
+                              disabled={actioning === busyKey || isAnalyzing}
                               onClick={() => resolveItem(item)}
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
-                              {actioning === busyKey ? "Saving…" : "Resolve"}
+                              {isAnalyzing ? "Analyzing…" : actioning === busyKey ? "Saving…" : "Resolve"}
                             </Button>
                           ) : (
                             <>
