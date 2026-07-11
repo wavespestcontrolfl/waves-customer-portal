@@ -705,11 +705,13 @@ const SYNC_INTERVAL = 60_000; // 1 minute cache
 // ── Pre-slab inventory-price link (owner decision 2026-07-10) ─────────────
 // Approved inventory prices drive pre-slab container costs: each product
 // with a catalogProductName is looked up in products_catalog, and an active,
-// priced (needs_pricing=false, best_price>0, unit_size_oz>0) row overrides
-// containerCost/containerOz for this sync. Fail-open everywhere — a missing
-// table/row/field, or a per-oz price outside [0.5x, 2x] of the pricing_config
-// value (fat-finger/bad-scrape guard), keeps the config value for that
-// product. Runs every sync AFTER config re-applies the base costs, so
+// priced (needs_pricing=false, best_price>0, unit_size_oz>0) row whose
+// best_vendor_pricing_id points at an ACTIVE, APPROVED/auto-approved
+// vendor_pricing row overrides containerCost/containerOz for this sync.
+// Fail-open everywhere — a missing table/row/field, an unapproved or
+// inactive backing vendor price, or a per-oz price outside [0.5x, 2x] of
+// the pricing_config value (fat-finger/bad-scrape guard), keeps the config
+// value for that product. Runs every sync AFTER config re-applies the base costs, so
 // disabling the link or fixing the catalog self-heals within one sync.
 async function syncPreSlabContainerCostsFromCatalog(db) {
   const termiticide = constants.SPECIALTY.preSlabTermiticide;
@@ -723,10 +725,25 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
     const rows = await db('products_catalog')
       .whereIn('name', entries.map(([, product]) => product.catalogProductName.trim()))
       .where({ active: true, needs_pricing: false })
-      .select('name', 'best_price', 'unit_size_oz');
+      .select('name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id');
+    // Only trust a best_price backed by an ACTIVE, APPROVED vendor price.
+    // Some inventory recalc paths cache the lowest vendor_pricing.price
+    // without filtering approval_status/is_active, and a pending scrape must
+    // never reprice customer quotes (codex r1).
+    const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
+    const approvedBackingIds = new Set();
+    if (backingIds.length) {
+      const backing = await db('vendor_pricing')
+        .whereIn('id', backingIds)
+        .where({ is_active: true })
+        .whereIn('approval_status', ['approved', 'auto_approved'])
+        .select('id');
+      for (const row of backing) approvedBackingIds.add(row.id);
+    }
     const byName = new Map(rows.map((row) => [row.name, row]));
     for (const [key, product] of entries) {
       const row = byName.get(product.catalogProductName.trim());
+      if (!row?.best_vendor_pricing_id || !approvedBackingIds.has(row.best_vendor_pricing_id)) continue;
       const price = Number(row?.best_price);
       const oz = Number(row?.unit_size_oz);
       if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(oz) || oz <= 0) continue;

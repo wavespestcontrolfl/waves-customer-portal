@@ -112,63 +112,87 @@ exports.up = async function (knex) {
     }
   }
 
-  // ── 2. products_catalog: Termidor SC unit size 20 → 78 oz ───────────────
+  // ── 2. products_catalog: Termidor SC unit size → 78 oz ──────────────────
+  // Prod carries 20; fresh/preview DBs carry NULL (the 2026-04-17 product
+  // seed predates the unit_size_oz column) — both are wrong for a row whose
+  // price is the 78 oz agency bottle, and both would keep the inventory
+  // link from ever engaging for Termidor (codex r1).
   if (await knex.schema.hasTable('products_catalog')) {
     await knex('products_catalog')
       .where({ name: 'Termidor SC' })
-      .where('unit_size_oz', 20)
+      .where(function () {
+        this.where('unit_size_oz', 20).orWhereNull('unit_size_oz');
+      })
       .update({ unit_size_oz: TERMIDOR_CONTAINER_OZ, updated_at: knex.fn.now() });
 
-    // ── 3. vendor_pricing: retire stale SiteOne seed, insert owner-real cost ─
+    // ── 3. vendor_pricing: retire stale SiteOne seed, assert owner-real cost ─
+    // The SiteOne retirement + catalog recache run whether or not an
+    // Intermountain row already exists — a pre-existing row must not no-op
+    // the correction and leave the stale $152.10 cached as best price
+    // (codex r1). An existing Intermountain row is updated in place to the
+    // owner-stated cost instead of inserting a duplicate.
     if (await knex.schema.hasTable('vendor_pricing') && await knex.schema.hasTable('vendors')) {
       const termidor = await knex('products_catalog').where({ name: 'Termidor SC' }).first('id');
       const intermountain = await knex('vendors').where({ name: 'Intermountain Turf' }).first('id');
       if (termidor && intermountain) {
+        await knex('vendor_pricing')
+          .where({ product_id: termidor.id })
+          .whereNull('vendor_product_url')
+          .where('price', STALE_SITEONE_PRICE)
+          .update({ is_active: false, is_best_price: false, updated_at: knex.fn.now() });
+
+        const ownerRealValues = {
+          price: TERMIDOR_REAL_COST,
+          price_amount: TERMIDOR_REAL_COST,
+          currency: 'USD',
+          quantity: '78 oz',
+          unit: 'oz',
+          unit_normalized: 'oz',
+          price_per_oz: Math.round((TERMIDOR_REAL_COST / TERMIDOR_CONTAINER_OZ) * 10000) / 10000,
+          approval_status: 'approved',
+          is_best_price: true,
+          is_active: true,
+          last_checked_at: knex.fn.now(),
+        };
         const existing = await knex('vendor_pricing')
           .where({ product_id: termidor.id, vendor_id: intermountain.id })
           .first('id');
-        if (!existing) {
+        let bestRowId;
+        if (existing) {
           await knex('vendor_pricing')
-            .where({ product_id: termidor.id })
+            .where({ id: existing.id })
+            .update({ ...ownerRealValues, updated_at: knex.fn.now() });
+          await knex('vendor_pricing')
+            .where({ id: existing.id })
             .whereNull('vendor_product_url')
-            .where('price', STALE_SITEONE_PRICE)
-            .update({ is_active: false, is_best_price: false, updated_at: knex.fn.now() });
-
+            .update({ vendor_product_url: INTERMOUNTAIN_URL });
+          bestRowId = existing.id;
+        } else {
           const [inserted] = await knex('vendor_pricing')
             .insert({
               product_id: termidor.id,
               vendor_id: intermountain.id,
-              price: TERMIDOR_REAL_COST,
-              price_amount: TERMIDOR_REAL_COST,
-              currency: 'USD',
-              quantity: '78 oz',
-              unit: 'oz',
-              unit_normalized: 'oz',
-              price_per_oz: Math.round((TERMIDOR_REAL_COST / TERMIDOR_CONTAINER_OZ) * 10000) / 10000,
+              ...ownerRealValues,
               vendor_product_url: INTERMOUNTAIN_URL,
               source_type: 'manual_seed',
               price_type: 'manual',
-              approval_status: 'approved',
               confidence_score: 0.9,
-              is_best_price: true,
-              is_active: true,
-              last_checked_at: knex.fn.now(),
             })
             .returning('id');
-          const insertedId = inserted?.id || inserted;
-
-          await knex('products_catalog').where({ id: termidor.id }).update({
-            best_vendor_pricing_id: insertedId,
-            best_price: TERMIDOR_REAL_COST,
-            best_price_amount_cached: TERMIDOR_REAL_COST,
-            best_price_vendor_id_cached: intermountain.id,
-            best_vendor: 'Intermountain Turf',
-            best_price_updated_at: knex.fn.now(),
-            best_price_status: 'current',
-            needs_pricing: false,
-            updated_at: knex.fn.now(),
-          });
+          bestRowId = inserted?.id || inserted;
         }
+
+        await knex('products_catalog').where({ id: termidor.id }).update({
+          best_vendor_pricing_id: bestRowId,
+          best_price: TERMIDOR_REAL_COST,
+          best_price_amount_cached: TERMIDOR_REAL_COST,
+          best_price_vendor_id_cached: intermountain.id,
+          best_vendor: 'Intermountain Turf',
+          best_price_updated_at: knex.fn.now(),
+          best_price_status: 'current',
+          needs_pricing: false,
+          updated_at: knex.fn.now(),
+        });
       }
     }
   }
@@ -201,9 +225,11 @@ exports.down = async function (knex) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
   }
 
-  // Catalog corrections: remove the row this migration inserted and revive
-  // the SiteOne seed it deactivated. unit_size_oz stays 78 — 20 was a data
-  // bug, not a prior state worth restoring.
+  // Catalog corrections: best-effort. Removes the Intermountain row keyed by
+  // this migration's URL (if up() updated a pre-existing URL-less row rather
+  // than inserting, that row is removed too — acceptable for a rollback that
+  // also revives the SiteOne seed as best price). unit_size_oz stays 78 —
+  // 20/NULL was a data bug, not a prior state worth restoring.
   if (await knex.schema.hasTable('products_catalog') && await knex.schema.hasTable('vendor_pricing')) {
     const termidor = await knex('products_catalog').where({ name: 'Termidor SC' }).first('id');
     if (termidor) {

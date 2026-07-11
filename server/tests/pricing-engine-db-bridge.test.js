@@ -382,13 +382,21 @@ describe('pricing engine DB bridge', () => {
   });
 
   test('inventory-price link overrides pre-slab container costs from approved catalog rows only', async () => {
-    const linkDb = (catalogRows) => {
+    const linkDb = (catalogRows, approvedVendorPricingRows = []) => {
       const db = (table) => {
         if (table === 'products_catalog') {
           const q = {
             whereIn: jest.fn(() => q),
             where: jest.fn(() => q),
             select: jest.fn(async () => catalogRows),
+          };
+          return q;
+        }
+        if (table === 'vendor_pricing') {
+          const q = {
+            whereIn: jest.fn(() => q),
+            where: jest.fn(() => q),
+            select: jest.fn(async () => approvedVendorPricingRows),
           };
           return q;
         }
@@ -405,22 +413,38 @@ describe('pricing engine DB bridge', () => {
       return db;
     };
 
-    // A sane approved price flows into the engine (containerCost AND
-    // containerOz come from the catalog together).
-    await expect(syncConstantsFromDB(linkDb([
-      { name: 'Talstar P', best_price: 45.5, unit_size_oz: 128 },
-    ]))).resolves.toBe(true);
+    // A sane price backed by an ACTIVE, APPROVED vendor row flows into the
+    // engine (containerCost AND containerOz come from the catalog together).
+    await expect(syncConstantsFromDB(linkDb(
+      [{ name: 'Talstar P', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
+      [{ id: 'vp-approved' }],
+    ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(45.5);
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerOz).toBe(128);
     // Products without a usable catalog row keep the config value.
     expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerCost).toBe(174.72);
 
+    // Approval gate (codex r1): a best_price whose backing vendor row is
+    // pending/inactive — or that has no backing row at all — must never
+    // reprice quotes, even inside the sanity band.
+    await expect(syncConstantsFromDB(linkDb(
+      [
+        { name: 'Taurus SC', best_price: 99, unit_size_oz: 78, best_vendor_pricing_id: 'vp-pending' },
+        { name: 'Bifen I/T', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
+      ],
+      [], // the approval-filtered lookup returns nothing
+    ))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost).toBe(95.00);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).toBe(41.53);
+
     // Fat-finger guard: a per-oz price outside [0.5x, 2x] of config is
-    // ignored ($152.10 against a 20 oz unit size is ~3.4x config per-oz —
-    // the exact bad-catalog-row shape this PR corrects).
-    await expect(syncConstantsFromDB(linkDb([
-      { name: 'Termidor SC', best_price: 152.10, unit_size_oz: 20 },
-    ]))).resolves.toBe(true);
+    // ignored even when approved ($152.10 against a 20 oz unit size is
+    // ~3.4x config per-oz — the exact bad-catalog-row shape this PR
+    // corrects).
+    await expect(syncConstantsFromDB(linkDb(
+      [{ name: 'Termidor SC', best_price: 152.10, unit_size_oz: 20, best_vendor_pricing_id: 'vp-approved' }],
+      [{ id: 'vp-approved' }],
+    ))).resolves.toBe(true);
     expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerCost).toBe(174.72);
     expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerOz).toBe(78);
 
