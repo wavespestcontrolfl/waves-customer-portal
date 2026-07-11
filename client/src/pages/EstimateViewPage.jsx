@@ -2653,7 +2653,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
     ? `Sent! Check ${customerEmail || 'your email'}.`
     : 'Sent! Check your texts for the link.';
   return (
-    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14, textAlign: 'center' }}>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.45, marginBottom: 10 }}>
         Want the fine print? Get the full details PDF — how visits work, every product with its label &amp; safety sheet.
       </div>
@@ -2662,7 +2662,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
           <span aria-hidden="true" style={{ marginRight: 6 }}>&#10003;</span>{sentLabel}
         </div>
       ) : (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
           {/* Direct view — opens the same tokenized PDF the send flows
               deliver, in a new tab where the browser's own print / download
               / share (incl. the mobile share sheet) take over. Rendered
@@ -2858,8 +2858,10 @@ export function ServiceSection({
             fontSize: 18,
             color: ESTIMATE_TEXT,
             margin: '0 0 16px',
-            // Keep clear of the absolutely-positioned corner badge.
-            paddingRight: showTierBadge ? 140 : 0,
+            // Keep clear of the absolutely-positioned corner badge — sized
+            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
+            // padding + the 16px corner inset).
+            paddingRight: showTierBadge ? 170 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
@@ -2872,7 +2874,9 @@ export function ServiceSection({
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
           color: '#1B2C5B', margin: '0 0 4px',
-          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 140,
+          // Same corner-badge clearance as the h3 above; only needed when
+          // this headline is the first line in the card (single-service).
+          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
