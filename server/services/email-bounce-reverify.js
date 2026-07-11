@@ -114,11 +114,17 @@ function filterDecoderCandidatesToBounced(decoderCandidates, bouncedEmail) {
   });
 }
 
-// LIKE-pattern escaping: '_' matches any char and '%' any run — and '_' is a
-// COMMON email character (first_last@…), so an unescaped predicate can match
-// a different address and burn a re-transcription on the wrong call.
-function escapeLike(value) {
-  return String(value || '').replace(/[\\%_]/g, (ch) => `\\${ch}`);
+// Boundary-anchored regex for locating an email inside free text: a bare
+// substring match burns a re-transcription on the WRONG call whenever the
+// bounced address sits inside a longer one (ann@example.com inside
+// joann@example.com). Left boundary: no local-part character before the
+// address. Right boundary: no domain continuation after it — a plain
+// alnum/hyphen (a@x.com vs a@x.company) or a dot that starts another label
+// (a@x.com vs a@x.com.au); a sentence-trailing dot still matches. Postgres
+// ARE and JS RegExp both accept this syntax.
+function emailBoundaryRegex(email) {
+  const escaped = String(email || '').trim().toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return `(^|[^a-z0-9._%+-])${escaped}($|[^a-z0-9.-]|\\.([^a-z0-9-]|$))`;
 }
 
 /** "apitts6958@yahoo.com" → "A-P-I-T-T-S-6-9-5-8 at yahoo — is that right?" */
@@ -175,7 +181,7 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
   const q = db('call_log')
     .whereNotNull('recording_url')
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
-    .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${escapeLike(bounced)}%`])
+    .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) ~ ?', [emailBoundaryRegex(bounced)])
     .select('id', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
     .modify((qb) => {
       if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
@@ -266,6 +272,10 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     // have duration_seconds without recording_duration_seconds.
     const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || 0;
     if (!result?.transcription || CallProc.isImplausibleTranscript(result.transcription, recordingSeconds)) {
+      // Unconditional delete is correct HERE (unlike the no-candidates path
+      // below): every address annotated onto this card shares this one
+      // recording, so a failed or implausible re-transcription dooms them all
+      // equally — no address could ever be carded from it.
       await db('triage_items').where({ id: cardId }).del().catch(() => {});
       return { skipped: !result?.transcription ? 'retranscribe_failed' : 'implausible_transcript' };
     }
@@ -279,35 +289,53 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
 
     const v1 = (() => { try { return JSON.parse(call.ai_extraction) || {}; } catch { return {}; } })();
 
-    // A SECOND bounced address may have been annotated onto the claim row
-    // while transcription ran (one recording can dictate two emails, both
-    // wrong). The audio work is already paid for — before giving up the
-    // shared mutex row, try each annotated address against the same decode.
-    const midRow = await db('triage_items').where({ id: cardId }).first('payload').catch(() => null);
-    const midPayload = typeof midRow?.payload === 'string'
-      ? (() => { try { return JSON.parse(midRow.payload); } catch { return {}; } })()
-      : (midRow?.payload || {});
-    const annotated = (Array.isArray(midPayload.additional_bounced_emails) ? midPayload.additional_bounced_emails : [])
-      .map((e) => String(e || '').trim().toLowerCase())
-      .filter((e) => EMAIL_RE.test(e) && e !== bounced);
-    const addressesToTry = [bounced, ...annotated];
-    // EVERY address on the card hard-bounced — none may resurface as a candidate.
-    const excluded = new Set([...addressesToTry, matchEmail, ...alsoExclude.map((e) => String(e || '').trim().toLowerCase())]);
+    // A SECOND bounced address may be annotated onto the claim row at ANY
+    // point while this runs (one recording can dictate two emails, both
+    // wrong). The audio work is already paid for, so every annotated address
+    // is tried against the same decode — and the shared mutex row is only
+    // deleted via compare-and-swap on updated_at: an annotation landing
+    // between the read and the delete voids the delete (the annotation path
+    // bumps updated_at) and the loop processes the new address instead of
+    // letting it vanish with the card.
+    const norm = (e) => String(e || '').trim().toLowerCase();
+    const alsoExcludeNorm = alsoExclude.map(norm);
+    const candidatesFor = (addr, excluded) => mergeCandidates({
+      bouncedEmail: addr,
+      decoderCandidates: filterDecoderCandidatesToBounced(allDecoderCandidates, addr),
+      nameCandidates: nameAnchoredEmailCandidates({ bouncedEmail: addr, firstName: v1.first_name, lastName: v1.last_name }),
+    }).filter((c) => !excluded.has(c.value));
 
     let carded = null;
-    for (const addr of addressesToTry) {
-      const cands = mergeCandidates({
-        bouncedEmail: addr,
-        decoderCandidates: filterDecoderCandidatesToBounced(allDecoderCandidates, addr),
-        nameCandidates: nameAnchoredEmailCandidates({ bouncedEmail: addr, firstName: v1.first_name, lastName: v1.last_name }),
-      }).filter((c) => !excluded.has(c.value));
-      if (cands.length) { carded = { address: addr, candidates: cands }; break; }
-    }
-    if (!carded) {
-      // No address on the card produced candidates — the claim row was only
-      // the mutex, and an empty card would ask the office to confirm nothing.
-      await db('triage_items').where({ id: cardId }).del().catch(() => {});
-      return { skipped: 'no_candidates' };
+    const tried = new Set();
+    while (!carded) {
+      const row = await db('triage_items').where({ id: cardId }).first('payload', 'updated_at').catch(() => null);
+      if (!row) return { skipped: 'card_gone' };
+      const rowPayload = typeof row.payload === 'string'
+        ? (() => { try { return JSON.parse(row.payload); } catch { return {}; } })()
+        : (row.payload || {});
+      const annotated = (Array.isArray(rowPayload.additional_bounced_emails) ? rowPayload.additional_bounced_emails : [])
+        .map(norm)
+        .filter((e) => EMAIL_RE.test(e));
+      const known = [...new Set([bounced, ...annotated])];
+      // EVERY address on the card hard-bounced — none may resurface as a candidate.
+      const excluded = new Set([...known, matchEmail, ...alsoExcludeNorm]);
+      const pending = known.filter((e) => !tried.has(e));
+      if (!pending.length) {
+        // No address on the card produced candidates — the claim row was only
+        // the mutex, and an empty card would ask the office to confirm
+        // nothing. Zero rows deleted = a concurrent annotation won; loop.
+        const deleted = await db('triage_items')
+          .where({ id: cardId, updated_at: row.updated_at })
+          .del()
+          .catch(() => 1); // fail open like the other delete paths — never loop on a DB error
+        if (deleted) return { skipped: 'no_candidates' };
+        continue;
+      }
+      for (const addr of pending) {
+        tried.add(addr);
+        const cands = candidatesFor(addr, excluded);
+        if (cands.length) { carded = { address: addr, candidates: cands }; break; }
+      }
     }
     const { candidates } = carded;
 
@@ -360,6 +388,6 @@ module.exports = {
   buildReadbackQuestion,
   mergeCandidates,
   filterDecoderCandidatesToBounced,
-  escapeLike,
+  emailBoundaryRegex,
   findSourceCall,
 };

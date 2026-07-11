@@ -26,7 +26,7 @@ const {
   buildReadbackQuestion,
   mergeCandidates,
   filterDecoderCandidatesToBounced,
-  escapeLike,
+  emailBoundaryRegex,
   reverifyBouncedEmailFromCall,
 } = require('../services/email-bounce-reverify');
 
@@ -131,11 +131,22 @@ describe('filterDecoderCandidatesToBounced — short local parts', () => {
   });
 });
 
-describe('escapeLike', () => {
-  test('underscores and percents are escaped (first_last@… must not match firstXlast@…)', () => {
-    expect(escapeLike('first_last@example.com')).toBe('first\\_last@example.com');
-    expect(escapeLike('100%@x.com')).toBe('100\\%@x.com');
-    expect(escapeLike('plain@x.com')).toBe('plain@x.com');
+describe('emailBoundaryRegex', () => {
+  // The same ARE-compatible pattern Postgres evaluates; JS RegExp accepts it.
+  const matches = (email, text) => new RegExp(emailBoundaryRegex(email)).test(text);
+
+  test('exact-address boundaries: a longer address containing the bounced one never matches', () => {
+    expect(matches('ann@example.com', '"email":"ann@example.com"')).toBe(true);
+    expect(matches('ann@example.com', '"email":"joann@example.com"')).toBe(false);   // left overlap
+    expect(matches('a@x.com', '"email":"a@x.company"')).toBe(false);                 // domain continues
+    expect(matches('a@x.com', '"email":"a@x.com.au"')).toBe(false);                  // extra label
+    expect(matches('first_last@x.com', 'wrote firstXlast@x.com today')).toBe(false); // no LIKE wildcards
+  });
+
+  test('free-text boundaries still match: start/end of text, quotes, sentence period', () => {
+    expect(matches('a@x.com', 'a@x.com')).toBe(true);
+    expect(matches('a@x.com', 'the email is a@x.com.')).toBe(true);
+    expect(matches('a@x.com', 'reach me at a@x.com, thanks')).toBe(true);
   });
 });
 
@@ -194,6 +205,56 @@ describe('reverifyBouncedEmailFromCall — annotated second address survives a n
     // The no-candidate primary rides along — the office still sees it bounced.
     expect(payload.additional_bounced_emails).toEqual(['zzqqxx@yahoo.com']);
     expect(written.summary).toContain('apitz6958@yahoo.com');
+  });
+});
+
+describe('reverifyBouncedEmailFromCall — CAS delete loses to a concurrent annotation', () => {
+  test('annotation lands between the no-candidate read and the delete → delete no-ops, new address is processed', async () => {
+    const db = require('../models/db');
+    const callRow = {
+      id: 'call1',
+      recording_url: 'https://recordings/x.mp3',
+      recording_duration_seconds: 60,
+      duration_seconds: 60,
+      customer_id: null,
+      ai_extraction: JSON.stringify({ first_name: 'Adam', last_name: 'Pitts' }),
+    };
+    const bare = { bounced_email: 'zzqqxx@yahoo.com', analyzing: true };
+    const withSecond = { ...bare, additional_bounced_emails: ['apitz6958@yahoo.com'] };
+    const updateSpy = jest.fn(() => Promise.resolve(1));
+    const makeChain = (terminal) => {
+      const chain = {};
+      for (const m of ['whereNotNull', 'whereRaw', 'select', 'modify', 'where', 'whereIn', 'orderBy', 'orderByRaw', 'limit', 'onConflict', 'ignore', 'insert']) {
+        chain[m] = jest.fn(() => chain);
+      }
+      chain.first = jest.fn(() => Promise.resolve(terminal.first));
+      chain.returning = jest.fn(() => Promise.resolve(terminal.returning));
+      chain.update = updateSpy;
+      chain.del = jest.fn(() => Promise.resolve(terminal.del ?? 1));
+      chain.then = (res, rej) => Promise.resolve(terminal.rows || []).then(res, rej);
+      return chain;
+    };
+    const deleteChain = makeChain({ del: 0 });
+    const queue = [
+      makeChain({ rows: [callRow] }),                                              // findSourceCall
+      makeChain({ returning: ['card1'] }),                                         // claim insert
+      makeChain({ first: { payload: JSON.stringify(bare), updated_at: 't1' } }),   // read: primary only, no candidates
+      makeChain({ first: { payload: JSON.stringify(bare), updated_at: 't1' } }),   // read: nothing pending → attempt delete
+      deleteChain,                                                                 // CAS delete LOSES (0 rows — annotation won)
+      makeChain({ first: { payload: JSON.stringify(withSecond), updated_at: 't2' } }), // re-read: annotation visible
+      makeChain({ first: { payload: JSON.stringify(withSecond) } }),               // re-read before final write
+      makeChain({}),                                                               // final card update
+    ];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await reverifyBouncedEmailFromCall({ bouncedEmail: 'zzqqxx@yahoo.com' });
+
+    expect(deleteChain.del).toHaveBeenCalledTimes(1);
+    expect(res.carded).toBe(true);
+    const payload = JSON.parse(updateSpy.mock.calls[0][0].payload);
+    expect(payload.bounced_email).toBe('apitz6958@yahoo.com');
+    expect(payload.additional_bounced_emails).toEqual(['zzqqxx@yahoo.com']);
+    expect(queue).toHaveLength(0); // exactly this sequence, no stray DB work
   });
 });
 
