@@ -543,10 +543,12 @@ function mapCustomerListRow(c) {
   };
 }
 
+// role travels WITH its slot through compaction — otherwise compacting slot 2
+// into slot 1 would leave slot 1 wearing slot 1's old role.
 const SERVICE_CONTACT_SLOT_FIELDS = [
-  ['service_contact_name', 'service_contact_phone', 'service_contact_email'],
-  ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email'],
-  ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email'],
+  ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+  ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+  ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
 ];
 
 function compactServiceContactSlots(updates, before = {}) {
@@ -561,16 +563,45 @@ function compactServiceContactSlots(updates, before = {}) {
     return value;
   };
 
+  // Roles belong to PEOPLE, not slot positions. The edit form submits only
+  // name/phone/email (echoing every field on every save), so each slot's
+  // role is re-derived by matching the slot's resulting identity against
+  // the slots stored BEFORE the save (phone, then email, then exact name):
+  // the same person — even shifted to a different slot by a delete —
+  // keeps their pipeline-recorded role, and a genuinely new person never
+  // inherits the old one (codex rounds 2/3/5).
+  const normKey = (v) => String(v == null ? '' : v).trim().toLowerCase();
+  const phoneKey = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+  const beforeSlots = SERVICE_CONTACT_SLOT_FIELDS.map(([nameCol, phoneCol, emailCol, roleCol]) => ({
+    name: before[nameCol], phone: before[phoneCol], email: before[emailCol], role: normalizedValue(before[roleCol]),
+  }));
+  const roleForIdentity = ([name, phone, email]) => {
+    const match = beforeSlots.find((b) => phoneKey(phone) && phoneKey(phone) === phoneKey(b.phone))
+      || beforeSlots.find((b) => normKey(email) && normKey(email) === normKey(b.email))
+      || beforeSlots.find((b) => normKey(name) && normKey(name) === normKey(b.name));
+    return match ? match.role : null;
+  };
+
   const compacted = SERVICE_CONTACT_SLOT_FIELDS
-    .map((fields) => fields.map((field) => (
-      Object.prototype.hasOwnProperty.call(updates, field)
-        ? normalizedValue(updates[field])
-        : normalizedValue(before[field])
-    )))
-    .filter((slot) => slot.some((value) => value !== null));
+    .map((fields) => {
+      const identity = fields.slice(0, 3).map((field) => (
+        Object.prototype.hasOwnProperty.call(updates, field)
+          ? normalizedValue(updates[field])
+          : normalizedValue(before[field])
+      ));
+      // An explicit role in the payload wins (the pipeline's own writes);
+      // otherwise the role follows the person.
+      const role = Object.prototype.hasOwnProperty.call(updates, fields[3])
+        ? normalizedValue(updates[fields[3]])
+        : roleForIdentity(identity);
+      return [...identity, role];
+    })
+    // Survival is judged on name/phone/email only — a role with no person
+    // attached must not keep a ghost slot alive.
+    .filter((slot) => slot.slice(0, 3).some((value) => value !== null));
 
   SERVICE_CONTACT_SLOT_FIELDS.forEach((fields, index) => {
-    const slot = compacted[index] || [null, null, null];
+    const slot = compacted[index] || fields.map(() => null);
     fields.forEach((field, fieldIndex) => {
       updates[field] = slot[fieldIndex];
     });
@@ -2314,7 +2345,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'payer_id'];
+      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path

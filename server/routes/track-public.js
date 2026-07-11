@@ -42,6 +42,7 @@ const {
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -53,12 +54,11 @@ const TRACK_PUBLIC_GEOCODE_TIMEOUT_MS = 1500;
 // vehicle coords + ETA between transitions.
 const EN_ROUTE_POLL_SECONDS = 30;
 
-// Customer track page TTL — long enough that the page can be left open
-// on a phone for a tech's full visit window without 403'ing on photo
-// thumbnails, short enough that a leaked URL doesn't have indefinite
-// reach. resolveTechPhotoUrl defaults to 900 (15min); we match it here
-// so a single page-load presigns the whole bundle on one cadence.
-const SERVICE_PHOTO_TTL_SECONDS = 15 * 60;
+// Customer track page TTL — the page gets left open on a phone well past a
+// visit window (backgrounded tabs), and 15-minute links 403'd thumbnails on
+// re-render. Shared customer-dwell TTL (24h): long enough for any realistic
+// session, still bounded if a URL leaks.
+const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -175,6 +175,12 @@ async function buildVehicle(service) {
 async function ensureEnRouteDestinationGeocoded(service) {
   if (!service || service.track_state !== 'en_route') return service;
   if (finiteNumber(service.latitude) != null && finiteNumber(service.longitude) != null) return service;
+  // ensureCustomerGeocoded resolves the PRIMARY address — when the visit's
+  // stamped service address diverges from the primary (secondary/rental
+  // booking) that would map/ETA the wrong house. No pin beats a wrong pin.
+  // A non-divergent stamp (ordinary primary-address phone booking) keeps
+  // the fallback: the primary IS the destination (codex round-4 P1).
+  if (service.stamped_address_diverges) return service;
   if (!service.customer_id) return service;
 
   try {
@@ -321,13 +327,19 @@ router.get('/:token', async (req, res, next) => {
         'c.last_name as cust_last_name',
         'c.email as cust_email',
         'c.phone as cust_phone',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
-        'c.latitude',
-        'c.longitude',
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+        // Stamped visits carry their own coords (property geocode stamped
+        // at booking) — read them first. The customer's primary coords are
+        // a valid fallback unless the stamp DIVERGES from the primary:
+        // every phone booking stamps, including primary-address bookings,
+        // so "stamped" alone must not blank the pin (codex round-4 P1).
+        db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
+        db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
         't.bouncie_imei as tech_bouncie_imei',
         't.photo_url as tech_photo_url',
@@ -352,7 +364,7 @@ router.get('/:token', async (req, res, next) => {
     // Business). Read-time presigning replaces the deleted public
     // proxy from PR #344 (P0 fix per Codex).
     const techPhotoUrl = row.technician_id
-      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
+      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS)
       : null;
 
     // A no-show is an operational-status flip (admin-dispatch) that does

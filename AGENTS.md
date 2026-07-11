@@ -53,8 +53,8 @@ finding and warns on P1. Reviewers must return JSON matching
   `server/services/stripe-pricing.js` (the pure, unit-tested surcharge module
   imported by `stripe.js` — `computeChargeAmount`, `isCardMethodType`,
   `CARD_SURCHARGE_RATE`) is the single source of truth for the card surcharge —
-  currently **3%** (`CONFIGURED_COST_BPS = 300`, capped at the `NETWORK_CAP_BPS`
-  3% Visa/MC cap; consent text says "up to 3%"). `CARD_SURCHARGE_RATE = 0.03` is
+  currently **2.9%** (`CONFIGURED_COST_BPS = 290` since PR #1836, capped at the
+  `NETWORK_CAP_BPS` 3% Visa/MC cap; consent text v8 says "up to 2.9%"). `CARD_SURCHARGE_RATE = 0.03` is
   a deprecated legacy mirror — prefer the cents/bps API. The dollar amount displayed to the customer, the
   `amountCents` sent to Stripe (`Math.round(total * 100)`), and the
   `card_surcharge` recorded on the `payments` row must all derive from the
@@ -229,7 +229,7 @@ finding and warns on P1. Reviewers must return JSON matching
   ET-wall-clock fields. `node-cron` schedules pass
   `timezone: 'America/New_York'` explicitly.
 - **Payment processor.** Stripe only — Payment Element (card / Apple Pay
-  / Google Pay / ACH). Card-family pays a surcharge (up to 3%); ACH pays the base.
+  / Google Pay / ACH). Card-family pays a surcharge (up to 2.9%); ACH pays the base.
   Surcharge math is centralized in `server/services/stripe.js`
   (`computeChargeAmount`, `isCardMethodType`). Square is fully phased out
   and must not be reintroduced.
@@ -305,6 +305,60 @@ finding and warns on P1. Reviewers must return JSON matching
   with metadata-pinned purpose/estimate id, NO money captured at booking —
   the saved card is charged on completion and a flat no-show fee only;
   dark behind ONE_TIME_CARD_HOLD).
+  `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
+  per-service details-packet PDF for the estimate view's "full details"
+  buttons; dark behind GATE_SERVICE_DETAILS_PDF — 404 when off; estimate
+  token format gate, generic 404, isEstimateCustomerViewable gate identical
+  to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
+  draft can never produce a customer-facing document), serviceKey must be
+  BOTH a known guide key and a recurring service actually on this estimate,
+  60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
+  service guide plus PUBLIC product-registry fields only — active
+  ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
+  dilution, or inventory data).
+  `/api/estimates/:token/service-details/send` (write; emails or texts that
+  same packet to the contact info ALREADY ON the estimate — the destination
+  is NEVER caller-supplied (body carries only `service` + `channel`), so
+  the token cannot be used to spray documents at arbitrary addresses; same
+  gate-404 + token format gate + customer-viewable + service-on-estimate
+  checks as the GET, 6 req/hour limit, email sends idempotent per
+  estimate+service+day, suppression-blocked addresses return 409 with no
+  send, generic errors — no PII in responses or logs).
+  `/api/estimates/:token/extension-request` (POST; one-click "my link
+  expired, I still want this" from the React estimate page's expired/
+  not-found screen. Estimate token format gate (same slug-or-64-hex regex as
+  the slots router), generic 404 — unknown token, malformed token, ineligible
+  row, and gate-off are indistinguishable — 5 req/hr per-IP limit, dark
+  behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
+  gate is off so a dark probe sees only generic 404s, never a revealing 429,
+  and keys via the shared /64-collapsing `rateLimitKey`). Eligibility
+  requires a PUBLISHED estimate (sent_at/viewed_at set — the expiration
+  sweep flips never-sent drafts to 'expired' too, and those must never
+  qualify) that is past expires_at or sweep-expired, not
+  accepted/declined/archived. Concurrency: the 24h dedupe stamp and the
+  lifetime auto-grant burn live in DEDICATED estimates columns
+  (`extension_requested_at` / `extension_auto_granted_at`, migration
+  20260711000001 — never estimate_data, whose full-blob writers could erase
+  jsonb stamps and un-burn the cap), claimed by one atomic conditional
+  UPDATE so concurrent POSTs can't fan out duplicates. First request per
+  estimate AUTO-GRANTS a 7-day extension via the shared
+  services/estimate-extension.js core (same expiry anchoring, status
+  revival, `estimate_extended` SMS, and `estimate.extended` email as the
+  admin extend route — consent/opt-out/Twilio-gate enforcement inside
+  sendCustomerMessage, suppression/dedupe inside the email template
+  library; post-write SMS/email plumbing never throws; the write is guarded on the
+  snapshot's status/archived_at and never moves an expiry backwards, 409 on
+  conflict; LIVE 'sending' claims are refused — only date-expired stale
+  ones extend), burned ATOMICALLY in the same claim UPDATE before any
+  mutation. Failure handling is fail-closed: provably pre-write errors
+  (400/409) release both stamps; ambiguous errors keep the BURN but release
+  the dedupe stamp so a retry reaches the notify-office path instead of a
+  false alreadyRequested. Repeat requests fall back to notify-office-only.
+  Every path raises an in-app admin notification (the auto-grant alert
+  retries once and error-logs on double failure; the notify-only path
+  treats the notification as the deliverable and releases its claim + 500s
+  when it can't persist); response carries only
+  success/autoExtended/expiresAt/smsSent/emailSent — no PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
@@ -330,6 +384,28 @@ finding and warns on P1. Reviewers must return JSON matching
   32-hex claim token. The full report payload never leaves the server before
   claim. Prospect free-text note is stored for admin view only — never fed to
   models or customer copy. Privacy headers on all responses.)
+  `/api/card/:token` (read-only digital business card payload; 64-hex
+  `customer_cards.share_token` format gate, generic 404 for unknown/malformed
+  tokens and archived/merged customers, 60 req/min per-IP read limit on top of
+  the global /api limiter, `Cache-Control: private, no-store`; payload is a
+  strict whitelist — customer FIRST NAME + member-since year +
+  has_left_google_review flag only, tech name + presigned photo, office
+  phone, the tracked /l review short-link, and the customer's referral link
+  (share never exposes the card token) — no address, email, or phone PII;
+  the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
+  headers via sensitive-spa-headers.js),
+  `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
+  token gate + archived-customer 404 + rate limit + `no-store`; contents are
+  COMPANY-ONLY — tech name/title, office line, company email/site/address,
+  license line — never customer data),
+  `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
+  64-hex token gate + archived-customer 404 + per-route rate limit +
+  `no-store`; 404s whenever the PASS_* signing env vars are unset (config
+  self-gate — the card payload's walletAvailable mirrors it so the button
+  never renders a dead tap); pass carries customer FIRST NAME + member-since
+  year only — NO home coordinates, NO next-visit date (static pass, no
+  update plumbing), review QR falls back to the card link for
+  has_left_google_review customers).
   `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
   the full report — same gate-404 + honeypot + privacy headers, 10 req/min
   limit, UUID + 32-hex claim-token format gates with generic 404 so tokens

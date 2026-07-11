@@ -6,13 +6,17 @@ import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
+import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 
-// Full-render guard for the legacy lawn service report (reportVersion
-// service_report_v1, serviceLine lawn, reportV2 null — i.e. LAWN_REPORT_V2 off,
-// which is the live production layout). A regression here previously shipped:
-// the early "V2 lead" block was gated on isLawnReport instead of isV2LeadLayout,
-// so a legacy lawn report rendered Products Applied + Visit Timeline twice (and
-// duplicated their DOM ids). These tests pin the single-render behavior.
+// Full-render guards for the lawn service report. V2 is THE lawn report
+// (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
+// reportV2 for every lawn visit with a tech-confirmed linked assessment. The
+// legacy layout (reportV2 null) survives ONLY as the fallback for historical
+// tokens whose visits predate the assessment flow — those permanent SMS/email
+// links must keep rendering lawn content. A regression here previously
+// shipped: the early "V2 lead" block was gated on isLawnReport instead of
+// isV2LeadLayout, so a legacy lawn report rendered Products Applied + Visit
+// Timeline twice (and duplicated their DOM ids).
 
 function renderReport(payload) {
   vi.stubGlobal(
@@ -80,7 +84,22 @@ describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
   });
 });
 
-describe('ReportViewPage — legacy lawn layout (reportV2 off)', () => {
+describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
+  it('renders the V2 dashboard and not the legacy assessment layout', async () => {
+    const { container } = renderReport(lawnReportV2);
+    // Snapshot hero headline from the reportV2 payload.
+    await screen.findByText('Stable — watching thin areas');
+
+    // Legacy lawn-assessment DOM must not render alongside V2.
+    expect(container.querySelector('.lawn-trend-chart')).toBeNull();
+    expect(container.querySelector('.lawn-assessment-layout-no-trend')).toBeNull();
+    // Shared sections still render exactly once in the V2 lead layout.
+    expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
+    expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 null)', () => {
   it('renders Products Applied and Visit Timeline exactly once', async () => {
     const { container } = renderReport(legacyLawnReport);
     await screen.findByText('Visit Summary');

@@ -10,7 +10,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
-const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT } = require('./pricing-engine/constants');
+const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
   inferFrequencyKeyFromEstimateData,
   resolveBillingCadence,
@@ -619,16 +619,23 @@ function isTermiteBaitOneTimeItem(item = {}) {
 }
 
 // Service-type predicate (independent of existing-customer status): the WaveGuard
-// $99 setup is a Pest/Mosquito membership fee. Lawn, termite-bait, rodent-bait,
-// tree & shrub, and palm carry no setup fee — they earn the annual-prepay discount
-// instead. This drives the prepay-discount decision (which must not depend on the
-// existing-customer waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
+// $99 setup applies ONLY to single-service recurring plans — recurring pest
+// only, or recurring mosquito only (owner directive 2026-07-10 evening,
+// supersedes the same-day pest-mixes rule). Any multi-service recurring
+// bundle carries no setup fee (the bundle is the incentive), and lawn /
+// termite-bait / rodent-bait / T&S / palm solo plans never carry it — all of
+// those earn the annual-prepay % discount instead. This drives the
+// prepay-discount decision (which must not depend on the existing-customer
+// waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
 // existing-customer waiver on top for the actual setup invoice.
+const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
-  const keys = (Array.isArray(recurringServices) ? recurringServices : [])
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  return keys.includes('pest_control') || keys.includes('mosquito');
+  const keys = Array.from(new Set(
+    (Array.isArray(recurringServices) ? recurringServices : [])
+      .map(recurringServiceKey)
+      .filter(Boolean),
+  ));
+  return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
@@ -638,7 +645,7 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
-  // Pest/Mosquito mixes always charge the setup (no 5% stacking).
+  // Solo pest / solo mosquito plans charge the setup (no 5% stacking).
   return recurringMixHasMembershipFeeService(recurring);
 }
 
@@ -778,26 +785,92 @@ function resolveAnnualPrepayDraftAmount({ prepayInvoiceAmount, annualTotal, mont
   return calculateAnnualPrepayAmount(monthlyRate);
 }
 
+// The lawn program minimum's floor-protected annual (owner directive
+// 2026-07-09): the first $50/mo × 12 of each recurring lawn line that no
+// discount — including the annual-prepay % — may cut into. Scans the same
+// dual sources as nonDiscountableRecurringAnnualFloor (mapped service rows +
+// lineItems) and dedupes by key so a lawn line is only protected once.
+function lawnProgramMinimumProtectedAnnual(estimateData = {}) {
+  const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  if (!Number.isFinite(minMonthly) || minMonthly <= 0) return 0;
+  const floorAnnual = Math.round(minMonthly * 12 * 100) / 100;
+  const protectedSum = (rows) => Math.round(rows.reduce((sum, item) => {
+    const annual = recurringLineAnnualAmount(item);
+    // Protect the FULL floor per line, not min(annual, floor): the floor is
+    // what the customer is actually billed — public render/accept clamp every
+    // recurring lawn line up to the program minimum, so a stale pre-floor
+    // stored annual (e.g. $408 on an outstanding link whose bundle re-clamps
+    // to $600) must not leave the clamped-up slice discountable, or the
+    // prepay % lands the invoice below the minimum. Over-protection is the
+    // safe direction: the caller's Math.min(base, floor) cap means it can
+    // only shrink the prepay discount, never raise the invoice above base.
+    return annual > 0 ? sum + floorAnnual : sum;
+  }, 0) * 100) / 100;
+  // Acceptance restamps recurring.services (NOT engine lineItems), so a
+  // stale source must never shrink the protection below what the accepted
+  // rows warrant — take the larger of the two sources. Both protect exactly
+  // the floor per line, so a source disagreement (differing line counts) can
+  // only over-protect (shrinking the prepay discount), never under-protect.
+  const fromLineItems = protectedSum(estimateLineItemsFromData(estimateData)
+    .filter((i) => recurringServiceKey(i) === 'lawn_care'));
+  const fromRecurringRows = protectedSum(recurringServicesFromEstimateData(estimateData)
+    .filter((svc) => recurringServiceKey(svc) === 'lawn_care'));
+  return Math.max(fromLineItems, fromRecurringRows);
+}
+
 // Single source of truth for the annual-prepay invoice amount, shared by the
 // converter (billing), the public estimate render, and the accept response so the
 // displayed/messaged total always equals the invoice the converter creates.
 // Non-pest/mosquito mixes take ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual;
 // the non-discountable recurring floor (margin-protected non-lawn lines) still
 // clamps the result, so callers never quote a total below what is actually billed.
+// The two inputs the prepay math needs for ANY base annual: the configured
+// discount % for this service mix, and the floor-protected slice no discount
+// may cut into. Exposed so the SSR page's client-side refresh
+// (refreshBillingAmounts) can re-derive the SAME floor-aware total this
+// module invoices when the annual changes — multiplying a new annual by a
+// previously-computed flat "effective rate" goes stale immediately, because
+// the effective rate is itself a function of the annual.
+function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
+  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
+  const protectedFloor = Math.round((
+    nonDiscountableRecurringAnnualFloor(estimateData)
+    + lawnProgramMinimumProtectedAnnual(estimateData)
+  ) * 100) / 100;
+  return { discountRate, protectedFloor };
+}
+
 function resolveAnnualPrepayInvoiceTotal({ baseAnnual, recurringServices = [], estimateData = {} } = {}) {
   const base = Math.round((Number(baseAnnual) || 0) * 100) / 100;
   if (!(base > 0)) return { amount: 0, discount: 0, rate: 0 };
-  const discountRate = recurringMixHasMembershipFeeService(recurringServices) ? 0 : ANNUAL_PREPAY_DISCOUNT_PCT;
   // Apply the prepay % ONLY to the discountable portion. Non-discountable
   // recurring lines (e.g. foam_recurring, whose cadence multiplier is its only
   // discount) are split out first and added back at full price — otherwise a
   // mixed plan (foam + lawn) would still bleed part of the 5% onto foam because
   // a simple max(discounted, floor) clamp only protects foam-heavy mixes.
-  const floor = Math.min(base, nonDiscountableRecurringAnnualFloor(estimateData));
+  // The lawn program minimum's protected slice (owner directive 2026-07-09:
+  // prepay is NOT exempt from the floor) joins the same non-discountable
+  // floor — only lawn's above-floor headroom earns the prepay %.
+  const { discountRate, protectedFloor } = annualPrepayDiscountComponents({ recurringServices, estimateData });
+  const floor = Math.min(base, protectedFloor);
   const discountableBase = Math.max(0, Math.round((base - floor) * 100) / 100);
   const amount = Math.round((floor + discountableBase * (1 - discountRate)) * 100) / 100;
   const discount = Math.max(0, Math.round((base - amount) * 100) / 100);
   return { amount, discount, rate: Math.round((discount / base) * 10000) / 10000 };
+}
+
+// Human label for the EFFECTIVE annual-prepay rate on invoice copy. The lawn
+// program minimum's protected floor can cap the discount well below the
+// configured 5% (only above-floor headroom is discountable), so the invoice
+// must never claim the configured rate. Mirrors the estimate-public SSR label
+// rules — integer percent at ≥1%, one decimal below — and renders '<0.1%'
+// instead of a misleading '0%' when a nonzero discount rounds away.
+function annualPrepayDiscountPctLabel(rate) {
+  const r = Number(rate) || 0;
+  if (r >= 0.01) return `${Math.round(r * 100)}%`;
+  if (r <= 0) return '0%';
+  const oneDecimal = Math.round(r * 1000) / 10;
+  return oneDecimal > 0 ? `${oneDecimal}%` : '<0.1%';
 }
 
 function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
@@ -1575,7 +1648,11 @@ const EstimateConverter = {
           const termMonthlyRate = monthlyRate > 0
             ? monthlyRate
             : Math.round((annualAmount / 12) * 100) / 100;
-          const prepayDiscountPctLabel = `${Math.round(ANNUAL_PREPAY_DISCOUNT_PCT * 100)}%`;
+          // Label the EFFECTIVE prepay rate, not the configured 5% — the lawn
+          // program minimum's protected floor can cap the discount to a sliver
+          // of the annual, and the invoice must claim the same rate the public
+          // page showed at approval.
+          const prepayDiscountPctLabel = annualPrepayDiscountPctLabel(prepayResolved.rate);
           // Commercial plans are not a WaveGuard membership and tier is the
           // non-member 'none'; label them 'Commercial' rather than letting the
           // truthy 'none' render as "WaveGuard none".
@@ -1920,6 +1997,11 @@ const EstimateConverter = {
             payUrlParams: {
               source: 'estimate',
               saveCard: '1',
+              // Recurring accepts require a method on file — keeps this
+              // inline param set in lockstep with estimateInvoicePayUrlParams
+              // (Codex #2507 P1). Display hint only: the pay endpoints
+              // enforce the requirement server-side from billing_mode.
+              saveRequired: '1',
               billingTerm,
             },
           });
@@ -1974,6 +2056,7 @@ const EstimateConverter = {
     // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
     // the team sets up the schedule manually (fire-and-forget; never blocks the
     // accept). Only the initial visit was scheduled above.
+    let commercialScheduleNotification = null;
     if (hasCommercialRecurring && !suppressRecurringConversion) {
       // skipAutoSchedule (manual Mark Won) schedules NOTHING; the normal path
       // schedules only the initial visit. Reflect what actually happened so
@@ -1983,16 +2066,30 @@ const EstimateConverter = {
         ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
         : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
       logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          'estimate_converted',
-          `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
-          `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-          { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } }
-        ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+      const notificationPayload = {
+        type: 'estimate_converted',
+        title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+        body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        // In-transaction callers (public accept, manual Mark Won) dispatch this
+        // post-commit from the returned payload — notifyAdmin writes through the
+        // GLOBAL pool, so firing it here would alert staff about a commercial
+        // schedule even when the outer transaction rolls the acceptance back.
+        commercialScheduleNotification = notificationPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            notificationPayload.type,
+            notificationPayload.title,
+            notificationPayload.body,
+            notificationPayload.options
+          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+        }
       }
     }
 
@@ -2049,6 +2146,10 @@ const EstimateConverter = {
       // non-member 'none'/'Commercial' tier).
       membershipEmail: commercialOnlyRecurring ? null : membershipEmail,
       welcomeSms,
+      // Non-null ONLY when opts.deferCommercialScheduleNotification asked for
+      // it (dispatched inline otherwise) — so callers can dispatch whatever
+      // comes back without double-send risk.
+      commercialScheduleNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
@@ -2090,6 +2191,8 @@ module.exports.durationMinutesForRecurringService = durationMinutesForRecurringS
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;
 module.exports.resolveAnnualPrepayInvoiceTotal = resolveAnnualPrepayInvoiceTotal;
+module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
+module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;
 module.exports.canAutoSendDraftInvoice = canAutoSendDraftInvoice;
@@ -2097,4 +2200,5 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

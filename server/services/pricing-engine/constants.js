@@ -81,6 +81,12 @@ const PEST = {
   // competitor comparison, or historical anchor). v4.3 operator baseline.
   base: r(117),
   floor: r(89),
+  // Post-discount program floor (owner decision 2026-07-09): WaveGuard tier
+  // discounts may not take the collected annual below floor × freqMult ×
+  // visitsPerYear — the list-price floor holds after discounts too, per
+  // cadence. Enforced in discount-engine.applyMarginGuard. DB kill switch:
+  // pest_base row enforce_floor_post_discount=false.
+  enforceFloorPostDiscount: true,
   footprintBrackets: [
     { sqft: 800,  adj: -r(15) },   // Was -r(20). Flattened — old value produced prices below floor.
     { sqft: 1200, adj: -r(10) },   // Was -r(12).
@@ -206,9 +212,14 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: basic(4x), standard(6x), enhanced(9x), premium(12x) are sold.
+// Tiers: standard(6x), enhanced(9x), premium(12x) are sold. basic(4x) is
+// RETIRED for new sales (owner directive 2026-07-09: no more $25–34/mo
+// quarterly lawn plans) — hidden:true drops it from the sold ladder while
+// keeping it priceable via includeHiddenTiers for legacy/admin flows. The
+// flag is DB-tunable (lawn_pricing_v2.tiers.basic.hidden via db-bridge), so
+// re-enabling quarterly needs no deploy.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0, label: '4x applications/yr' },
+  basic:    { freq: 4,  index: 0, label: '4x applications/yr', hidden: true },
   standard: { freq: 6,  index: 1, label: '6x applications/yr' },
   enhanced: { freq: 9,  index: 2, label: '9x applications/yr' },
   premium:  { freq: 12, index: 3, label: '12x applications/yr' },
@@ -216,6 +227,13 @@ const LAWN_TIERS = {
 const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
+  // Hard program minimum (owner directive 2026-07-09, raised $45→$50 same
+  // day): no recurring lawn plan is sold below this monthly price, on ANY
+  // track/size/cadence, and the customer-facing ladder re-clamps AFTER
+  // WaveGuard/manual discounts AND the annual-prepay % (prepay is NOT
+  // exempt) — the bracket bottom cells ($25 Bahia) and discount stacking
+  // can't recreate a below-floor plan. 0/null disables the floor.
+  programMinimumMonthly: 50,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
@@ -1291,9 +1309,27 @@ const SPECIALTY = {
   },
   preSlabTermiticide: {
     defaultProductKey: 'termidor_sc',
+    // Usage-based price steps (owner decision 2026-07-10): the quoted price
+    // floors at the cost-plus of the slab rounded UP to the next
+    // usageStepSqFt sq ft, so price climbs with real product usage every
+    // ~100 sqft instead of flat-lining across the wide contextual-minimum
+    // buckets, and extends past the last bucket (no table cap). The
+    // contextual minimums below still apply as the value floor. Kill switch:
+    // usage_step_sqft = 0 in pricing_config.onetime_preslab (no deploy).
+    usageStepSqFt: 100,
+    // Inventory-price link (owner decision 2026-07-10): db-bridge overrides
+    // each product's containerCost/containerOz from the inventory catalog's
+    // approved best price (products_catalog row named catalogProductName) on
+    // every sync, so an approved price change in /admin/inventory reprices
+    // pre-slab without a deploy. Fail-open: rows that are inactive, flagged
+    // needs_pricing, missing price/size, or whose $/oz drifts outside
+    // [0.5x, 2x] of the config value (fat-finger guard) are ignored. Kill
+    // switch: link_container_costs_to_catalog = false in the same row.
+    linkContainerCostsToCatalog: true,
     products: {
       termidor_sc: {
         label: 'Termidor SC - Fipronil',
+        catalogProductName: 'Termidor SC',
         supplierSku: '59021468',
         packageLabel: '78 oz Agency',
         activeIngredient: 'fipronil',
@@ -1313,6 +1349,7 @@ const SPECIALTY = {
       },
       taurus_sc: {
         label: 'Taurus SC - Fipronil',
+        catalogProductName: 'Taurus SC',
         supplierSku: '82003599',
         packageLabel: '78 oz',
         activeIngredient: 'fipronil',
@@ -1332,6 +1369,7 @@ const SPECIALTY = {
       },
       bifen_it: {
         label: 'Bifen I/T - Bifenthrin',
+        catalogProductName: 'Bifen I/T',
         packageLabel: '1 gallon / 128 oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
@@ -1350,6 +1388,7 @@ const SPECIALTY = {
       },
       talstar_p: {
         label: 'Talstar P - Bifenthrin',
+        catalogProductName: 'Talstar P',
         packageLabel: '1 gallon / 128 oz',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',

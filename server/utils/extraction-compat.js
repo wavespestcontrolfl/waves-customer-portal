@@ -33,6 +33,7 @@ function flatView(extraction) {
     phone: caller.phone_e164 || null,
 
     address_line1: addr.street_line_1 || null,
+    address_line2: addr.street_line_2 || null,
     city: addr.city || null,
     state: addr.state || null,
     zip: addr.postal_code || null,
@@ -45,6 +46,7 @@ function flatView(extraction) {
     quote_promised: svc.quote_promised === true,
     additional_properties: mapAdditionalPropertiesToLegacy(property.additional_properties),
     secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
+    secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
@@ -106,10 +108,18 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
+    is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
   if (!mapped.first_name && !mapped.last_name && !mapped.phone && !mapped.email) return null;
   return mapped;
+}
+
+// 1.4.0 array — every entry through the same single-contact mapper; empty
+// shells drop; hard cap 3 (the slot budget).
+function mapSecondaryContactsToLegacy(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(mapSecondaryContactToLegacy).filter(Boolean).slice(0, 3);
 }
 
 function mapServiceCategoryToLegacy(category) {
@@ -149,6 +159,7 @@ function mapLeadQualityToLegacy(quality) {
 module.exports = {
   isV2Extraction,
   flatView,
+  mapSecondaryContactsToLegacy,
   mapServiceCategoryToLegacy,
   mapLeadQualityToLegacy,
   mapAdditionalPropertiesToLegacy,

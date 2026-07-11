@@ -98,6 +98,44 @@ function errLabel(err) {
   return err.code || err.name || 'network/timeout';
 }
 
+// One extra polite request, only on a timed-out golden check: hit the county's
+// public search landing page (no parcel/address in the URL) with a real
+// browser UA. Distinguishes the two causes a from-Railway timeout can have —
+// WAF scoring our bot UA on datacenter egress (probe succeeds → set
+// COUNTY_LOOKUP_UA, no deploy) vs an IP-level block (probe hangs too →
+// needs a proxy/edge path). Result rides in the check detail.
+const COUNTY_PROBE_URLS = {
+  Sarasota: 'https://www.sc-pa.com/propertysearch/',
+  Manatee: 'https://www.manateepao.gov/',
+  Charlotte: 'https://www.ccappraiser.com/',
+};
+const BROWSER_PROBE_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const PROBE_TIMEOUT_MS = 15000;
+
+async function probeCountyHostWithBrowserUa(county) {
+  const url = COUNTY_PROBE_URLS[county];
+  if (!url) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const t0 = Date.now();
+  try {
+    const resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': BROWSER_PROBE_UA } });
+    const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    // A fast 403/429/5xx means the browser UA did NOT work — pointing the
+    // operator at COUNTY_LOOKUP_UA there would be a no-op. Only a 2xx is
+    // evidence of UA-scoring.
+    return resp.ok
+      ? `HTTP ${resp.status} in ${elapsed} — UA-scoring likely; set COUNTY_LOOKUP_UA to a browser string`
+      : `HTTP ${resp.status} in ${elapsed} — blocked response; a UA change alone is unlikely to help`;
+  } catch (err) {
+    return errLabel(err) === 'timeout'
+      ? 'also timed out — IP-level block likely'
+      : `failed (${errLabel(err)})`;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Presence-level expectations every golden parcel must satisfy. Each maps to
 // a distinct parsing surface, so the failure text names what broke.
 function evaluateGoldenRecord(label, record) {
@@ -254,7 +292,15 @@ async function runPropertyLookupCanaryInner() {
     const key = `golden:${golden.parcel.county}`;
     if (errCode) {
       logger.warn('[property-lookup-canary] by-parcel lookup threw', { label: golden.label, code: errCode });
-      checks.push({ key, status: 'transient', details: [`${golden.label}: by-parcel lookup threw (${errCode})`] });
+      // On a timeout, probe the same county host once with a real-browser UA:
+      // the same URL + bot UA answers in <1s from residential networks, so a
+      // succeeding probe means the county WAF is scoring our UA from this
+      // datacenter egress (fix: set COUNTY_LOOKUP_UA, no deploy), while a
+      // hanging probe means the block is IP-level (fix: proxy/edge). The
+      // detail names only the county — no parcel/address (PII rule).
+      const probe = errCode === 'timeout' ? await probeCountyHostWithBrowserUa(golden.parcel.county) : null;
+      const probeNote = probe ? ` — browser-UA probe: ${probe}` : '';
+      checks.push({ key, status: 'transient', details: [`${golden.label}: by-parcel lookup threw (${errCode})${probeNote}`] });
     } else if (!record) {
       checks.push({ key, status: 'transient', details: [`${golden.label}: by-parcel lookup returned no record`] });
     } else {

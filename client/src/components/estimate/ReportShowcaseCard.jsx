@@ -1,11 +1,17 @@
 /**
- * Waves service-report showcase — marketing section for the post-visit pest
+ * Waves service-report showcase — marketing section for the post-visit
  * report. Mirrors AppShowcaseCard's two-column layout FLIPPED: the app card
  * leads with the phone on the left and copy on the right (phone stacking
  * first on mobile), so this section puts the copy on the LEFT and the visual
- * on the RIGHT, with the copy stacking first on mobile. The visual is a
- * stylized report mock built in plain JSX (no images) whose centerpiece is
- * the tech-recorded recap video block — the report's strongest proof point.
+ * on the RIGHT, with the copy stacking first on mobile.
+ *
+ * Two variants (owner ask 2026-07-09):
+ * - 'pest' (default): the visual is a stylized report mock whose centerpiece
+ *   is the tech-recorded recap video block — the pest report's strongest
+ *   proof point.
+ * - 'lawn': lawn-only estimates showcase the Lawn Report instead — the
+ *   0–100 lawn health score built from turf photos plus visit-to-visit
+ *   trends, which is what a lawn customer actually receives after a visit.
  */
 import { estimateCard } from './cardStyles';
 import { W } from './tokens';
@@ -16,6 +22,13 @@ const REPORT_FEATURES = [
   'Photo & product log',
   'Pest pressure trend',
   'Re-entry timers',
+];
+
+const LAWN_REPORT_FEATURES = [
+  'Lawn health score',
+  'Photo & product log',
+  'Density, weed & color scores',
+  'Visit-to-visit trends',
 ];
 
 // Stylized report-phone mock: a rounded "report page" card with a header,
@@ -71,7 +84,10 @@ function ReportMock() {
             <path fill="#FFFFFF" d="M8 5.5v13l11-6.5z" />
           </svg>
         </span>
-        <span style={{
+        {/* data-gt="" opts small deliberately-colored text out of the glass
+            theme's auto-tiering — [data-gt="fine"] repaints ≤12px text to
+            var(--tt) !important, which turns white-on-navy invisible. */}
+        <span data-gt="" style={{
           position: 'absolute', right: 8, bottom: 8,
           fontSize: 11, fontWeight: 700, color: W.white,
           background: 'rgba(4,57,94,.65)', borderRadius: 6, padding: '2px 7px',
@@ -94,7 +110,7 @@ function ReportMock() {
           <path d="M3 7l7 7 4-4 7 7" />
           <path d="M15 17h6v-6" />
         </svg>
-        <span style={{ fontSize: 12, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
+        <span data-gt="" style={{ fontSize: 12, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
           Pest pressure trending down
         </span>
       </div>
@@ -102,14 +118,106 @@ function ReportMock() {
   );
 }
 
-export default function ReportShowcaseCard() {
+// Lawn variant of the mock: the centerpiece is the 0–100 lawn health score
+// (built from turf photos — density, weed pressure, color) with the same
+// trend line underneath, so the card reads as "the lawn report scores and
+// tracks your lawn", not the pest recap video.
+function LawnReportMock() {
+  const scoreRows = [
+    ['Density / Coverage', '82'],
+    ['Weed pressure', '88'],
+    ['Color health', '79'],
+  ];
+  return (
+    <div
+      role="img"
+      aria-label="Preview of the Waves lawn report with a lawn health score and visit-to-visit turf trends"
+      style={{
+        width: 264, maxWidth: '100%',
+        background: W.white, borderRadius: 22,
+        border: '1px solid #DCEAF3', padding: 16,
+        boxShadow: '0 24px 55px rgba(4,57,94,.28), 0 4px 12px rgba(15,23,42,.12)',
+      }}
+    >
+      {/* Report header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{
+          width: 26, height: 26, borderRadius: 8, background: W.blueDeeper,
+          color: W.white, fontSize: 13, fontWeight: 800,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          W
+        </span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.2, color: W.blueDeeper }}>Your lawn report</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: W.textCaption }}>Visit complete · Waves Pest Control</div>
+        </div>
+      </div>
+
+      {/* Lawn health score block */}
+      <div style={{
+        fontSize: 11, fontWeight: 700, color: W.blueDark,
+        textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8,
+      }}>
+        Today&rsquo;s lawn health
+      </div>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '12px 12px', borderRadius: 12,
+        background: 'linear-gradient(135deg, #16294E 0%, #0B1B3A 55%, #1B2C5B 100%)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,.12), 0 6px 16px rgba(4,57,94,.22)',
+      }}>
+        <span style={{
+          flex: '0 0 auto', width: 54, height: 54, borderRadius: '50%',
+          background: 'rgba(255,255,255,.12)', border: '2px solid rgba(255,255,255,.8)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          color: W.white,
+        }}>
+          {/* data-gt="" — see ReportMock's 0:52 badge; the auto-tiering would
+              repaint this white-on-navy text to var(--tt) and hide it. */}
+          <span data-gt="" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1 }}>83</span>
+          <span data-gt="" style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: '0.06em' }}>/ 100</span>
+        </span>
+        <div style={{ flex: 1, display: 'grid', gap: 5 }}>
+          {scoreRows.map(([label, score]) => (
+            <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+              <span data-gt="" style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,.85)', lineHeight: 1.2 }}>{label}</span>
+              <span data-gt="" style={{ fontSize: 10.5, fontWeight: 800, color: W.white, lineHeight: 1.2 }}>{score}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop: 7, fontSize: 11, fontWeight: 600, color: W.textBody, lineHeight: 1.35 }}>
+        Scored from turf photos your tech captures during the visit.
+      </div>
+
+      {/* Turf trend line */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 7,
+        marginTop: 11, padding: '8px 12px', borderRadius: 10,
+        background: W.blueLight, border: '1px solid #CDEBFA',
+      }}>
+        <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke={W.green} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: 'block', flex: '0 0 auto' }}>
+          <path d="M3 17l7-7 4 4 7-7" />
+          <path d="M15 7h6v6" />
+        </svg>
+        <span data-gt="" style={{ fontSize: 12, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
+          Turf density trending up
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export default function ReportShowcaseCard({ variant = 'pest' }) {
+  const lawn = variant === 'lawn';
   return (
     <section style={estimateCard()}>
       <div style={{
         fontSize: 12, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
-        The Waves report
+        {lawn ? 'The Waves lawn report' : 'The Waves report'}
       </div>
       <h2 style={{
         fontSize: 24, fontWeight: 500, lineHeight: 1.2,
@@ -118,9 +226,9 @@ export default function ReportShowcaseCard() {
         Every visit ends with proof &mdash; see exactly what we did
       </h2>
       <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        Minutes after we finish, your service report lands with photo evidence,
-        re-entry timers, your pest pressure trend &mdash; and a recap video
-        recorded by your tech before leaving your property.
+        {lawn
+          ? <>Minutes after we finish, your lawn report lands with photo evidence, a 0&ndash;100 lawn health score, and visit-to-visit turf trends &mdash; so you can watch your lawn improve treatment by treatment.</>
+          : <>Minutes after we finish, your service report lands with photo evidence, re-entry timers, your pest pressure trend &mdash; and a recap video recorded by your tech before leaving your property.</>}
       </p>
 
       {/* Copy LEFT / visual RIGHT — the flip of AppShowcaseCard's phone-left
@@ -129,18 +237,18 @@ export default function ReportShowcaseCard() {
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 26, marginTop: 8 }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: W.navyDeep }}>
-            No more &ldquo;did they even show up?&rdquo;
+            {lawn ? 'Watch your lawn improve, visit by visit' : <>No more &ldquo;did they even show up?&rdquo;</>}
           </div>
           <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
-            Every treatment is documented while your tech is still in the
-            driveway &mdash; what was found, what was applied, and when it&rsquo;s
-            safe for kids and pets to head back outside.
+            {lawn
+              ? <>Every treatment is documented while your tech is still in the driveway &mdash; turf density, weed pressure, color, and what was applied, tracked against your last visit so progress is never a guess.</>
+              : <>Every treatment is documented while your tech is still in the driveway &mdash; what was found, what was applied, and when it&rsquo;s safe for kids and pets to head back outside.</>}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '16px 0 0' }}>
             {/* data-glass-accent renders these as the same gold pills as the
                 AI slot-search chips (owner 2026-07-07); the inline styles
                 remain the non-glass fallback. */}
-            {REPORT_FEATURES.map((label) => (
+            {(lawn ? LAWN_REPORT_FEATURES : REPORT_FEATURES).map((label) => (
               <span
                 key={label}
                 data-glass-accent=""
@@ -157,7 +265,7 @@ export default function ReportShowcaseCard() {
           </div>
         </div>
         <div style={{ flex: '0 0 auto', margin: '8px auto' }}>
-          <ReportMock />
+          {lawn ? <LawnReportMock /> : <ReportMock />}
         </div>
       </div>
     </section>

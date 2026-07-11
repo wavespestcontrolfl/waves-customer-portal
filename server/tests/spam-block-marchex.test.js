@@ -159,4 +159,42 @@ describe('spam-block Marchex Clean Call integration', () => {
     expect(result.blockType).toBe('hard_block');
     expect(inserts[0].row.block_type).toBe('hard_block');
   });
+
+  // Blocked calls return TwiML before the webhook's call_log insert, so the
+  // spam evidence for the calls most worth auditing must ride the
+  // blocked_call_attempts row itself (Codex P2 on #2556).
+  describe('signals capture on blocked-attempt audit rows', () => {
+    const SIGNALS = { stir_verstat: 'TN-Validation-Passed-A', addons: { status: 'successful' } };
+
+    test('manual block persists the signals JSON on the audit row', async () => {
+      const { inserts } = makeDb({ manualBlock: { block_type: 'hard_block' } });
+      isEnabled.mockReturnValue(false);
+
+      await checkInboundBlock({ ...CALL, signals: SIGNALS });
+
+      expect(inserts).toHaveLength(1);
+      expect(JSON.parse(inserts[0].row.signals)).toEqual(SIGNALS);
+    });
+
+    test('marchex shadow row persists the signals JSON', async () => {
+      const { inserts } = makeDb();
+      isEnabled.mockReturnValue(false);
+
+      await checkInboundBlock({ ...CALL, addOns: marchexAddOns('BLOCK'), signals: SIGNALS });
+
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0].row.block_type).toBe('marchex_shadow');
+      expect(JSON.parse(inserts[0].row.signals)).toEqual(SIGNALS);
+    });
+
+    test('omitted signals store NULL (sms caller passes nothing)', async () => {
+      const { inserts } = makeDb({ manualBlock: { block_type: 'hard_block' } });
+      isEnabled.mockReturnValue(false);
+
+      await checkInboundBlock({ ...CALL, channel: 'sms' });
+
+      expect(inserts).toHaveLength(1);
+      expect(inserts[0].row.signals).toBeNull();
+    });
+  });
 });

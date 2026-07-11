@@ -274,11 +274,13 @@ describe('commercial safety gate in generateEstimate', () => {
     expect(lawn).toMatchObject({ monthly: 51.75, annual: 621, perApp: 69 });
     expect(estimate.summary).toMatchObject({
       recurringAnnualBeforeDiscount: 1089,
-      recurringAnnualAfterDiscount: 980.1,
-      recurringMonthlyAfterDiscount: 81.68,
-      year1Total: 980,
-      year2Annual: 980,
-      year2Monthly: 81.68,
+      // Silver 10% on lawn (621 → 558.90) caps at the $600 lawn program
+      // minimum (owner 2026-07-09): pest 421.20 + lawn 600 = 1021.20.
+      recurringAnnualAfterDiscount: 1021.2,
+      recurringMonthlyAfterDiscount: 85.1,
+      year1Total: 1021,
+      year2Annual: 1021,
+      year2Monthly: 85.1,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',

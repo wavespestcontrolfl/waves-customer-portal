@@ -20,7 +20,12 @@
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["is_voicemail", "is_spam", "transcript_word_count", "call_summary"],
+      "required": [
+        "is_voicemail",
+        "is_spam",
+        "transcript_word_count",
+        "call_summary"
+      ],
       "properties": {
         "is_voicemail": {
           "type": "boolean",
@@ -30,60 +35,116 @@
           "type": "boolean",
           "description": "True if the call is spam, solicitation, robocall, or wrong number."
         },
-        "transcript_word_count": { "type": "integer", "minimum": 0 },
-        "transcript_duration_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "transcript_word_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transcript_duration_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
         "call_summary": {
           "type": "string",
           "description": "2-3 sentence summary of the call for quick triage."
         }
       }
     },
-
     "caller": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["relationship_to_property", "on_site_authorization", "decision_maker_present", "phone_source"],
+      "required": [
+        "relationship_to_property",
+        "on_site_authorization",
+        "decision_maker_present",
+        "phone_source"
+      ],
       "properties": {
         "name_full": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Full name as spoken. Do not split or reformat."
         },
         "first_name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "First/given name if clearly identifiable. null if ambiguous or not stated."
         },
         "last_name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Last/family name if clearly identifiable. Do not invent from caller ID, address, or context."
         },
         "organization_name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Business or HOA name if caller is representing an organization."
         },
         "name_confidence": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 1,
           "description": "Confidence that name extraction is correct. Low when spelled out ambiguously or only partially heard."
         },
         "phone_e164": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^\\+[1-9]\\d{1,14}$",
           "description": "Best callback number stated by caller. May differ from Twilio ANI."
         },
         "phone_raw_spoken": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Phone number as spoken in transcript, verbatim. e.g. 'five five five, one two three, four five six seven'."
         },
         "phone_source": {
           "type": "string",
-          "enum": ["caller_id", "spoken", "both", "unknown"],
+          "enum": [
+            "caller_id",
+            "spoken",
+            "both",
+            "unknown"
+          ],
           "description": "How the phone number was obtained. 'caller_id' = from Twilio ANI only, 'spoken' = caller stated it, 'both' = matches ANI and spoken."
         },
-        "email": { "type": ["string", "null"], "format": "email" },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Email address as heard, even if the domain sounds incomplete (e.g. 'brandon@gmail'). Server re-validates and repairs known domain typos; an invalid capture must not be dropped here."
+        },
         "relationship_to_property": {
           "type": "string",
-          "enum": ["owner", "tenant", "spouse_partner", "property_manager", "hoa_board_member", "employee", "other", "unknown"]
+          "enum": [
+            "owner",
+            "tenant",
+            "spouse_partner",
+            "property_manager",
+            "hoa_board_member",
+            "employee",
+            "real_estate_agent",
+            "lender",
+            "other",
+            "unknown"
+          ]
         },
         "on_site_authorization": {
           "type": "boolean",
@@ -94,35 +155,84 @@
           "description": "Caller can commit to service/pricing without consulting another party."
         },
         "preferred_contact_method": {
-          "type": ["string", "null"],
-          "enum": ["phone", "sms", "email", "unspecified", null]
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "phone",
+            "sms",
+            "email",
+            "unspecified",
+            null
+          ]
         }
       }
     },
-
     "secondary_contact": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "A SECOND person named as a party to the service (a realtor's home buyer, a landlord's tenant, a spouse). null when no such person was named. The caller's own identity always stays in `caller`. 1.2.0 additive — absent in older payloads. phone_e164/email are deliberately unpatterned here: a garbled spoken value must not schema-fail the whole extraction; the server normalizer validates and nulls them.",
       "additionalProperties": false,
-      "required": ["role", "wants_notifications"],
+      "required": [
+        "role",
+        "wants_notifications"
+      ],
       "properties": {
-        "name_full": { "type": ["string", "null"] },
-        "first_name": { "type": ["string", "null"] },
-        "last_name": { "type": ["string", "null"] },
+        "name_full": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "first_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "phone_e164": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Callback number stated for this person, E.164 preferred. Server re-validates."
         },
-        "phone_raw_spoken": { "type": ["string", "null"] },
+        "phone_raw_spoken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "email": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Only when clearly said or spelled in full. Server re-validates."
         },
         "role": {
           "type": "string",
           "enum": [
-            "home_buyer", "home_seller", "tenant", "landlord", "spouse_partner",
-            "family_member", "real_estate_agent", "property_manager", "other", "unknown"
+            "home_buyer",
+            "home_seller",
+            "tenant",
+            "landlord",
+            "lender",
+            "spouse_partner",
+            "family_member",
+            "real_estate_agent",
+            "property_manager",
+            "other",
+            "unknown"
           ],
           "description": "This person's relationship to the transaction — the BUYER a realtor books for is home_buyer, not real_estate_agent."
         },
@@ -130,62 +240,219 @@
           "type": "boolean",
           "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to this person. A merely-mentioned or explicitly-excluded person is false."
         },
-        "notes": { "type": ["string", "null"] }
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_billing_party": {
+          "type": "boolean",
+          "description": "true ONLY when the caller clearly says THIS person pays for the service (e.g. 'the owner Jim will pay by credit card', 'bill the management company'). Merely being the owner/landlord/manager is NOT enough — the caller must indicate they cover the cost. 1.6.0 additive; absent in older payloads."
+        }
       }
     },
-
+    "secondary_contacts": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "maxItems": 3,
+      "description": "ALL other people named as parties to the service, most notification-central first (up to 3). The FIRST entry must also mirror into secondary_contact for older readers. []/null when no other party was named. 1.4.0 additive - absent in older payloads.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "wants_notifications"
+        ],
+        "properties": {
+          "name_full": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone_e164": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Callback number stated for this person, E.164 preferred. Server re-validates."
+          },
+          "phone_raw_spoken": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only when clearly said or spelled in full. Server re-validates."
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "home_buyer",
+              "home_seller",
+              "tenant",
+              "landlord",
+              "lender",
+              "spouse_partner",
+              "family_member",
+              "real_estate_agent",
+              "property_manager",
+              "other",
+              "unknown"
+            ]
+          },
+          "wants_notifications": {
+            "type": "boolean",
+            "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person."
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_billing_party": {
+            "type": "boolean",
+            "description": "true ONLY when the caller clearly says THIS person pays for the service (e.g. 'the owner Jim pays by credit card', 'bill the management company'). Merely being the owner/landlord/manager is NOT enough. 1.6.0 additive."
+          }
+        }
+      }
+    },
     "consent": {
       "type": "object",
       "description": "TCPA-relevant consent capture. SMS dispatch MUST check sms_consent_given=true and do_not_contact_request=false before firing.",
       "additionalProperties": false,
-      "required": ["sms_consent_given", "call_recording_disclosed", "do_not_contact_request"],
+      "required": [
+        "sms_consent_given",
+        "call_recording_disclosed",
+        "do_not_contact_request"
+      ],
       "properties": {
-        "sms_consent_given": { "type": "boolean" },
+        "sms_consent_given": {
+          "type": "boolean"
+        },
         "sms_consent_quote": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Verbatim transcript span where consent was given."
         },
-        "call_recording_disclosed": { "type": "boolean" },
+        "call_recording_disclosed": {
+          "type": "boolean"
+        },
         "do_not_contact_request": {
           "type": "boolean",
           "description": "Caller explicitly asked not to be contacted further."
         }
       }
     },
-
     "property": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["service_address", "property_type", "hoa_community_flag", "hoa_common_area_service"],
+      "required": [
+        "service_address",
+        "property_type",
+        "hoa_community_flag",
+        "hoa_common_area_service"
+      ],
       "properties": {
         "service_address": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
             "raw_text": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Address as spoken by the caller, verbatim. Preserved for re-extraction and audit."
             },
-            "street_line_1": { "type": ["string", "null"] },
-            "street_line_2": { "type": ["string", "null"] },
-            "city": { "type": ["string", "null"] },
-            "state": { "type": ["string", "null"], "enum": ["FL", null] },
+            "street_line_1": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "street_line_2": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "city": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "FL",
+                null
+              ]
+            },
             "postal_code": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "pattern": "^\\d{5}(-\\d{4})?$"
             },
             "county": {
-              "type": ["string", "null"],
-              "enum": ["Manatee", "Sarasota", "Charlotte", "DeSoto", null],
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "Manatee",
+                "Sarasota",
+                "Charlotte",
+                "DeSoto",
+                null
+              ],
               "description": "Service area constraint. If present and not one of these, set triage_flag=out_of_service_area."
             },
             "subdivision_or_community": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "e.g. 'Lakewood Ranch', 'Heritage Harbor', 'Boca Royale'."
             },
             "normalization_status": {
               "type": "string",
-              "enum": ["complete", "partial", "failed", "inferred", "not_attempted"],
+              "enum": [
+                "complete",
+                "partial",
+                "failed",
+                "inferred",
+                "not_attempted"
+              ],
               "description": "Set by server after normalization pass. Model should output 'not_attempted'."
             }
           }
@@ -193,9 +460,15 @@
         "property_type": {
           "type": "string",
           "enum": [
-            "single_family", "condo", "townhouse", "mobile_home",
-            "multi_family", "hoa_common_area", "commercial",
-            "vacant_lot", "unknown"
+            "single_family",
+            "condo",
+            "townhouse",
+            "mobile_home",
+            "multi_family",
+            "hoa_common_area",
+            "commercial",
+            "vacant_lot",
+            "unknown"
           ]
         },
         "hoa_community_flag": {
@@ -207,29 +480,62 @@
           "description": "Service is for HOA-owned common areas. Triggers commercial pricing + admin-approval hold."
         },
         "commercial_subtype": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "enum": [
-            "restaurant", "office", "retail", "warehouse",
-            "medical", "multi_unit_residential", "hospitality",
-            "industrial", "agricultural", "other", null
+            "restaurant",
+            "office",
+            "retail",
+            "warehouse",
+            "medical",
+            "multi_unit_residential",
+            "hospitality",
+            "industrial",
+            "agricultural",
+            "other",
+            null
           ]
         },
-        "approximate_lot_size_acres": { "type": ["number", "null"], "minimum": 0 },
-        "approximate_living_sqft": { "type": ["integer", "null"], "minimum": 0 },
+        "approximate_lot_size_acres": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "approximate_living_sqft": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
         "pets_on_property": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["present"],
+          "required": [
+            "present"
+          ],
           "properties": {
-            "present": { "type": "boolean" },
+            "present": {
+              "type": "boolean"
+            },
             "species_notes": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "description": "Free text: 'two dogs in yard', 'indoor cat', 'koi pond'."
             }
           }
         },
         "access_notes": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Gate code, side gate locked, dogs in back, lockbox info."
         },
         "additional_properties": {
@@ -240,33 +546,91 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "raw_text": { "type": ["string", "null"] },
-              "street_line_1": { "type": ["string", "null"] },
-              "street_line_2": { "type": ["string", "null"] },
-              "city": { "type": ["string", "null"] },
-              "state": { "type": ["string", "null"], "enum": ["FL", null] },
+              "raw_text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "street_line_1": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "street_line_2": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "city": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "FL",
+                  null
+                ]
+              },
               "postal_code": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^\\d{5}(-\\d{4})?$"
               },
-              "subdivision_or_community": { "type": ["string", "null"] },
+              "subdivision_or_community": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "property_type": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "enum": [
-                  "single_family", "condo", "townhouse", "mobile_home",
-                  "multi_family", "hoa_common_area", "commercial",
-                  "vacant_lot", "unknown", null
+                  "single_family",
+                  "condo",
+                  "townhouse",
+                  "mobile_home",
+                  "multi_family",
+                  "hoa_common_area",
+                  "commercial",
+                  "vacant_lot",
+                  "unknown",
+                  null
                 ]
               },
               "occupancy": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "enum": [
-                  "owner_occupied", "rental_investment", "commercial",
-                  "seasonal", "vacant", "unknown", null
+                  "owner_occupied",
+                  "rental_investment",
+                  "commercial",
+                  "seasonal",
+                  "vacant",
+                  "unknown",
+                  null
                 ]
               },
               "notes": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "description": "What the caller said about this property: services wanted, access, exterior covered by HOA, etc."
               }
             }
@@ -274,19 +638,33 @@
         }
       }
     },
-
     "service_request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["primary_service_category", "service_intent", "urgency", "pests_observed", "pests_observed_status"],
+      "required": [
+        "primary_service_category",
+        "service_intent",
+        "urgency",
+        "pests_observed",
+        "pests_observed_status"
+      ],
       "properties": {
         "primary_service_category": {
           "type": "string",
           "enum": [
-            "pest_general", "termite", "rodent", "mosquito",
-            "stinging_insect", "lawn_care", "palm_injection",
-            "bed_bug", "wdo",
-            "exclusion", "inspection_only", "bundled_waveguard", "other"
+            "pest_general",
+            "termite",
+            "rodent",
+            "mosquito",
+            "stinging_insect",
+            "lawn_care",
+            "palm_injection",
+            "bed_bug",
+            "wdo",
+            "exclusion",
+            "inspection_only",
+            "bundled_waveguard",
+            "other"
           ]
         },
         "secondary_categories": {
@@ -294,16 +672,30 @@
           "items": {
             "type": "string",
             "enum": [
-              "pest_general", "termite", "rodent", "mosquito",
-              "stinging_insect", "lawn_care", "palm_injection",
-              "bed_bug", "wdo",
-              "exclusion", "inspection_only", "bundled_waveguard", "other"
+              "pest_general",
+              "termite",
+              "rodent",
+              "mosquito",
+              "stinging_insect",
+              "lawn_care",
+              "palm_injection",
+              "bed_bug",
+              "wdo",
+              "exclusion",
+              "inspection_only",
+              "bundled_waveguard",
+              "other"
             ]
           }
         },
         "pests_observed_status": {
           "type": "string",
-          "enum": ["observed", "not_observed_preventative", "not_observed_inquiry", "not_discussed"],
+          "enum": [
+            "observed",
+            "not_observed_preventative",
+            "not_observed_inquiry",
+            "not_discussed"
+          ],
           "description": "Semantic status. 'observed' = pests_observed has items. 'not_observed_preventative' = wants prevention, no active pest. 'not_observed_inquiry' = quote/info call. 'not_discussed' = call topic didn't involve pest identification."
         },
         "pests_observed": {
@@ -311,215 +703,486 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["pest_type", "severity_signal"],
+            "required": [
+              "pest_type",
+              "severity_signal"
+            ],
             "properties": {
               "pest_type": {
                 "type": "string",
                 "enum": [
-                  "ants_general", "ants_fire", "ants_carpenter",
-                  "roaches_german", "roaches_palmetto", "roaches_smokybrown",
-                  "rodents_rats", "rodents_mice", "rodents_squirrels",
-                  "termites_subterranean", "termites_drywood",
+                  "ants_general",
+                  "ants_fire",
+                  "ants_carpenter",
+                  "roaches_german",
+                  "roaches_palmetto",
+                  "roaches_smokybrown",
+                  "rodents_rats",
+                  "rodents_mice",
+                  "rodents_squirrels",
+                  "termites_subterranean",
+                  "termites_drywood",
                   "mosquitoes",
-                  "wasps", "yellow_jackets", "hornets", "bees_honey", "bees_carpenter",
-                  "spiders_general", "spiders_widow", "spiders_recluse",
-                  "fleas", "ticks", "bed_bugs",
-                  "silverfish", "earwigs", "millipedes", "centipedes",
-                  "chinch_bugs", "sod_webworms", "armyworms", "mole_crickets", "grubs", "fire_ants_lawn",
-                  "palm_weevils", "scale_insects", "whiteflies",
-                  "iguanas", "snakes", "moles", "bats", "other_wildlife",
-                  "no_see_ums", "flies_gnats", "scorpions", "love_bugs",
-                  "unspecified", "other"
+                  "wasps",
+                  "yellow_jackets",
+                  "hornets",
+                  "bees_honey",
+                  "bees_carpenter",
+                  "spiders_general",
+                  "spiders_widow",
+                  "spiders_recluse",
+                  "fleas",
+                  "ticks",
+                  "bed_bugs",
+                  "silverfish",
+                  "earwigs",
+                  "millipedes",
+                  "centipedes",
+                  "chinch_bugs",
+                  "sod_webworms",
+                  "armyworms",
+                  "mole_crickets",
+                  "grubs",
+                  "fire_ants_lawn",
+                  "palm_weevils",
+                  "scale_insects",
+                  "whiteflies",
+                  "iguanas",
+                  "snakes",
+                  "moles",
+                  "bats",
+                  "other_wildlife",
+                  "no_see_ums",
+                  "flies_gnats",
+                  "scorpions",
+                  "love_bugs",
+                  "unspecified",
+                  "other"
                 ]
               },
-              "location_on_property": { "type": ["string", "null"] },
+              "location_on_property": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "severity_signal": {
                 "type": "string",
                 "enum": [
-                  "sighting_single", "sighting_multiple", "active_infestation",
+                  "sighting_single",
+                  "sighting_multiple",
+                  "active_infestation",
                   "swarmers_seen",
-                  "structural_damage_visible", "lawn_damage_visible",
-                  "person_stung_or_bitten", "unknown"
+                  "structural_damage_visible",
+                  "lawn_damage_visible",
+                  "person_stung_or_bitten",
+                  "unknown"
                 ]
               },
-              "first_observed": { "type": ["string", "null"] },
-              "prior_treatment_attempts": { "type": ["string", "null"] }
+              "first_observed": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "prior_treatment_attempts": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
             }
           }
         },
         "service_intent": {
           "type": "string",
           "enum": [
-            "active_infestation_treatment", "preventative_one_time",
-            "recurring_membership_inquiry", "inspection_only",
-            "quote_only", "follow_up_existing_service",
-            "complaint_or_callback", "cancellation_request"
+            "active_infestation_treatment",
+            "preventative_one_time",
+            "recurring_membership_inquiry",
+            "inspection_only",
+            "quote_only",
+            "follow_up_existing_service",
+            "complaint_or_callback",
+            "cancellation_request"
           ]
         },
         "urgency": {
           "type": "string",
           "enum": [
-            "emergency_same_day", "within_48_hours", "within_one_week",
-            "scheduling_flexible", "no_appointment_needed"
+            "emergency_same_day",
+            "within_48_hours",
+            "within_one_week",
+            "scheduling_flexible",
+            "no_appointment_needed"
           ]
         },
         "waveguard_tier_mentioned": {
-          "type": ["string", "null"],
-          "enum": ["bronze", "silver", "gold", "platinum", null]
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "bronze",
+            "silver",
+            "gold",
+            "platinum",
+            null
+          ]
         },
         "specific_service_name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Verbatim name from the bookable service catalog list in the prompt when the request maps to one specific bookable service; null otherwise. Never a name outside that list."
         },
         "quoted_price_usd": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Total USD price the agent quoted AND the caller accepted for the service being booked. null when no price was quoted/accepted or the amount is uncertain."
         },
         "quote_requested": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "Getting a quote/estimate/pricing was a reason for the call."
         },
         "quote_promised": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "The AGENT committed to send a quote/estimate after the call. Means work is still owed to the caller — set even when an appointment was also booked."
         }
       }
     },
-
     "customer_history": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "prior_complaint_mentioned"],
+      "required": [
+        "status",
+        "prior_complaint_mentioned"
+      ],
       "properties": {
         "status": {
           "type": "string",
           "enum": [
-            "new_customer", "current_active", "former_lapsed",
-            "switching_from_competitor", "referred", "unknown"
+            "new_customer",
+            "current_active",
+            "former_lapsed",
+            "switching_from_competitor",
+            "referred",
+            "unknown"
           ]
         },
-        "competitor_name": { "type": ["string", "null"] },
-        "referral_source": { "type": ["string", "null"] },
-        "prior_complaint_mentioned": { "type": "boolean" }
+        "competitor_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "referral_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prior_complaint_mentioned": {
+          "type": "boolean"
+        }
       }
     },
-
     "scheduling": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status"],
+      "required": [
+        "status"
+      ],
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["none", "requested", "offered", "confirmed", "reschedule_requested", "canceled", "ambiguous"],
+          "enum": [
+            "none",
+            "requested",
+            "offered",
+            "confirmed",
+            "reschedule_requested",
+            "canceled",
+            "ambiguous"
+          ],
           "description": "Only 'confirmed' maps to legacy appointment_confirmed=true. 'requested'/'offered' do NOT create appointments."
         },
         "confirmed_start_at": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time",
           "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
         },
-        "requested_date_range_start": { "type": ["string", "null"], "format": "date" },
-        "requested_date_range_end": { "type": ["string", "null"], "format": "date" },
-        "preferred_time_of_day": {
-          "type": ["string", "null"],
-          "enum": ["morning", "afternoon", "evening", "any", "unspecified", null]
+        "requested_date_range_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
         },
-        "callback_window_start": { "type": ["string", "null"], "format": "time" },
-        "callback_window_end": { "type": ["string", "null"], "format": "time" },
+        "requested_date_range_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "preferred_time_of_day": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "morning",
+            "afternoon",
+            "evening",
+            "any",
+            "unspecified",
+            null
+          ]
+        },
+        "callback_window_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "time"
+        },
+        "callback_window_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "time"
+        },
         "follow_up_mentioned": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "true ONLY when a second/follow-up treatment visit was specifically discussed as part of this booking (e.g. a two-treatment protocol). A generic 'call us if it comes back' is not a follow-up visit."
         },
         "follow_up_start_at": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date-time",
           "description": "ISO 8601 Eastern Time datetime ONLY when a specific follow-up date/time was explicitly agreed; null otherwise."
         },
         "blackout_dates": {
           "type": "array",
-          "items": { "type": "string", "format": "date" }
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
         },
-        "scheduling_notes_raw": { "type": ["string", "null"] }
-      }
-    },
-
-    "commercial_signals": {
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "properties": {
-        "business_name": { "type": ["string", "null"] },
-        "decision_authority_confirmed": { "type": ["boolean", "null"] },
-        "procurement_process_mentioned": { "type": ["boolean", "null"] },
-        "annual_contract_interest": { "type": ["boolean", "null"] },
-        "competing_quotes_mentioned": { "type": ["boolean", "null"] },
-        "budget_signal": { "type": ["string", "null"] },
-        "insurance_or_compliance_requirements": {
-          "type": ["array", "null"],
-          "items": { "type": "string" }
+        "scheduling_notes_raw": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
-
+    "commercial_signals": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "business_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decision_authority_confirmed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "procurement_process_mentioned": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "annual_contract_interest": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "competing_quotes_mentioned": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "budget_signal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "insurance_or_compliance_requirements": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "sentiment_and_lead": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sentiment", "lead_quality"],
+      "required": [
+        "sentiment",
+        "lead_quality"
+      ],
       "properties": {
         "sentiment": {
           "type": "string",
-          "enum": ["positive", "neutral", "frustrated", "angry", "urgent_distress", "confused"]
+          "enum": [
+            "positive",
+            "neutral",
+            "frustrated",
+            "angry",
+            "urgent_distress",
+            "confused"
+          ]
         },
         "lead_quality": {
           "type": "string",
           "enum": [
-            "hot", "warm", "cold", "tire_kicker",
-            "wrong_number", "spam_or_solicitation", "out_of_service_area"
+            "hot",
+            "warm",
+            "cold",
+            "tire_kicker",
+            "wrong_number",
+            "spam_or_solicitation",
+            "out_of_service_area"
           ]
         },
         "objections_raised": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         },
         "buying_signals": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
-
     "evidence": {
       "type": "array",
       "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed.",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["field_path", "quote", "speaker"],
+        "required": [
+          "field_path",
+          "quote",
+          "speaker"
+        ],
         "properties": {
-          "field_path": { "type": "string" },
-          "quote": { "type": "string" },
-          "speaker": { "type": "string", "enum": ["caller", "agent"] },
-          "transcript_offset_ms": { "type": ["integer", "null"], "minimum": 0 }
+          "field_path": {
+            "type": "string"
+          },
+          "quote": {
+            "type": "string"
+          },
+          "speaker": {
+            "type": "string",
+            "enum": [
+              "caller",
+              "agent"
+            ]
+          },
+          "transcript_offset_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
         }
       }
     },
-
     "confidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["overall", "service_address", "primary_service_category", "urgency", "consent_capture"],
+      "required": [
+        "overall",
+        "service_address",
+        "primary_service_category",
+        "urgency",
+        "consent_capture"
+      ],
       "properties": {
-        "caller_identity": { "type": "number", "minimum": 0, "maximum": 1 },
-        "service_address": { "type": "number", "minimum": 0, "maximum": 1 },
-        "property_type": { "type": "number", "minimum": 0, "maximum": 1 },
-        "primary_service_category": { "type": "number", "minimum": 0, "maximum": 1 },
-        "urgency": { "type": "number", "minimum": 0, "maximum": 1 },
-        "scheduling_window": { "type": "number", "minimum": 0, "maximum": 1 },
-        "consent_capture": { "type": "number", "minimum": 0, "maximum": 1 },
-        "overall": { "type": "number", "minimum": 0, "maximum": 1 }
+        "caller_identity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "service_address": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "property_type": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "primary_service_category": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "urgency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scheduling_window": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "consent_capture": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "overall": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
-
     "triage_flags": {
       "type": "array",
       "description": "Model-suggested reasons the call should not auto-route. Server also computes deterministic flags after extraction — final gate uses the union.",
@@ -551,8 +1214,106 @@
       "uniqueItems": true
     },
     "other_parties_mentioned": {
-      "type": ["boolean", "null"],
+      "type": [
+        "boolean",
+        "null"
+      ],
       "description": "true when the call names MORE people as parties to the service than the single secondary_contact captured (buyer + co-buyer + agent; tenant + owner) — tells the office to re-listen for the additional parties. null/false otherwise. 1.2.0 additive."
+    },
+    "call_nature": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "new_lead",
+        "existing_customer_service",
+        "existing_customer_scheduling",
+        "billing_question",
+        "vendor_or_partner",
+        "job_applicant",
+        "spam_solicitation",
+        "robocall",
+        "wrong_number",
+        "voicemail_message",
+        "silent_or_noise",
+        "other",
+        null
+      ],
+      "description": "Primary nature of the call — drives the terminal disposition. Null only when truly indeterminate."
+    },
+    "recommended_disposition": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "booked",
+        "callback_task_created",
+        "lead_response_flow_triggered",
+        "existing_customer_routed",
+        "estimate_send",
+        "cancellation_processed",
+        "complaint_escalated",
+        "vendor_logged",
+        "voicemail_processed",
+        "spam_discarded",
+        "wrong_number_closed",
+        "no_action_needed",
+        null
+      ],
+      "description": "Model-recommended terminal disposition. The rules layer may override; ambiguity resolves to lead_response_flow_triggered, never a review queue."
+    },
+    "spam_verdict": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "is_spam_content": {
+          "type": "boolean",
+          "description": "Transcript CONTENT is solicitation/robocall/scam TO the business. Never true when a service request, service address, or quoted price is present."
+        },
+        "spam_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "solicitation",
+            "robocall",
+            "scam",
+            "wrong_number",
+            "not_spam",
+            null
+          ]
+        },
+        "evidence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "<=20 words from the transcript supporting the verdict."
+        }
+      },
+      "required": [
+        "is_spam_content"
+      ]
+    },
+    "language": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "english",
+        "spanish",
+        "other",
+        "mixed",
+        null
+      ],
+      "description": "Caller language; spanish/other flags the language-support lane."
     }
   }
 }

@@ -725,7 +725,10 @@ async function getCashFlow(startDate, endDate) {
     // Payouts — bucket by business-local day (ET) so late-evening payouts
     // don't roll into "tomorrow" under a UTC session timezone.
     const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || 'America/New_York';
+    // Same status rule as the export: failed/canceled payouts never reached
+    // the bank, so counting them under-/over-states daily cash.
     const payoutRows = await db('stripe_payouts')
+      .where({ status: 'paid' })
       .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
       .select(
         db.raw("DATE(arrival_date AT TIME ZONE ?) as date", [BUSINESS_TZ]),
@@ -785,6 +788,9 @@ async function getCashFlow(startDate, endDate) {
         .first()
         .catch(() => ({ total: '0' })),
       db('stripe_payouts')
+        // Same status='paid' rule as the daily rows above — summary totals
+        // and the daily breakdown must reconcile.
+        .where({ status: 'paid' })
         .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
         .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
         .first()
@@ -913,7 +919,12 @@ async function reconcilePayout(payoutId, actualAmount, notes, reconciledBy, stat
  */
 async function generateExport(format, startDate, endDate) {
   try {
+    // Only payouts that actually reached the bank: failed/canceled payouts
+    // carry arrival dates too, and OFX sums LEDGERBAL with no status field —
+    // exporting a failed payout beside its replacement makes the books
+    // unreconcilable. Mirrors the /stats status filter.
     const payouts = await db('stripe_payouts')
+      .where({ status: 'paid' })
       .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
       .orderBy('arrival_date');
 

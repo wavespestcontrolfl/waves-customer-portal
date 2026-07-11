@@ -3,7 +3,7 @@
 // Combines property calculation, service pricing, and discounts
 // into a complete customer estimate
 // ============================================================
-const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB } = require('./constants');
+const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2 } = require('./constants');
 
 // All-in annual cost (direct + admin) + margin floor for the guarded services,
 // mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
@@ -43,7 +43,8 @@ const {
   normalizeRoachType,
 } = require('./service-pricing');
 const {
-  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, validateEstimateDiscounts,
+  determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard,
+  pestProgramFloorAnnual, validateEstimateDiscounts,
 } = require('./discount-engine');
 const {
   isCommercialProperty,
@@ -1473,11 +1474,36 @@ function generateEstimate(input) {
         item.finalMonthly = Math.round(guarded.finalAnnual / 12 * 100) / 100;
         item.finalMargin = guarded.finalMargin;
         item.marginGuardApplied = guarded.marginGuardApplied;
+        item.programFloorApplied = guarded.programFloorApplied === true;
         item.discountCapped = guarded.discountCapped;
         if (guarded.minAnnualForMargin !== undefined) {
           item.minAnnualForMargin = guarded.minAnnualForMargin;
         }
+        if (guarded.programFloorAnnual !== undefined) {
+          item.programFloorAnnual = guarded.programFloorAnnual;
+        }
         item.annualAfterDiscount = guarded.finalAnnual;
+      } else if (item.service === 'lawn_care') {
+        // Lawn program minimum (owner directive 2026-07-09) holds POST-
+        // WaveGuard: a floor-priced lawn line must not leave the engine
+        // below the floor after Silver/Gold/Platinum. Never raise
+        // a line above its own pre-discount price (min() keeps legacy
+        // below-floor lines merely undiscounted, not repriced upward here).
+        const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+        const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+          ? Math.min(Math.round(minMonthly * 12 * 100) / 100, item.annualBeforeDiscount)
+          : 0;
+        if (floorAnnual > 0 && discountedAnnual < floorAnnual) {
+          item.annualAfterDiscount = floorAnnual;
+          item.discountCapped = true;
+          item.programMinimumGuardApplied = true;
+          item.requestedDiscountPct = discount.effectiveDiscount || 0;
+          item.actualDiscountPct = item.annualBeforeDiscount > 0
+            ? Math.round((1 - floorAnnual / item.annualBeforeDiscount) * 1000) / 1000
+            : 0;
+        } else {
+          item.annualAfterDiscount = discountedAnnual;
+        }
       } else {
         item.annualAfterDiscount = discountedAnnual;
       }
@@ -1517,6 +1543,7 @@ function generateEstimate(input) {
   let manualDiscountAmount = 0;          // recurring slice (margin logic + recurringAnnualAfter use this)
   let manualDiscountOneTimeAmount = 0;   // one-time slice
   let manualDiscountSpecialtyAmount = 0; // specialty slice
+  let manualDiscountLawnFloorCapped = false; // recurring slice capped at the lawn program minimum
   let manualDiscountInfo = null;
   const manualEligibleItems = recurringItems.filter(isManualRecurringDiscountEligible);
   const manualExcludedItems = recurringItems.filter(i => !isManualRecurringDiscountEligible(i));
@@ -1554,6 +1581,44 @@ function generateEstimate(input) {
         manualDiscountSpecialtyAmount = roundMoney(applied - manualDiscountAmount - manualDiscountOneTimeAmount);
       }
     }
+    // Lawn program minimum (owner directive 2026-07-09): unlike the warn-only
+    // margin stance below, the lawn floor is a HARD post-discount minimum —
+    // the recurring slice may spend all non-lawn room plus lawn's above-floor
+    // headroom, but never the floor itself. min(line, floor) protects legacy
+    // below-floor lines in full (they cannot be manually discounted lower)
+    // without ever raising them.
+    const lawnProgramMinimumMonthlyValue = Number(LAWN_PRICING_V2.programMinimumMonthly);
+    if (Number.isFinite(lawnProgramMinimumMonthlyValue) && lawnProgramMinimumMonthlyValue > 0) {
+      const lawnFloorAnnual = roundMoney(lawnProgramMinimumMonthlyValue * 12);
+      const lawnFloorProtectedAnnual = roundMoney(manualEligibleItems
+        .filter((i) => i.service === 'lawn_care')
+        .reduce((sum, i) => sum + Math.min(i.annualAfterDiscount || i.annual || 0, lawnFloorAnnual), 0));
+      const recurringManualHeadroom = Math.max(0, roundMoney(manualDiscountableRecurringAnnual - lawnFloorProtectedAnnual));
+      if (manualDiscountAmount > recurringManualHeadroom) {
+        const blockedRecurring = roundMoney(manualDiscountAmount - recurringManualHeadroom);
+        manualDiscountAmount = recurringManualHeadroom;
+        // FIXED discounts are one admin-entered dollar amount for the whole
+        // estimate — dollars the lawn floor blocks from the recurring slice
+        // move to the one-time/specialty buckets while they have room, so
+        // the customer still receives the intended total wherever possible.
+        // (PERCENT stays per-bucket by definition.) Only dollars that no
+        // bucket can absorb count as capped.
+        let stillBlocked = blockedRecurring;
+        if (md.type !== 'PERCENT' && stillBlocked > 0) {
+          const oneTimeRoom = Math.max(0, roundMoney(manualDiscountableOneTime - manualDiscountOneTimeAmount));
+          const toOneTime = Math.min(stillBlocked, oneTimeRoom);
+          manualDiscountOneTimeAmount = roundMoney(manualDiscountOneTimeAmount + toOneTime);
+          stillBlocked = roundMoney(stillBlocked - toOneTime);
+          if (stillBlocked > 0) {
+            const specialtyRoom = Math.max(0, roundMoney(manualDiscountableSpecialty - manualDiscountSpecialtyAmount));
+            const toSpecialty = Math.min(stillBlocked, specialtyRoom);
+            manualDiscountSpecialtyAmount = roundMoney(manualDiscountSpecialtyAmount + toSpecialty);
+            stillBlocked = roundMoney(stillBlocked - toSpecialty);
+          }
+        }
+        if (stillBlocked > 0) manualDiscountLawnFloorCapped = true;
+      }
+    }
     const appliedTotal = roundMoney(
       manualDiscountAmount + manualDiscountOneTimeAmount + manualDiscountSpecialtyAmount,
     );
@@ -1579,8 +1644,10 @@ function generateEstimate(input) {
       discountableBase: manualDiscountableTotal,
       recurringDiscountableBase: manualDiscountableRecurringAnnual,
       oneTimeDiscountableBase: roundMoney(manualDiscountableOneTime + manualDiscountableSpecialty),
-      capped: requestedAmount > appliedTotal,
-      capReason: requestedAmount > appliedTotal ? 'discountable_base' : null,
+      capped: requestedAmount > appliedTotal || manualDiscountLawnFloorCapped,
+      capReason: manualDiscountLawnFloorCapped
+        ? 'lawn_program_minimum'
+        : (requestedAmount > appliedTotal ? 'discountable_base' : null),
       scope: nonRecurringAmount > 0 ? 'recurring_and_one_time_after_waveguard' : 'recurring_annual_after_waveguard',
       stackingOrder: 'after_waveguard',
       eligibleServices: [
@@ -1624,6 +1691,24 @@ function generateEstimate(input) {
           manualDiscountShare: Math.round(lineManualCut * 100) / 100,
           message: `${item.service} manual discount drops margin to ${(lineMargin * 100).toFixed(1)}% (below ${(marginFloor * 100).toFixed(0)}% floor)`,
         });
+      }
+      // Pest program floor: manual owner discounts stay warn-only (deliberate
+      // loss-leader pricing is an owner override), but surface a distinct
+      // warning when the pest share of the pool cuts below the post-discount
+      // program floor that caps automatic WaveGuard discounts.
+      if (item.service === 'pest_control' && PEST.enforceFloorPostDiscount) {
+        const floorAnnual = pestProgramFloorAnnual(item.freqMult, item.visitsPerYear);
+        if (floorAnnual !== null && lineFinalAnnual < floorAnnual) {
+          item.manualPestFloorWarning = true;
+          manualMarginWarnings.push({
+            service: item.service,
+            type: 'manual_discount_below_pest_program_floor',
+            programFloorAnnual: floorAnnual,
+            finalAnnual: lineFinalAnnual,
+            manualDiscountShare: Math.round(lineManualCut * 100) / 100,
+            message: `pest_control manual discount drops annual to $${lineFinalAnnual.toFixed(2)} (below the $${floorAnnual.toFixed(2)} program floor)`,
+          });
+        }
       }
     }
   }

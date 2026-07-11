@@ -22,6 +22,7 @@ import {
 } from '../../lib/estimate-glass-copy';
 import { glassScarcityInfo, glassSlotIsStale, glassSlotMeta } from '../../lib/estimate-glass-slots';
 import { GlassScarcityBadge, GlassTechChip } from './glass/GlassEstimateExtras';
+import { docTransition } from '../../theme-doc';
 import { W } from './tokens';
 
 
@@ -69,12 +70,12 @@ function SlotCard({ slot, isSelected, onSelect, stale = false, glass = false }) 
         boxShadow: ESTIMATE_INNER_SHADOW,
         cursor: 'pointer', marginBottom: 12,
         display: 'flex', flexDirection: 'column', gap: 4,
-        transition: 'border-color 160ms ease, background 160ms ease, color 160ms ease',
+        transition: docTransition('border-color', 'background', 'color'),
       }}
     >
       <div style={{ fontSize: 14, fontWeight: 600, color: isSelected ? 'rgba(255,255,255,.82)' : W.textCaption }}>{day}</div>
       <div style={{ fontSize: 20, fontWeight: 700, color: isSelected ? W.white : W.blueDeeper, lineHeight: 1.2 }}>{startTime}</div>
-      <div style={{ fontSize: 13, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
+      <div style={{ fontSize: 14, color: isSelected ? 'rgba(255,255,255,.86)' : W.textCaption }}>
         Arrival window: {window}
       </div>
       {slot.routeOptimal && glass ? (
@@ -300,7 +301,7 @@ export default function SlotPicker({
   const SoftRouteBanner = () => (
     <div style={{
       background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
-      padding: '12px 12px', fontSize: 14, color: '#9A3412', marginBottom: 12, lineHeight: 1.4,
+      padding: '12px 12px', fontSize: 14, color: '#9A3412', marginBottom: 12, lineHeight: 1.5,
     }}>
       No route near you that day yet — here&apos;s what&apos;s close.
     </div>
@@ -352,7 +353,7 @@ export default function SlotPicker({
           onClick={clearFinder}
           style={{
             justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
-            color: W.blueDeeper, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            color: W.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
             textDecoration: 'underline', textUnderlineOffset: 3,
             padding: '12px 8px', minHeight: 44, // touch audit 2026-07-06
           }}
@@ -361,7 +362,7 @@ export default function SlotPicker({
         </button>
       ) : null}
       <div style={{ border: `1px solid ${W.borderCool}`, borderRadius: 12, padding: 16, background: W.white, boxShadow: ESTIMATE_INNER_SHADOW }}>
-        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 13, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
+        <label htmlFor={pickedDateInputId} style={{ display: 'block', fontSize: 14, fontWeight: 700, color: W.blueDeeper, marginBottom: 8 }}>
           Can't find a date? Pick one that works for you.
         </label>
         {/* iOS Safari renders an empty <input type="date"> as a blank box
@@ -384,7 +385,7 @@ export default function SlotPicker({
             fontSize: 15,
             fontWeight: pickedDate ? 600 : 400,
             color: pickedDate ? W.navy : W.textCaption,
-            lineHeight: 1.3,
+            lineHeight: 1.35,
           }}>
             {pickedDate ? formatPickedDate(pickedDate) : 'Select a date (mm/dd/yyyy)'}
           </span>
@@ -470,9 +471,9 @@ export default function SlotPicker({
         lineHeight: 1.2,
         margin: '0 0 8px',
       }}>
-        {glassHeading || 'Find a date & time that works for you'}
+        {glassHeading || 'Search by date or time \u2014 no calling, no hold music, no back-and-forth'}
       </h2>
-      <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.55, marginBottom: 16 }}>
+      <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
         {glass
           ? GLASS_COPY.schedExcerpt
           : 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.'}
@@ -524,7 +525,7 @@ export default function SlotPicker({
             type="button"
             onClick={() => setShowMore((v) => !v)}
             style={{
-              marginTop: 8, padding: '13px 16px', minHeight: 44, background: 'transparent',
+              marginTop: 8, padding: '12px 16px', minHeight: 44, background: 'transparent',
               color: W.blueDeeper, border: `1px solid ${W.blueDeeper}`, borderRadius: 12,
               cursor: 'pointer', fontSize: 14, fontWeight: 600, width: '100%',
             }}

@@ -14,6 +14,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { HQ, haversine } = require('../route-optimizer');
 const { etParts, etDateString } = require('../../utils/datetime-et');
+const { stampedDivergesSql } = require('../stamped-address');
 
 const ROAD_FACTOR = 1.4;
 const AVG_MPH = 30;
@@ -150,9 +151,13 @@ async function findAvailableSlots(opts) {
       // by 20260414000029_geofence_timers.js). customers.lat / customers.lng
       // don't exist on prod — reading them throws and kills the whole
       // /available-slots query. Aliased back to cust_lat/cust_lng for
-      // the downstream code that consumes those names.
-      'customers.latitude as cust_lat',
-      'customers.longitude as cust_lng',
+      // the downstream code that consumes those names. Primary coords only
+      // stand in when the visit's stamped address doesn't DIVERGE from the
+      // primary — modeling a stamped rental stop at the primary home offers
+      // slots that don't fit the real route (codex round-8 P1); a divergent
+      // coordless stop degrades to no-drive-time instead.
+      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END as cust_lat`),
+      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
     );
 
   const dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
@@ -226,7 +231,11 @@ async function findAvailableSlots(opts) {
 
         if (earliestEnd > latestEnd) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day
-        if (!prev.lat || !next.lat) continue;  // missing coords — skip
+        // A coordless anchor (ungeocoded stop, or a divergent stamped rental
+        // whose primary-coord fallback the SELECT suppressed) degrades to
+        // zero drive time via driveMin() rather than hiding the gaps on
+        // either side of it — skipping here starved otherwise-valid slots
+        // around every coordless stop (codex round-9 P2).
 
         // Day delay penalty — prefer sooner days (0.5 min/day)
         const daysOut = Math.max(0, (new Date(date + 'T12:00:00') - new Date(dateFrom + 'T12:00:00')) / (1000 * 60 * 60 * 24));

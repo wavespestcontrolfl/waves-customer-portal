@@ -414,7 +414,7 @@ router.post('/sms', async (req, res) => {
         domain: numberConfig.domain,
         media: inboundMedia,
       }),
-    }).returning('id');
+    }).returning(['id', 'created_at']);
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
@@ -476,8 +476,11 @@ router.post('/sms', async (req, res) => {
           message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
         });
+        // suppressed counts as HANDLED: an internal-test/demo customer's
+        // inbound must not fall through to the legacy owner-SMS forward —
+        // that would re-create the exact alert the suppression removed.
         knownInboundNotified = Boolean(stats && !stats.error &&
-          (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+          (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
       } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
     }
 
@@ -487,7 +490,31 @@ router.post('/sms', async (req, res) => {
     // (known customers) — for owner phones it is redirected to the SAME admin
     // notification, so sending both raised a duplicate. Unknown senders have no
     // customer match (sms_reply never fires), so they still get this alert.
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // Per-sender rate limit for UNKNOWN senders: spam robotext threads from
+    // one number raised a separate owner alert per message (19 alerts from a
+    // single roof-repair thread, 2026-07). One alert per unknown sender per
+    // 4h window — the full thread is still in /admin/communications and
+    // sms_log. Known customers are unaffected. Fails open on query error.
+    //
+    // Only rows STRICTLY OLDER than this message's own sms_log row count:
+    // two near-simultaneous first texts must not each see the other and both
+    // suppress (leaving a new thread with no alert at all) — with a strict
+    // created_at ordering, at most the later one suppresses. An exact
+    // timestamp tie fails open to two alerts, the safe direction.
+    let repeatUnknownSender = false;
+    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
+      try {
+        const prior = await db('sms_log')
+          .where({ direction: 'inbound', from_phone: From })
+          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+          .where('created_at', '<', smsLogEntry.created_at)
+          .whereNot('twilio_sid', MessageSid)
+          .first('id');
+        repeatUnknownSender = Boolean(prior);
+      } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
+    }
+
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length

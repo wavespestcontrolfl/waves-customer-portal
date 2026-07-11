@@ -79,7 +79,12 @@ function parseMarchexVerdict(addOnsRaw) {
  *        logged twice (the block decision/TwiML is still returned normally).
  * @returns {Promise<{blocked: boolean, twiml?: string, blockType?: string}>}
  */
-async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordAttempt = true }) {
+async function checkInboundBlock({ from, to, channel, twilioSid, addOns, signals = null, recordAttempt = true }) {
+  // `signals` (optional, voice only): the caller's pre-parsed spam evidence
+  // ({ stir_verstat, addons }) — persisted on the audit row because a blocked
+  // call never reaches the call_log insert that captures these for allowed
+  // calls, and a false-positive review needs the evidence that drove the block.
+  const signalsJson = signals ? JSON.stringify(signals) : null;
   if (!from) return { blocked: false };
 
   let block;
@@ -118,6 +123,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordA
                 channel,
                 block_type: 'marchex_shadow',
                 twilio_sid: twilioSid || null,
+                signals: signalsJson,
               });
             } catch (err) {
               logger.error(`[spam-block] Shadow audit insert failed: ${err.message}`);
@@ -133,6 +139,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordA
               channel,
               block_type: 'marchex_auto',
               twilio_sid: twilioSid || null,
+              signals: signalsJson,
             });
           } catch (err) {
             logger.error(`[spam-block] Audit insert failed: ${err.message}`);
@@ -155,6 +162,7 @@ async function checkInboundBlock({ from, to, channel, twilioSid, addOns, recordA
         channel,
         block_type: block.block_type,
         twilio_sid: twilioSid || null,
+        signals: signalsJson,
       });
     } catch (err) {
       logger.error(`[spam-block] Audit insert failed: ${err.message}`);

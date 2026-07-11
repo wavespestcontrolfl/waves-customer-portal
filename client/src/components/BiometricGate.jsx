@@ -222,16 +222,13 @@ export default function BiometricGate({ children }) {
               }}
             />
           ))}
+          {/* layout-only wrapper — no data-glass surface, no box chrome: the logo
+              floats directly on the scene (owner request: no card around the logo) */}
           <div
             className="waves-lock-anim"
-            data-glass="modal"
             style={{
               position: 'relative',
               width: 'min(340px, 100%)',
-              padding: '36px 28px 32px',
-              borderRadius: 24,
-              background: 'rgba(255,255,255,0.5)',
-              border: '1px solid rgba(255,255,255,0.75)',
               display: 'flex', flexDirection: 'column', alignItems: 'center',
               animation: 'wavesLockLogoIn 0.5s ease-out both',
             }}

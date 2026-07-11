@@ -1493,7 +1493,7 @@ describe('newsletter greeting personalization + render polish', () => {
     expect(plainBulletText('Sit-down meal at a Cortez staple')).toBe('Sit-down meal at a Cortez staple');
   });
 
-  test('assembly: 22px greeting carries the name token; divider renders at 64px', async () => {
+  test('assembly: 22px greeting carries the name token; divider renders at 48px', async () => {
     const html = await assembleBeehiivNewsletter({
       selectedSubject: 'Test',
       greeting: 'Hey there!',
@@ -1505,16 +1505,18 @@ describe('newsletter greeting personalization + render polish', () => {
     });
     expect(html).toContain(`Hey there${GREETING_NAME_TOKEN}!`);
     expect(html).toMatch(/font-size:22px[^>]*>👋/);
-    expect(html).toContain('width="64"');
+    expect(html).toContain('width="48"');
     expect(html).not.toContain('width="100"');
   });
 
-  test('wrapNewsletter local-guide header uses the 2026 logo at 88px', () => {
+  test('wrapNewsletter local-guide chrome uses the 2026 logo (glass footer, 44px)', () => {
+    // The 88px header logo was retired with the pre-glass theme (#2428);
+    // the glass wrapper carries the 2026 logo in the footer at 44px.
     const { wrapNewsletter } = require('../services/email-template');
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
     expect(html).toContain('waves-logo-2026.png');
     expect(html).not.toContain('/waves-logo.png');
-    expect(html).toContain('width="88"');
+    expect(html).toContain('width="44"');
   });
 });
 

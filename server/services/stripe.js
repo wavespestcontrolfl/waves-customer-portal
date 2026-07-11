@@ -235,7 +235,7 @@ const StripeService = {
    * @param {string} [paymentMethodType] — 'card', 'us_bank_account', or 'card_or_bank'
    * @returns {{ clientSecret: string, setupIntentId: string }}
    */
-  async createSetupIntent(customerId, paymentMethodType = 'card') {
+  async createSetupIntent(customerId, paymentMethodType = 'card', opts = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -251,7 +251,11 @@ const StripeService = {
       const setupIntent = await stripe.setupIntents.create({
         customer: stripeCustomerId,
         payment_method_types: paymentMethodTypes,
+        // Callers may tag a purpose (e.g. 'covered_capture') so the
+        // setup_intent.succeeded webhook can route completion; the
+        // waves_customer_id key always wins over caller metadata.
         metadata: {
+          ...(opts.metadata || {}),
           waves_customer_id: customerId,
         },
       });
@@ -993,6 +997,13 @@ const StripeService = {
   async chargeMonthly(customerId, idempotencyKey = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
+    // NULL/0 monthly_rate = unpriced (manual quote pending), not "charge
+    // nothing": the cron already filters monthly_rate > 0, so this guards
+    // direct callers from minting a $0/NaN PaymentIntent off an unpriced
+    // customer (NULL-not-$0 rule).
+    if (!(Number(customer.monthly_rate) > 0)) {
+      throw new Error(`Customer ${customerId} has no positive monthly_rate — refusing autopay charge`);
+    }
 
     // The "WaveGuard Monthly" marker is load-bearing: billing-cron identifies
     // monthly autopay rows by a `%WaveGuard Monthly%` LIKE match for its
@@ -1297,6 +1308,18 @@ const StripeService = {
         }
         logger.error(`[stripe] chargeInvoiceWithSavedCard failed for invoice ${invoice.invoice_number}: ${err.message}`);
         try {
+          // Stamp the invoice link: the obligation this attempt was collecting
+          // lives on the invoice row, which stays 'sent' — an unlinked failed
+          // row would be double-counted by billing-v2 /balance (invoice +
+          // failed attempt for the same debt) with nothing ever superseding
+          // it, since this path sets no next_retry_at for the retry sweep.
+          // Deliberately NO stripe_payment_intent_id on this row: a declined
+          // off-session PI (e.g. authentication_required) can still succeed
+          // later, and the webhook's succeeded-handler would then flip THIS
+          // row to paid by PI match and return before linking the invoice
+          // (which this failure path never stamped a PI onto) — a paid row
+          // beside a still-collectible invoice, with dunning continuing after
+          // the money arrived (Codex P1 on this PR).
           await db('payments').insert({
             customer_id: invoice.customer_id,
             payment_method_id: card.id,
@@ -1306,6 +1329,10 @@ const StripeService = {
             status: 'failed',
             description: `Invoice ${invoice.invoice_number} — card on file (FAILED)`,
             failure_reason: err.message,
+            metadata: JSON.stringify({
+              invoice_id: invoice.id,
+              source: 'card_on_file_failed_attempt',
+            }),
           });
         } catch { /* non-fatal */ }
         throw new Error(err.message || 'Card charge failed');
@@ -1474,7 +1501,10 @@ const StripeService = {
     const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
     const remainingCents = paidCents - priorCents;
     const requestCents = amount ? Math.round(amount * 100) : null;
-    const requestTag = requestCents === null ? 'rest' : String(requestCents);
+    // Tag of what the OPERATOR entered (base dollars) — replay detection keys
+    // on this, so a retry of the same entered amount replays the original
+    // attempt even though the amount actually sent to Stripe is grossed up.
+    const enteredTag = requestCents === null ? 'rest' : String(requestCents);
 
     // Persist the attempt key BEFORE calling Stripe. The retry contract
     // ("re-running the same refund is safe") must hold even when the
@@ -1488,7 +1518,55 @@ const StripeService = {
     try {
       meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
     } catch { meta = {}; }
-    const isReplay = !!(meta.pending_refund_key && meta.pending_refund_request === requestTag);
+
+    // Card-brand rule: a partial refund must return the prorated share of the
+    // recorded card surcharge, not just the entered base dollars — the
+    // surcharge was collected on the refunded portion too. All math comes
+    // from the one authority (computeRefundSurcharge in stripe-pricing);
+    // payments.surcharge_amount_cents is the recorded surcharge (the
+    // compliance-migration column every Stripe insert path populates) and
+    // payments.refunded_surcharge_cents tracks the cumulative returned share
+    // so successive partials prorate without drift. Full ("rest") refunds
+    // already return everything and skip this.
+    const surchargeCents = Math.max(0, Number(payment.surcharge_amount_cents) || 0);
+    const alreadyRefundedSurchargeCents = Math.min(surchargeCents, Math.max(0, Number(payment.refunded_surcharge_cents) || 0));
+    const surchargeShareCents = requestCents !== null && surchargeCents > 0
+      ? computeRefundSurcharge({
+          refundBaseCents: requestCents,
+          originalBaseCents: Math.max(0, paidCents - surchargeCents),
+          originalSurchargeCents: surchargeCents,
+          totalRefundedBaseCents: Math.max(0, priorCents - alreadyRefundedSurchargeCents),
+          alreadyRefundedSurchargeCents,
+        })
+      : 0;
+    // Never push the grossed amount past the remaining balance — near the end
+    // of a heavily-refunded payment the cap eats into the share, not the base.
+    let grossCents = requestCents === null
+      ? null
+      : Math.min(requestCents + surchargeShareCents, Math.max(requestCents, remainingCents));
+
+    // Replay detection keys on the ENTERED amount (pending_refund_base);
+    // legacy markers predate the gross-up and stored the entered amount in
+    // pending_refund_request, so fall back to it.
+    const isReplay = !!(meta.pending_refund_key
+      && (meta.pending_refund_base ?? meta.pending_refund_request) === enteredTag);
+    // The freshly-computed gross for the CURRENT balance — a stale replay
+    // whose original attempt provably never landed restarts from this, not
+    // from the dead attempt's frozen/legacy amount.
+    const freshGrossCents = grossCents;
+    if (isReplay && grossCents !== null) {
+      // Resend the ORIGINAL amount verbatim — Stripe rejects a reused key
+      // whose parameters differ, and a definitive rejection would clear the
+      // marker and open the door to a double refund. New-style markers froze
+      // the grossed amount; LEGACY (pre-gross-up) markers sent exactly the
+      // entered amount, so replay that — never a freshly computed gross.
+      grossCents = Number.isFinite(Number(meta.pending_refund_gross))
+        ? Number(meta.pending_refund_gross)
+        : requestCents;
+    }
+    let requestTag = isReplay
+      ? meta.pending_refund_request
+      : (grossCents === null ? 'rest' : String(grossCents));
     if (meta.pending_refund_key && !isReplay) {
       throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
     }
@@ -1507,10 +1585,26 @@ const StripeService = {
     };
     let idempotencyKey;
     const attemptReason = reason || 'requested_by_customer';
+    // Bounced attempts leave the amounts untouched (nothing was returned),
+    // so a retry after a bounce sees the SAME tag and priorCents — without
+    // the bounce-count suffix it would reuse the dead attempt's key and
+    // Stripe's idempotency layer would hand back the bounced refund object
+    // instead of creating a new refund.
+    const bouncedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
     const persistPendingAttempt = async () => {
-      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
+      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}${bouncedIds.length ? `_b${bouncedIds.length}` : ''}`;
       await db('payments').where({ id: paymentId }).update({
-        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_reason: attemptReason, pending_refund_at: new Date().toISOString() }),
+        metadata: JSON.stringify({
+          ...meta,
+          pending_refund_key: idempotencyKey,
+          pending_refund_request: requestTag,
+          // Entered base + frozen grossed amount: replays match on the base
+          // and resend the gross verbatim (see gross-up block above).
+          pending_refund_base: enteredTag,
+          ...(grossCents !== null ? { pending_refund_gross: grossCents } : {}),
+          pending_refund_reason: attemptReason,
+          pending_refund_at: new Date().toISOString(),
+        }),
       });
     };
 
@@ -1551,8 +1645,13 @@ const StripeService = {
         // remainder never sent. An unparseable key can't be reconciled —
         // no adoption; the fresh 'rest' attempt below is still safe because
         // Stripe computes the remainder from its own ledger.
-        let expectedCents = requestCents;
-        if (requestCents === null) {
+        // Prefer the frozen grossed amount — that is what the original
+        // attempt actually sent to Stripe (legacy markers have no gross and
+        // fall back to the entered amount, which WAS what they sent).
+        let expectedCents = Number.isFinite(Number(meta.pending_refund_gross))
+          ? Number(meta.pending_refund_gross)
+          : requestCents;
+        if (expectedCents === null) {
           const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
           expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
             ? paidCents - keyPriorCents
@@ -1564,7 +1663,14 @@ const StripeService = {
           && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
         if (!adoptedRefund) {
           // The original attempt never landed at Stripe — start over as a
-          // validated fresh attempt against the CURRENT balance.
+          // validated fresh attempt against the CURRENT balance. The gross
+          // and tag were forced to the dead attempt's values above (a legacy
+          // marker would resend the UNGROSSED base, shorting the customer
+          // the prorated surcharge); recompute both — a fresh tag also
+          // derives a fresh idempotency key, so the new amount can't wedge
+          // on the stale key's parameter check.
+          grossCents = freshGrossCents;
+          requestTag = grossCents === null ? 'rest' : String(grossCents);
           assertNewAttemptRefundable();
           await persistPendingAttempt();
         }
@@ -1576,6 +1682,8 @@ const StripeService = {
     const clearedMeta = { ...meta };
     delete clearedMeta.pending_refund_key;
     delete clearedMeta.pending_refund_request;
+    delete clearedMeta.pending_refund_base;
+    delete clearedMeta.pending_refund_gross;
     delete clearedMeta.pending_refund_reason;
     delete clearedMeta.pending_refund_at;
 
@@ -1586,8 +1694,10 @@ const StripeService = {
           payment_intent: payment.stripe_payment_intent_id,
           reason: replayReason || attemptReason,
         };
-        if (requestCents !== null) {
-          refundParams.amount = requestCents;
+        if (grossCents !== null) {
+          // Entered base + prorated surcharge share (capped at the remaining
+          // balance) — see the gross-up block above.
+          refundParams.amount = grossCents;
         }
         refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
@@ -1636,6 +1746,55 @@ const StripeService = {
     }
     const isFullRefund = totalRefundedCents >= paidCents;
 
+    // LIVE metadata read — the charge.refunded / refund.failed webhooks may
+    // have written stamps or bounce fences while this attempt was in flight,
+    // and clearedMeta is a pre-call snapshot that would otherwise erase them.
+    let liveMeta = null;
+    try {
+      const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
+      try {
+        liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
+      } catch { liveMeta = {}; }
+    } catch (liveErr) {
+      logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
+      liveMeta = null; // unknown — fall back to the loaded snapshot below
+    }
+
+    // A refund whose FAILURE was already recorded must never be stamped as
+    // returned money: when the original attempt's ledger write failed, the
+    // pending marker survives its own refund's bounce, and the retry's
+    // idempotent key replay hands back the ORIGINAL bounced refund object
+    // as if newly created. Stamping it would record money Stripe kept — and
+    // handleRefundFailed would never rewind it (the bounce is already
+    // fenced, so the event replay is a no-op). Abort: clear the pending
+    // marker (the next attempt derives a fresh bounce-suffixed key) and
+    // tell the operator the truth.
+    const bounceFence = new Set([
+      ...bouncedIds,
+      ...(liveMeta && Array.isArray(liveMeta.failed_refund_ids) ? liveMeta.failed_refund_ids : []),
+    ]);
+    if (refund?.id && bounceFence.has(refund.id)) {
+      const abortMeta = { ...(liveMeta || clearedMeta) };
+      for (const k of ['pending_refund_key', 'pending_refund_request', 'pending_refund_base', 'pending_refund_gross', 'pending_refund_reason', 'pending_refund_at']) {
+        delete abortMeta[k];
+      }
+      await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) }).catch(() => {});
+      logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted, nothing stamped`);
+      throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
+    }
+    // Preserve concurrently-recorded bounce fences of OTHER refunds — the
+    // wholesale metadata write below must not erase them.
+    if (bounceFence.size) clearedMeta.failed_refund_ids = [...bounceFence];
+
+    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
+    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
+    const mergedStamps = new Set([
+      ...(liveMeta && Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
+      ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
+      ...(refund?.id ? [refund.id] : []),
+    ]);
+    if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
+
     try {
       await db('payments')
         .where({ id: paymentId })
@@ -1644,6 +1803,20 @@ const StripeService = {
           refund_amount: totalRefundedCents / 100,
           refund_status: refund.status,
           stripe_refund_id: refund.id,
+          // Cumulative surcharge-returned tracker — the NEXT partial prorates
+          // from this. The share actually sent this attempt = Stripe's refund
+          // amount minus the entered base (0 on legacy/no-surcharge attempts);
+          // a full refund returns the whole surcharge by definition.
+          ...(surchargeCents > 0
+            ? {
+                refunded_surcharge_cents: isFullRefund
+                  ? surchargeCents
+                  : Math.min(
+                      surchargeCents,
+                      alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
+                    ),
+              }
+            : {}),
           metadata: JSON.stringify(clearedMeta),
         });
     } catch (dbErr) {
@@ -1742,6 +1915,7 @@ const StripeService = {
     let cardSurcharge;
     let cardTotal;
     let coveredByCredit = false;
+    let captureHeld = false;
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -1842,6 +2016,25 @@ const StripeService = {
         // prepaid transition (return, NOT throw → no rollback) and skips minting
         // a PaymentIntent; settled after the transaction below.
         if (require('../config/feature-gates').gates.autoApplyAccountCredit && availableCredit > 0) {
+          // Required-save signup with nothing chargeable on file: full
+          // coverage is only PROBED, never applied (Codex #2507 round-7
+          // P1). Applying here transitions the invoice to prepaid before
+          // any SetupIntent exists, so an abandoned capture form would
+          // leave the recurring signup complete with no saved method. The
+          // hold keeps the invoice collectible; settleHeldCoverage applies
+          // the credit from /setup-complete (or the covered_capture
+          // webhook) AFTER save→consent→enroll succeeds. Partial coverage
+          // falls through to the normal apply + PI mint — the PI itself
+          // captures the method via setup_future_usage. An attached PI
+          // means money may be in flight: never hold, let the existing
+          // reuse/409 lifecycle decide.
+          if (opts.holdCoverageForCapture
+            && !lockedInvoice.stripe_payment_intent_id
+            && availableCredit >= invoiceAmountDue(lockedInvoice)) {
+            coveredByCredit = true;
+            captureHeld = true;
+            return;
+          }
           const { applyAccountCreditToInvoice } = require('./customer-credit');
           await applyAccountCreditToInvoice({ invoiceId }, trx).catch((e) =>
             logger.warn(`[stripe] pay-page account-credit apply skipped for invoice ${invoiceId}: ${e.message}`));
@@ -1879,6 +2072,15 @@ const StripeService = {
             card_surcharge: '0',
             save_card_opt_in: saveCard ? 'true' : 'false',
             selected_method_category: 'card',
+            // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+            // MERGE) so a reused PI that was previously finalized can't carry a
+            // stale surcharge_policy_version — which the webhook guard reads as
+            // "finalized" and would settle a later base-only card confirm without
+            // surcharge. Empty string deletes the key on update. Mirrors
+            // createStatementPaymentIntent, which fixed exactly this failure mode.
+            surcharge_policy_version: '',
+            surcharge_rate_bps: '',
+            card_funding: '',
           },
           payment_method_types: ['card'],
         };
@@ -2021,6 +2223,14 @@ const StripeService = {
       });
 
       if (coveredByCredit) {
+        if (captureHeld) {
+          // Coverage was only probed — the invoice is untouched (still
+          // collectible, credit balance intact). The route surfaces
+          // captureNeeded and the credit applies via settleHeldCoverage
+          // once the capture completes.
+          logger.info(`[stripe] Pay-page: account credit fully covers invoice ${invoice.invoice_number} — coverage HELD pending required-save capture`);
+          return { covered_by_credit: true, capture_held: true, status: invoice.status, clientSecret: null, paymentIntentId: null, amount: 0 };
+        }
         // Account credit fully covered the invoice in the committed transaction
         // above — no PaymentIntent to mint. Run the same post-payment side effects
         // a real payment would, and return a covered state (no clientSecret) so
@@ -2070,6 +2280,49 @@ const StripeService = {
   },
 
   /**
+   * Settle a required-save invoice whose full credit coverage was HELD until
+   * method capture completed (Codex #2507 round-7 P1):
+   * createInvoicePaymentIntent with holdCoverageForCapture only PROBES
+   * coverage, so the invoice stays collectible until save→consent→enroll
+   * succeeds. Called from POST /pay/:token/setup-complete and the
+   * covered_capture webhook — idempotent both directions:
+   * applyAccountCreditToInvoice skips uncollectible / PI-attached /
+   * payer-billed invoices, and fullCoverageOnly refuses to partially drain
+   * credit that shrank in the meantime (the invoice then simply stays
+   * payable through the normal pay flow — reminders never stopped because
+   * it was never settled).
+   *
+   * Returns { settled, alreadySettled, reason } — alreadySettled marks the
+   * benign "someone else settled it first" skip so callers don't treat a
+   * completed race as a coverage failure.
+   */
+  async settleHeldCoverage(invoiceId) {
+    const { applyAccountCreditToInvoice } = require('./customer-credit');
+    const result = await applyAccountCreditToInvoice({ invoiceId, fullCoverageOnly: true });
+    if (!result?.fullyCovered) {
+      return {
+        settled: false,
+        alreadySettled: result?.skipped === 'uncollectible',
+        reason: result?.skipped || 'not_fully_covered',
+      };
+    }
+    // Same post-payment side effects the immediate covered path runs.
+    try {
+      await require('./invoice-followups').stopOnPayment(invoiceId);
+    } catch (e) {
+      logger.warn(`[stripe] stopOnPayment after held-coverage settle failed for ${invoiceId}: ${e.message}`);
+    }
+    try {
+      const fresh = await db('invoices').where({ id: invoiceId }).first();
+      if (fresh) await require('./annual-prepay-renewals').syncTermForInvoicePayment(fresh);
+    } catch (e) {
+      logger.warn(`[stripe] term sync after held-coverage settle failed for ${invoiceId}: ${e.message}`);
+    }
+    logger.info(`[stripe] Held credit coverage settled for invoice ${invoiceId} after required-save capture`);
+    return { settled: true, alreadySettled: false, reason: null };
+  },
+
+  /**
    * Update an open invoice PaymentIntent's method category.
    *
    * Both card and ACH keep the PI at base amount — no surcharge at this stage.
@@ -2088,15 +2341,56 @@ const StripeService = {
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
     assertInvoiceCollectible(invoice.status);
-    if (!invoice.stripe_payment_intent_id
-      || String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
+    if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
-
     // Never save a third-party payer's card onto the homeowner account (see
     // createInvoicePaymentIntent) — the AP user can toggle this after the
     // Element loads, so guard the update path too.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
+
+    // A stale id can be a legitimate lost-response recovery: a prior
+    // /update-amount took the replacement path (fresh PI minted, invoice
+    // repointed) but the response never reached the client, so its network
+    // retry still carries the dead PI's id. Recover ONLY for that exact
+    // replay, all three required:
+    //  - lineage: the stale id is the PI the current one replaced (stamped
+    //    by replaceInvoicePaymentIntentForTender, one generation);
+    //  - tender: the request matches the current PI's lock, so a replay can
+    //    re-apply payment_method_types but never flip it under a pending
+    //    confirm/finalize;
+    //  - save-card: the request matches the current PI's save_card_opt_in,
+    //    so a late replay can never clear a newer opt-in's
+    //    setup_future_usage (consent silently lost).
+    // Any other mismatch — e.g. an out-of-order older sync from a dead
+    // Elements mount — rejects as before. The caller-supplied PI is never
+    // updated on a mismatch.
+    const retargeted = String(invoice.stripe_payment_intent_id) !== String(paymentIntentId);
+    const effectivePaymentIntentId = String(invoice.stripe_payment_intent_id);
+    if (retargeted) {
+      const requestedType = isCardMethodType(methodCategory || 'card') ? 'card' : 'us_bank_account';
+      let currentIntent = null;
+      try {
+        currentIntent = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
+      } catch (retrieveErr) {
+        logger.warn(
+          `[stripe] Could not retrieve current PI ${effectivePaymentIntentId} while vetting a stale `
+          + `update-amount id for invoice ${invoiceId}: ${retrieveErr.message}`,
+        );
+      }
+      const lineageMatch = currentIntent?.metadata?.replaced_from === String(paymentIntentId);
+      const tenderMatch = Array.isArray(currentIntent?.payment_method_types)
+        && currentIntent.payment_method_types.length === 1
+        && currentIntent.payment_method_types[0] === requestedType;
+      const saveCardMatch = (currentIntent?.metadata?.save_card_opt_in === 'true') === saveCard;
+      if (!lineageMatch || !tenderMatch || !saveCardMatch) {
+        throw new Error('PaymentIntent does not belong to this invoice');
+      }
+      logger.warn(
+        `[stripe] update-amount replaying a lost replacement response: stale PI ${paymentIntentId} `
+        + `→ current PI ${effectivePaymentIntentId} (invoice ${invoiceId})`,
+      );
+    }
     const selectedMethodCategory = methodCategory || 'card';
     // Charge base = amount due (total − applied account credit), not raw total.
     const base = invoiceAmountDue(invoice);
@@ -2119,6 +2413,15 @@ const StripeService = {
         card_surcharge: '0',
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
+        // CLEAR any surcharge-finalization metadata (Stripe metadata updates
+        // MERGE) — a declined /finalize leaves surcharge_policy_version on the
+        // PI, and the webhook's surcharge-bypass quarantine reads that stale key
+        // as "finalized", settling a later base-only card confirm without the
+        // surcharge. Empty string deletes the key on update. Mirrors
+        // createStatementPaymentIntent.
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
       },
     };
 
@@ -2134,8 +2437,22 @@ const StripeService = {
     }
 
     try {
-      const paymentIntent = await stripe.paymentIntents.update(paymentIntentId, updateParams);
-      logger.info(`[stripe] PI ${paymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
+      const paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
+      logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
+      if (retargeted) {
+        // A newer tender switch can repoint the invoice between the lineage
+        // vetting above and this update settling. Re-read before handing the
+        // client a secret: returning an orphaned PI would let a charge
+        // succeed that /confirm then rejects (invoice bound elsewhere).
+        const freshInvoice = await db('invoices').where({ id: invoiceId }).first();
+        if (!freshInvoice
+          || String(freshInvoice.stripe_payment_intent_id || '') !== effectivePaymentIntentId) {
+          const raceErr = new Error('Payment session changed. Please refresh the invoice and try again.');
+          raceErr.statusCode = 409;
+          raceErr.sessionChanged = true;
+          throw raceErr;
+        }
+      }
       return {
         paymentIntentId: paymentIntent.id,
         base,
@@ -2143,8 +2460,12 @@ const StripeService = {
         total: base,
         cardSurchargeRate: CONFIGURED_COST_BPS / 10_000,
         surchargeRateBps: CONFIGURED_COST_BPS,
+        ...(retargeted ? { replaced: true, clientSecret: paymentIntent.client_secret } : {}),
       };
     } catch (err) {
+      // The retarget recheck's session-changed 409 must reach the route
+      // as-is, not wrapped as a generic update failure.
+      if (err && err.sessionChanged) throw err;
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover
@@ -2153,10 +2474,10 @@ const StripeService = {
       // defense is preserved.
       if (isIncompatibleAttachedMethodError(err)) {
         logger.warn(
-          `[stripe] PI ${paymentIntentId} tender switch blocked by attached PM; `
+          `[stripe] PI ${effectivePaymentIntentId} tender switch blocked by attached PM; `
           + `recreating for method=${selectedMethodCategory}`,
         );
-        return this.replaceInvoicePaymentIntentForTender(invoiceId, paymentIntentId, {
+        return this.replaceInvoicePaymentIntentForTender(invoiceId, effectivePaymentIntentId, {
           paymentMethodTypes,
           metadata: updateParams.metadata,
           customer: updateParams.customer || null,
@@ -2166,7 +2487,7 @@ const StripeService = {
           methodCategory: selectedMethodCategory,
         });
       }
-      logger.error(`[stripe] PI update failed for ${paymentIntentId}: ${err.message}`);
+      logger.error(`[stripe] PI update failed for ${effectivePaymentIntentId}: ${err.message}`);
       throw new Error(`Failed to update payment amount: ${err.message}`);
     }
   },
@@ -2216,7 +2537,11 @@ const StripeService = {
       amount: baseCents,
       currency: 'usd',
       description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
-      metadata,
+      // replaced_from stamps one generation of lineage so update-amount can
+      // recognize a lost-response replay of THIS replacement (client retries
+      // still carrying the canceled PI's id) without opening a blanket
+      // stale-id retarget.
+      metadata: { ...metadata, replaced_from: String(oldPaymentIntentId) },
       payment_method_types: paymentMethodTypes,
     };
     if (customer) {
@@ -3118,6 +3443,21 @@ const StripeService = {
           && String(lockedInvoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
           throw new Error('Invoice has a different active payment');
         }
+        // Dispute guard (mirrors the webhook succeeded-handler): after a
+        // chargeback the payments row is 'disputed', the invoice is reopened
+        // 'overdue', and its PI is cleared — so a replayed /confirm with the old
+        // PI id passes every guard above (the PI still retrieves 'succeeded' at
+        // Stripe). Without this check it would flip the charged-back invoice
+        // back to paid, kill dunning, and overwrite the disputed row — erasing
+        // dispute_id/dispute_final, which also neutralizes the webhook's own
+        // late-replay guards. The money already went back via the chargeback:
+        // 'disputed' is terminal for this PI, refuse to settle on it.
+        const disputedRow = await trx('payments')
+          .where({ stripe_payment_intent_id: paymentIntentId, status: 'disputed' })
+          .first('id');
+        if (disputedRow) {
+          throw new Error('This payment was disputed after it succeeded — the invoice cannot be re-marked paid from the old payment session');
+        }
         if (paymentStatus === 'processing') {
           // Expected ACH amount prices from amount due (total − applied credit).
           const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), resolvedPaymentMethod);
@@ -3209,10 +3549,25 @@ const StripeService = {
           .orderBy('created_at', 'desc')
           .first();
         if (existingPayment) {
+          // Never clobber a money-LEFT row: refunded/disputed rows record cash
+          // that went back to the customer. A miss here means the row flipped
+          // to one of those between the dispute pre-check above and this write
+          // (a dispute/refund webhook landing mid-flight) — THROW so the whole
+          // transaction rolls back, including the invoice update above;
+          // returning would let /confirm settle the invoice as paid beside a
+          // row recording that the money just left. A 'paid' row is the
+          // OPPOSITE case and passes through deliberately: the webhook writes
+          // the payments row before it settles the invoice, so /confirm racing
+          // (or repairing after) a half-applied webhook must still be able to
+          // mark the open invoice paid — money genuinely arrived (Codex P2).
           const [record] = await trx('payments')
             .where({ id: existingPayment.id })
+            .whereNotIn('status', ['refunded', 'disputed'])
             .update(paymentPayload)
             .returning('*');
+          if (!record) {
+            throw new Error('Payment record changed while confirming — refresh the invoice and try again');
+          }
           return record;
         }
 

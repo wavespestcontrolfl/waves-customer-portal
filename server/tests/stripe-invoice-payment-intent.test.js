@@ -163,6 +163,35 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     });
   });
 
+  test('reusing an open PaymentIntent clears stale surcharge-finalization metadata', async () => {
+    // A declined /finalize leaves surcharge_policy_version on the PI; Stripe
+    // metadata updates MERGE, so without an explicit '' clear the reused PI
+    // keeps the stale key and the webhook quarantine reads it as "finalized" —
+    // settling a base-only card confirm without the surcharge (audit P1).
+    invoiceRow.stripe_payment_intent_id = 'pi_open';
+    stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
+      id: 'pi_open',
+      status: 'requires_payment_method',
+      metadata: {
+        waves_invoice_id: invoiceRow.id,
+        surcharge_policy_version: 'v3',
+        surcharge_rate_bps: '290',
+        card_funding: 'credit',
+      },
+    });
+
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_open', expect.objectContaining({
+      metadata: expect.objectContaining({
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
+      }),
+    }));
+  });
+
   test('setup returns a client-safe conflict when a bound PaymentIntent is already in progress', async () => {
     invoiceRow.stripe_payment_intent_id = 'pi_processing';
     stripeClient.paymentIntents.retrieve.mockResolvedValueOnce({
@@ -510,14 +539,165 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     }));
   });
 
-  test('updates reject PaymentIntents that are not bound to the invoice', async () => {
-    invoiceRow.stripe_payment_intent_id = 'pi_other';
+  test('updates reject when the invoice has no PaymentIntent at all', async () => {
+    invoiceRow.stripe_payment_intent_id = null;
     const StripeService = require('../services/stripe');
 
     await expect(
       StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card'),
     ).rejects.toThrow(/does not belong/);
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a stale id that IS the replaced lineage with a matching tender replays onto the CURRENT PI (lost-response retry recovery)', async () => {
+    // A prior /update-amount can take the replacement path (fresh PI minted,
+    // invoice repointed) with the response lost in transit — the client's
+    // network retry then still carries the dead PI's id. The caller-supplied
+    // stale PI must never be updated; the tender lock applies to the invoice's
+    // current PI, returned with replaced+clientSecret so Elements re-mounts.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
+    stripeClient.paymentIntents.update.mockImplementation(async (id, params) => ({
+      id,
+      client_secret: `cs_${id}`,
+      ...params,
+    }));
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card');
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(1);
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_current', expect.objectContaining({
+      amount: 7500,
+      payment_method_types: ['card'],
+    }));
+    expect(result).toMatchObject({
+      paymentIntentId: 'pi_current',
+      base: 75,
+      surcharge: 0,
+      total: 75,
+      replaced: true,
+      clientSecret: 'cs_pi_current',
+    });
+  });
+
+  test('a replay whose save-card state differs from the current PI is rejected — a late replay must not clear a newer opt-in', async () => {
+    // Codex P1: the save-card checkbox stays enabled while a sync retries. If
+    // the customer opts in after the original saveCard=false request went out,
+    // a late accepted replay would clear setup_future_usage/save_card_opt_in
+    // on the current PI — silently dropping consent/enrollment.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced', save_card_opt_in: 'true' },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card', { saveCard: false }),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a retargeted update 409s when the invoice was repointed again before the response (never hand back an orphaned PI)', async () => {
+    // Codex P1: a newer tender switch can repoint the invoice between the
+    // lineage vetting and the Stripe update settling. Returning the old PI's
+    // clientSecret would remount the customer on an orphaned PI whose charge
+    // /confirm later rejects. The post-update recheck must 409 instead.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
+    stripeClient.paymentIntents.update.mockImplementation(async (id, params) => {
+      // Simulate the overlapping newer sync repointing the invoice mid-update.
+      invoiceRow.stripe_payment_intent_id = 'pi_even_newer';
+      return { id, client_secret: `cs_${id}`, ...params };
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card'),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('Payment session changed'),
+    });
+  });
+
+  test('a stale lineage id with a DIFFERENT tender is rejected — a late out-of-order sync must never flip the current lock', async () => {
+    // Codex P1 on the blanket retarget: an older overlapped /update-amount
+    // (e.g. an abandoned ACH toggle from a dead Elements mount) still carrying
+    // the canceled id must NOT rewrite payment_method_types under a pending
+    // card confirm/finalize.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'us_bank_account'),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a stale id with no replacement lineage is rejected (fail-closed, includes retrieve failure)', async () => {
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: {},
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_never_ours', 'card'),
+    ).rejects.toThrow(/does not belong/);
+
+    // Retrieve failure = lineage unverifiable = reject, never retarget blind.
+    stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('network blip'));
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_never_ours', 'card'),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a matching PI id does NOT report replaced (no spurious Elements re-mount)', async () => {
+    const StripeService = require('../services/stripe');
+
+    const result = await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+
+    expect(result.replaced).toBeUndefined();
+    expect(result.clientSecret).toBeUndefined();
+  });
+
+  test('tender updates clear stale surcharge-finalization metadata (merge-delete via empty strings)', async () => {
+    // Same failure mode createStatementPaymentIntent fixed: a declined
+    // /finalize leaves surcharge_policy_version on the PI and a later reuse
+    // must delete it (empty string) or the webhook quarantine is disabled.
+    const StripeService = require('../services/stripe');
+    await StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_invoice', 'card');
+
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledWith('pi_invoice', expect.objectContaining({
+      metadata: expect.objectContaining({
+        surcharge_policy_version: '',
+        surcharge_rate_bps: '',
+        card_funding: '',
+      }),
+    }));
   });
 
   test('tender switch blocked by an attached PM recreates the PaymentIntent for the new tender', async () => {
@@ -533,7 +713,13 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       expect.objectContaining({
         amount: 7500,
         payment_method_types: ['card'],
-        metadata: expect.objectContaining({ selected_method_category: 'card', card_surcharge: '0' }),
+        metadata: expect.objectContaining({
+          selected_method_category: 'card',
+          card_surcharge: '0',
+          // Lineage stamp — update-amount uses it to recognize a lost-response
+          // replay of this replacement (retry still carrying the canceled id).
+          replaced_from: 'pi_invoice',
+        }),
       }),
       expect.objectContaining({ idempotencyKey: expect.stringContaining('invoice_pi_replace_') }),
     );

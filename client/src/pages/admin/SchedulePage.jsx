@@ -7067,9 +7067,12 @@ export function CompletionPanel({
   // otherwise a pre-load submit hides the field the server still requires (422).
   const { enabled: turfHeightFlag, ready: turfHeightFlagReady } = useFeatureFlagReady("turf-height-capture");
   // Phase 3 fast closeout — flag-gated (default off). Existing completion flow is unchanged when off.
-  // Tree & Shrub exception-based closeout — flag-gated (default off). When off the
-  // completion flow is unchanged and the server's post-commit auto-score still runs.
-  const { enabled: treeShrubCloseoutFlag, ready: treeShrubCloseoutReady } = useFeatureFlagReady("tree-shrub-closeout-v2");
+  // Tree & Shrub exception-based closeout — UNCONDITIONAL (the per-user
+  // tree-shrub-closeout-v2 flag is retired; owner ungated 2026-07-09). This
+  // also closes a trap: the server's validateTreeShrubCloseout enforcement is
+  // unconditional for tree_shrub/palm completions, so a tech WITHOUT the old
+  // flag had no closeout UI to collect the required fields and every
+  // completion hard-400'd (tree_shrub_closeout_lockout).
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
   const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
@@ -7289,6 +7292,12 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
+  // Flips true once Generate AI report replaces the notes with clean prose.
+  // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
+  // selection source of truth (delete a line = deselect); after, the label
+  // arrays are authoritative and selections render as removable pills instead
+  // of tagged lines inside the report text. Persisted with the draft.
+  const [chipLinesDetached, setChipLinesDetached] = useState(false);
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
@@ -7355,8 +7364,7 @@ export function CompletionPanel({
   const observationChips = observationChipsForLine(chipServiceLine);
   const recommendationChips = recommendationChipsForLine(chipServiceLine);
   const recapEligible = pestRecapFlag && pestRecapReady && serviceLineForCloseout === "pest";
-  const treeShrubCloseoutOn =
-    treeShrubCloseoutReady && treeShrubCloseoutFlag && serviceLineForCloseout === "tree_shrub";
+  const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence) and returns the findings
@@ -8036,6 +8044,10 @@ export function CompletionPanel({
         actionScopeByLabel,
         selectedObservationLabels,
         selectedRecommendationLabels,
+        // Which deselect model the label arrays were saved under — a restored
+        // post-AI-draft (no chip lines in notes) must restore as detached or
+        // labelsStillInNotes would silently drop every structured selection.
+        chipLinesDetached,
         nextVisitNote,
         showNextVisitNote,
         equipmentSystemId,
@@ -8097,6 +8109,7 @@ export function CompletionPanel({
     actionScopeByLabel,
     selectedObservationLabels,
     selectedRecommendationLabels,
+    chipLinesDetached,
     nextVisitNote,
     showNextVisitNote,
     equipmentSystemId,
@@ -8193,6 +8206,9 @@ export function CompletionPanel({
         ? savedDraft.selectedRecommendationLabels
         : [],
     );
+    // Drafts saved before the detached-selection model lack the field → false,
+    // which matches their notes still carrying the chip-marker lines.
+    setChipLinesDetached(savedDraft.chipLinesDetached === true);
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
     setEquipmentSystemId(savedDraft.equipmentSystemId || "");
@@ -8395,6 +8411,10 @@ export function CompletionPanel({
   }
 
   function addChipNote(prefix, text) {
+    // Once an AI draft has replaced the notes, the label arrays are the
+    // selection source of truth and selections render as removable pills —
+    // don't write tagged template lines back into the clean report prose.
+    if (chipLinesDetached) return;
     const line = `[${prefix}] ${text}`;
     setNotes((prev) => (prev.trim() ? prev.trimEnd() + "\n" + line : line));
   }
@@ -8408,14 +8428,13 @@ export function CompletionPanel({
     );
   }
   function labelsStillInNotes(labels) {
-    // A selected label only counts as still-active if it appears inside one of
-    // the bracketed chip-marker lines ([Protocol]/[Protocol optional]/[Action]/
-    // [Found]/[Next] …) — NOT in arbitrary prose. The label arrays are only ever
-    // populated alongside a marker (the chip handlers, or a restored draft whose
-    // saved notes carry the markers), so this matches the same items as before
-    // for normal completions, but makes the deselect handle reliable after
-    // Generate: deleting the marker truly removes the item even when the AI prose
-    // happens to repeat the label text verbatim.
+    // Pre-draft deselect model only (see activeSelectedLabels for the
+    // post-draft one): a selected label counts as still-active if it appears
+    // inside one of the bracketed chip-marker lines ([Protocol]/[Protocol
+    // optional]/[Action]/[Found]/[Next] …) — NOT in arbitrary prose. The label
+    // arrays are only ever populated alongside a marker (the chip handlers, or
+    // a restored pre-draft whose saved notes carry the markers), so deleting a
+    // marker line truly deselects the item.
     const markerLines = notes
       .split("\n")
       .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
@@ -8425,40 +8444,67 @@ export function CompletionPanel({
       return text && markerLines.some((line) => line.includes(text));
     });
   }
-  // Generate AI report replaces the notes wholesale with AI prose, which would
-  // strip the [Protocol]/[Found]/[Next] tagged lines that handleSubmit reads
-  // back via labelsStillInNotes to rebuild protocolActionsCompleted + their
-  // re-entry/treatment scopes, observations, and recommendations. Re-append the
-  // still-selected labels so the structured visit record (and interior-treatment
-  // safety scopes) survive drafting.
-  function stitchSelectedLabelsIntoReport(reportText) {
-    const base = String(reportText || "");
-    const lines = [];
-    // Always emit an explicit removable marker (don't skip when the prose
-    // happens to mention the label verbatim): the marker is the tech's deselect
-    // handle, so leaving a still-selected item in prose-only form would make it
-    // impossible to deselect before completing.
-    const pushLabel = (prefix, label) => {
-      const text = String(label || "").trim();
-      if (text) lines.push(`[${prefix}] ${text}`);
-    };
-    // Only re-stitch labels still present in the pre-generation notes — the tech
-    // deselects a wrongly-picked item by deleting its tagged line, and
-    // handleSubmit honors that via labelsStillInNotes. Stitching the full
-    // selected-label state would resurrect a deliberately-removed action (and its
-    // re-entry scope) on the next Generate. (notes still holds the pre-draft text
-    // here; setNotes(report) hasn't applied yet.)
-    labelsStillInNotes(selectedProtocolActionLabels).forEach((l) =>
-      pushLabel("Protocol", l),
+  // The still-selected structured labels, honoring whichever deselect model is
+  // active: before an AI draft, the [Protocol]/[Found]/[Next] chip lines in the
+  // notes are the source of truth (delete a line = deselect); after Generate
+  // replaces the notes with clean prose (chipLinesDetached), the label arrays
+  // are authoritative and the removable pills below the notes are the deselect
+  // handle. Every reader (submit, AI payload, applied-count) goes through this
+  // so the structured visit record can't drift from what the tech sees.
+  function activeSelectedLabels(labels) {
+    if (!chipLinesDetached) return labelsStillInNotes(labels);
+    return (Array.isArray(labels) ? labels : []).filter((label) =>
+      String(label || "").trim(),
     );
-    labelsStillInNotes(selectedObservationLabels).forEach((l) =>
-      pushLabel("Found", l),
-    );
-    labelsStillInNotes(selectedRecommendationLabels).forEach((l) =>
-      pushLabel("Next", l),
-    );
-    if (!lines.length) return base;
-    return base.trimEnd() + "\n\n" + lines.join("\n");
+  }
+  // Generate AI report replaces the notes wholesale with AI prose. The tagged
+  // [Protocol]/[Found]/[Next] template lines are NOT re-appended to the report
+  // (owner request: the drafted copy must be clean prose only). Instead, prune
+  // the label arrays to the labels whose tagged lines survived in the pre-draft
+  // notes (honoring deselect-by-deletion up to this point) and flip
+  // chipLinesDetached so the arrays become authoritative — the structured visit
+  // record (and interior-treatment safety scopes) survive drafting, and the
+  // pills UI takes over as the deselect handle. (notes still holds the
+  // pre-draft text here; setNotes(report) hasn't applied yet.)
+  function applyGeneratedReport(reportText) {
+    if (!chipLinesDetached) {
+      setSelectedProtocolActionLabels(
+        labelsStillInNotes(selectedProtocolActionLabels),
+      );
+      setSelectedObservationLabels(
+        labelsStillInNotes(selectedObservationLabels),
+      );
+      setSelectedRecommendationLabels(
+        labelsStillInNotes(selectedRecommendationLabels),
+      );
+      setChipLinesDetached(true);
+    }
+    setNotes(String(reportText || "").trim());
+  }
+  // Deselect handle after an AI draft: remove a structured selection from its
+  // label array (and its recorded re-entry/treatment scope, for protocol
+  // actions). Products added by a protocol action stay — they have their own
+  // remove control, same as deleting a tagged line never removed them.
+  function removeSelectedLabel(kind, label) {
+    if (kind === "protocol") {
+      setSelectedProtocolActionLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+      setActionScopeByLabel((prev) => {
+        if (!(label in prev)) return prev;
+        const next = { ...prev };
+        delete next[label];
+        return next;
+      });
+    } else if (kind === "observation") {
+      setSelectedObservationLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+    } else if (kind === "recommendation") {
+      setSelectedRecommendationLabels((prev) =>
+        prev.filter((item) => item !== label),
+      );
+    }
   }
   // The [Protocol]/[Found]/[Next] chip lines are structured selections that ride
   // along in the notes only as the tech's deselect handle — they're already sent
@@ -8482,9 +8528,9 @@ export function CompletionPanel({
     const productsApplied = selectedProducts
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
-    const actionsCompleted = labelsStillInNotes(selectedProtocolActionLabels);
-    const observations = labelsStillInNotes(selectedObservationLabels);
-    const recommendations = labelsStillInNotes(selectedRecommendationLabels);
+    const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
+    const observations = activeSelectedLabels(selectedObservationLabels);
+    const recommendations = activeSelectedLabels(selectedRecommendationLabels);
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -8990,7 +9036,7 @@ export function CompletionPanel({
           service.id,
         );
       }
-      const reportProtocolActions = labelsStillInNotes(
+      const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       );
       const reportProtocolActionScopes = reportProtocolActions
@@ -9000,11 +9046,13 @@ export function CompletionPanel({
           return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
         })
         .filter(Boolean);
-      const reportObservations = labelsStillInNotes(selectedObservationLabels);
+      const reportObservations = activeSelectedLabels(
+        selectedObservationLabels,
+      );
       // Typed mode appends the optional recommendations textarea into the
       // existing recommendations array — no new server field.
       const reportRecommendations = [
-        ...labelsStillInNotes(selectedRecommendationLabels),
+        ...activeSelectedLabels(selectedRecommendationLabels),
         ...(isTypedFindings && typedRecommendations.trim()
           ? [typedRecommendations.trim()]
           : []),
@@ -9336,8 +9384,17 @@ export function CompletionPanel({
           : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
+    // After an AI draft the notes are clean prose (no tagged lines), so check
+    // the authoritative label array instead of the notes text.
+    const inSelection = chipLinesDetached
+      ? selectedProtocolActionLabels.some(
+          (label) =>
+            String(label).trim().toLowerCase() ===
+            noteText.trim().toLowerCase(),
+        )
+      : notes.includes(noteText);
     return (
-      (!!noteText && notes.includes(noteText)) ||
+      (!!noteText && inSelection) ||
       (action?.product?.id &&
         selectedProducts.some((p) => p.productId === action.product.id))
     );
@@ -9351,6 +9408,28 @@ export function CompletionPanel({
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
+  // After an AI draft, the tagged chip lines no longer ride in the notes, so
+  // the still-selected structured items render as removable pills below the
+  // notes box — the ×-pill replaces delete-the-line as the deselect handle.
+  const detachedSelectionEntries = chipLinesDetached
+    ? [
+        ...activeSelectedLabels(selectedProtocolActionLabels).map((label) => ({
+          kind: "protocol",
+          prefix: "Protocol",
+          label,
+        })),
+        ...activeSelectedLabels(selectedObservationLabels).map((label) => ({
+          kind: "observation",
+          prefix: "Found",
+          label,
+        })),
+        ...activeSelectedLabels(selectedRecommendationLabels).map((label) => ({
+          kind: "recommendation",
+          prefix: "Next",
+          label,
+        })),
+      ]
+    : [];
   function handleProtocolActionSelect(value) {
     if (!value) return;
     // No note-mutating selections while an AI draft is in flight — the chip line
@@ -10493,6 +10572,57 @@ export function CompletionPanel({
                 )}
               </div>
             </Field>
+            {/* Post-AI-draft structured selections — the tagged lines no
+                longer ride in the report text, so the pills are the deselect
+                handle (tap × to remove an item before completing). */}
+            {detachedSelectionEntries.length > 0 && (
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 6,
+                  marginTop: -8,
+                  marginBottom: 16,
+                }}
+              >
+                {detachedSelectionEntries.map(({ kind, prefix, label }) => (
+                  <span
+                    key={`${kind}:${label}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink2,
+                      background: M.muted,
+                      border: `1px solid ${M.hairline}`,
+                      borderRadius: 999,
+                      padding: "4px 6px 4px 10px",
+                    }}
+                  >
+                    <span style={{ color: M.ink3 }}>{prefix}:</span>
+                    {label}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
+                      onClick={() => removeSelectedLabel(kind, label)}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: M.ink3,
+                        fontSize: 14,
+                        lineHeight: 1,
+                        padding: "2px 4px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {!isTypedFindings && (
               <Field label="Protocol actions">
                 {protocolActionsLoading ? (
@@ -10602,8 +10732,7 @@ export function CompletionPanel({
                   setGenerating(true);
                   try {
                     const r = await generateAiReport(payload);
-                    if (r.report)
-                      setNotes(stitchSelectedLabelsIntoReport(r.report));
+                    if (r.report) applyGeneratedReport(r.report);
                   } catch (e) {
                     alert("AI report failed: " + e.message);
                   }
@@ -12362,6 +12491,55 @@ export function CompletionPanel({
               </button>
             )}
           </div>
+          {/* Post-AI-draft structured selections — the tagged lines no longer
+              ride in the report text, so the pills are the deselect handle
+              (click × to remove an item before completing). */}
+          {detachedSelectionEntries.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                marginTop: 8,
+              }}
+            >
+              {detachedSelectionEntries.map(({ kind, prefix, label }) => (
+                <span
+                  key={`${kind}:${label}`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    fontSize: 12,
+                    color: D.text,
+                    background: D.card,
+                    border: `1px solid ${D.border}`,
+                    borderRadius: 999,
+                    padding: "4px 6px 4px 10px",
+                  }}
+                >
+                  <span style={{ color: D.muted }}>{prefix}:</span>
+                  {label}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
+                    onClick={() => removeSelectedLabel(kind, label)}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: D.muted,
+                      fontSize: 14,
+                      lineHeight: 1,
+                      padding: "2px 4px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
             {!isTypedFindings && (
@@ -12477,8 +12655,7 @@ export function CompletionPanel({
                 setGenerating(true);
                 try {
                   const r = await generateAiReport(payload);
-                  if (r.report)
-                    setNotes(stitchSelectedLabelsIntoReport(r.report));
+                  if (r.report) applyGeneratedReport(r.report);
                 } catch (e) {
                   alert("AI report failed: " + e.message);
                 }

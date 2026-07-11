@@ -114,6 +114,10 @@ describe('public estimate one-time breakdown', () => {
             frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
             waveGuardTier: 'Silver',
             anchorOneTimePrice: 250,
+            // Solo-pest snapshots carry the $99 WaveGuard setup — without it
+            // the missing-fee guard (codex rd2 P1) correctly forces a
+            // recompute instead of fast-pathing.
+            firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }],
             source: 'send_snapshot_fixture',
           },
         },
@@ -595,8 +599,8 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 90,
-                annual: 1080,
+                monthly: 100,
+                annual: 1200,
                 perServiceTreatments: [
                   {
                     service: 'pest_control',
@@ -606,11 +610,14 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
+                    // $100/app × 6 ÷ 12 = $50/mo — a SOLD cadence at the lawn
+                    // program minimum, so this snapshot keeps the fast path
+                    // (4-visit lawn rows are retired regardless of price).
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 120,
-                    perTreatment: 120,
-                    visitsPerYear: 4,
+                    displayPrice: 100,
+                    perTreatment: 100,
+                    visitsPerYear: 6,
                   },
                 ],
                 included: [
@@ -623,11 +630,14 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 90,
-            annualAfterDiscount: 1080,
+            monthlyTotal: 100,
+            annualAfterDiscount: 1200,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 40 },
+              // The stored lawn row carries its SOLD cadence (matching the
+              // snapshot's 6-visit treatment row) — a cadence-less lawn row
+              // with no tier ladder would be uninspectable and requote.
+              { name: 'Lawn Care', mo: 50, visitsPerYear: 6 },
             ],
           },
           oneTime: {
@@ -637,19 +647,19 @@ describe('public estimate one-time breakdown', () => {
           },
         },
       },
-      monthly_total: 90,
-      annual_total: 1080,
+      monthly_total: 100,
+      annual_total: 1200,
       onetime_total: 99,
       waveguard_tier: 'Bronze',
     });
 
     expect(payload.frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 90,
+      monthly: 100,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 90,
-      annualSubtotal: 1080,
+      monthlySubtotal: 100,
+      annualSubtotal: 1200,
     }));
     expect(payload.services.map((section) => section.key)).toEqual(['pest_control', 'lawn_care']);
     expect(payload.services[0]).toEqual(expect.objectContaining({
@@ -657,7 +667,9 @@ describe('public estimate one-time breakdown', () => {
       label: 'Pest Control',
       isPest: true,
       isRecurring: true,
-      setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+      // Multi-service bundles carry NO WaveGuard setup (owner directive
+      // 2026-07-10 evening: solo pest / solo mosquito only).
+      setupFee: null,
     }));
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
@@ -674,8 +686,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies).toHaveLength(1);
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'recurring',
-      monthly: 40,
-      perTreatment: 120,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
       addOns: [],
     }));
@@ -693,7 +705,7 @@ describe('public estimate one-time breakdown', () => {
   test('multi-service pest bundles preserve non-pest cadence rows when split', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-mixed-pest-non-pest-cadence-test',
-      monthly_total: 90,
+      monthly_total: 100,
       estimate_data: {
         sendSnapshot: {
           pricingBundle: {
@@ -703,7 +715,7 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 90,
+                monthly: 100,
                 perServiceTreatments: [
                   {
                     service: 'pest_control',
@@ -713,11 +725,12 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
-                    label: 'Lawn Care (Quarterly)',
-                    displayPrice: 120,
-                    perTreatment: 120,
-                    visitsPerYear: 4,
+                    label: 'Lawn Care (Bi-monthly)',
+                    displayPrice: 100,
+                    perTreatment: 100,
+                    visitsPerYear: 6,
                   },
                 ],
               },
@@ -747,11 +760,11 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 90,
-            annualAfterDiscount: 1080,
+            monthlyTotal: 100,
+            annualAfterDiscount: 1200,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 40 },
+              { name: 'Lawn Care', mo: 50 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -763,8 +776,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 90,
-      annual: 1080,
+      monthly: 100,
+      annual: 1200,
     }));
     expect(payload.frequencies[1]).toEqual(expect.objectContaining({
       key: 'monthly',
@@ -776,8 +789,8 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.services[1].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 40,
-      perTreatment: 120,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
     }));
     expect(payload.services[1].frequencies[1]).toEqual(expect.objectContaining({
@@ -787,16 +800,16 @@ describe('public estimate one-time breakdown', () => {
       perVisit: null,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 90,
-      annualSubtotal: 1080,
+      monthlySubtotal: 100,
+      annualSubtotal: 1200,
     }));
   });
 
   test('multi-service non-pest bundles preserve selectable cadence rows when split', async () => {
     const payload = await buildPricingBundle({
       id: 'estimate-public-non-pest-multi-cadence-test',
-      monthly_total: 50,
-      annual_total: 600,
+      monthly_total: 70,
+      annual_total: 840,
       estimate_data: {
         sendSnapshot: {
           pricingBundle: {
@@ -805,15 +818,16 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'quarterly',
                 label: 'Quarterly',
-                monthly: 50,
-                annual: 600,
+                monthly: 70,
+                annual: 840,
                 perServiceTreatments: [
                   {
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 90,
-                    perTreatment: 90,
-                    visitsPerYear: 4,
+                    displayPrice: 100,
+                    perTreatment: 100,
+                    visitsPerYear: 6,
                   },
                   {
                     service: 'mosquito',
@@ -827,14 +841,14 @@ describe('public estimate one-time breakdown', () => {
               {
                 key: 'monthly',
                 label: 'Monthly',
-                monthly: 60,
-                annual: 720,
+                monthly: 75,
+                annual: 900,
                 perServiceTreatments: [
                   {
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 35,
-                    perTreatment: 35,
+                    displayPrice: 50,
+                    perTreatment: 50,
                     visitsPerYear: 12,
                   },
                   {
@@ -851,10 +865,10 @@ describe('public estimate one-time breakdown', () => {
         },
         result: {
           recurring: {
-            monthlyTotal: 50,
-            annualAfterDiscount: 600,
+            monthlyTotal: 70,
+            annualAfterDiscount: 840,
             services: [
-              { name: 'Lawn Care', mo: 30 },
+              { name: 'Lawn Care', mo: 50 },
               { name: 'Mosquito', mo: 20 },
             ],
           },
@@ -870,19 +884,19 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[1].frequencies.map((frequency) => frequency.key)).toEqual(['quarterly', 'monthly']);
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
-      monthly: 30,
-      perTreatment: 90,
+      monthly: 50,
+      perTreatment: 100,
       perVisit: null,
     }));
     expect(payload.services[0].frequencies[1]).toEqual(expect.objectContaining({
       key: 'monthly',
-      monthly: 35,
-      perTreatment: 35,
+      monthly: 50,
+      perTreatment: 50,
       perVisit: null,
     }));
     expect(payload.combinedRecurring).toEqual(expect.objectContaining({
-      monthlySubtotal: 50,
-      annualSubtotal: 600,
+      monthlySubtotal: 70,
+      annualSubtotal: 840,
     }));
   });
 
@@ -913,7 +927,11 @@ describe('public estimate one-time breakdown', () => {
             discount: 0,
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 40 },
+              // Tree & Shrub, not lawn: an estimate with a recurring LAWN
+              // service and an unitemized snapshot now recomputes (lawn
+              // program-minimum policy), so the legacy-preservation
+              // mechanism is pinned with a non-lawn mix.
+              { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -962,11 +980,12 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
+                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
-                    displayPrice: 120,
-                    perTreatment: 120,
-                    visitsPerYear: 4,
+                    displayPrice: 100,
+                    perTreatment: 100,
+                    visitsPerYear: 6,
                   },
                 ],
               },
@@ -977,7 +996,7 @@ describe('public estimate one-time breakdown', () => {
           recurring: {
             services: [
               { name: 'Pest Control', mo: 50 },
-              { name: 'Lawn Care', mo: 40 },
+              { name: 'Lawn Care', mo: 50 },
             ],
           },
           oneTime: { total: 0, items: [] },
@@ -996,6 +1015,454 @@ describe('public estimate one-time breakdown', () => {
       monthlySubtotal: 83.33,
       annualSubtotal: 999.96,
     }));
+  });
+
+  test('snapshots violating the lawn program policy (retired Quarterly / below-floor lawn) are recomputed', async () => {
+    // A lawn-only estimate sent BEFORE the 2026-07-09 retirement/floor: its
+    // snapshot still offers the Basic cadence at $30/mo. The snapshot matches
+    // the stored totals, but it must NOT short-circuit — the bundle re-derives
+    // through the clamped ladder builders so the retired/below-floor plan can
+    // neither render nor be accepted from the old link.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-policy-violating-snapshot-test',
+      monthly_total: 30,
+      annual_total: 360,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'pre_floor_lawn_snapshot',
+            frequencies: [
+              { key: 'basic', label: 'Quarterly', serviceCategory: 'lawn_care', serviceTierKey: 'basic', monthly: 30, annual: 360, visitsPerYear: 4 },
+              { key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard', monthly: 38, annual: 456, visitsPerYear: 6 },
+            ],
+          },
+        },
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: false },
+              { name: 'Standard', v: 6, mo: 38, ann: 456, pa: 76 },
+              { name: 'Enhanced', v: 9, mo: 47, ann: 564, pa: 62.67, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 30,
+            annualAfterDiscount: 360,
+            services: [
+              { name: 'Lawn Care', service: 'lawn_care', mo: 30 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+    const keys = payload.frequencies.map((frequency) => frequency.key);
+    expect(keys).not.toContain('basic');
+    for (const frequency of payload.frequencies) {
+      if (frequency.serviceCategory === 'lawn_care') {
+        expect(frequency.monthly).toBeGreaterThanOrEqual(45);
+      }
+    }
+  });
+
+  test('snapshots with an AT-FLOOR 4-visit lawn row are still recomputed (retired cadence, any price)', async () => {
+    // $135/app × 4 ÷ 12 = $45/mo passes the price check, but 4 visits/yr IS
+    // the retired Quarterly plan — the snapshot must not short-circuit.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-at-floor-retired-lawn-snapshot-test',
+      monthly_total: 95,
+      annual_total: 1140,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'at_floor_retired_lawn_snapshot',
+            frequencies: [
+              {
+                key: 'quarterly',
+                label: 'Quarterly',
+                monthly: 95,
+                annual: 1140,
+                perServiceTreatments: [
+                  { service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 150, perTreatment: 150, visitsPerYear: 4 },
+                  { service: 'lawn_care', label: 'Lawn Care', displayPrice: 135, perTreatment: 135, visitsPerYear: 4 },
+                ],
+              },
+            ],
+          },
+        },
+        result: {
+          recurring: {
+            monthlyTotal: 95,
+            annualAfterDiscount: 1140,
+            services: [
+              { name: 'Pest Control', mo: 50 },
+              { name: 'Lawn Care', mo: 45 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+  });
+
+  test('an unitemized snapshot on a recurring-lawn estimate is recomputed (cannot be policy-checked)', async () => {
+    // Legacy snapshot with bare frequency rows — no lawn serviceCategory,
+    // treatment rows, sections, or combo axes. The estimate's recurring lawn
+    // is pre-floor ($34/mo), so fast-pathing the snapshot would sell below
+    // the program minimum without any row the policy check could catch.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-unitemized-lawn-snapshot-test',
+      monthly_total: 84,
+      annual_total: 1008,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'legacy_unitemized_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [
+              { key: 'quarterly', label: 'Quarterly', monthly: 84, annual: 1008 },
+              { key: 'monthly', label: 'Monthly', monthly: 104, annual: 1248 },
+            ],
+          },
+        },
+        result: {
+          results: {
+            pestTiers: [{ label: 'Quarterly', mo: 50, ann: 600, pa: 150, apps: 4 }],
+          },
+          recurring: {
+            discount: 0,
+            monthlyTotal: 84,
+            annualAfterDiscount: 1008,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 34, visitsPerYear: 6 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+  });
+
+  test('a snapshot whose lawn is only a section KEY (generic frequencies) is recomputed, not fast-pathed', async () => {
+    // Old snapshots of the no-engine fallback can carry a section keyed
+    // lawn_care whose frequencies are generic (no serviceCategory, no lawn
+    // treatment rows). The policy check cannot attribute those rows to lawn,
+    // so the section key alone must NOT count as lawn-identifiable — the
+    // below-floor snapshot recomputes and lands in the quote-required gate.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-section-key-snapshot-test',
+      monthly_total: 34,
+      annual_total: 408,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'legacy_section_key_snapshot',
+            waveGuardTier: 'Bronze',
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 34, annual: 408 }],
+            services: [{
+              key: 'lawn_care',
+              label: 'Lawn Care',
+              frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 34, annual: 408 }],
+            }],
+          },
+        },
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 34 }] },
+      },
+    });
+
+    expect(payload.snapshotHit).not.toBe(true);
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('annual prepay is hidden when the lawn floor leaves no sellable discount (React /data gate)', async () => {
+    // Lawn-only plan AT the $50/mo program minimum: prepay would save $0
+    // (the whole annual is floor-protected), so the bundle must not expose
+    // annualPrepayEligible — PaymentPreferenceButtons renders off that
+    // boolean alone. The $87/mo case above stays eligible (real headroom).
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-at-floor-prepay-gate-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 50,
+              ann: 600,
+              perTreatment: 100,
+              visitsPerYear: 6,
+            }],
+          },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.annualPrepayEligible).toBe(false);
+  });
+
+  test('annual prepay stays offered when a selectable higher cadence clears the floor', async () => {
+    // Default (recommended Standard) sits AT the floor, but the Premium
+    // cadence has real headroom — accept invoices from the SELECTED
+    // frequency, so the payload-level flag must not hide prepay for the
+    // whole estimate.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-selectable-prepay-gate-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true },
+              { name: 'Premium', v: 12, mo: 89, ann: 1068, pa: 89 },
+            ],
+          },
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{
+              service: 'lawn_care',
+              name: 'Lawn Care',
+              mo: 50,
+              ann: 600,
+              perTreatment: 100,
+              visitsPerYear: 6,
+            }],
+          },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.annualPrepayEligible).toBe(true);
+  });
+
+  test('a manual discount the floor blocks on EVERY cadence is suppressed on the payload and combined card', async () => {
+    // Lawn-only plan AT the $50/mo minimum with a $10/mo manual discount:
+    // every frequency row suppresses the discount (zero room under the
+    // floor), so the TOP-LEVEL payload.manualDiscount must be suppressed
+    // too — buildCombinedRecurring prefers it over the frequency rows and
+    // the React page renders combined.manualDiscount, which would otherwise
+    // show savings no selectable price reflects.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-floor-suppresses-top-level-discount-test',
+      monthly_total: 50,
+      annual_total: 600,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', value: 120, amount: 120, scope: 'recurring_annual_after_waveguard' },
+          recurring: {
+            discount: 0,
+            waveGuardTier: 'Bronze',
+            monthlyTotal: 50,
+            annualAfterDiscount: 600,
+            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 50, ann: 600, visitsPerYear: 6 }],
+          },
+          results: { lawn: [{ name: 'Standard', v: 6, mo: 50, ann: 600, pa: 100, recommended: true }] },
+          oneTime: { total: 0, items: [] },
+        },
+      },
+    });
+
+    expect(payload.manualDiscountSuppressed).toBe(true);
+    expect(payload.manualDiscount || null).toBeNull();
+    expect((payload.frequencies || []).every((f) => !f.manualDiscount)).toBe(true);
+    expect(payload.combinedRecurring?.manualDiscount || null).toBeNull();
+  });
+
+  test('no-engine fallback: a below-floor recurring-lawn estimate is quote-required, not rendered verbatim', async () => {
+    // Legacy shape whose lawn row lives at the estData top level — no
+    // result.* (so no v1 shape) and no engineInputs — takes the no-engine
+    // single-frequency fallback, which renders stored totals verbatim with
+    // no ladder rebuild and no clamp. A pre-floor lawn quote must flip to
+    // quote-required there instead of staying acceptable below the minimum.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-below-floor-test',
+      monthly_total: 34,
+      annual_total: 408,
+      estimate_data: {
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 34 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: a MIXED bundle with a lawn slice is quote-required even above the floor', async () => {
+    // $80/mo across lawn + tree: the fallback totals can't attribute the
+    // lawn slice, so floor compliance is unprovable — requote.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-mixed-test',
+      monthly_total: 80,
+      annual_total: 960,
+      estimate_data: {
+        recurring: {
+          services: [
+            { name: 'Lawn Care', service: 'lawn_care', mo: 30 },
+            { name: 'Tree & Shrub', service: 'tree_shrub', mo: 50 },
+          ],
+        },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: even a floor-compliant lawn-only estimate is quote-required (no provable cadence)', async () => {
+    // $55/mo satisfies the price floor, but the fallback bundle's single
+    // frequency is keyed 'quarterly' and the sparse row carries no explicit
+    // cadence — accepting could schedule the retired 4-visit program. No
+    // exception: every no-engine recurring-lawn shape requotes.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-lawn-compliant-test',
+      monthly_total: 55,
+      annual_total: 660,
+      estimate_data: {
+        recurring: { services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('legacy_lawn_pricing_requote');
+  });
+
+  test('no-engine fallback: a recurring NON-lawn estimate stays self-serve', async () => {
+    // The requote gate keys on recurring lawn only — a legacy pest-only
+    // no-engine shape keeps its existing fallback behavior.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-no-engine-pest-only-test',
+      monthly_total: 55,
+      annual_total: 660,
+      estimate_data: {
+        recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 55 }] },
+      },
+    });
+
+    expect(payload.fallback).toBe('no_engine_inputs');
+    expect(payload.quoteRequired).not.toBe(true);
+  });
+
+  test('a lawn-only estimate whose stored rows are ALL retired is quote-required (no self-serve accept)', async () => {
+    // Legacy quote that stored only the Basic/4-app row: the ladder filters
+    // it, and the generic fallback must NOT offer a silently-billable
+    // quarterly row — the estimate flips to quote-required so accept 409s
+    // and the view shows the call-to-confirm state.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-retired-lawn-only-requote-test',
+      monthly_total: 30,
+      annual_total: 360,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 30,
+            annualAfterDiscount: 360,
+            services: [
+              { name: 'Lawn Care', service: 'lawn_care', mo: 30 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
+    expect(payload.frequencies.map((f) => f.key)).not.toContain('basic');
+  });
+
+  test('a MIXED bundle whose only stored lawn row is retired is also quote-required', async () => {
+    // The converter schedules from the stored lawn service row — a mixed
+    // pest+lawn accept would keep the retired 4-visit cadence with only the
+    // price floored. No sellable lawn cadence → requote, any mix.
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-retired-lawn-mixed-requote-test',
+      monthly_total: 80,
+      annual_total: 960,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 80,
+            annualAfterDiscount: 960,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 30, visitsPerYear: 4 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(true);
+    expect(payload.quoteRequiredReason).toBe('retired_lawn_cadence_requote');
+  });
+
+  test('a bundle with a sellable lawn cadence in its rows stays self-serve acceptable', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-sellable-lawn-not-requote-test',
+      monthly_total: 95,
+      annual_total: 1140,
+      estimate_data: {
+        result: {
+          results: {
+            lawn: [
+              { name: 'Basic', v: 4, mo: 30, ann: 360, pa: 90 },
+              { name: 'Standard', v: 6, mo: 45, ann: 540, pa: 90, recommended: true },
+            ],
+          },
+          recurring: {
+            monthlyTotal: 95,
+            annualAfterDiscount: 1140,
+            services: [
+              { name: 'Pest Control', service: 'pest_control', mo: 50 },
+              { name: 'Lawn Care', service: 'lawn_care', mo: 45, visitsPerYear: 6 },
+            ],
+          },
+          oneTime: { total: 0, items: [] },
+          specItems: [],
+        },
+      },
+    });
+
+    expect(payload.quoteRequired).toBe(false);
+    expect(payload.quoteRequiredReason).not.toBe('retired_lawn_cadence_requote');
   });
 
   test('phase 0 no-engine recurring fallback keeps stored frequency pricing in services', async () => {
@@ -1502,8 +1969,9 @@ describe('public estimate one-time breakdown', () => {
       }),
     ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
-      // Mosquito is a WaveGuard-membership service (setup fee + tier), but it is
-      // not pest, so the pest-specific add-on gates stay off.
+      // Solo recurring mosquito DOES carry the $99 WaveGuard setup (owner
+      // directive 2026-07-10 evening — solo pest / solo mosquito only); the
+      // pest-specific add-on gates stay off.
       showWaveGuardSetupFee: true,
       showPestRecurringAddOns: false,
       showOneTimePestAddOns: false,
@@ -1946,7 +2414,7 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
-  test('lawn-only public frequencies include and preserve 4-application basic tier', () => {
+  test('lawn-only public frequencies drop the retired 4-application basic tier (owner directive 2026-07-09)', () => {
     const estData = {
       result: {
         results: {
@@ -1965,34 +2433,38 @@ describe('public estimate one-time breakdown', () => {
       },
     };
 
+    // Quarterly is retired: a stored Basic row (even the recommended one)
+    // never re-renders as a selectable cadence, so it can't be accepted.
     const frequencies = lawnFrequenciesFromResultStats(estData);
-    expect(frequencies.map((frequency) => frequency.key)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
+    expect(frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced', 'premium']);
     expect(frequencies[0]).toMatchObject({
-      key: 'basic',
-      label: 'Quarterly',
+      key: 'standard',
+      label: 'Bi-monthly',
       serviceCategory: 'lawn_care',
-      serviceTierKey: 'basic',
-      monthly: 80,
-      annual: 960,
-      perTreatment: 240,
-      visitsPerYear: 4,
+      serviceTierKey: 'standard',
+      monthly: 90,
+      annual: 1080,
+      perTreatment: 180,
+      visitsPerYear: 6,
       perServiceTreatments: [
-        expect.objectContaining({ service: 'lawn_care', perTreatment: 240, visitsPerYear: 4 }),
+        expect.objectContaining({ service: 'lawn_care', perTreatment: 180, visitsPerYear: 6 }),
       ],
     });
 
+    // Accepting a surviving cadence still re-stamps the recurring line and
+    // marks the results rows (Basic stays unselected).
     const nextData = applySelectedLawnTierToEstimateData(estData, frequencies[0]);
     expect(nextData.result.recurring.services[0]).toMatchObject({
       service: 'lawn_care',
-      serviceKey: 'lawn_care_quarterly',
-      frequency: 'quarterly',
-      tier: 'basic',
-      visitsPerYear: 4,
-      perTreatment: 240,
+      serviceKey: 'lawn_care_bimonthly',
+      frequency: 'bi_monthly',
+      tier: 'standard',
+      visitsPerYear: 6,
+      perTreatment: 180,
     });
     expect(nextData.result.results.lawn.map((row) => ({ tier: row.tier, selected: row.selected }))).toEqual([
-      { tier: 'basic', selected: true },
-      { tier: 'standard', selected: false },
+      { tier: 'basic', selected: false },
+      { tier: 'standard', selected: true },
       { tier: 'enhanced', selected: false },
       { tier: 'premium', selected: false },
     ]);
@@ -2036,9 +2508,11 @@ describe('public estimate one-time breakdown', () => {
     });
 
     // Termite carries no WaveGuard setup fee under the unified model, but it is
-    // still annual-prepay eligible (5% discount). A stale cached $99 membership
-    // fee is netted out via a one_time_adjustment so it is never charged; the
-    // bait-station install stays a separate one-time charge.
+    // still annual-prepay eligible (5% discount). A stale explicit $99 setup row
+    // is dropped outright (owner ask 2026-07-09: non-pest estimates must never
+    // show the membership setup) and its amount is stripped from the explicit
+    // total, so no netting adjustment row is minted; the bait-station install
+    // stays a separate one-time charge.
     expect(payload.annualPrepayEligible).toBe(true);
     expect(payload.setupFee).toBeNull();
     expect(payload.firstVisitFees).not.toContainEqual(expect.objectContaining({
@@ -2051,9 +2525,48 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.renderFlags.showWaveGuardSetupFee).toBe(false);
     expect(payload.oneTimeBreakdown.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ service: 'termite_bait_installation', amount: 556 }),
-      expect.objectContaining({ service: 'one_time_adjustment', amount: -99 }),
     ]));
+    expect(payload.oneTimeBreakdown.items).not.toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+    }));
+    expect(payload.oneTimeBreakdown.items).not.toContainEqual(expect.objectContaining({
+      service: 'one_time_adjustment',
+    }));
     expect(payload.oneTimeBreakdown.total).toBe(556);
+  });
+
+  test('public pricing bundle: lawn-only estimate drops a stale explicit WaveGuard setup row', async () => {
+    const payload = await buildPricingBundle({
+      id: 'estimate-public-lawn-only-setup-suppression-test',
+      estimate_data: {
+        result: {
+          recurring: {
+            monthlyTotal: 120,
+            annualAfterDiscount: 1440,
+            services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 120 }],
+          },
+          oneTime: {
+            total: 99,
+            items: [
+              { service: 'waveguard_setup', name: 'WaveGuard setup', price: 99, detail: 'Membership setup fee' },
+            ],
+          },
+        },
+      },
+      monthly_total: 120,
+      annual_total: 1440,
+      onetime_total: 99,
+    });
+
+    // Lawn carries no WaveGuard membership setup (owner ask 2026-07-09): the
+    // stale explicit $99 row saved in oneTime.items is dropped, its amount is
+    // stripped from the explicit total, and no netting adjustment row is
+    // minted — the one-time card disappears entirely.
+    expect(payload.oneTimeBreakdown.items).toEqual([]);
+    expect(payload.oneTimeBreakdown.total).toBe(0);
+    expect(payload.firstVisitFees || []).not.toContainEqual(expect.objectContaining({
+      service: 'waveguard_setup',
+    }));
   });
 
   test('classifies fallback-saved native roach initial by service key', async () => {
@@ -4159,8 +4672,10 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Lot', value: '9,000 sq ft' },
       { label: 'Pool/Lanai', value: 'Yes (Medium cage)' },
       { label: 'Treatable lawn', value: '5,200 sq ft' },
-      { label: 'Complexity', value: 'Moderate' },
     ]));
+    // Complexity is suppressed for ANY mix that includes lawn (owner ask
+    // 2026-07-10 — extends the lawn-only rule to pest+lawn bundles).
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.signals).toEqual([]);
   });
@@ -4183,6 +4698,30 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Treatable lawn', value: '4,200 sq ft' },
       { label: 'Grass type', value: 'St. Augustine' },
     ]));
+  });
+
+  test('Waves AI payload drops Pool/Lanai and Complexity for lawn-only estimates', () => {
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {
+        homeSqFt: 1900,
+        lotSqFt: 7200,
+        lawnSqFt: 4200,
+        services: { lawn: { track: 'st_augustine' } },
+        landscapeComplexity: 'COMPLEX',
+        pool: 'YES',
+        poolCage: 'YES',
+        poolCageSize: 'medium',
+      },
+      result: {
+        recurring: { services: [{ name: 'Lawn Care' }] },
+      },
+    });
+
+    expect(payload.metrics).toEqual(expect.arrayContaining([
+      { label: 'Grass type', value: 'St. Augustine' },
+    ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
   });
 
   test('Waves AI payload uses later object turf fields when the first field is a placeholder', () => {
@@ -4285,7 +4824,10 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics.some((metric) => metric.label === 'Trees/Shrubs')).toBe(false);
   });
 
-  test('Waves AI payload preserves complexity for termite and lawn bundles', () => {
+  test('Waves AI payload suppresses complexity for any bundle that includes lawn', () => {
+    // Owner ask 2026-07-10: landscape Complexity reads as noise whenever lawn
+    // is in the mix — extended from the lawn-only rule to bundles (pest+lawn,
+    // termite+lawn). Termite perimeter still renders.
     const payload = buildWaveGuardIntelligencePayload({}, {
       inputs: {
         homeSqFt: 2400,
@@ -4308,12 +4850,36 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toHaveLength(6);
+    expect(payload.metrics).toHaveLength(5);
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Termite perimeter', value: '180 linear ft' },
-      { label: 'Complexity', value: 'Moderate' },
     ]));
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
+  });
+
+  test('Waves AI payload suppresses complexity for engineInputs-shaped lawn estimates', () => {
+    // Quote-wizard estimates persist a legacy empty `inputs: {}` alongside
+    // engineInputs.services.lawn — the lawn detector must read both shapes.
+    const payload = buildWaveGuardIntelligencePayload({}, {
+      inputs: {},
+      engineInputs: {
+        homeSqFt: 2400,
+        lotSqFt: 9000,
+        landscapeComplexity: 'MODERATE',
+        services: { lawn: { track: 'st_augustine' }, pest: { frequency: 4 } },
+      },
+      result: {
+        recurring: {
+          services: [
+            { name: 'Pest Control', service: 'pest_control' },
+            { name: 'Lawn Care', service: 'lawn_care' },
+          ],
+        },
+      },
+    });
+
+    expect(payload.metrics.some((metric) => metric.label === 'Complexity')).toBe(false);
   });
 
   test('Waves AI payload uses termite-specific copy and perimeter for termite-bait-only estimates', () => {
@@ -5314,8 +5880,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="219.6">$219.60</strong></div>');
-    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="99">$318.60</strong></div>');
-    expect(html).toContain('setup plus the first application totaling <span data-standard-invoice-copy-total data-standard-setup-due="99">$318.60</span>');
+    // Multi-service bundles carry NO WaveGuard setup (owner directive
+    // 2026-07-10 evening: the fee is solo-pest/solo-mosquito only), so the
+    // invoice total is the first visit alone.
+    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="0">$219.60</strong></div>');
+    expect(html).not.toContain('data-standard-setup-due="99"');
     expect(html).not.toContain('data-first-visit-copy-total');
     expect(html).toContain("document.querySelectorAll('[data-standard-invoice-total]')");
     expect(html).toContain("document.querySelectorAll('[data-standard-invoice-copy-total]')");
@@ -5411,8 +5980,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<span>Invoice total</span>');
     expect(html).not.toContain('Invoice includes WaveGuard setup');
     expect(html).not.toContain('we open the $99 setup invoice');
-    // Prepay is still offered, now with a 5% discount: $660 → $627.
-    expect(html).toContain('data-prepay-invoice-total data-prepay-discount-rate="0.05">$627');
+    // Prepay is still offered, but the $50/mo lawn program minimum protects
+    // $600 of the $660 base — the 5% applies only to the $60 headroom:
+    // $660 → $657. The element carries the floor + configured rate so the
+    // client-side refresh re-derives the floor-aware total for ANY annual.
+    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -5472,18 +6044,22 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('<strong><s>$99</s> $0</strong>');
     expect(html).toContain('Pay the 12-month plan in full');
     // Prepay incentive is a 5% discount off the recurring annual, not a setup waiver.
-    expect(html).toContain('Choose the 12-month plan up front and save 5%; we send the annual invoice automatically after confirmation.');
-    expect(html).toContain('Prepay discount (5%)');
-    expect(html).toContain('Save 5%');
+    // The lawn floor protects $600 of the $660 base — the effective prepay
+    // rate is 0.5% (one-decimal label so it never reads "save 0%").
+    expect(html).toContain('Choose the 12-month plan up front and save 0.5%; we send the annual invoice automatically after confirmation.');
+    expect(html).toContain('Prepay discount (0.5%)');
+    expect(html).toContain('Save 0.5%');
     expect(html).not.toContain('Net setup fee: $0');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
     expect(html).not.toContain('<strong>−$99</strong>');
     expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
-    // Annual plan total $660 → prepay invoice $627 (5% off the recurring annual).
-    expect(html).toContain('data-prepay-discount-rate="0.05">$627</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-discount-rate="0.05">$627</span>');
+    // Annual plan total $660 → prepay invoice $657 (5% off only the $60
+    // slice above the $600 lawn program minimum). The refresh attrs carry
+    // the floor + configured rate, never a flat effective rate.
+    expect(html).toContain('data-prepay-configured-rate="0.05">$657</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
-    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 627;');
+    expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 657;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
     expect(html).toContain("annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' will be available for optional payment after confirmation.");
     expect(html).not.toContain('The WaveGuard Membership is included with the 12-month plan invoice.');
@@ -6482,7 +7058,7 @@ describe('public estimate one-time breakdown', () => {
       success: true,
       nextStep: 'pay_invoice',
       serviceMode: 'recurring',
-      invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&billingTerm=prepay_annual',
+      invoicePayUrl: '/pay/annual-token?source=estimate&saveCard=1&saveRequired=1&billingTerm=prepay_annual',
       billingTerm: 'prepay_annual',
       prepayInvoiceAmount: 660,
     }));
@@ -6799,7 +7375,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoiceId: 'inv-123',
-      invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&billingTerm=standard',
+      invoicePayUrl: '/pay/inv-123?source=estimate&saveCard=1&saveRequired=1&billingTerm=standard',
     }));
   });
 
@@ -6810,6 +7386,9 @@ describe('public estimate one-time breakdown', () => {
     })).toEqual({
       source: 'estimate',
       saveCard: '1',
+      // Recurring accepts lock the consent box: a method on file is a
+      // signup precondition (owner ruling 2026-07-09).
+      saveRequired: '1',
       billingTerm: 'standard',
     });
 

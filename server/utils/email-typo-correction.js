@@ -172,6 +172,11 @@ function correctEmailDomain(email) {
   if (!domain.includes('.')) {
     const exact = DOTLESS_TO_DOMAIN.get(domain);
     if (exact) return build(exact, 'missing_dot', 'high');
+    // Whole TLD dropped, leaving a bare known second-level label: a spoken
+    // "…at gmail" that lost ".com" ("brandon@gmail" → "brandon@gmail.com").
+    // Only when the SLD unambiguously maps to one known domain.
+    const sldCanonical = SLD_TO_DOMAIN.get(domain);
+    if (sldCanonical) return build(sldCanonical, 'missing_tld', 'high');
     // Fall through to fuzzy match below in case it's dotless AND mistyped.
   }
 

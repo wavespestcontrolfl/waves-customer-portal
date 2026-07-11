@@ -10,6 +10,7 @@ const {
   reportPdfStorageKey,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
+const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
   emitPdfRenderTerminalFailure,
@@ -47,19 +48,24 @@ async function loadServiceRecordForPdf(recordId, knex = db) {
   return knex('service_records')
     .where({ 'service_records.id': recordId })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
     .select(
       'service_records.*',
       'customers.first_name',
       'customers.last_name',
-      'customers.address_line1',
-      'customers.address_line2',
-      'customers.city',
-      'customers.state',
-      'customers.zip',
+      // PDF address/map follow the visit's stamped service address when
+      // present — a phone-booked rental report must not render the primary
+      // home (codex round-9 P2). Coords: stamped visit coords first, the
+      // primary home only for non-divergent stamps.
+      knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+      knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      knex.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+      knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
       'customers.has_left_google_review',
-      'customers.latitude as customer_latitude',
-      'customers.longitude as customer_longitude',
+      knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+      knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
       'technicians.name as technician_name',
       'technicians.photo_url as technician_photo_url',
       'technicians.avatar_url as technician_avatar_url',

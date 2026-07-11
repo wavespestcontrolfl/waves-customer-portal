@@ -533,9 +533,14 @@ async function createPendingEstimate(input) {
     token: estimate.token,
     admin_url: `https://portal.wavespestcontrol.com/admin/estimates`,
     customer_view_url: customerViewUrl,
+    // Staff preview link — bare /estimate/<token> serves the legacy
+    // server-HTML renderer while the row is still a draft; ?adminPreview=1
+    // routes staff to the real React page. Kept separate from
+    // customer_view_url, which doubles as the customer's link after send.
+    admin_preview_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}?adminPreview=1`,
     monthly_total: monthly,
     annual_total: annual,
-    note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send.',
+    note_for_admin: 'Draft created. Open admin/estimates → 🤖 to review and send. To preview it yourself, use admin_preview_url (the customer link shows the draft in the old layout).',
   };
 }
 

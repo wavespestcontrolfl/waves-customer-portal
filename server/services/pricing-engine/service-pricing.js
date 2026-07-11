@@ -25,6 +25,11 @@ const {
   lawnComplexityMinutes,
   computeLawnCostFloor,
 } = require('@waves/lawn-cost-floor');
+// Pest post-discount program floor (owner decision 2026-07-09). Tier rows
+// carry the floor amounts so downstream payload shapers (v1-legacy-mapper →
+// estimate-public shapeFromV1) can hold the customer-visible discounted price
+// at the floor without re-deriving cadence math from constants.
+const { pestProgramFloorPerVisit, pestProgramFloorAnnual } = require('./discount-engine');
 
 function roundMoney(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -1465,12 +1470,22 @@ function pricePestControl(property, options = {}) {
     const fm = freqDiscounts[freqKey] || 1.0;
     const pa = Math.round((basePrice * fm + roachAddOn) * 100) / 100;
     const ann = Math.round(pa * v * 100) / 100;
+    // Post-discount program floor for this cadence. Emitted only while
+    // enforcement is on: estimates generated with the floor keep it for the
+    // life of the stored payload (snapshot semantics); flipping the DB kill
+    // switch stops NEW estimates from carrying it.
+    const floorAnn = PEST.enforceFloorPostDiscount ? pestProgramFloorAnnual(fm, v) : null;
     return {
       frequency: freqKey,
       freq: v,
       perApp: pa,
       annual: ann,
       monthly: Math.round(ann / 12 * 100) / 100,
+      ...(floorAnn !== null ? {
+        programFloorPerVisit: pestProgramFloorPerVisit(fm),
+        programFloorAnnual: floorAnn,
+        programFloorMonthly: Math.round(floorAnn / 12 * 100) / 100,
+      } : {}),
       label: freqKey === 'monthly' ? 'Monthly' : freqKey === 'bimonthly' ? 'Bi-Monthly' : 'Quarterly',
       recommended: freqKey === frequency,
       selected: freqKey === frequency,
@@ -1826,6 +1841,11 @@ function priceLawnCare(property, options = {}) {
     lawnFreq,
     useLawnCostFloor = true,
     includeHiddenTiers = false,
+    // Internal-only escape hatch for callers that need the raw market
+    // baseline (one-time lawn derives its base from recurring perApp and
+    // must not inherit the recurring program minimum). NOT wired to
+    // estimate-engine input — sold recurring plans always get the floor.
+    applyProgramMinimum = true,
   } = options;
 
   const normalizedTrack = normalizeGrassType(track);
@@ -1858,6 +1878,15 @@ function priceLawnCare(property, options = {}) {
 
   // ── Tier array: 4 Apps / 6 Apps / 9 Apps / 12 Apps ──
   const TIER_LIST = includeHiddenTiers ? Object.keys(LAWN_TIERS) : LAWN_SOLD_TIERS;
+  // Program minimum (owner directive 2026-07-09): every sold lawn plan bills
+  // at least this per month regardless of track/size/cadence. Annual is the
+  // source of truth; ceil to a whole-dollar-per-app multiple like the cost
+  // floor so perApp stays clean.
+  const programMinimumMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
+  const programMinimumAnnual = applyProgramMinimum
+    && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
+    ? Math.round(programMinimumMonthly * 12 * 100) / 100
+    : 0;
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
@@ -1872,7 +1901,9 @@ function priceLawnCare(property, options = {}) {
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
     const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPriceFor55;
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
-    const ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
+    const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
+    if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       tier: t,
@@ -1884,8 +1915,14 @@ function priceLawnCare(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      pricingBasis: costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis,
-      pricingSource: costFloorApplied ? 'COST_FLOOR' : market.pricingSource,
+      pricingBasis: programMinimumApplied
+        ? 'PROGRAM_MINIMUM_MONTHLY'
+        : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis),
+      pricingSource: programMinimumApplied
+        ? 'PROGRAM_MINIMUM'
+        : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource),
+      programMinimumApplied,
+      programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
       marketAnnual,
       marketSource: market.pricingSource,
@@ -1945,6 +1982,8 @@ function priceLawnCare(property, options = {}) {
     },
     costFloorAnnual: selected.costFloorAnnual,
     costFloorApplied: selected.costFloorApplied,
+    programMinimumApplied: selected.programMinimumApplied === true,
+    programMinimumMonthly: selected.programMinimumMonthly ?? null,
     costs: {
       annualMaterial: roundMoney(selectedCosts.annualMaterial ?? scaledMaterial),
       annualLabor: roundMoney(selectedCosts.annualLabor ?? annualLabor),
@@ -4565,6 +4604,9 @@ function priceOneTimeLawn(property, options = {}) {
     tier,
     lawnFreq,
     useLawnCostFloor: false,
+    // One-time derives from the raw recurring per-app market rate; the
+    // recurring program minimum (a floor on sold PLANS) must not inflate it.
+    applyProgramMinimum: false,
   });
   const base = Math.max(ONE_TIME.lawn.floor, Math.round(lawnResult.perApp * ONE_TIME.lawn.oneTimeMultiplier));
 
@@ -5304,6 +5346,9 @@ function pricePreSlabTermiticide(input, options = {}) {
     marginDivisor: product.marginDivisor,
     targetMargin: 1 - product.marginDivisor,
     rawPrice: null,
+    usageStepSqFt: Number(cfg.usageStepSqFt) > 0 ? Number(cfg.usageStepSqFt) : 0,
+    usageStepPricedSqFt: null,
+    usageStepPrice: null,
     jobContext: jobContextResolution.jobContext,
     preSlabJobContext: jobContextResolution.jobContext,
     requestedJobContext: jobContextResolution.requestedJobContext,
@@ -5368,23 +5413,44 @@ function pricePreSlabTermiticide(input, options = {}) {
   }
 
   const slabSqFt = measurement.value;
-  const productOz = slabSqFt / 10 * productOzPer10SqFt;
-  const units = Math.max(1, Math.ceil(productOz / containerOz));
   const chemicalCostPerOz = containerCost / containerOz;
+  const complianceAdminCost = Number(cfg.complianceAdminCost || 0);
+  const includeDriveCost = cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true;
+  // One cost-plus evaluator for both the actual slab and the usage-step
+  // bucket, so the step can never drift from the real formula.
+  const costPlusAt = (sqFt) => {
+    const oz = sqFt / 10 * productOzPer10SqFt;
+    const hrs = Math.min(
+      laborCfg.maxHours || 5,
+      Math.max(laborCfg.minHours || 1, (laborCfg.baseHours || 0.5) + sqFt * (laborCfg.hoursPerSqFt || (1 / 1500))),
+    );
+    const drive = includeDriveCost ? GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60 : 0;
+    const totalCost = oz * chemicalCostPerOz + hrs * GLOBAL.LABOR_RATE + cfg.equipCost + complianceAdminCost + drive;
+    return { oz, hrs, drive, totalCost, price: Math.round(totalCost / product.marginDivisor) };
+  };
+  const actual = costPlusAt(slabSqFt);
+  const productOz = actual.oz;
+  const units = Math.max(1, Math.ceil(productOz / containerOz));
   const allocatedProductCost = productOz * chemicalCostPerOz;
   const fullContainerProductCost = units * containerCost;
-  const laborHrs = Math.min(
-    laborCfg.maxHours || 5,
-    Math.max(laborCfg.minHours || 1, (laborCfg.baseHours || 0.5) + slabSqFt * (laborCfg.hoursPerSqFt || (1 / 1500))),
-  );
+  const laborHrs = actual.hrs;
   const laborCost = laborHrs * GLOBAL.LABOR_RATE;
-  const complianceAdminCost = Number(cfg.complianceAdminCost || 0);
-  const driveCost = cfg.includeDriveCostByContext?.[jobContextResolution.jobContext] === true
-    ? GLOBAL.LABOR_RATE * GLOBAL.DRIVE_TIME / 60
-    : 0;
-  const cost = allocatedProductCost + laborCost + cfg.equipCost + complianceAdminCost + driveCost;
-  const rawPrice = Math.round(cost / product.marginDivisor);
-  const priceBeforeVolumeDiscount = Math.max(rawPrice, floorBeforeVolumeDiscount);
+  const driveCost = actual.drive;
+  const cost = actual.totalCost;
+  const rawPrice = actual.price;
+  // Usage-step (owner decision 2026-07-10): the list price floors at the
+  // cost-plus of the slab rounded UP to the next usageStepSqFt sq ft, so
+  // price climbs with product usage instead of flat-lining across the wide
+  // contextual-minimum buckets (and keeps stepping past the last bucket —
+  // no table cap). Reported quantities (productOz/units/cost fields) stay
+  // actual-usage. Volume discounts still apply to the stepped price; the
+  // static contextual floor remains the absolute post-discount minimum.
+  const usageStepSqFt = Number(cfg.usageStepSqFt) > 0 ? Number(cfg.usageStepSqFt) : 0;
+  const usageStepPricedSqFt = usageStepSqFt > 0 ? Math.ceil(slabSqFt / usageStepSqFt) * usageStepSqFt : null;
+  const usageStepPrice = usageStepPricedSqFt !== null && usageStepPricedSqFt !== slabSqFt
+    ? costPlusAt(usageStepPricedSqFt).price
+    : rawPrice;
+  const priceBeforeVolumeDiscount = Math.max(rawPrice, usageStepPrice, floorBeforeVolumeDiscount);
   const priceAfterVolumeDiscount = Math.max(
     Math.round(priceBeforeVolumeDiscount * volumeDiscountMultiplier),
     floorAfterVolumeDiscount,
@@ -5407,6 +5473,9 @@ function pricePreSlabTermiticide(input, options = {}) {
     driveCost: roundMoney(driveCost),
     cost: roundMoney(cost),
     rawPrice,
+    usageStepSqFt,
+    usageStepPricedSqFt,
+    usageStepPrice,
     priceBeforeVolumeDiscount,
     priceAfterVolumeDiscount,
     treatmentPrice: priceAfterVolumeDiscount,

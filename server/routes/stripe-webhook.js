@@ -560,6 +560,25 @@ router.post(
           await handleChargeRefunded(event.data.object);
           break;
 
+        case 'refund.failed':
+          await handleRefundFailed(event.data.object);
+          break;
+
+        case 'refund.updated':
+        case 'charge.refund.updated': {
+          // Both names fire on refund status/metadata changes (refund.updated
+          // is the modern event, charge.refund.updated the legacy alias); the
+          // money-relevant transition is a post-creation bounce. Everything
+          // else is noise — charge.refunded already recorded the creation.
+          const refundObj = event.data.object;
+          if (['failed', 'canceled'].includes(refundObj?.status)) {
+            await handleRefundFailed(refundObj);
+          } else {
+            logger.info(`[stripe-webhook] refund ${refundObj?.id || '(unknown)'} updated → ${refundObj?.status} (no action)`);
+          }
+          break;
+        }
+
         case 'charge.dispute.created':
           await handleDisputeCreated(event.data.object);
           break;
@@ -1137,6 +1156,42 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     }
   }
 
+  // If ACH payment succeeded, resolve any pending ACH failures for this
+  // customer. ORDER MATTERS: this reset must run BEFORE the save-card
+  // mirror below — a required-save customer paying by bank from a
+  // previously blocked account (ach_status needs_verification/suspended)
+  // has just proven the account collects, and enrollConsentedMethod
+  // refuses bank targets while ach_status is unhealthy. Resetting first
+  // means the enrollment attempt sees the healthy state; the old
+  // reset-after ordering left the debit cleared but the method
+  // saved-only with no second enrollment attempt (Codex #2507 round-6).
+  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
+  if (pmType === 'us_bank_account') {
+    try {
+      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+      if (payment?.customer_id) {
+        // Third-party Bill-To: a payer/AP bank transfer clearing must not
+        // reactivate the homeowner's suspended/needs-verification ACH state —
+        // the payer's payment row sits under the service customer's id but is
+        // not the homeowner's bank account. (Symmetric to the handleAchFailure
+        // guard.)
+        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
+        if (achInvoice?.payer_id) {
+          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
+        } else {
+          await db('ach_failure_log')
+            .where({ customer_id: payment.customer_id, resolved: false })
+            .update({ resolved: true, resolution: 'retry_success' })
+            .catch(() => {});
+          await db('customers').where({ id: payment.customer_id })
+            .update({ ach_status: 'active', ach_failure_count: 0 })
+            .catch(() => {});
+          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
+        }
+      }
+    } catch { /* non-critical */ }
+  }
+
   // ── Save payment method on the customer if they opted in ─────
   //
   // When the /pay/:token page sets `setup_future_usage: 'off_session'`
@@ -1186,80 +1241,76 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           currentAutopayMethod = null;
         }
       }
-      // Estimate-flow signups (billing_mode 'per_application' /
-      // 'annual_prepay') enroll in autopay at signup (owner ruling
-      // 2026-07-09): the v8 save-card consent the customer just checked
-      // explicitly authorizes charging this card "for future service visits
-      // and invoices as agreed", and their acceptance-invoice pay links
-      // arrive with saveCard=1 (estimateInvoicePayUrlParams) so the consent
-      // box is presented by default. Legacy / unclassified customers keep
-      // the old behavior: saved for card-on-file only, autopay stays an
-      // explicit portal (AutopayCard) enrollment. Column-guarded read —
-      // pre-migration environments keep enrolling nothing.
-      let enrollAutopay = false;
+      // Autopay enrollment is CONSENT-gated, not billing-mode-gated (owner
+      // ruling 2026-07-09: Auto Pay is enabled for every customer who saves
+      // a method, regardless of per-app / prepay / monthly) — and the gate
+      // is the immutable payment_method_consents ROW, never PI metadata
+      // alone (Codex #2507 P1 round-2): if the browser's consent POST never
+      // lands (closed tab, network failure), enabling off-session charges
+      // from metadata would leave us charging with no authorization
+      // snapshot on file. The race runs BOTH directions and both are
+      // covered: consent row first → this webhook enrolls below; webhook
+      // first → the method is saved card-on-file only and the /consent
+      // endpoint completes enrollment when it records the row
+      // (enrollConsentedMethod is shared + idempotent). billing_mode only
+      // decides WHAT charges the method (per-visit completion, annual
+      // renewal, or the monthly cron).
       let signupBillingMode = null;
       try {
         const custRow = await db('customers')
           .where({ id: wavesCustomerId })
           .first('billing_mode');
         signupBillingMode = custRow?.billing_mode || null;
-        enrollAutopay = ['per_application', 'annual_prepay'].includes(signupBillingMode);
-      } catch (modeErr) { /* billing_mode column absent — keep false */ }
+      } catch (modeErr) { /* billing_mode column absent — log detail only */ }
       let saved = existing;
       if (!saved) {
-        // ANY tender enrolls (owner ruling 2026-07-09: capture a payment
-        // method at signup — card or bank — and auto-charge it after each
-        // visit / at renewal): chargeInvoiceWithSavedCard locks the PI to
-        // the saved method's family, and the ach_status guard in
-        // customerOnAutopay handles unhealthy bank accounts.
+        // ANY tender saves (owner ruling 2026-07-09: capture a payment
+        // method at signup — card or bank): chargeInvoiceWithSavedCard
+        // locks the PI to the saved method's family, and the ach_status
+        // guard in customerOnAutopay handles unhealthy bank accounts.
+        // Saved autopay-OFF; the consent-row check below enrolls. Default
+        // claim keeps the round-5 semantics: only when no healthy
+        // incumbent is in charge.
         saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
-          enableAutopay: enrollAutopay,
+          enableAutopay: false,
           makeDefault: !currentAutopayMethod,
         });
-      } else if (enrollAutopay && !currentAutopayMethod && existing.customer_id === wavesCustomerId) {
-        // The pm was already on file (saved card-on-file before this signup,
-        // or a duplicate webhook) — the short-circuit skips savePaymentMethod,
-        // so enroll here or the signup's autopay consent is silently dropped
-        // and completion collection (getChargeableAutopayMethod: is_default
-        // AND autopay_enabled) never finds a card (Codex round-2). Same
-        // semantics as the fresh-save path: only claim default when no
-        // chargeable autopay method exists; an existing one stays in charge.
-        // Ownership guard: `existing` is looked up by pm id alone. Any
-        // tender enrolls (see the fresh-save branch note).
-        await db('payment_methods')
-          .where({ customer_id: wavesCustomerId })
-          .whereNot({ id: existing.id })
-          .update({ is_default: false });
-        await db('payment_methods')
-          .where({ id: existing.id })
-          .update({ autopay_enabled: true, is_default: true });
-        saved = { ...existing, autopay_enabled: true, is_default: true };
-        logger.info(`[stripe-webhook] Autopay enrolled on existing pm ${stripePmId} for customer ${wavesCustomerId} (estimate-flow signup)`);
-      }
-      // Row-level enrollment is inert while the CUSTOMER flag is off:
-      // customerOnAutopay short-circuits on customers.autopay_enabled=false
-      // (e.g. a returning customer who turned Auto Pay off), so the consented
-      // card would never be auto-charged and the portal would keep reporting
-      // Auto Pay as off (Codex round-3). The signup consent re-authorizes —
-      // flip the customer flag and point it at whichever method is actually
-      // in charge (a pre-existing chargeable default keeps that role).
-      const enrolledChargeable = enrollAutopay
-        && (currentAutopayMethod || (saved && saved.autopay_enabled && saved.is_default));
-      if (enrolledChargeable) {
-        await db('customers')
-          .where({ id: wavesCustomerId })
-          .update({
-            autopay_enabled: true,
-            autopay_payment_method_id: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
-          });
-        try {
-          await require('../services/autopay-log').logAutopay(wavesCustomerId, 'autopay_enabled', {
-            paymentMethodId: currentAutopayMethod ? currentAutopayMethod.id : saved.id,
-            details: { source: 'estimate_flow_signup', billing_mode: signupBillingMode },
-          });
-        } catch (logErr) { /* log-only */ }
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Ownership guard: `existing` was looked up by pm id alone — never
+      // enroll a method that belongs to another customer (Codex round-2
+      // short-circuit note).
+      if (!existing || existing.customer_id === wavesCustomerId) {
+        if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+          // Record the consent snapshot SERVER-SIDE — same recipe as the
+          // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
+          // micro-deposit signup, confirmPayment returned requires_action
+          // so the browser never posted /consent (that endpoint refuses
+          // non-processing/succeeded PIs), and by the time this succeeded
+          // event arrives days later there is no browser left to post it —
+          // deferring would leave a required-save signup paid with the
+          // method saved-but-unenrolled forever. The round-2 gate stands:
+          // enrollment still requires the immutable consent ROW — it is
+          // CREATED here from the Stripe-signed artifact (save_card_opt_in
+          // + setup_future_usage written together by the controlled /setup
+          // and /update-amount paths, and the customer confirmed that PI),
+          // never inferred at charge time.
+          await ConsentService.recordConsent({
+            customerId: wavesCustomerId,
+            paymentMethodId: saved.id,
+            stripePaymentMethodId: stripePmId,
+            source: 'pay_page',
+            methodType: saved.method_type || 'card',
+          });
+        }
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        await enrollConsentedMethod({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { billing_mode: signupBillingMode },
+        });
+      }
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
           customerId: wavesCustomerId,
@@ -1272,9 +1323,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       }
       logger.info(`[stripe-webhook] Save-card opt-in persisted: pm ${stripePmId} → payment_methods ${saved.id}`);
     } catch (err) {
-      // Non-fatal — the charge already succeeded. Log loudly so we can
-      // manually reconcile if the save failed.
-      logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}): ${err.message}`);
+      // Re-throw so the dispatcher 500s and Stripe retries (Codex #2507
+      // round-7 P1): for micro-deposit ACH signups THIS event is the only
+      // completion path (no browser returns days later), so a swallowed
+      // transient error would leave the signup paid with nothing
+      // enrolled, permanently. Every step above is idempotent
+      // (lookup-first save, hasConsentFor-gated consent, idempotent
+      // enrollment) and the payment settle earlier in this handler is
+      // status-guarded, so the retry re-runs safely.
+      logger.error(`[stripe-webhook] Save-card persist failed for PI ${piId} (pm ${stripePmId}) — rethrowing for Stripe retry: ${err.message}`);
+      throw err;
     }
   }
 
@@ -1289,34 +1347,6 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       source: 'stripe_webhook',
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
-  }
-
-  // If ACH payment succeeded, resolve any pending ACH failures for this customer
-  const pmType = paymentIntent.payment_method_types?.[0] || paymentIntent.last_payment_error?.payment_method?.type;
-  if (pmType === 'us_bank_account') {
-    try {
-      const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
-      if (payment?.customer_id) {
-        // Third-party Bill-To: a payer/AP bank transfer clearing must not
-        // reactivate the homeowner's suspended/needs-verification ACH state —
-        // the payer's payment row sits under the service customer's id but is
-        // not the homeowner's bank account. (Symmetric to the handleAchFailure
-        // guard.)
-        const achInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first().catch(() => null);
-        if (achInvoice?.payer_id) {
-          logger.info(`[stripe-webhook] ACH success on payer-billed invoice ${achInvoice.invoice_number} (PI ${piId}) — not resetting homeowner ACH state`);
-        } else {
-          await db('ach_failure_log')
-            .where({ customer_id: payment.customer_id, resolved: false })
-            .update({ resolved: true, resolution: 'retry_success' })
-            .catch(() => {});
-          await db('customers').where({ id: payment.customer_id })
-            .update({ ach_status: 'active', ach_failure_count: 0 })
-            .catch(() => {});
-          logger.info(`[stripe-webhook] ACH success — reset failure state for customer ${payment.customer_id}`);
-        }
-      }
-    } catch { /* non-critical */ }
   }
 
   // ── Bell + push for the admin team ──
@@ -1481,7 +1511,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // ── ACH failure handling ──
   const pmType = paymentIntent.last_payment_error?.payment_method?.type;
   if (pmType === 'us_bank_account') {
-    await handleAchFailure(paymentIntent, failureMessage);
+    await handleAchFailure(paymentIntent, failureMessage, eventId);
   }
 
   // ── Bell + push for the admin team ──
@@ -1605,25 +1635,27 @@ async function resolveRefundedInvoiceId(trx, { pmt, charge, chargeId }) {
   return null;
 }
 
+// Durable record of WHICH refunds were counted into a payments row's
+// refund_amount — stripe_refund_id alone only remembers the newest stamp, so
+// a bounce of an OLDER stamped partial would otherwise be unattributable
+// (handleRefundFailed can only rewind refunds it can attribute).
+function metadataWithStampedRefund(rawMeta, refundId) {
+  let meta = {};
+  try {
+    meta = rawMeta ? (typeof rawMeta === 'string' ? JSON.parse(rawMeta) : rawMeta) : {};
+  } catch { meta = {}; }
+  if (!refundId) return meta;
+  const stamped = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+  if (stamped.includes(refundId)) return meta;
+  return { ...meta, stamped_refund_ids: [...stamped, refundId] };
+}
+
 /**
  * charge.refunded — Update refund status on payments table
  */
 async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
-
-  // Estimate deposits have no payments row — a dashboard refund (or the
-  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
-  // unapplied remainder) must flip the deposit ledger so reversed money can
-  // never satisfy acceptance or be credited, then skip the payments path
-  // entirely. The cumulative refunded amount lets the handler recognize the
-  // echo of a refund it already stamped (a partial remainder refund must not
-  // flip a legitimately credited row).
-  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
-  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
-    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
-  });
-  if (depositReversal.handled) return;
 
   const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;
   const refundId = latestRefund?.id || charge.latest_refund || null;
@@ -1633,6 +1665,61 @@ async function handleChargeRefunded(charge) {
   const refundAmountDollars = refundAmountCents / 100;
   const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
+
+  // Estimate deposits have no payments row — a dashboard refund (or the
+  // webhook echo of our own refunds: stale deposit, exempt-path sweep,
+  // unapplied remainder) must flip the deposit ledger so reversed money can
+  // never satisfy acceptance or be credited, then skip the payments path
+  // entirely. The cumulative refunded amount lets the handler recognize the
+  // echo of a refund it already stamped (a partial remainder refund must not
+  // flip a legitimately credited row); refundId lets it refuse a refund
+  // whose failure was already recorded (bounce-before-creation).
+  const { handleDepositChargeReversed } = require('../services/estimate-deposits');
+  const depositReversal = await handleDepositChargeReversed(charge.payment_intent, 'charge.refunded', {
+    amountRefundedCents: Number(charge.amount_refunded) > 0 ? Number(charge.amount_refunded) : null,
+    refundId,
+  });
+  if (depositReversal.handled) return;
+
+  // Out-of-order bounce guard: Stripe can deliver refund.failed BEFORE this
+  // creation event. handleRefundFailed records the bounced id in the
+  // payments row's metadata — stamping that refund as successful here (and
+  // running the credit/deposit side effects) would resurrect money Stripe
+  // kept. Events for OTHER refunds on the same charge carry different ids
+  // and proceed normally.
+  if (refundId) {
+    // Pre-settlement fence: the bounce arrived before ANY payments row
+    // existed (invoice/statement cases — deposits fence on their own
+    // ledger). Table-probed for pre-migration tolerance.
+    try {
+      if (await db.schema.hasTable('stripe_failed_refunds')) {
+        const fenced = await db('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+        if (fenced) {
+          logger.warn(`[stripe-webhook] charge.refunded for ${refundId} arrived after its pre-settlement failure was fenced — skipping stamp + side effects`);
+          return;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[stripe-webhook] pre-settlement fence probe failed for ${refundId}: ${err.message}`);
+    }
+    // Same lookup ladder as handleRefundFailed — a processing-stage ACH row
+    // may be keyed by PI only, and the fence must cover every row that
+    // handler can mark.
+    let bounceCheck = await db('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+    if (!bounceCheck && charge.payment_intent) {
+      bounceCheck = await db('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('metadata');
+    }
+    if (bounceCheck) {
+      let bounceMeta = {};
+      try {
+        bounceMeta = bounceCheck.metadata ? (typeof bounceCheck.metadata === 'string' ? JSON.parse(bounceCheck.metadata) : bounceCheck.metadata) : {};
+      } catch { bounceMeta = {}; }
+      if (Array.isArray(bounceMeta.failed_refund_ids) && bounceMeta.failed_refund_ids.includes(refundId)) {
+        logger.warn(`[stripe-webhook] charge.refunded for ${refundId} arrived after its failure was already recorded — skipping stamp + side effects`);
+        return;
+      }
+    }
+  }
 
   // Statement refund REORDERED ahead of settlement: if a FULL refund arrives
   // before payment_intent.succeeded wrote the statement payments row, resolve the
@@ -1657,6 +1744,7 @@ async function handleChargeRefunded(charge) {
             refund_amount: cumulativeRefundAmountDollars,
             refund_status: isFullRefund ? 'full' : 'partial',
             stripe_refund_id: refundId,
+            metadata: JSON.stringify(metadataWithStampedRefund(rowInLock.metadata, refundId)),
           });
           if (isFullRefund) await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
         } else if (isFullRefund) {
@@ -1668,7 +1756,7 @@ async function handleChargeRefunded(charge) {
             payment_date: etDateString(), amount: (charge.amount || refundAmountCents) / 100,
             status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId,
             description: `Payer statement S-${stmtByPi.id} fully refunded`,
-            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund' }),
+            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund', ...(refundId ? { stamped_refund_ids: [refundId] } : {}) }),
           });
         } else {
           // Partial refund pre-settlement: the eventual succeeded will settle the
@@ -1700,6 +1788,7 @@ async function handleChargeRefunded(charge) {
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
         stripe_refund_id: refundId,
+        metadata: JSON.stringify(metadataWithStampedRefund(preRefundRow.metadata, refundId)),
       });
       if (isFullRefund) {
         await reverseStatementCascadeForDispute(preRefundRow.statement_id, preRefundRow.stripe_payment_intent_id, `charge.refunded (full $${cumulativeRefundAmountDollars.toFixed(2)})`, { database: trx });
@@ -1726,6 +1815,34 @@ async function handleChargeRefunded(charge) {
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
     let result = pmt;
+    // Record this refund id as STAMPED (see metadataWithStampedRefund) so a
+    // later bounce of it stays attributable even after newer stamps
+    // overwrite stripe_refund_id.
+    if (pmt && refundId) {
+      await trx('payments').where({ id: pmt.id }).update({
+        metadata: JSON.stringify(metadataWithStampedRefund(pmt.metadata, refundId)),
+      });
+    }
+    // Keep the surcharge-returned tracker in step with refunds this app did
+    // NOT issue (Stripe-dashboard partials): treat the cumulative refunded
+    // gross as proportionally split (rs = R·S/(B+S)), monotone max() so the
+    // exact tracking written by StripeService.refund is never lowered by its
+    // own webhook echo. Pre-gross-up legacy refunds get counted as containing
+    // their share too — conservative: the next in-app partial can only send
+    // LESS surcharge, never over-refund.
+    if (pmt) {
+      const trkSurcharge = Math.max(0, Number(pmt.surcharge_amount_cents) || 0);
+      const trkPaidCents = Math.round((parseFloat(pmt.amount) || 0) * 100);
+      if (trkSurcharge > 0 && trkPaidCents > 0) {
+        const proportional = Math.min(
+          trkSurcharge,
+          Math.round((Math.round(cumulativeRefundAmountDollars * 100) * trkSurcharge) / trkPaidCents),
+        );
+        if (proportional > (Number(pmt.refunded_surcharge_cents) || 0)) {
+          await trx('payments').where({ id: pmt.id }).update({ refunded_surcharge_cents: proportional });
+        }
+      }
+    }
     if (isFullRefund) {
       // Resolve the invoice from every available link (PI, metadata.invoice_id,
       // charge.payment_intent, invoices.stripe_charge_id) — a reconciled
@@ -1756,7 +1873,7 @@ async function handleChargeRefunded(charge) {
             refund_status: 'full',
             stripe_refund_id: refundId,
             description: `Invoice ${inv?.invoice_number || invId} fully refunded`,
-            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund' }),
+            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund', ...(refundId ? { stamped_refund_ids: [refundId] } : {}) }),
           }).returning('*');
           result = marker;
         }
@@ -1810,6 +1927,311 @@ async function handleChargeRefunded(charge) {
 }
 
 /**
+ * refund.failed / charge.refund.updated(status=failed|canceled) — a refund we
+ * already recorded bounced after creation. charge.refunded fires when the
+ * refund is CREATED, before ACH refunds actually clear, so the books
+ * optimistically show the money returned (payments row stamped, credit
+ * restored, refund email sent). When the bank later rejects it, Stripe keeps
+ * the money and nothing corrected the ledger — this handler reverts the
+ * payments stamps and raises an operator signal for the parts that need a
+ * human (restored account credit, the already-sent refund email, deposit
+ * ledger flips).
+ */
+async function handleRefundFailed(refund) {
+  const refundId = refund?.id || null;
+  const chargeId = refund?.charge || null;
+  const piId = refund?.payment_intent || null;
+  const failedCents = Number(refund?.amount) || 0;
+  const failedDollars = failedCents / 100;
+  logger.warn(`[stripe-webhook] Refund ${refundId} FAILED (charge ${chargeId}): ${refund?.failure_reason || refund?.status || 'no reason given'}`);
+
+  let payment = null;
+  if (refundId) payment = await db('payments').where({ stripe_refund_id: refundId }).first();
+  if (!payment && chargeId) payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  // ACH rows created by payment_intent.processing may not carry a charge id
+  // yet — without the PI fallback an early bounce would take the notify-only
+  // path, never record failed_refund_ids, and the late charge.refunded would
+  // stamp the failed refund as successful.
+  if (!payment && piId) payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
+
+  // The admin notification is the ONLY durable operator signal for the side
+  // effects this handler deliberately leaves to a human (restored credit,
+  // statement cascade, deposit ledger) — Stripe will not retry an acked
+  // event, so its insert must never be swallowed. For payments-backed
+  // bounces it commits ATOMICALLY with the revert (a failure rolls both
+  // back and the 500 makes Stripe retry the whole event); for the
+  // no-payments case it throws for the same reason — nothing else was
+  // written, so the retry is a clean re-run.
+  const insertBounceNotification = async (conn, body) => {
+    await conn('notifications').insert({
+      recipient_type: 'admin',
+      category: 'billing',
+      title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
+      body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
+      icon: '⚠️',
+      link: '/admin/invoices',
+    });
+  };
+
+  if (!payment) {
+    // Estimate-deposit refunds have no payments row — record the failed id
+    // ON THE DEPOSIT so a late charge.refunded can't run the reversal for
+    // money Stripe kept (handleDepositChargeReversed consults this fence).
+    // Column-probed for pre-migration tolerance; the deposit-row lookup
+    // doubles as the replay fence (both bounce events must notify once).
+    let dep = null;
+    if (piId && refundId) {
+      try {
+        const depCols = await db('estimate_deposits').columnInfo();
+        if (depCols.failed_refund_ids) {
+          dep = await db('estimate_deposits')
+            .where({ stripe_payment_intent_id: piId })
+            .first('id', 'failed_refund_ids', 'status');
+        }
+      } catch (err) {
+        logger.warn(`[stripe-webhook] deposit bounce-fence probe failed for PI ${piId}: ${err.message}`);
+      }
+    }
+    if (dep) {
+      const parseFence = (v) => {
+        if (Array.isArray(v)) return v;
+        if (typeof v === 'string') { try { return JSON.parse(v || '[]'); } catch { return []; } }
+        return [];
+      };
+      if (parseFence(dep.failed_refund_ids).includes(refundId)) return; // replay — already recorded + notified
+      // Fence + notification commit ATOMICALLY (same invariant as the
+      // payments-backed revert below): a notify failure must roll the fence
+      // back and throw so Stripe retries — a committed fence with a lost
+      // notification would send the retry into the replay check above and
+      // ack silently, erasing the only operator signal. The fence list is
+      // RE-READ under the row lock: two overlapping bounces for different
+      // partial refunds would otherwise both write from the pre-transaction
+      // snapshot, and the loser's id would vanish — un-fencing its late
+      // charge.refunded.
+      await db.transaction(async (trx) => {
+        const locked = await trx('estimate_deposits')
+          .where({ id: dep.id })
+          .forUpdate()
+          .first('failed_refund_ids', 'status');
+        if (!locked) return;
+        const failed = parseFence(locked.failed_refund_ids);
+        if (failed.includes(refundId)) return; // recorded while we waited on the lock
+        await trx('estimate_deposits')
+          .where({ id: dep.id })
+          .update({ failed_refund_ids: JSON.stringify([...failed, refundId]), updated_at: new Date() });
+        await insertBounceNotification(trx, `Deposit ${dep.id} (status ${locked.status || dep.status}): the failed refund id was recorded — the deposit reversal will refuse this refund's late creation event. If the deposit was already flipped to refunded, restore its ledger manually.`);
+      });
+      return;
+    }
+    // No payments row and not a deposit — an invoice/statement refund whose
+    // bounce outran settlement. Fence the refund id in stripe_failed_refunds
+    // (PK = refund id) so the late charge.refunded can't stamp a refunded
+    // marker, terminalize the invoice, or restore credit for money Stripe
+    // kept. Same atomic fence+notification contract as the deposit branch;
+    // table-probed for pre-migration tolerance.
+    let fenceTableReady = false;
+    if (refundId) {
+      try {
+        fenceTableReady = await db.schema.hasTable('stripe_failed_refunds');
+        if (fenceTableReady) {
+          const fenced = await db('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+          if (fenced) return; // replay — already recorded + notified
+        }
+      } catch (err) {
+        logger.warn(`[stripe-webhook] refund-failed fence probe failed for ${refundId}: ${err.message}`);
+        fenceTableReady = false;
+      }
+    }
+    if (refundId && fenceTableReady) {
+      await db.transaction(async (trx) => {
+        await trx('stripe_failed_refunds').insert({
+          stripe_refund_id: refundId,
+          stripe_charge_id: chargeId,
+          stripe_payment_intent_id: piId,
+          context: 'refund.failed before settlement row',
+        });
+        await insertBounceNotification(trx, 'No payments row matched — the failed refund id was fenced, so its late charge.refunded creation event will be skipped. If an invoice or statement was already marked refunded, restore it manually.');
+      });
+      return;
+    }
+    await insertBounceNotification(db, 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.');
+    return;
+  }
+
+  // Pre-resolve the linked invoice (+ any prepay term the optimistic refund
+  // cancelled) READ-ONLY before the transaction: a failed lookup (e.g. a
+  // pre-migration table) inside the trx would poison it and wedge the event
+  // in a retry loop; out here it just degrades the notification detail.
+  let linkedInvoice = null;
+  let cancelledPrepayTermId = null;
+  try {
+    let pMeta = {};
+    try {
+      pMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+    } catch { pMeta = {}; }
+    // Same resolution ladder as resolveRefundedInvoiceId — a legacy
+    // reconciled charge-only payment links its invoice via
+    // invoices.stripe_charge_id, and charge.refunded terminalizes through
+    // that fallback, so the bounce restore must reach it too.
+    if (pMeta.invoice_id) {
+      linkedInvoice = await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number');
+    }
+    if (!linkedInvoice && piId) {
+      linkedInvoice = await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number');
+    }
+    const linkChargeId = chargeId || payment.stripe_charge_id || null;
+    if (!linkedInvoice && linkChargeId) {
+      linkedInvoice = await db('invoices').where({ stripe_charge_id: linkChargeId }).first('id', 'invoice_number');
+    }
+    if (linkedInvoice) {
+      cancelledPrepayTermId = (await db('annual_prepay_terms')
+        .where({ prepay_invoice_id: linkedInvoice.id, status: 'cancelled' })
+        .first('id'))?.id || null;
+    }
+  } catch (err) {
+    logger.warn(`[stripe-webhook] refund-failed invoice/term lookup failed: ${err.message}`);
+  }
+
+  let restoredInvoiceId = null;
+  await db.transaction(async (trx) => {
+    const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
+    if (!row) return;
+    let meta = {};
+    try {
+      meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+    } catch { meta = {}; }
+    // Replay fence: refund.failed and charge.refund.updated both fire for
+    // one bounce (plus Stripe retries) — a bounce already recorded changed
+    // nothing, so it must neither re-subtract nor re-notify (the first run
+    // committed the notification atomically with this fence).
+    const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+    if (refundId && failedIds.includes(refundId)) return;
+    const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+    const nextMeta = {
+      ...meta,
+      failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds,
+      // A bounced refund is no longer counted in refund_amount — drop it
+      // from the stamped record too.
+      ...(refundId && stampedIds.includes(refundId)
+        ? { stamped_refund_ids: stampedIds.filter((id) => id !== refundId) }
+        : {}),
+    };
+
+    // Only a refund that was actually STAMPED into this row may rewind the
+    // cumulative amounts. stamped_refund_ids records EVERY refund whose
+    // amount entered refund_amount (stripe_refund_id alone only remembers
+    // the newest — a $40 partial overwritten by a later $20 stamp must still
+    // be rewindable when the $40 bounces); the stripe_refund_id check keeps
+    // legacy rows stamped before that record existed working. A bounce we
+    // can't attribute is only RECORDED — subtracting it would erase EARLIER
+    // cleared refunds. The recorded id makes handleChargeRefunded skip the
+    // late creation stamp, and the notification flags the manual case.
+    const wasStamped = !!refundId
+      && (row.stripe_refund_id === refundId || stampedIds.includes(refundId));
+    if (!wasStamped) {
+      await trx('payments').where({ id: row.id }).update({ metadata: JSON.stringify(nextMeta) });
+      await insertBounceNotification(trx, `Payment row ${row.id}: the bounce arrived before (or without) its creation stamp — amounts were left untouched and the late charge.refunded event will be skipped. If this refund was already recorded under an earlier stamp, reconcile refund_amount manually.`);
+      return;
+    }
+
+    const priorRefundCents = Math.round((parseFloat(row.refund_amount) || 0) * 100);
+    const nextRefundCents = Math.max(0, priorRefundCents - failedCents);
+    const rowPaidCents = Math.round((parseFloat(row.amount) || 0) * 100);
+    // Rewind the cumulative surcharge-returned tracker to match the new
+    // refunded total (rs = R·S/(B+S), the inverse of the gross-up split) —
+    // leaving it stale would make StripeService.refund treat the bounced
+    // share as already returned and under-refund the retry. min() with the
+    // current value: a bounce only ever REMOVES returned surcharge, and a
+    // legacy row whose refunds were never grossed keeps its 0.
+    const surchargeCents = Math.max(0, Number(row.surcharge_amount_cents) || 0);
+    const currentReturnedSurcharge = Math.max(0, Number(row.refunded_surcharge_cents) || 0);
+    const surchargeRewind = surchargeCents > 0 && rowPaidCents > 0 && currentReturnedSurcharge > 0
+      ? {
+          refunded_surcharge_cents: Math.min(
+            currentReturnedSurcharge,
+            Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
+          ),
+        }
+      : {};
+    await trx('payments').where({ id: row.id }).update({
+      ...surchargeRewind,
+      refund_amount: nextRefundCents / 100,
+      // A surviving remainder means an EARLIER partial did clear; when the
+      // bounce erased the whole refund, CLEAR the status — consumers treat
+      // any non-null refund_status as refund activity (Customer360 hides the
+      // Refund button on !!refund_status; prepay reconciliation skips rows
+      // with one), and a fully-bounced refund must leave the row refundable.
+      // failed_refund_ids in metadata stays as the durable record.
+      refund_status: nextRefundCents > 0 ? 'partial' : null,
+      // The row's "current refund" pointer must never name money Stripe
+      // kept: cleared outright when the bounce erased the whole refund, and
+      // when an earlier partial survives, repointed at the newest surviving
+      // stamped id (or cleared for legacy rows with no stamped record).
+      ...(nextRefundCents === 0
+        ? { stripe_refund_id: null }
+        : (row.stripe_refund_id === refundId
+          ? { stripe_refund_id: stampedIds.filter((id) => id !== refundId).pop() || null }
+          : {})),
+      // A row terminalized to 'refunded' by a refund that never fully
+      // cleared is still (at least partly) collected money — anything
+      // short of the full paid amount reverts to 'paid', matching the
+      // charge.refunded handler's full-vs-partial convention (and the
+      // dashboard's full-refund exclusion).
+      ...(row.status === 'refunded' && nextRefundCents < rowPaidCents ? { status: 'paid' } : {}),
+      metadata: JSON.stringify(nextMeta),
+    });
+
+    // Restore the linked invoice: a full refund terminalized it to
+    // 'refunded' (returnAppliedCreditOnRefund) — with the money kept by
+    // Stripe that status is now false on every customer/admin surface.
+    // Status-only and mechanical (collected money is a fact); the CREDIT
+    // side of that settle stays a human decision below. The decision rides
+    // the conditional WHERE alone — NOT a pre-trx status read: this trx can
+    // wait on the payments lock while the racing charge.refunded commits
+    // the very flip to 'refunded', and a stale pre-lock 'paid' would skip
+    // the restore entirely.
+    let invoiceRestored = null;
+    if (linkedInvoice && nextRefundCents < rowPaidCents) {
+      const flipped = await trx('invoices')
+        .where({ id: linkedInvoice.id, status: 'refunded' })
+        .update({ status: 'paid', updated_at: new Date() });
+      if (flipped > 0) {
+        invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
+        restoredInvoiceId = linkedInvoice.id;
+      }
+    }
+
+    // Operator signal: the reverts above are mechanical, but the remaining
+    // side effects of the optimistic refund are DELIBERATELY not
+    // auto-reversed — account credit restored by returnAppliedCreditOnRefund
+    // may already be spent (a mechanical claw-back could drive a balance
+    // negative), a payer statement reopened by the cascade reversal may have
+    // re-collection in flight, and the customer already got a "refund
+    // issued" email. Name the exact records so the human reconciles
+    // specifics.
+    let sideEffectHint = '';
+    if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
+    else if (linkedInvoice) sideEffectHint += ` Check invoice ${linkedInvoice.invoice_number || linkedInvoice.id}: restored account credit may need to be re-applied/clawed back.`;
+    if (cancelledPrepayTermId) sideEffectHint += ` Annual-prepay term ${cancelledPrepayTermId} was CANCELLED by the refund — the paid-sync is re-run, but refund-cancelled terms are not auto-revived (revival is dispute-marker-gated); if coverage stays cancelled, reactivate it manually.`;
+    if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
+    await insertBounceNotification(trx, `Payment row ${row.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`);
+  });
+
+  // Post-commit: re-run the annual-prepay paid sync for a restored invoice —
+  // no payment_intent.succeeded will ever fire for a bounce, so nothing else
+  // re-syncs coverage. For a payment_pending term this reactivates it through
+  // the sanctioned state machine; a refund-cancelled term stays cancelled
+  // (revival is deliberately dispute-marker-gated — see the notification).
+  if (restoredInvoiceId) {
+    try {
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredInvoiceId);
+    } catch (err) {
+      logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
+    }
+  }
+}
+
+/**
  * payment_method.detached — Remove from our DB
  */
 async function handlePaymentMethodDetached(paymentMethod) {
@@ -1839,6 +2261,97 @@ async function handleSetupIntentSucceeded(setupIntent) {
       await CardHolds.handleCardHoldSetupIntentSucceeded(setupIntent);
     } catch (err) {
       logger.error(`[stripe-webhook] card-hold SetupIntent handling failed: ${err.message}`);
+    }
+    return;
+  }
+  // Covered-by-credit capture (Codex #2507 P1 round-3): the SetupIntent the
+  // pay page minted for a required-save, credit-covered invoice can finish
+  // AFTER the browser is gone — a 3DS/bank-auth redirect that never returns,
+  // or ACH micro-deposits verified days later. Complete the same save →
+  // consent → enrollment the /setup-complete endpoint runs (all steps
+  // idempotent; the endpoint and this handler may both fire). The capture
+  // page rendered the LOCKED v8 consent before confirmSetup — this SI only
+  // exists because the server required a method on file — so recording the
+  // snapshot here (no IP/UA, like other server-side completions) is the
+  // faithful record of what the customer agreed to.
+  if (setupIntent.metadata?.purpose === 'covered_capture'
+    && setupIntent.metadata?.waves_customer_id
+    && setupIntent.payment_method) {
+    const wavesCustomerId = setupIntent.metadata.waves_customer_id;
+    const stripePmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method.id;
+    try {
+      const StripeService = require('../services/stripe');
+      const ConsentService = require('../services/payment-method-consents');
+      let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+      if (saved && saved.customer_id !== wavesCustomerId) {
+        logger.warn(`[stripe-webhook] covered-capture pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
+        return;
+      }
+      if (!saved) {
+        saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+          enableAutopay: false,
+          makeDefault: false,
+        });
+      }
+      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        await ConsentService.recordConsent({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: stripePmId,
+          source: 'pay_page',
+          methodType: saved.method_type || 'card',
+        });
+      }
+      await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      const enrollment = await enrollConsentedMethod({
+        customerId: wavesCustomerId,
+        paymentMethodId: saved.id,
+        source: 'save_card_consent',
+        details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
+      });
+      // Capture done → apply the HELD credit coverage (Codex #2507
+      // round-7 P1): under the hold flow the invoice stayed collectible
+      // until this point, and when the browser never returns this webhook
+      // is the only place the settle can happen. Idempotent — a
+      // setup-complete race or a pre-hold prepaid invoice skips inside.
+      // invoice_id was stamped server-side at /capture-setup mint;
+      // ownership double-checked against the SI's customer. A REFUSED
+      // enrollment (ach_blocked — e.g. micro-deposits verified but a
+      // separate ACH failure suspended the customer meanwhile) must NOT
+      // settle (round-8 P2): the invoice stays collectible, the capture
+      // state re-derives on the customer's next visit, and the next
+      // /capture-setup mint is card-only. No rethrow — a webhook retry
+      // can't change the bank state.
+      const enrollmentOk = enrollment.enrolled || enrollment.reason === 'already_enrolled';
+      if (!enrollmentOk) {
+        logger.warn(`[stripe-webhook] covered-capture enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId} — held coverage NOT settled`);
+      }
+      const capturedInvoiceId = setupIntent.metadata?.invoice_id || null;
+      if (enrollmentOk && capturedInvoiceId) {
+        const capturedInvoice = await db('invoices').where({ id: capturedInvoiceId }).first('id', 'customer_id');
+        if (capturedInvoice && String(capturedInvoice.customer_id) === String(wavesCustomerId)) {
+          const settle = await StripeService.settleHeldCoverage(capturedInvoice.id);
+          if (!settle.settled && !settle.alreadySettled) {
+            // Not an error — credit shrank mid-capture; the invoice simply
+            // stays payable through the normal pay flow (reminders never
+            // stopped). Retrying the webhook can't change that.
+            logger.warn(`[stripe-webhook] covered-capture settle skipped for invoice ${capturedInvoice.id}: ${settle.reason}`);
+          }
+        }
+      }
+      logger.info(`[stripe-webhook] covered-capture completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
+    } catch (err) {
+      // Re-throw so the dispatcher returns 500 and Stripe retries (Codex
+      // #2507 round-5 P1): this webhook can be the ONLY completion path
+      // (browser never returned after 3DS/bank auth, or micro-deposits
+      // verified days later), and every step above is idempotent — a
+      // swallowed transient error would leave a required-save signup
+      // prepaid with nothing chargeable, permanently.
+      logger.error(`[stripe-webhook] covered-capture completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      throw err;
     }
     return;
   }
@@ -1894,7 +2407,7 @@ async function handlePayoutEvent(payout, eventType) {
  * 2nd fail (same invoice): switch to card, flag ACH needs_verification
  * 3rd fail (90 days): suspend ACH, switch default to card
  */
-async function handleAchFailure(paymentIntent, failureReason) {
+async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
   const piId = paymentIntent.id;
 
   try {
@@ -1920,6 +2433,7 @@ async function handleAchFailure(paymentIntent, failureReason) {
     // value — escalating twice or skipping a step. Same advisory-lock
     // pattern as the terminal handoff mint serialization.
     let recentFailures = 0;
+    let achReplay = false;
     await db.transaction(async (trx) => {
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
@@ -1927,11 +2441,36 @@ async function handleAchFailure(paymentIntent, failureReason) {
       );
 
       try {
-        await trx('ach_failure_log').insert({
-          customer_id: customer.id,
-          stripe_payment_intent_id: piId,
-          failure_reason: failureReason,
-        });
+        // Idempotent under webhook re-runs (the file's handler contract): a
+        // RETRY of the same failure event must not log a second row —
+        // duplicates double-count one real failure and can escalate straight
+        // to needs_verification/suspended. Dedupe on the EVENT identity, not
+        // the PI alone: the same invoice/PI is legitimately re-attempted
+        // (see handlePaymentIntentProcessing's same-PI reattempt note) and
+        // each real bank failure carries a distinct event id that MUST
+        // count. Check-then-insert is race-safe under the advisory lock.
+        // Legacy fallback (no eventId / pre-migration column): PI-level
+        // dedupe, the pre-existing conservative behavior.
+        // Column probe (NOT try/insert-catch: a failed statement aborts the
+        // whole Postgres transaction, poisoning the count/status queries
+        // below). columnInfo is the repo's pre-migration-tolerance pattern.
+        const achCols = await trx('ach_failure_log').columnInfo();
+        const hasEventCol = !!achCols.stripe_event_id;
+        const dedupe = { customer_id: customer.id, stripe_payment_intent_id: piId };
+        const alreadyLogged = await trx('ach_failure_log')
+          .where(eventId && hasEventCol ? { ...dedupe, stripe_event_id: eventId } : dedupe)
+          .first('id');
+        if (alreadyLogged) achReplay = true;
+        if (!alreadyLogged) {
+          const insertRow = {
+            customer_id: customer.id,
+            stripe_payment_intent_id: piId,
+            failure_reason: failureReason,
+          };
+          await trx('ach_failure_log').insert(
+            eventId && hasEventCol ? { ...insertRow, stripe_event_id: eventId } : insertRow,
+          );
+        }
       } catch { /* table may not exist yet */ }
 
       // Count is now guaranteed to include the just-inserted row because
@@ -1982,6 +2521,16 @@ async function handleAchFailure(paymentIntent, failureReason) {
         throw dbErr;
       }
     });
+
+    // Replay (this failure was already counted): the status recompute above
+    // is idempotent, but the customer SMS and the dunning-hold counter below
+    // are NOT — a duplicate webhook delivery must not resend notices or
+    // advance/release held follow-up sequences for a failure that already
+    // did both.
+    if (achReplay) {
+      logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
+      return;
+    }
 
     // Send SMS outside the transaction so a slow provider call doesn't
     // hold the per-customer advisory lock against concurrent failures.
@@ -2620,16 +3169,36 @@ async function handleDisputeCreated(dispute) {
         metadata: JSON.stringify({ ...createdPaymentMeta, dispute_invoice_id: invoice.id }),
       });
 
-      await db('invoices').where({ id: invoice.id }).update({
-        status: 'overdue',
-        paid_at: null,
-        // Clear the PI linkage: the pay page and card-on-file paths
-        // treat a lingering non-canceled intent as "payment already in
-        // progress" and would refuse re-collection on the reopened
-        // invoice. The disputed payments row keeps the original PI for
-        // the audit trail.
-        stripe_payment_intent_id: null,
-        stripe_charge_id: null,
+      // Annual-prepay coverage must not ride on provisionally clawed-back
+      // money: SUSPEND (active → payment_pending, never cancel) any live
+      // term this invoice paid for. A won dispute restores the invoice to
+      // paid and the ordinary payment sync re-activates the term; a lost
+      // dispute cancels it via the refund-shaped sync in dispute-closed.
+      // ATOMIC with the invoice reopen (Codex #2533 round-5 P2): a crash
+      // between a committed suspension and the reopen would leave a
+      // payment_pending + dispute-marked term joined to a still-'paid'
+      // invoice — exactly the shape activatePaidPendingTerms (billing cron)
+      // and the sweep's marker legs read as "dispute resolved", so they
+      // would flip coverage back on and clear the marker mid-dispute before
+      // Stripe's retry lands. One transaction means the world only ever
+      // sees suspended-term + reopened-invoice together. No .catch —
+      // critical-write discipline, a rollback fails the event and Stripe
+      // retries it.
+      await db.transaction(async (trx) => {
+        await require('../services/annual-prepay-renewals')
+          .suspendActiveTermsForDisputedInvoice(invoice.id, trx);
+
+        await trx('invoices').where({ id: invoice.id }).update({
+          status: 'overdue',
+          paid_at: null,
+          // Clear the PI linkage: the pay page and card-on-file paths
+          // treat a lingering non-canceled intent as "payment already in
+          // progress" and would refuse re-collection on the reopened
+          // invoice. The disputed payments row keeps the original PI for
+          // the audit trail.
+          stripe_payment_intent_id: null,
+          stripe_charge_id: null,
+        });
       });
     }
     }
@@ -2775,6 +3344,21 @@ async function handleDisputeClosed(dispute) {
           stripe_charge_id: payment.stripe_charge_id || null,
         });
       }
+      // Annual-prepay sync on the restored money: a paid PREPAY invoice
+      // re-activates its dispute-suspended term (payment_pending → active)
+      // and re-runs the pending-window reconcile, so visits that billed
+      // per-application during the dispute settle/credit against the
+      // annual; a paid VISIT invoice re-enters the pending-window hook to
+      // resolve a slice the activation left in-flight. Fresh read — the
+      // restore above (or a replacement payment) decides the status this
+      // sync sees. Idempotent; no .catch (critical-write discipline).
+      if (invoice) {
+        const freshWonInvoice = await db('invoices').where({ id: invoice.id }).first();
+        if (freshWonInvoice) {
+          await require('../services/annual-prepay-renewals')
+            .syncTermForInvoicePayment(freshWonInvoice);
+        }
+      }
     } else if (status === 'lost') {
       // Money is gone for good. Set status explicitly — Stripe does not
       // guarantee dispute.created arrived first, so don't assume the
@@ -2800,6 +3384,18 @@ async function handleDisputeClosed(dispute) {
       // that newly paid invoice must not be flipped back to overdue.
       if (lostInvoice && ['paid', 'processing'].includes(lostInvoice.status)
         && lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi) {
+        // Persist the invoice binding (mirrors dispute-created): the reopen
+        // below clears the invoice's PI, so a Stripe retry of THIS event can
+        // only re-find the invoice — and re-run the prepay claw-back sync —
+        // through the metadata.
+        await db('payments').where({ id: payment.id }).update({
+          metadata: JSON.stringify({
+            ...closedPaymentMeta,
+            dispute_id: dispute.id,
+            dispute_final: status,
+            dispute_invoice_id: lostInvoice.id,
+          }),
+        });
         await db('invoices').where({ id: lostInvoice.id }).update({
           status: 'overdue',
           paid_at: null,
@@ -2809,6 +3405,28 @@ async function handleDisputeClosed(dispute) {
           stripe_payment_intent_id: null,
           stripe_charge_id: null,
         });
+      }
+      // Annual-prepay claw-back: lost = the money is gone for good — the
+      // same semantics as a full refund. Run the refund-shaped sync
+      // whenever the DISPUTED payment (not a replacement) backed the
+      // invoice: on first delivery the PI still matches or the invoice sits
+      // reopened ('overdue') under this dispute's recorded binding; on a
+      // Stripe retry after the PI-clear above, the metadata binding decides.
+      // A replacement-paid invoice never matches either arm — its coverage
+      // is backed by real money and must survive. For a PREPAY invoice this
+      // cancels the term (stamps cleared, coverage-settled invoices
+      // reopened, pending-window credits reversed, billing mode restored);
+      // for a VISIT invoice the pending-window hook reverses that visit's
+      // slice credit. Idempotent; no .catch (critical-write discipline).
+      const lostDisputeOwnedInvoice = !!lostInvoice && (
+        (lostInvoicePi && lostDisputedPi && lostInvoicePi === lostDisputedPi)
+        || (!lostInvoicePi
+          && String(lostInvoice.status || '').toLowerCase() === 'overdue'
+          && closedPaymentMeta.dispute_invoice_id === lostInvoice.id)
+      );
+      if (lostDisputeOwnedInvoice) {
+        await require('../services/annual-prepay-renewals')
+          .syncTermForInvoicePayment({ id: lostInvoice.id, status: 'refunded', paid_at: null });
       }
     }
   }
@@ -2893,3 +3511,6 @@ async function handleSetupIntentFailed(setupIntent) {
 }
 
 module.exports = router;
+// Exposed for unit tests.
+module.exports._handleRefundFailed = handleRefundFailed;
+module.exports._handleChargeRefunded = handleChargeRefunded;

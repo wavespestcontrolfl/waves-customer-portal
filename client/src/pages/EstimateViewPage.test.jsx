@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -239,6 +239,50 @@ describe('OneTimeBreakdownCard', () => {
     expect(screen.getAllByText('$99').length).toBe(2);
     expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
+
+  it('excludes serviceless embedded rows by identity key so they never total twice', () => {
+    // Older termite install rows carry no `service` — they normalize into the
+    // termite section by LABEL and render embedded there. The standalone card
+    // must drop them via oneTimeRowIdentityKey, not a truthy `service` match.
+    const legacyInstall = { label: 'Advance Installation', amount: 639, detail: '23 stations' };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [legacyInstall] }}
+        excludeServices={[oneTimeRowIdentityKey(legacyInstall)]}
+      />,
+    );
+    // Nothing left to show — the card renders null instead of re-totaling.
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('still excludes service-keyed embedded rows passed as identity keys', () => {
+    const keyedRow = { service: 'termite_bait_installation', label: 'Advance Installation', amount: 639 };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [keyedRow] }}
+        excludeServices={[oneTimeRowIdentityKey(keyedRow)]}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('keeps a quote-required sibling that shares a service with an embedded priced row', () => {
+    // Same `service` on both rows: the priced one renders embedded (and is
+    // excluded here); the quote-required one never embeds and MUST stay in
+    // this card with its Quote Required row — a service-only identity would
+    // drop both.
+    const pricedEmbedded = { service: 'flea_package', label: 'Flea Treatment', amount: 250 };
+    const quoteSibling = { service: 'flea_package', label: 'Flea Treatment — Detached Guest House', amount: null, kind: 'quote_required', quoteRequired: true };
+    render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 250, items: [pricedEmbedded, quoteSibling] }}
+        excludeServices={[oneTimeRowIdentityKey(pricedEmbedded)]}
+      />,
+    );
+    expect(screen.getByText('Flea Treatment — Detached Guest House')).toBeInTheDocument();
+    expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
+    expect(screen.queryByText((_, el) => el?.textContent === '$250' && el?.children.length === 0)).not.toBeInTheDocument();
+  });
 });
 
 describe('oneTimePriceCopy', () => {
@@ -331,6 +375,55 @@ describe('estimateAddServiceOffer', () => {
       serviceKey: 'mosquito',
       label: 'Mosquito',
     }));
+  });
+});
+
+describe('reportShowcaseVariantForServices', () => {
+  it('shows the lawn report on a lawn-only estimate', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+    ])).toBe('lawn');
+  });
+
+  it('ignores "pest" in lawn marketing copy — included lines never flip the variant', () => {
+    // Real lawn payloads include "Chinch, sod webworm & turf pest response";
+    // only structural identity (key/memberKeys/isPest/serviceCategory) may
+    // decide the variant, never copy text.
+    expect(reportShowcaseVariantForServices([{
+      key: 'lawn_care',
+      label: 'Lawn Care',
+      isRecurring: true,
+      isPest: false,
+      frequencies: [{
+        key: 'standard',
+        serviceCategory: 'lawn_care',
+        included: [
+          { key: 'fert', label: 'Fertilization + weed control' },
+          { key: 'pests', label: 'Chinch, sod webworm & turf pest response' },
+        ],
+      }],
+    }])).toBe('lawn');
+  });
+
+  it('keeps the pest report when pest control is in the mix', () => {
+    expect(reportShowcaseVariantForServices([{
+      key: 'bundle',
+      label: 'Recurring services',
+      isRecurring: true,
+      memberKeys: ['pest_control', 'lawn_care'],
+      frequencies: [],
+    }])).toBe('pest');
+  });
+
+  it('keeps the pest report for lawn + mosquito', () => {
+    expect(reportShowcaseVariantForServices([
+      { key: 'lawn_care', label: 'Lawn Care', isRecurring: true },
+      { key: 'mosquito', label: 'Mosquito', isRecurring: true },
+    ])).toBe('pest');
+  });
+
+  it('defaults to the pest report with no services', () => {
+    expect(reportShowcaseVariantForServices([])).toBe('pest');
   });
 });
 
@@ -664,6 +757,71 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
     );
     expect(screen.getByText('Invoice due now')).toBeInTheDocument();
     expect(screen.getByText(/Slot: slot-1/)).toBeInTheDocument();
+  });
+});
+
+describe('SuccessCard — already-accepted retry', () => {
+  it('does not promise a confirmation text when the accept was a retry of an already-accepted estimate', () => {
+    // Server returns the full success payload with alreadyAccepted: true; with
+    // no nextStep resolving, the generic card must not promise a text that
+    // may never re-send.
+    render(<SuccessCard acceptResult={{ success: true, alreadyAccepted: true }} />);
+
+    expect(screen.getByText(/already accepted — you're all set/)).toBeInTheDocument();
+    expect(screen.queryByText(/Check your phone for the confirmation text/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the confirmation-text copy for a fresh accept', () => {
+    render(<SuccessCard acceptResult={{ success: true }} />);
+
+    expect(screen.getByText(/Check your phone for the confirmation text/)).toBeInTheDocument();
+  });
+
+  it('does not promise a booking-link text for an already-accepted one-time retry, but keeps the booking button', () => {
+    // An already-accepted unbooked one-time retry returns book_one_time plus
+    // a FRESH booking URL without re-sending the SMS — the on-screen button
+    // is the real path, so the copy must not claim a text was sent.
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'book_one_time',
+          bookingUrl: 'https://book.example/one-time',
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/Check your phone/)).not.toBeInTheDocument();
+    expect(screen.getByText(/already accepted — pick your appointment now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
+  it('keeps the booking-link text for a fresh one-time accept', () => {
+    render(
+      <SuccessCard
+        acceptResult={{ success: true, nextStep: 'book_one_time', bookingUrl: 'https://book.example/one-time' }}
+      />,
+    );
+
+    expect(screen.getByText(/Check your phone for the booking link/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Pick appointment' })).toHaveAttribute('href', 'https://book.example/one-time');
+  });
+
+  it('routes an already-accepted retry to its nextStep card when one resolves', () => {
+    render(
+      <SuccessCard
+        acceptResult={{
+          success: true,
+          alreadyAccepted: true,
+          nextStep: 'pay_invoice',
+          invoicePayUrl: 'https://pay.example/inv',
+        }}
+      />,
+    );
+
+    expect(screen.getByText(/Payment is optional right now/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Pay now and save card/ })).toHaveAttribute('href', 'https://pay.example/inv');
   });
 });
 

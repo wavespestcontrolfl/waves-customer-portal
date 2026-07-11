@@ -8,6 +8,7 @@ const PDFDocument = require('pdfkit');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
@@ -372,11 +373,12 @@ router.get('/project/:token/data', async (req, res, next) => {
         ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
         : undefined,
     });
+    const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
     const photosWithUrls = await Promise.all(photos.map(async (ph) => {
       let url = null;
       if (config.s3?.bucket && ph.s3_key) {
         try {
-          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: 3600 });
+          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };
@@ -760,12 +762,22 @@ router.post('/:token/ask', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -859,11 +871,21 @@ router.get('/:token', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+        // Stamped-address precedence — see the /:token/data handler note
+        // (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -982,12 +1004,22 @@ router.get('/:token/map.svg', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1020,13 +1052,23 @@ router.get('/:token/data', async (req, res, next) => {
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
       .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+      .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select('service_records.*', 'customers.first_name', 'customers.last_name', 'customers.phone', 'customers.email',
-        'customers.address_line1', 'customers.address_line2',
-        'customers.city', 'customers.state', 'customers.zip',
+        // Report address = the visit's stamped service address when present
+        // (a phone-booked rental completes at the rental, not the primary
+        // home); the customer mirror is the fallback (codex round-9 P2).
+        db.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+        db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
         'customers.has_left_google_review',
         'customers.waveguard_tier',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Map center follows the treated parcel: stamped visit coords first,
+        // the primary home only for non-divergent stamps (codex round-9 P2).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',

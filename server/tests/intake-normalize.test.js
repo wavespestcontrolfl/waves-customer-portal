@@ -266,4 +266,14 @@ describe('normalizeCallExtraction — URL-shaped transcript email garble', () =>
     expect(out.email).toBe('wcw63@gmail.com');
     expect(out.email_raw).toBeNull();
   });
+
+  test('a dropped-TLD capture is demoted to email_raw, never repaired inline', () => {
+    // The repair ("brandon@gmail" → "brandon@gmail.com") belongs to
+    // deriveEmailReview, whose proposal must clear the processor's ownership
+    // gate (correctedAddressOwnedByOther) before adoption. Adopting it here
+    // would hand the customer/lead upserts an ungated corrected address.
+    const out = normalizeCallExtraction({ email: 'brandon.post00@gmail' });
+    expect(out.email).toBeNull();
+    expect(out.email_raw).toBe('brandon.post00@gmail');
+  });
 });

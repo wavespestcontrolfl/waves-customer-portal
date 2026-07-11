@@ -42,6 +42,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const SmartRebooker = require('../services/rebooker');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { stampedDivergesSql } = require('../services/stamped-address');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -145,12 +146,17 @@ async function loadByToken(token) {
       's.self_booking_id',
       'c.first_name as cust_first_name',
       'c.last_name as cust_last_name',
-      'c.address_line1',
-      'c.city',
-      'c.state',
-      'c.zip',
-      'c.latitude',
-      'c.longitude',
+      // Availability must be computed around the BOOKED property, not the
+      // customer's primary mirror (codex round-7 P1): stamped fields win
+      // under the same output names, and coords follow the divergence rule —
+      // a divergent stamp with no visit coords leaves lat/lng null so
+      // buildAvailabilityForService geocodes the (stamped) address text.
+      db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+      db.raw('COALESCE(s.service_address_city, c.city) as city'),
+      db.raw('COALESCE(s.service_address_state, c.state) as state'),
+      db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+      db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
+      db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
       'c.deleted_at as customer_deleted_at'
     );
 }

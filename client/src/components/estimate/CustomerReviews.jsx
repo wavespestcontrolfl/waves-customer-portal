@@ -23,11 +23,13 @@ function pageSizeForViewport() {
 }
 const ROTATE_MS = 6000;
 
-// Same three GBP profiles the server-rendered page falls back to.
+// All four GBP profiles (owner directive 2026-07-10) — same list the
+// server-rendered page falls back to.
 const REVIEW_FALLBACKS = [
   { name: 'Lakewood Ranch', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
   { name: 'Parrish', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
   { name: 'Sarasota', placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { name: 'Venice', placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
 ].map((l) => ({
   reviewerName: `Waves ${l.name}`,
   text: `Read current Google reviews for our ${l.name} location.`,
@@ -50,18 +52,18 @@ function ReviewCard({ review }) {
     <div style={estimateInnerBox({ padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150 })}>
       <Stars rating={review.starRating} />
       <p style={{
-        fontSize: 13, margin: '0 0 12px', lineHeight: 1.55, color: W.textBody,
+        fontSize: 14, margin: '0 0 12px', lineHeight: 1.5, color: W.textBody,
         fontStyle: review.fallback ? 'normal' : 'italic', flex: 1,
       }}>
         {review.fallback ? review.text : `“${review.text}”`}
       </p>
-      <div style={{ fontSize: 13, color: W.textCaption }}>
+      <div style={{ fontSize: 14, color: W.textCaption }}>
         <strong style={{ color: W.blueDeeper }}>{review.reviewerName || 'Waves customer'}</strong>
         {review.location ? ` · ${review.location}` : ''}
       </div>
       {review.url ? (
         <a href={review.url} target="_blank" rel="noopener noreferrer" style={{
-          fontSize: 13, fontWeight: 600, color: W.blueDeeper, marginTop: 8,
+          fontSize: 14, fontWeight: 600, color: W.blueDeeper, marginTop: 8,
         }}>
           {review.fallback ? 'Open Google reviews' : 'View local reviews'}
         </a>

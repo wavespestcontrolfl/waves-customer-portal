@@ -564,53 +564,13 @@ router.post('/sends/:id/test', async (req, res) => {
       req.body.email || req.technician?.email || 'contact@wavespestcontrol.com',
       { adminEmail: req.technician?.email },
     );
-    // Demo unsubscribe URL — won't resolve to a real subscriber but the link
-    // renders correctly and Gmail/Apple Mail will show the native unsub UI.
-    const demoUrl = sendgrid.unsubscribeUrl('test-' + send.id);
-    // Same wrapper the real send uses (newsletter-sender.js) so the
-    // operator's preview matches what subscribers will receive.
-    let html = wrapNewsletter({
-      body: send.html_body || '',
-      unsubscribeUrl: demoUrl,
-      preheader: send.preview_text || undefined,
-      newsletterType: send.newsletter_type || undefined,
-      preferredSourcesCta: true,
-    });
-    // Resolve ALL merge tags the way the broadcast does so the operator's test
-    // matches production: use the test recipient's subscriber row when one
-    // exists ("Hey there, Adam!"), and resolve {{city}}/{{grass-type}} from the
-    // linked customer when present, else neutral defaults. sendOne has no
-    // substitutions API, so this is a manual replace.
-    const {
-      GREETING_NAME_TOKEN, greetingNameValueFor,
-      CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL,
-    } = require('../services/newsletter-draft');
-    // A test send has no per-recipient delivery row, so there's no engagement
-    // token to build live quiz links from — render the quiz NEUTRALLY (inert
-    // answer chips) so the operator validates the block layout instead of
-    // seeing literal {{quiz}}/{{quiz-text}}. Mirrors the /preview modal.
-    const { neutralizeQuizTokens } = require('../services/newsletter-quiz');
-    const testSub = await db('newsletter_subscribers')
-      .whereRaw('LOWER(email) = ?', [String(testEmail).toLowerCase()])
-      .first();
-    const greetingValue = greetingNameValueFor(testSub?.first_name);
-    let cityValue = DEFAULT_CITY_LABEL;
-    let grassValue = DEFAULT_GRASS_LABEL;
-    if (testSub?.customer_id) {
-      const pctx = (await NewsletterSender.loadPersonalizationContext([testSub])).get(testSub.customer_id);
-      if (pctx) {
-        cityValue = pctx.city || DEFAULT_CITY_LABEL;
-        grassValue = pctx.grassLabel || DEFAULT_GRASS_LABEL;
-      }
-    }
-    const applyTokens = (s) => neutralizeQuizTokens(
-      String(s)
-        .split(GREETING_NAME_TOKEN).join(greetingValue)
-        .split(CITY_TOKEN).join(cityValue)
-        .split(GRASS_TYPE_TOKEN).join(grassValue),
-    );
-    html = applyTokens(html);
-    const testText = send.text_body ? applyTokens(send.text_body) : undefined;
+    // Shared preview renderer (also used by the proof-approval flow): same
+    // wrapper the real send uses, all merge tags resolved from the test
+    // recipient's subscriber row, quiz tokens neutralized. Keeping one
+    // renderer means the operator's test, the owner's proof, and the live
+    // broadcast wrapper can't drift apart.
+    const { renderSendPreview } = require('../services/newsletter-proof');
+    const { html, text: testText, unsubscribeUrl: demoUrl } = await renderSendPreview(send, testEmail);
 
     const result = await sendgrid.sendOne({
       to: testEmail,

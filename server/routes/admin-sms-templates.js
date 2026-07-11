@@ -312,6 +312,7 @@ const MSG_TYPE_TO_TEMPLATE = {
   en_route: 'tech_en_route',
   service_complete: 'service_complete',
   service_complete_prepaid: 'service_complete_prepaid',
+  service_complete_annual_prepay: 'service_complete_annual_prepay',
   service_complete_with_invoice: 'service_complete_with_invoice',
   missed_call_followup: 'missed_call',
   invoice: 'invoice_sent',

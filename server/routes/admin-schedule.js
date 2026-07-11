@@ -5,6 +5,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
@@ -1206,7 +1207,17 @@ router.get('/', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific stamped address (call bookings for a secondary/
+        // rental property) wins over the customer's primary mirror — same
+        // field names, so the schedule/tech-home consumers keep working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Divergent stamps keep THEIR unit line (condo/duplex bookings need
+        // their door); non-divergent stamps fall back to the primary's unit
+        // (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.property_sqft', 'customers.lot_sqft', 'customers.lead_score',
         'customers.service_preferences',
@@ -1306,7 +1317,7 @@ router.get('/', async (req, res, next) => {
         autopayEnabled: s.autopay_enabled !== false,
         customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim() || null,
         customerId: s.customer_id, customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: normalizedType,                    // FIX #2: clean label
         serviceTypeDisplay,
@@ -2719,7 +2730,14 @@ router.get('/list', async (req, res, next) => {
         // blank payerId/poNumber and silently clears an existing per-job payer/PO
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
-        'customers.first_name', 'customers.last_name', 'customers.address_line1 as address', 'customers.city', 'customers.zip',
+        'customers.first_name', 'customers.last_name',
+        // Stamped visit-specific address wins over the primary mirror here
+        // too — this list is a display surface for the booked property. The
+        // unit line rides along (condo/duplex visits are indistinguishable
+        // by street alone — codex round-6 P2).
+        db.raw(`TRIM(CONCAT(COALESCE(scheduled_services.service_address_line1, customers.address_line1), ' ', COALESCE(${stampedLine2Sql('scheduled_services', 'customers')}, ''))) as address`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'technicians.name as tech_name'
       )
       .orderBy('scheduled_services.scheduled_date')
@@ -4068,6 +4086,81 @@ function shouldAttemptPrepaidReceipt({ gateEnabled, emailReceipt, applyToSeries,
 // double-charge window. See services/prepaid-pi-guard.
 const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
 
+// Shared pre-completion mint: advisory-lock + replay-check + create, WITH the
+// estimate-deposit roll-forward. Completion REUSES a pre-minted invoice instead
+// of calling InvoiceService.createFromService (the only other roll-forward
+// site), so a mint here that skips the deposit credit permanently strands the
+// customer's paid deposit — accepted estimates are deliberately outside the
+// terminal-refund sweep — and the visit double-collects (deposit + full price).
+// Same discipline as createFromService: request the full unapplied balance,
+// let create() cap it against the after-tax total, consume exactly the
+// effective amount in the SAME transaction; a mismatch throws (the mint rolls
+// back), one retry re-reads the fresh balance, and a second failure falls back
+// to an UNCREDITED mint + reconcile alert — deposit machinery failures never
+// block door collection. The advisory lock serializes the two mint callers
+// (this helper's callers and Charge-now) so a double-tap can't race a visit
+// into two open invoices; the in-lock re-check returns the first request's
+// invoice to the replay.
+async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }) {
+  const InvoiceService = require('../services/invoice');
+  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
+  const sourceEstimateId = svc.source_estimate_id || null;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const withDeposit = attempt < 2 && !!sourceEstimateId;
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['schedule.invoice.mint', String(svc.id)],
+        );
+        const replayed = await trx('invoices')
+          .where({ scheduled_service_id: svc.id })
+          .whereNot('status', 'void')
+          .orderBy('created_at', 'desc')
+          .first();
+        if (replayed) return { invoice: replayed, reused: true };
+        const depositCredit = withDeposit
+          ? await pendingDepositCredit(sourceEstimateId, trx)
+          : null;
+        const created = await InvoiceService.create({
+          ...buildCreateParams(),
+          database: trx,
+          ...(depositCredit && Number(depositCredit.amount) > 0
+            ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
+            : {}),
+        });
+        const effective = Number(created?.applied_deposit_credit) || 0;
+        if (effective > 0) {
+          const allocated = await consumeDepositCredit({
+            estimateId: sourceEstimateId,
+            amount: effective,
+            invoiceId: created.id,
+            trx,
+          });
+          if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
+            throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
+          }
+        }
+        return { invoice: created, reused: false };
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!withDeposit) throw err;
+      logger.warn(`[schedule] mint deposit roll-forward failed for service ${svc.id} (attempt ${attempt + 1}): ${err.message}`);
+      if (attempt === 1) {
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          await triggerNotification('estimate_deposit_reconcile_needed', { estimateId: sourceEstimateId });
+        } catch (notifyErr) {
+          logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
+        }
+      }
+    }
+  }
+  throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
+}
+
 // Mint-or-reuse the invoice for a scheduled visit at the visit's standard price
 // (no operator extras — that's the Charge-now sheet's job, which is why that
 // route keeps its own inline mint). Serialized on the SAME advisory lock as
@@ -4091,19 +4184,9 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
     fallbackAmount: amount,
     fallbackDescription: svc.service_type || 'Service visit',
   });
-  return db.transaction(async (trx) => {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['schedule.invoice.mint', String(svc.id)],
-    );
-    const replayed = await trx('invoices')
-      .where({ scheduled_service_id: svc.id })
-      .whereNot('status', 'void')
-      .orderBy('created_at', 'desc')
-      .first();
-    if (replayed) return { invoice: replayed, reused: true };
-    const created = await InvoiceService.create({
-      database: trx,
+  return mintScheduledServiceInvoiceWithDeposit({
+    svc,
+    buildCreateParams: () => ({
       customerId: svc.customer_id,
       scheduledServiceId: svc.id,
       title: formatServiceDisplay(svc.service_type, []),
@@ -4112,8 +4195,7 @@ async function mintOrReuseScheduledServiceInvoice(svc) {
       taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
       trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
       dueDate: etDateString(),
-    });
-    return { invoice: created, reused: false };
+    }),
   });
 }
 
@@ -4679,29 +4761,18 @@ router.post('/:id/invoice', async (req, res, next) => {
       extraLineItems: invoiceExtraLines,
     });
 
-    // Mint inside a transaction holding an advisory xact lock keyed on the
-    // scheduled_service_id (same pattern as services/stripe.js
-    // 'stripe.pi.payment'). invoices.scheduled_service_id has no unique
+    // Mint through the shared deposit-aware helper: advisory xact lock keyed on
+    // the scheduled_service_id (invoices.scheduled_service_id has no unique
     // index, so the unlocked check above can race a double-tap into TWO open
-    // invoices — and applyPrepaidCredit dedupes per invoice id, so the
-    // prepaid credit would then apply in full to both. The lock serializes
-    // concurrent mints; the re-check inside the lock returns the first
-    // request's invoice to the replay instead of minting a second one.
-    // InvoiceService.create rides the same trx (database: trx), so the
-    // invoice row commits atomically with the lock release.
-    const minted = await db.transaction(async (trx) => {
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['schedule.invoice.mint', String(svc.id)],
-      );
-      const replayed = await trx('invoices')
-        .where({ scheduled_service_id: svc.id })
-        .whereNot('status', 'void')
-        .orderBy('created_at', 'desc')
-        .first();
-      if (replayed) return { invoice: replayed, reused: true };
-      const created = await InvoiceService.create({
-        database: trx,
+    // invoices — and applyPrepaidCredit dedupes per invoice id, so the prepaid
+    // credit would then apply in full to both; the in-lock re-check returns the
+    // first request's invoice to the replay), plus the estimate-deposit
+    // roll-forward — completion reuses this pre-minted invoice, so skipping the
+    // credit here would strand the customer's paid deposit and collect full
+    // price on top of it.
+    const minted = await mintScheduledServiceInvoiceWithDeposit({
+      svc,
+      buildCreateParams: () => ({
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         title: formatServiceDisplay(svc.service_type, []),
@@ -4710,8 +4781,7 @@ router.post('/:id/invoice', async (req, res, next) => {
         taxRate: svc.cust_property_type === 'commercial' ? 0.07 : 0,
         trustedStoredDiscountSources: ['scheduled_service', 'validated_checkout'],
         dueDate: etDateString(),
-      });
-      return { invoice: created, reused: false };
+      }),
     });
 
     let invoice = minted.invoice;
@@ -4838,6 +4908,22 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    // Only 'confirmed' / 'cancelled' are allowed until the office confirms it.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     const fromStatus = svc.status;
     if (toStatus === 'en_route') {
       const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -4876,6 +4962,15 @@ router.put('/:id/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        // Expected block from the shared writer's review-booking guard —
+        // conflict, not a 500 (mirrors the pre-guard above for statuses it
+        // doesn't cover, e.g. a race past it).
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -4926,6 +5021,19 @@ router.put('/:id/status', async (req, res, next) => {
           waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
         });
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
+    }
+
+    // Outbound-callback booking confirmed by the office → arm the deferred
+    // reminders, convert the originating call lead, resolve the review card.
+    // Shared hook (services/outbound-review-confirm) so the admin-dispatch
+    // status route — the other surface staff confirm from — runs the exact
+    // same side effects and the two paths can't drift.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
+      }
     }
 
     // En-route: track-transitions flip (which fires the customer SMS
@@ -5331,9 +5439,15 @@ router.post('/optimize', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -5422,9 +5536,15 @@ router.post('/optimize-route', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
-        db.raw('COALESCE(scheduled_services.lat, customers.latitude) as lat'),
-        db.raw('COALESCE(scheduled_services.lng, customers.longitude) as lng'),
-        'customers.city', 'customers.zip',
+        // Primary-home coords are only a valid fallback when the visit's
+        // stamped address doesn't DIVERGE from the primary — a divergent
+        // stamp with no coords must degrade to "no pin" (optimizer appends
+        // coordless stops), never route to the wrong house. City/zip follow
+        // the stamp so zone grouping reflects the booked property.
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as lat`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as lng`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         db.raw("COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, '') as customer_name")
       );
 
@@ -6702,6 +6822,7 @@ router._test = {
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
   countUpcomingSeriesVisits,
+  mintScheduledServiceInvoiceWithDeposit,
 };
 
 module.exports = router;

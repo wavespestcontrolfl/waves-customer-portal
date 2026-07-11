@@ -16,6 +16,10 @@ const photos = require('./photos');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
+// Was hardcoded gemini-2.5-flash in the request URL — the exact pattern that
+// broke call extraction when Google retired that model (2026-07-09): no env
+// lever, so a model retirement means a deploy.
+const GEMINI_OCR_MODEL = process.env.GEMINI_TURF_OCR_MODEL || 'gemini-3.5-flash';
 
 const GAUGE_OCR_PROMPT = `You are reading a Turfchek rough grass height-of-cut gauge from a photo. Find where the grass canopy line meets the printed inch scale and read the maintained height in inches. Return ONLY a JSON object: {"height_in": number, "confidence": number between 0 and 1, "readable": boolean}. If the gauge scale or canopy line is not clearly legible, set "readable" to false and "confidence" to 0.`;
 
@@ -71,7 +75,7 @@ async function callClaudeGaugeOcr(base64Image, mimeType) {
 async function callGeminiGaugeOcr(base64Image, mimeType) {
   if (!GEMINI_KEY) return null;
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_OCR_MODEL}:generateContent?key=${GEMINI_KEY}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -583,7 +583,7 @@ export default function MobileAppointmentDetailSheet({
               className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
-              ⛈️ Rain out
+              Rain out
             </button>
           )}
           <button

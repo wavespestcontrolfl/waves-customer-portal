@@ -355,6 +355,7 @@ export default function RatePage() {
               <img
                 src={techPhotoUrl}
                 alt={techName}
+                referrerPolicy="no-referrer"
                 style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', display: 'block', boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}
               />
             ) : (

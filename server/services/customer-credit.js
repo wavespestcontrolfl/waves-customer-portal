@@ -322,10 +322,19 @@ async function restoreAccountCreditForVoidedInvoice({ invoice, createdBy = 'syst
  * two paths can't double-restore, and only a NON-terminal row is flipped, so a
  * replayed event never clobbers an existing void/cancel/refund or re-credits. Runs
  * inside the caller's trx.
+ *
+ * Consumed ESTIMATE-DEPOSIT credit is restored here too, on the same terminal
+ * transition. Refund is the only exit for a paid deposit-credited invoice
+ * (voidInvoice refuses paid invoices), so without this the 'credited' ledger
+ * rows strand forever — the void paths' restoreDepositCreditForVoidedInvoice
+ * can never run on a 'refunded' invoice. Gating on the transition winner
+ * (!alreadyTerminal, under the row lock) keeps it exactly-once across webhook
+ * replays and the admin-refund/webhook pair; a shortfall throws (same contract
+ * as the void path) so the caller's trx rolls back and Stripe retries the event.
  */
 async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, trx) {
   const inv = await trx('invoices').where({ id: invoiceId }).forUpdate()
-    .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied');
+    .first('id', 'customer_id', 'invoice_number', 'status', 'credit_applied', 'line_items');
   if (!inv) return { restored: 0 };
   const restore = round2(inv.credit_applied);
   // A FULL refund TERMINALIZES the invoice to 'refunded' from ANY non-terminal
@@ -342,6 +351,14 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
   if (restore > 0) updates.credit_applied = 0;
   if (!alreadyTerminal || restore > 0) {
     await trx('invoices').where({ id: invoiceId }).update(updates);
+  }
+  if (!alreadyTerminal) {
+    // Transition winner: give back the deposit dollars this invoice consumed
+    // (credited → received, roll-forward-eligible). Restore-based-on-line-items
+    // must run at most once per invoice, which the terminal gate guarantees.
+    // eslint-disable-next-line global-require
+    const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
+    await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
   }
   if (restore > 0) {
     await postCreditMovement({

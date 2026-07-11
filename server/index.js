@@ -245,6 +245,16 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   }
   next();
 });
+// The AI-content-report surface (default ON — MS Store policy 11.16 needs it
+// live; GATE_AI_CONTENT_REPORT=false kills it) carries the same contract:
+// while dark it must read 404 even for an IP that already exhausted the
+// global /api/ limiter. Mirrors requireAiContentReport in routes/ai-assistant.js.
+app.use('/api/ai/chat/report', (req, res, next) => {
+  if (process.env.GATE_AI_CONTENT_REPORT === 'false') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -370,6 +380,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Digital business card — public token-scoped data + Save-contact vCard.
+app.use('/api/card', require('./routes/card-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).
 // Dark behind GATE_UNIVERSAL_LINKS — both files 404 until flipped.
 app.use('/.well-known', require('./routes/well-known'));
@@ -388,6 +400,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // /api/admin/customers prefix; Express tries them in mount order.
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
+app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/command-center', require('./routes/admin-command-center'));

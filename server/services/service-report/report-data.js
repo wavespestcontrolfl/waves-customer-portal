@@ -1216,13 +1216,17 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
 }
 
 async function photoUrl(photo) {
-  if (photo.s3_url) return photo.s3_url;
-  if (!photo.s3_key || !PhotoService) return null;
-  try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
-  } catch {
-    return null;
+  // Presign from s3_key FIRST: service_photos.s3_url is a legacy stored-URL
+  // column whose values expire/go stale (see the track-public.js note) — it
+  // only remains as the fallback for ancient rows that never got a key.
+  if (photo.s3_key && PhotoService) {
+    try {
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the legacy stored URL */
+    }
   }
+  return photo.s3_url || null;
 }
 
 function buildProtocolPayload(record) {
@@ -1658,7 +1662,7 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
+    return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
   } catch {
     return null;
   }
@@ -2381,6 +2385,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
+    // PhotoService is guard-loaded above — fall back to the helper's default
+    // TTL rather than throwing when it's unavailable.
+    PhotoService?.CUSTOMER_DWELL_TTL_SECONDS ?? undefined,
   ).catch(() => service.technician_avatar_url || service.technician_photo_url || null);
   const publicZones = zones.map((zone) => ({
     id: zone.id,
@@ -2418,12 +2425,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
-  // Lawn Report V2 — visual-insight payload (flag-gated, additive). Deterministic
-  // structure (diagnosis / water / mowing / treatment / trends) from the data already
-  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose per visit
-  // and falls back to the deterministic copy field-by-field. Never blocks the report.
+  // Lawn Report V2 — THE lawn report (owner ruling 2026-07-09; the
+  // LAWN_REPORT_V2 env flag is retired). Deterministic structure
+  // (diagnosis / water / mowing / treatment / trends) from the data already
+  // computed for V1; optional LLM narrative overlay (VOICE) varies the prose
+  // per visit and falls back to the deterministic copy field-by-field. Built
+  // whenever the visit has a tech-confirmed linked assessment — visits
+  // without one (historical tokens predating the assessment flow) keep the
+  // legacy fallback layout client-side. Never blocks the report.
   let reportV2 = null;
-  if (serviceLine === 'lawn' && process.env.LAWN_REPORT_V2 === 'true' && lawnAssessment) {
+  if (serviceLine === 'lawn' && lawnAssessment) {
     try {
       // Phase 2: prefer the stored area water-intake snapshot (computed at
       // completion); compute + persist on the fly if absent so a permanent report
@@ -2566,11 +2577,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
-  // Tree & Shrub Report V2 — visual plant-health payload (flag-gated, additive).
-  // Mirrors the lawn path: a tech-confirmed tree_shrub_assessments row, scored from
-  // the visit's photos, drives the five diagnosis categories + insights. Best-effort:
-  // a build hiccup or unmigrated tables must never break the report.
-  if (!reportV2 && serviceLine === 'tree_shrub' && process.env.TREE_SHRUB_REPORT_V2 === 'true') {
+  // Tree & Shrub Report V2 — visual plant-health payload (unconditional, like
+  // lawn: the TREE_SHRUB_REPORT_V2 env flag is retired — owner ungated
+  // 2026-07-09 after prod ran flag-on since 06-26). Mirrors the lawn path: a
+  // tech-confirmed tree_shrub_assessments row, scored from the visit's
+  // photos, drives the five diagnosis categories + insights. Best-effort: a
+  // build hiccup or unmigrated tables must never break the report.
+  if (!reportV2 && serviceLine === 'tree_shrub') {
     try {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);

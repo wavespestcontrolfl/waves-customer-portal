@@ -1171,6 +1171,11 @@ module.exports = {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
   leadMatchesEstimateContact,
+  // The same contact normalization the lead-match rule uses, for callers that
+  // need to apply the identical match semantics against other tables
+  // (estimate revise validates the linked CUSTOMER's contact with these).
+  normalizeContactPhone: normalizePhone,
+  normalizeContactEmail: normalizeEmail,
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,

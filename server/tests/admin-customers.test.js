@@ -232,12 +232,15 @@ describe('admin customers route helpers', () => {
       service_contact_name: 'Grace Hopper',
       service_contact_phone: '+19415550199',
       service_contact_email: 'grace@example.com',
+      service_contact_role: null,
       service_contact2_name: 'Sam Spouse',
       service_contact2_phone: '+19415550112',
       service_contact2_email: 'sam@example.com',
+      service_contact2_role: 'spouse_partner',
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
+      service_contact3_role: null,
     };
     const updates = {
       service_contact_name: '',
@@ -251,13 +254,50 @@ describe('admin customers route helpers', () => {
       service_contact_name: 'Sam Spouse',
       service_contact_phone: '+19415550112',
       service_contact_email: 'sam@example.com',
+      // The person's role travels WITH them through the promotion.
+      service_contact_role: 'spouse_partner',
       service_contact2_name: null,
       service_contact2_phone: null,
       service_contact2_email: null,
+      service_contact2_role: null,
       service_contact3_name: null,
       service_contact3_phone: null,
       service_contact3_email: null,
+      service_contact3_role: null,
     });
+  });
+
+  test('an echoed shifted list carries the role with the person (codex round-5 P2)', () => {
+    // Admin edit form echoes every field: the tenant moved from slot 2 into
+    // slot 1, slot 2 cleared, no role fields in the payload. The person's
+    // role must follow them; per-slot comparison would have dropped it.
+    const before = {
+      service_contact_name: 'Rhonda Realtor',
+      service_contact_phone: '+19415550100',
+      service_contact_email: '',
+      service_contact_role: 'real_estate_agent',
+      service_contact2_name: 'Terry Tenant',
+      service_contact2_phone: '+19415550112',
+      service_contact2_email: '',
+      service_contact2_role: 'tenant',
+    };
+    const updates = {
+      service_contact_name: 'Terry Tenant',
+      service_contact_phone: '+19415550112',
+      service_contact_email: '',
+      service_contact2_name: '',
+      service_contact2_phone: '',
+      service_contact2_email: '',
+      service_contact3_name: '',
+      service_contact3_phone: '',
+      service_contact3_email: '',
+    };
+
+    compactServiceContactSlots(updates, before);
+
+    expect(updates.service_contact_name).toBe('Terry Tenant');
+    expect(updates.service_contact_role).toBe('tenant');
+    expect(updates.service_contact2_role).toBeNull();
   });
 
   test('slot compaction is a no-op when no service-contact column is updated', () => {

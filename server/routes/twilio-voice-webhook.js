@@ -13,6 +13,14 @@ const { decideVoiceRoute } = require('../services/voice-route-decision');
 const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
 const { isRelayAttached } = require('../services/voice-agent/relay-server');
 
+// Single TTS voice for every <Say> in the voice flow. The flow previously
+// mixed three tiers — legacy `alice`, standard Polly.Joanna, and bare <Say>
+// (Twilio default voice) — which sounded like three different robots on one
+// call. Polly.Joanna-Neural is the highest GA/SLA-covered tier of the same
+// Joanna voice; the pre-recorded ElevenLabs brand assets remain <Play>.
+// Env-swappable without a code change.
+const SAY_VOICE = process.env.TWILIO_SAY_VOICE || 'Polly.Joanna-Neural';
+
 function notifyTwilioFailure(payload) {
   void alertTwilioFailure(payload).catch((err) => {
     logger.error(`[twilio-alerts] async notification failed: ${err.message}`);
@@ -174,6 +182,19 @@ async function rememberForwardAccept({ parentCallSid, dialCallSid, answeredByNum
     });
 }
 
+// Compact, parse-safe capture of Twilio's Marketplace `AddOns` webhook param
+// for the call_log metadata audit trail. Parsed object when valid JSON,
+// truncated string when not (still evidence of WHAT arrived), null when the
+// param is absent entirely.
+function parseAddOnsForAudit(addOnsRaw) {
+  if (!addOnsRaw) return null;
+  try {
+    return typeof addOnsRaw === 'string' ? JSON.parse(addOnsRaw) : addOnsRaw;
+  } catch {
+    return String(addOnsRaw).slice(0, 1000);
+  }
+}
+
 function metadataHasForwardAcceptance(metadata, { parentCallSid, dialCallSid }) {
   const acceptance = parseJsonObject(metadata).forward_acceptance || {};
   if (acceptance.accepted !== true) return false;
@@ -285,7 +306,7 @@ const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 function appendVoicemailRecording(twiml) {
   const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
   twiml.play(voicemailAudio);
-  twiml.say({ voice: 'alice' }, 'Your message will be recorded and transcribed.');
+  twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
   twiml.record({
     maxLength: 120,
     action: VOICEMAIL_COMPLETE_ACTION,
@@ -417,7 +438,7 @@ router.post('/voice', async (req, res) => {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('twilioVoice')) {
       logger.info(`[GATE BLOCKED] Voice call from ${maskPhone(req.body.From)} (gate: twilioVoice)`);
-      return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Thank you for calling Waves Pest Control. Please call back during business hours or text us at 941-318-7612.</Say></Response>');
+      return res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Thank you for calling Waves Pest Control. Please call back during business hours or text us at 941-318-7612.</Say></Response>`);
     }
 
     const { From, To, CallSid, CallStatus, Direction } = req.body;
@@ -439,6 +460,10 @@ router.post('/voice', async (req, res) => {
     const { checkInboundBlock } = require('../middleware/spam-block');
     const blockResult = await checkInboundBlock({
       from: From, to: To, channel: 'voice', twilioSid: CallSid, addOns: req.body.AddOns,
+      // Blocked calls return TwiML before the call_log insert below ever
+      // runs, so their spam evidence must ride the blocked_call_attempts
+      // audit row instead — same fields the allowed path stores in metadata.
+      signals: { stir_verstat: req.body.StirVerstat || null, addons: parseAddOnsForAudit(req.body.AddOns) },
       recordAttempt: firstDelivery,
     });
     if (blockResult.blocked) return res.type('text/xml').send(blockResult.twiml);
@@ -483,6 +508,15 @@ router.post('/voice', async (req, res) => {
         // Read back after press-1 by connectingAnnouncement(). Stored server-side
         // so the caller's name never enters a callback URL (request-logger safe).
         screen_caller_name: spokenCallerName(customer),
+        // Spam-signal ground truth (2026-07-09): the STIR/SHAKEN attestation
+        // and the Marketplace AddOns verdicts arrive ONLY on this initial
+        // webhook and were previously dropped on the floor. Captured so
+        // screening accuracy can be judged from call_log against the
+        // pipeline's own spam classifications BEFORE any caller is ever
+        // challenged or blocked. NULL addons = Twilio attached nothing —
+        // that absence is itself a finding (Marchex was silent for months).
+        stir_verstat: req.body.StirVerstat || null,
+        addons: parseAddOnsForAudit(req.body.AddOns),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -624,7 +658,7 @@ router.post('/voice', async (req, res) => {
       to: req.body?.To,
       link: '/admin/communications',
     });
-    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>We're sorry, please try again.</Say></Response>`);
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">We're sorry, please try again.</Say></Response>`);
   }
 });
 
@@ -850,8 +884,8 @@ router.post('/inbound-forward-screen', (req, res) => {
       timeout: 7,
     });
 
-    gather.say({ voice: 'Polly.Joanna' }, 'Waves call. Press 1 to connect.');
-    twiml.say({ voice: 'Polly.Joanna' }, 'No input received. Goodbye.');
+    gather.say({ voice: SAY_VOICE }, 'Waves call. Press 1 to connect.');
+    twiml.say({ voice: SAY_VOICE }, 'No input received. Goodbye.');
     twiml.hangup();
 
     res.type('text/xml').send(twiml.toString());
@@ -890,9 +924,9 @@ router.post('/inbound-forward-accept', async (req, res) => {
           logger.warn(`[voice] forward-accept caller lookup failed for ${maskSid(parentCallSid)}: ${lookupErr.message}`);
         }
       }
-      twiml.say({ voice: 'Polly.Joanna' }, connectingAnnouncement(callRow));
+      twiml.say({ voice: SAY_VOICE }, connectingAnnouncement(callRow));
     } else {
-      twiml.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      twiml.say({ voice: SAY_VOICE }, 'Goodbye.');
       twiml.hangup();
     }
 
@@ -1129,13 +1163,13 @@ router.post('/lead-alert-announce', async (req, res) => {
     const spokenPhone = leadPhoneRaw.replace(/\+1(\d{3})(\d{3})(\d{4})/, '$1. $2. $3.');
     const twiml = new VoiceResponse();
     twiml.pause({ length: 1 });
-    twiml.say({ voice: 'alice' }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    twiml.say({ voice: SAY_VOICE }, `${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
     twiml.pause({ length: 1 });
-    twiml.say({ voice: 'alice' }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
+    twiml.say({ voice: SAY_VOICE }, `Again. ${eventLabel}. ${leadName}. Phone ${spokenPhone}`);
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Lead alert announce error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>New lead received. Check admin portal.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">New lead received. Check admin portal.</Say></Response>`);
   }
 });
 
@@ -1165,17 +1199,17 @@ router.post('/outbound-admin-prompt', async (req, res) => {
     });
 
     gather.say(
-      { voice: 'Polly.Joanna' },
+      { voice: SAY_VOICE },
       `${eventLabel ? `${eventLabel}. ` : ''}Calling ${firstName}. Press 1 to connect.`
     );
 
-    twiml.say('No response received. Goodbye.');
+    twiml.say({ voice: SAY_VOICE }, 'No response received. Goodbye.');
     twiml.hangup();
 
     res.type('text/xml').send(twiml.toString());
   } catch (err) {
     logger.error(`Outbound admin prompt error: ${err.message}`);
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Error. Goodbye.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Error. Goodbye.</Say></Response>`);
   }
 });
 
@@ -1193,7 +1227,7 @@ router.post('/outbound-connect', async (req, res) => {
     // hangs up cleanly so we don't bridge a customer to a voicemail tone.
     if (digits !== '1') {
       const reject = new VoiceResponse();
-      reject.say({ voice: 'Polly.Joanna' }, 'Goodbye.');
+      reject.say({ voice: SAY_VOICE }, 'Goodbye.');
       reject.hangup();
       return res.type('text/xml').send(reject.toString());
     }
@@ -1240,7 +1274,7 @@ router.post('/outbound-connect', async (req, res) => {
       to: req.body?.To,
       link: '/admin/communications',
     });
-    res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, unable to connect.</Say></Response>');
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="${SAY_VOICE}">Sorry, unable to connect.</Say></Response>`);
   }
 });
 
@@ -1378,6 +1412,7 @@ router._test = {
   maskPhone,
   maskSid,
   metadataHasForwardAcceptance,
+  parseAddOnsForAudit,
   spokenCallerName,
   rememberForwardAccept,
   resolveCsrName,

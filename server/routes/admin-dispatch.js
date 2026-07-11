@@ -10,6 +10,7 @@ const { etDateString, addETDays, parseETDateTime, formatETDay, formatETDate, for
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
+const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
@@ -1099,6 +1100,11 @@ router.get('/:serviceId/completion-profile', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// SQL NULL must reach buildPropertyMapPayload as NaN, not Number(null)=0 —
+// 0 is finite, so a coordless row would render an "available" map centered
+// at 0,0 instead of the missing_coordinates state (codex round-9 P2).
+const coordOrNaN = (v) => (v == null ? NaN : Number(v));
+
 // Satellite basemap + the customer's existing zones for the zone-marking
 // surfaces (completion-flow capture step and the office desk-backfill flow).
 // The image params (center / zoom / 640x340) are built through the SAME
@@ -1184,10 +1190,22 @@ router.get('/:serviceId/property-map', async (req, res, next) => {
     const svc = await db('scheduled_services as ss')
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .where('ss.id', req.params.serviceId)
-      .select('ss.id', 'ss.customer_id', 'c.latitude', 'c.longitude')
+      .select(
+        'ss.id',
+        'ss.customer_id',
+        // The zone-marking map must center on the BOOKED parcel: visit coords
+        // first; the primary home only for non-divergent stamps — a divergent
+        // stamp with no coords degrades to the map's missing_coordinates
+        // state rather than letting zones be drawn on the wrong parcel
+        // (codex round-7 P1).
+        db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as latitude`),
+        db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as longitude`)
+      )
       .first();
     if (!svc || !svc.customer_id) return res.status(404).json({ error: 'Service not found' });
-    return res.json(await buildPropertyMapPayload(svc.customer_id, Number(svc.latitude), Number(svc.longitude)));
+    // Number(null) is 0 — a finite value that would sail past the payload's
+    // missing_coordinates check and center the map at 0,0 (codex round-9 P2).
+    return res.json(await buildPropertyMapPayload(svc.customer_id, coordOrNaN(svc.latitude), coordOrNaN(svc.longitude)));
   } catch (err) { next(err); }
 });
 
@@ -1201,7 +1219,8 @@ router.get('/customers/:customerId/property-map', requireAdmin, async (req, res,
       .select('id', 'latitude', 'longitude')
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    return res.json(await buildPropertyMapPayload(customer.id, Number(customer.latitude), Number(customer.longitude)));
+    // Same Number(null)=0 trap as the service-scoped handler above.
+    return res.json(await buildPropertyMapPayload(customer.id, coordOrNaN(customer.latitude), coordOrNaN(customer.longitude)));
   } catch (err) { next(err); }
 });
 
@@ -1324,7 +1343,16 @@ router.get('/:date?', async (req, res, next) => {
       .select(
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
-        'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+        // Visit-specific address (stamped at booking for property-aware
+        // visits, e.g. a customer's rental) wins over the customer's primary
+        // mirror — same output field names, so every consumer keeps working.
+        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as address_line1'),
+        // Divergent stamps keep THEIR unit line; non-divergent stamps fall
+        // back to the primary's unit (codex round-4/round-5 P2).
+        db.raw(`${stampedLine2Sql('scheduled_services', 'customers')} as address_line2`),
+        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
+        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as state'),
+        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
         'customers.waveguard_tier', 'customers.monthly_rate', 'customers.lawn_type',
         'customers.autopay_enabled', 'customers.autopay_paused_until',
         'customers.autopay_payment_method_id',
@@ -1400,7 +1428,7 @@ router.get('/:date?', async (req, res, next) => {
         customerName: `${s.first_name} ${s.last_name}`,
         customerId: s.customer_id,
         customerPhone: s.customer_phone,
-        address: [s.address_line1, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+        address: [[s.address_line1, s.address_line2].filter(Boolean).join(" "), s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "),
         city: s.city,
         serviceType: s.service_type,
         scheduledDate: s.scheduled_date,
@@ -1574,6 +1602,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state
@@ -1729,6 +1772,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
         const lifecycleAt = new Date();
+        if (toStatus === 'confirmed') {
+          // Same lifecycle semantics as the admin-schedule status route. For a
+          // pending outbound-review booking this is the flag the shared-writer
+          // guard and the customer self-service filters key on — without it a
+          // dispatch-side confirm left the row permanently review-locked.
+          lifecycleUpdates.customer_confirmed = true;
+        }
         if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, lifecycleAt));
         }
@@ -1759,12 +1809,31 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
         });
       }
       throw err;
+    }
+
+    // Office confirmation of a pending outbound-review booking from THIS route
+    // must run the same side effects as the admin-schedule confirm path (arm
+    // deferred reminders, convert the originating call lead, resolve the
+    // outbound_booking_review card) — shared hook so the two can't drift.
+    // Post-commit + best-effort, same as every other block below.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-dispatch');
+      }
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.
@@ -2238,7 +2307,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'scheduled_services.*',
         'customers.first_name', 'customers.last_name', 'customers.phone as cust_phone', 'customers.email as cust_email',
         'customers.city', 'customers.property_type',
-        'customers.latitude as customer_latitude', 'customers.longitude as customer_longitude',
+        // Report application-conditions (weather) capture at the TREATED
+        // parcel: stamped visit coords first, the primary home only for
+        // non-divergent stamps (codex round-10 P2).
+        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as customer_latitude`),
+        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as customer_longitude`),
         'customers.monthly_rate as cust_monthly_rate',
         'customers.waveguard_tier as cust_waveguard_tier',
         ...(billingModeColumnsExist
@@ -3914,6 +3987,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
         }
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          // Completing a pending outbound-review booking is an expected block
+          // from the shared writer — record the failed attempt and conflict.
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
           return res.status(409).json({
@@ -4160,12 +4242,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
     // tree_shrub_assessments row that feeds the customer Tree & Shrub Report V2.
     // Post-commit + fire-and-forget: it never blocks completion latency or success
-    // (the report self-heals on view). Flag-gated, tree_shrub-only, fully guarded —
-    // a scoring hiccup can't affect any completion. Replays return earlier, so this
-    // runs once on the genuine first completion (no duplicate assessments).
+    // (the report self-heals on view). Unconditional (the TREE_SHRUB_REPORT_V2
+    // env flag is retired — owner ungated 2026-07-09), tree_shrub-only, fully
+    // guarded — a scoring hiccup can't affect any completion. Replays return
+    // earlier, so this runs once on the genuine first completion (no duplicate
+    // assessments).
     if (
-      process.env.TREE_SHRUB_REPORT_V2 === 'true'
-      && reportServiceLine === 'tree_shrub'
+      reportServiceLine === 'tree_shrub'
       && !isIncompleteVisit
       && Array.isArray(completionPhotos) && completionPhotos.length
     ) {
@@ -4634,7 +4717,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         prepaidPiId = guard.piId;
       }
 
-      return db.transaction(async (trx) => {
+      let flippedPaidByPrepayment = false;
+      const creditedResult = await db.transaction(async (trx) => {
         const lockedInvoice = await trx('invoices')
           .where({ id: invoiceRow.id })
           .forUpdate()
@@ -4666,6 +4750,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
         const paidByPrepayment = remainingCents <= 0;
+        flippedPaidByPrepayment = paidByPrepayment;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
           .update({
@@ -4701,6 +4786,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         });
         return creditedInvoice;
       });
+      // A cash/Zelle prepayment that fully covers the invoice flips it paid
+      // with NO Stripe webhook behind it, so the annual-prepay payment sync
+      // (pending-term activation + the pending-window slice resolution the
+      // reconcile left "until the invoice resolves") would never run.
+      // Mirror the prepaid-receipt path (admin-schedule): best-effort — the
+      // daily covered-term sweep is the recovery net.
+      if (flippedPaidByPrepayment && creditedResult?.id) {
+        try {
+          await AnnualPrepayRenewals.syncTermForInvoicePayment(creditedResult);
+        } catch (err) {
+          logger.warn(`[dispatch] annual-prepay sync after prepaid credit failed for invoice ${creditedResult.id}: ${err.message}`);
+        }
+      }
+      return creditedResult;
     };
 
     if (shouldInvoice) {
@@ -5096,6 +5195,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
+    // Digital business card: mint the customer's card off their first
+    // completed visit, tied to the tech on record (services/customer-card.js).
+    // Fire-and-forget — a mint failure never blocks the completion, and the
+    // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
+    // Internal-only completion profiles (e.g. Waves Assessment) suppress all
+    // customer comms/public tokens above, so they must not mint a
+    // customer-facing card either (Codex P1 on PR #2588). Non-performed
+    // outcomes also skip: no service was delivered, and minting would tie
+    // the lifetime card to the wrong first visit/tech. 'incomplete' does NOT
+    // return early in this handler — it records the alert and continues — so
+    // it belongs here too, matching the referral-credit non-performed guard
+    // (Codex P2 #2588 r2 + r5).
+    const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
+    if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
+      try {
+        const CustomerCardService = require('../services/customer-card');
+        void CustomerCardService.ensureCardForCompletion({
+          customerId: svc.customer_id,
+          serviceRecordId: record.id,
+          scheduledServiceId: svc.id,
+        }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
+      } catch (e) {
+        logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);
+      }
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);
@@ -5135,7 +5260,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // source of truth) and run the consistency check, so the SMS below leads with
         // the same line as the report. Best-effort; never blocks completion.
         let lawnReportSmsSummary = null;
-        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && process.env.LAWN_REPORT_V2 === 'true') {
+        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
           try {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
@@ -5205,17 +5330,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           completionSmsWasTruncated = false;
         } else {
           if (usePaidCompletionTemplate) {
-            const body = await renderTemplate('service_complete_prepaid', {
+            // Annual-prepay coverage means the plan paid for this visit when
+            // it was bought, not today — service_complete_prepaid's "Thanks
+            // for your payment today" reads wrong there (owner report
+            // 2026-07-09). Plan-covered visits get the annual-prepay variant;
+            // a disabled/missing variant falls back to the base paid template
+            // so the toggle can never cost the customer their completion text.
+            const paidTemplateVars = {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
-            }, {
+            };
+            const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
               entity_id: record.id,
-            });
+            };
+            let body = null;
+            if (annualPrepayCovered) {
+              sentSmsType = 'service_complete_annual_prepay';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
+            if (!body) {
+              sentSmsType = 'service_complete_prepaid';
+              body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
+            }
             if (!body) throw new Error('SMS template service_complete_prepaid is missing or inactive');
-            sentSmsType = 'service_complete_prepaid';
             sentSmsBody = `${body}${reviewSuffix}`.trim();
             completionSmsWasTruncated = false;
           } else {
@@ -6482,12 +6622,10 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
 // confirms/hides/edits and the decisions are submitted with completion.
 router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
   try {
-    // Server kill-switch + cost guard: the dual-vision scoring is paid, so refuse
-    // (before any model call) unless the feature is rolled out — mirrors the gate on
-    // the completion auto-score hook, so the UI flag alone can't trigger paid calls.
-    if (process.env.TREE_SHRUB_REPORT_V2 !== 'true') {
-      return res.status(404).json({ error: 'Not found' });
-    }
+    // The TREE_SHRUB_REPORT_V2 kill-switch is retired (owner ungated
+    // 2026-07-09) — the feature is fully rolled out, matching the
+    // now-unconditional completion auto-score hook. Ownership + service-line
+    // guards below still bound who can trigger the paid dual-vision call.
     // Per-service ownership (same guard as photo-analysis/draft): a tech may only
     // score photos for a service they're assigned to; admins are unrestricted.
     if (!(await assertRecapOwnership(req, res))) return;
@@ -6604,6 +6742,23 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+
+    // A pending outbound-callback booking must be office-CONFIRMED before it can
+    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
+    // without the confirmation hook's reminder/lead/triage side effects. Confirm
+    // it first, then reschedule.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
+        .first('source_action', 'status', 'customer_confirmed');
+      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
@@ -6879,8 +7034,8 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.id,
         s.technician_id,
         s.customer_id,
-        COALESCE(s.lat, c.latitude)  AS lat,
-        COALESCE(s.lng, c.longitude) AS lng,
+        COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END)  AS lat,
+        COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng,
         s.status,
         s.service_type,
         s.scheduled_date,
@@ -6888,11 +7043,11 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         s.window_end,
         c.first_name,
         c.last_name,
-        c.address_line1,
-        c.address_line2,
-        c.city,
-        c.state,
-        c.zip
+        COALESCE(s.service_address_line1, c.address_line1) AS address_line1,
+        ${stampedLine2Sql('s', 'c')} AS address_line2,
+        COALESCE(s.service_address_city, c.city) AS city,
+        COALESCE(s.service_address_state, c.state) AS state,
+        COALESCE(s.service_address_zip, c.zip) AS zip
       FROM scheduled_services s
       INNER JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
@@ -7021,13 +7176,17 @@ router.get('/jobs/:id', requireAdmin, async (req, res, next) => {
         'c.last_name as cust_last_name',
         'c.phone as cust_phone',
         'c.email as cust_email',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip',
-        'c.latitude as cust_lat',
-        'c.longitude as cust_lng'
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip'),
+        // A visit whose stamp DIVERGES from the primary must never fall back
+        // to the customer's PRIMARY geocode — a null pin beats navigating to
+        // the wrong (real) house (codex P1). Non-divergent stamps (ordinary
+        // primary-address phone bookings) keep the fallback (round-4 P1).
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END as cust_lat`),
+        db.raw(`CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END as cust_lng`)
       );
 
     if (!row) return res.status(404).json({ error: 'Job not found' });
@@ -7119,11 +7278,11 @@ router.get('/techs/:id', requireAdmin, async (req, res, next) => {
         's.window_end',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
-        'c.address_line1',
-        'c.address_line2',
-        'c.city',
-        'c.state',
-        'c.zip'
+        db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
+        db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
+        db.raw('COALESCE(s.service_address_city, c.city) as city'),
+        db.raw('COALESCE(s.service_address_state, c.state) as state'),
+        db.raw('COALESCE(s.service_address_zip, c.zip) as zip')
       );
 
     const completed = routeRows.filter((r) => r.status === 'completed').length;

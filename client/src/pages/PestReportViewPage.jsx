@@ -3,7 +3,6 @@ import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -57,9 +56,8 @@ function Page({ children }) {
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
         }
       `}</style>
-      <main style={{ flex: 1, width: '100%', maxWidth: 720, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
-      {/* Standard pre-footer newsletter card (owner 2026-07-09). */}
-      <GlassNewsletterCard source="pest_report_footer" />
+      <main style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       <BrandFooter variant="light" />
     </div>
   );

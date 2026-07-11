@@ -629,6 +629,13 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
       return null;
     }
+    // House rule: no prices in customer SMS. This lane's draft lands in the
+    // composer's Use Draft button — same delivery boundary as suggest-mode,
+    // same deterministic guard (a priced draft falls back to the template).
+    if (parsed.reply && require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
+      logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
+      return null;
+    }
     return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);
@@ -669,6 +676,15 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     }
 
     const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+    // The house no-price rule applies to WHATEVER text lands in the composer
+    // card — the deterministic scheduling templates echo raw inbound text, so
+    // a customer's own "Tuesday for $50 works" would flow into the draft
+    // whenever the LLM path is rejected or unavailable. NULL = the agent
+    // offers no draft; the human writes the reply.
+    const reviewDraftText = llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage;
+    const reviewSuggestedMessage = reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
+      ? null
+      : reviewDraftText;
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;
@@ -707,7 +723,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
       blocked_actions: JSON.stringify(decision.blockedActions),
       safety_flags: JSON.stringify(decision.safetyFlags),
-      suggested_message: llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage,
+      suggested_message: reviewSuggestedMessage,
       reasoning_summary: decision.reasoningSummary,
       model: llmDraft ? llmDraft.model : 'deterministic_rules',
       prompt_version: llmDraft ? llmDraft.promptVersion : null,

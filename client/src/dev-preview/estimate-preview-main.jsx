@@ -9,8 +9,13 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import EstimateViewPage from '../pages/EstimateViewPage';
+import WavesShell from '../components/brand/WavesShell';
+// Brand tokens (--surface/--border/...) normally ride in via main.jsx —
+// without them the WavesShell top bar computes a transparent background and
+// the preview's colors drift from the real page.
+import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'accepted'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'lawn', 'accepted'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -29,7 +34,12 @@ const CONTACT = {
 const BASE_ESTIMATE = {
   id: 1,
   token: 'preview-token',
-  slug: null,
+  // Estimate # + issued/expiration render under the hero contact block on
+  // every estimate — the harness carries real-shaped values so the block is
+  // exercised in preview.
+  slug: 'WPC-2026-0512',
+  createdAt: '2026-07-09T14:00:00.000Z',
+  expiresAt: '2026-07-16T14:00:00.000Z',
   ...CONTACT,
   askToken: 'preview-ask-token',
   category: 'RESIDENTIAL',
@@ -269,10 +279,30 @@ function acceptedScenario() {
   };
 }
 
+// Lawn-only recurring estimate — exercises the lawn variant of the report
+// showcase (lawn health score mock instead of the pest recap video).
+function lawnScenario() {
+  const bundle = bundleScenario();
+  const lawnService = bundle.pricing.services.find((s) => s.key === 'lawn_care');
+  return {
+    ...bundle,
+    estimate: { ...bundle.estimate, serviceCategory: 'lawn_care' },
+    pricing: {
+      ...bundle.pricing,
+      services: [lawnService],
+      renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: null,
+      combinedRecurring: null,
+      askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
   bundle: bundleScenario,
+  lawn: lawnScenario,
   accepted: acceptedScenario,
 };
 
@@ -315,7 +345,9 @@ window.fetch = async (input, init) => {
   });
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
-    return respond(PAYLOADS[scenario]());
+    // Prod sends glassDefault per eligible category with the gate unset =
+    // ALL categories, so the harness mirrors the live copy pack.
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;
@@ -373,7 +405,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <MemoryRouter initialEntries={['/estimate/preview-token']}>
       <Routes>
-        <Route path="/estimate/:token" element={<EstimateViewPage />} />
+        {/* Same shell chrome as the real /estimate/:token route in App.jsx —
+            previews must show the universal header/footer (owner 2026-07-09). */}
+        <Route path="/estimate/:token" element={<WavesShell><EstimateViewPage /></WavesShell>} />
       </Routes>
     </MemoryRouter>
     <ScenarioBar />

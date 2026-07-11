@@ -14,6 +14,17 @@ const s3Client = new S3Client({
 
 const PhotoService = {
   /**
+   * TTL for presigned VIEW urls on customer-dwell surfaces — tokenized
+   * report/track/document pages and the logged-in portal. URLs are minted
+   * per page-load, so this only has to cover in-page DWELL (backgrounded
+   * tabs, lazy-loaded photo sliders), not link age: 5–15 minute links left
+   * swiped-to report slides blank once the customer had the page open a
+   * while (owner-reported 2026-07-11). 24h covers any realistic session
+   * while keeping a leaked URL's reach bounded.
+   */
+  CUSTOMER_DWELL_TTL_SECONDS: 24 * 60 * 60,
+
+  /**
    * Generate a presigned URL for uploading a photo from the field
    * Tech's mobile app uploads directly to S3 via this URL
    */

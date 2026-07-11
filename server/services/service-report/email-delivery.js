@@ -391,6 +391,7 @@ async function loadServiceRecord(recordId) {
   return db('service_records')
     .where({ 'service_records.id': recordId })
     .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
     .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
     .select(
       'service_records.*',
@@ -399,8 +400,11 @@ async function loadServiceRecord(recordId) {
       'customers.email as customer_email',
       'customers.phone as customer_phone',
       ...SERVICE_CONTACT_COLUMNS.map((column) => `customers.${column}`),
-      'customers.city',
-      'customers.state',
+      // The email's "completed ... at City, ST" line names the visit's
+      // stamped city when present — a rental visit in another town must not
+      // read as the primary home's city (codex round-9 P2 class).
+      db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
       'technicians.name as technician_name',
     )
     .first();

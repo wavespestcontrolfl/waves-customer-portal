@@ -1443,47 +1443,44 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // precheck above, but Postgres serializes UPDATEs against the same
     // row so only one of these statements actually changes anything;
     // the loser gets an empty .returning('*') and bails out before any
-    // side effects (receipt send, payments-ledger insert, activity row)
-    // run a second time.
-    const [updatedInvoice] = await db('invoices')
-      .where({ id })
-      .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-      .update({
-        status: 'paid',
-        paid_at: db.fn.now(),
-        payment_method: method,
-        payment_reference: trimmedReference || null,
-        payment_recorded_by: recordedBy,
-        payment_recorded_at: db.fn.now(),
-        notes: nextNotes,
-        updated_at: db.fn.now(),
-      })
-      .returning('*');
+    // side effects (receipt send, activity row) run a second time.
+    //
+    // The payments-ledger insert rides the SAME transaction as the status
+    // flip: the ledger row is load-bearing for every revenue rollup, and a
+    // best-effort insert after commit left collected cash permanently
+    // missing on a transient DB failure — with no alert and no sweep (the
+    // dashboard gap-fallback only rescues Stripe-PI invoices). Either both
+    // commit or the operator gets a retryable error and nothing changed.
+    const updatedInvoice = await db.transaction(async (trx) => {
+      const [row] = await trx('invoices')
+        .where({ id })
+        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+        .update({
+          status: 'paid',
+          paid_at: trx.fn.now(),
+          payment_method: method,
+          payment_reference: trimmedReference || null,
+          payment_recorded_by: recordedBy,
+          payment_recorded_at: trx.fn.now(),
+          notes: nextNotes,
+          updated_at: trx.fn.now(),
+        })
+        .returning('*');
+      if (!row) return null;
 
-    if (!updatedInvoice) {
-      // Lost the race to a concurrent caller (or another path marked it
-      // paid in between). Re-fetch so we can return a useful 409 body.
-      const current = await db('invoices').where({ id }).first();
-      return res.status(409).json({
-        error: 'Invoice status changed before payment could be recorded',
-        current_status: current?.status,
-      });
-    }
-
-    // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
-    // reports) sum manual cash/check/Zelle alongside Stripe collections.
-    // No `processor` set — that column is reserved for actual gateways
-    // (`stripe`); leaving it null is the existing convention for off-
-    // gateway money (see admin-payments-reconcile.js manual branch).
-    try {
+      // Payments-ledger row so revenue dashboards (admin-dashboard, monthly
+      // reports) sum manual cash/check/Zelle alongside Stripe collections.
+      // No `processor` set — that column is reserved for actual gateways
+      // (`stripe`); leaving it null is the existing convention for off-
+      // gateway money (see admin-payments-reconcile.js manual branch).
       const paymentRow = {
-        customer_id: updatedInvoice.customer_id,
+        customer_id: row.customer_id,
         // Record the CASH actually received — amount due (total − applied account
         // credit) — not the full total, or manual cash/check/Zelle over-states
         // revenue by the applied credit (which isn't cash).
-        amount: invoiceAmountDue(updatedInvoice),
+        amount: invoiceAmountDue(row),
         status: 'paid',
-        description: `Invoice ${updatedInvoice.invoice_number} — ${method}`
+        description: `Invoice ${row.invoice_number} — ${method}`
           + `${trimmedReference ? ` (${trimmedReference})` : ''}`,
         payment_date: etDateString(),
       };
@@ -1493,12 +1490,21 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       // account credit was applied the recorded cash (amount due) differs from
       // invoice.total, so they MUST be linked or the receipt falls back to the
       // pre-credit total instead of the amount actually received.
-      if (updatedInvoice.payer_id || Number(updatedInvoice.credit_applied) > 0) {
-        paymentRow.metadata = JSON.stringify({ invoice_id: updatedInvoice.id });
+      if (row.payer_id || Number(row.credit_applied) > 0) {
+        paymentRow.metadata = JSON.stringify({ invoice_id: row.id });
       }
-      await db('payments').insert(paymentRow);
-    } catch (err) {
-      logger.error(`[admin-invoices:record-payment] payments-ledger insert failed for ${updatedInvoice.invoice_number}: ${err.message}`);
+      await trx('payments').insert(paymentRow);
+      return row;
+    });
+
+    if (!updatedInvoice) {
+      // Lost the race to a concurrent caller (or another path marked it
+      // paid in between). Re-fetch so we can return a useful 409 body.
+      const current = await db('invoices').where({ id }).first();
+      return res.status(409).json({
+        error: 'Invoice status changed before payment could be recorded',
+        current_status: current?.status,
+      });
     }
 
     // Stop the follow-up sequence the same way the Stripe webhook does.

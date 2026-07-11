@@ -637,6 +637,119 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
   });
 });
 
+describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () => {
+  // Real content-guardrails end-to-end: a termite intercept post ships WITH a
+  // FAQ by owner mandate (2026-06-11), so the pre-commit gate must honor the
+  // same narrow exception the publish path does — without it every fix on
+  // such a post P0s on the PRE-EXISTING FAQ and the PR parks (PR #368).
+  const TERMITE_FM = {
+    title: 'Sentricon in Southwest Florida',
+    slug: '/termite/sentricon-swfl/',
+    meta_description: 'How termite bait stations work in Southwest Florida sandy soil, and what a monitored bait program actually covers for SWFL homeowners.',
+    primary_keyword: 'sentricon',
+    secondary_keywords: [],
+    category: 'termite',
+    post_type: 'location',
+    service_areas_tag: ['Sarasota'],
+    related_services: [],
+    spoke_links: [],
+    author: { name: 'Adam Benetti', role: 'Owner', fdacs_license: 'JB1234', bio_url: '/about/authors/adam-benetti' },
+    technically_reviewed_by: { name: 'Adam Benetti', credential: 'Certified Operator', fdacs_license: 'JB1234', bio_url: '/about/authors/adam-benetti' },
+    published: '2026-07-10',
+    updated: '2026-07-10',
+    technically_reviewed: '2026-07-10',
+    fact_checked: '2026-07-10',
+    review_cadence: 'quarterly',
+    reading_time_min: 3,
+    hero_image: { src: '/images/blog/termite/sentricon-swfl/hero.webp', alt: 'Bait station along a home perimeter' },
+    og_image: '/images/blog/termite/sentricon-swfl/hero.webp',
+    canonical: 'https://www.wavespestcontrol.com/termite/sentricon-swfl/',
+    schema_types: ['Article', 'FAQPage'],
+    disclosure: { type: 'pricing-transparency' },
+    domains: ['wavespestcontrol.com'],
+    tracking: { domains: ['wavespestcontrol.com'] },
+  };
+  // JSON is valid YAML, so a stringified object is a parseable frontmatter block.
+  const FAQ_MD = `---\n${JSON.stringify(TERMITE_FM, null, 2)}\n---\nBait stations target the colony itself.\n\n## Frequently Asked Questions\n\n### How long does bait last?\n\nStations stay in service as long as they are monitored.`;
+  const gateDeps = { factCheckEvaluate: async () => ({ pass: true }) };
+
+  test('validateFixedBlogFile: termite post with a pre-existing FAQ blocks without the flag, passes with it', async () => {
+    const strict = await rem.validateFixedBlogFile(FAQ_MD, {}, gateDeps);
+    expect(strict.ok).toBe(false);
+    expect(strict.reason).toMatch(/FAQ_BLOCKED_SERVICE/);
+
+    const excepted = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, gateDeps);
+    expect(excepted.ok).toBe(true);
+  });
+
+  test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
+    let optsSeen = null;
+    const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };
+    const r = await runRemediationForPr(
+      { ...CTX, operatorFaqException: true },
+      { db: makeDb(), gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: spy },
+    );
+    expect(r.remediated).toBe(true);
+    expect(optsSeen.operatorFaqException).toBe(true);
+  });
+
+  test('autonomous lane derives the flag from the run opportunity/brief via the runner derivation', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const db = makeDb({
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
+      });
+      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+      gh.getPr = async () => pr;
+      let optsSeen = null;
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: (md, opts) => { optsSeen = opts; return { ok: true }; },
+        validateAutonomousRunGates: async () => ({ ok: true }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => ({ voice_constraints: { operator_brief: { faq_required: true } } }),
+          _deriveGuardrailOptions: async () => ({ service: 'termite', domains: null, operatorFaqException: true }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      expect(optsSeen.operatorFaqException).toBe(true);
+    } finally {
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
+  });
+
+  test('autonomous lane derivation failure stays false (fail closed, remediation still runs)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    try {
+      const db = makeDb({
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
+      });
+      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+      gh.getPr = async () => pr;
+      let optsSeen = null;
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: (md, opts) => { optsSeen = opts; return { ok: true }; },
+        validateAutonomousRunGates: async () => ({ ok: true }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => { throw new Error('briefs table unavailable'); },
+          _deriveGuardrailOptions: async () => ({ operatorFaqException: true }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      expect(optsSeen.operatorFaqException).toBe(false);
+    } finally {
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
+  });
+});
+
 describe('validateAutonomousRunGates', () => {
   const MD = '---\ntitle: T\n---\nFixed body text';
   const RUN = {

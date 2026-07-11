@@ -174,20 +174,19 @@ export function GlassReviewMarquee({ reviews }) {
 }
 
 /**
- * Sticky mobile book bar (≤640px via CSS): live price/period on the left,
- * slot-aware approve button on the right. Hidden entirely off-mobile and
- * without glass (display:none default; the media query only flips it on
- * under html[data-glass-theme]).
+ * Sticky mobile book bar (≤640px via CSS): one large slot-aware approve
+ * button. The bar shows NO price (owner directive 2026-07-10) — the cards
+ * quote per-application prices, and a competing /mo figure down here read as
+ * two different totals. priceLabel still gates rendering so quote-required /
+ * ranged estimates keep the bar hidden, exactly as before. Hidden entirely
+ * off-mobile and without glass (display:none default; the media query only
+ * flips it on under html[data-glass-theme]).
  */
-export function GlassStickyBookBar({ priceLabel, periodLabel, slotMeta, onApprove }) {
+export function GlassStickyBookBar({ priceLabel, slotMeta, onApprove }) {
   if (!priceLabel) return null;
   return (
     <div className="gc-mbb">
-      <div className="gc-mbb-price">
-        {priceLabel}
-        {periodLabel ? <span className="gc-mbb-period">{periodLabel}</span> : null}
-      </div>
-      <button type="button" className="gc-mbb-btn" onClick={onApprove}>
+      <button type="button" className="gc-mbb-btn" style={{ flex: 1, width: '100%' }} onClick={onApprove}>
         {slotMeta ? `Approve ${slotMeta.dow} ${slotMeta.time} →` : 'Approve my plan →'}
       </button>
     </div>
@@ -237,7 +236,7 @@ export function GlassScarcityBadge({ info }) {
  */
 export function GlassSectionCta({ label, onClick, style }) {
   return (
-    <div style={{ display: 'flex', margin: '14px 0 4px', ...style }}>
+    <div style={{ display: 'flex', margin: '16px 0 4px', ...style }}>
       <button type="button" className="gc-section-cta" onClick={onClick}>
         {label}
       </button>

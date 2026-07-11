@@ -286,15 +286,20 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
   // Matches the formula in admin-dispatch.js computeTechEta — keep
   // them in sync if you change one. Failure paths return eta_minutes
   // null; never block the ping broadcast on this enrichment.
+  // The primary-home fallback only applies when the visit's stamped
+  // address doesn't DIVERGE from the primary — a divergent stamped
+  // rental with no coords broadcasts eta_minutes null rather than an
+  // ETA to the wrong house (codex round-9 P2).
   let eta_minutes = null;
   if (row && row.current_job_id && (row.status === 'en_route' || row.status === 'driving')) {
     try {
+      const { stampedDivergesSql } = require('./stamped-address');
       const job = await db('scheduled_services as s')
         .leftJoin('customers as c', 's.customer_id', 'c.id')
         .where('s.id', row.current_job_id)
         .first(
-          db.raw('COALESCE(s.lat, c.latitude) AS lat'),
-          db.raw('COALESCE(s.lng, c.longitude) AS lng')
+          db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) AS lat`),
+          db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) AS lng`)
         );
       if (job && job.lat != null && job.lng != null) {
         eta_minutes = haversineEtaMinutes(

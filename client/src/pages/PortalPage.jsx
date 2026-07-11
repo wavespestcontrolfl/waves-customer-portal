@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import api from '../utils/api';
@@ -8,7 +9,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
-import NewsletterSignup from '../components/NewsletterSignup';
 import Icon from '../components/Icon';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
@@ -770,7 +770,9 @@ function PhotoGallery({ photos }) {
             border: p.isBest ? `2px solid ${B.teal}` : `1px solid ${B.grayLight}`,
             boxShadow: selected === i ? `0 0 0 3px ${B.teal}44` : 'none',
           }}>
-            <img src={p.url} alt={`Lawn ${p.type || ''}`} loading="lazy" style={{
+            {/* Eager: presigned URL — lazy deferred the fetch past expiry
+                and thumbnails rendered blank. */}
+            <img src={p.url} alt={`Lawn ${p.type || ''}`} style={{
               width: '100%', height: '100%', objectFit: 'cover',
             }} />
             {p.isBest && (
@@ -1167,69 +1169,205 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   );
 }
 
-// Share action on the home-page content cards (owner 2026-07-09): native
-// share sheet where available, clipboard fallback with a "Copied!" flash.
-// A canceled share sheet is not an error and does nothing.
+// Share action on the home-page content cards (owner 2026-07-09): explicit
+// channel menu — Facebook, Twitter, Instagram, email, text message.
+// Instagram has no web share intent, so that option copies the link and
+// opens Instagram with a "Link copied!" flash on the button. The menu is
+// position:fixed because the cards clip overflow and live inside a
+// horizontal scroll rail; any scroll closes it so it can't drift.
+const SHARE_BRAND_ICONS = {
+  facebook: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="#1877F2" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+  ),
+  twitter: (
+    <svg viewBox="0 0 24 24" width={14} height={14} fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.451-6.231zm-1.161 17.52h1.833L7.084 4.126H5.117l11.966 15.644z" /></svg>
+  ),
+  instagram: (
+    <svg viewBox="0 0 24 24" width={15} height={15} fill="none" stroke="#E1306C" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="19" height="19" rx="5" /><circle cx="12" cy="12" r="4.2" /><circle cx="17.4" cy="6.6" r="0.6" fill="#E1306C" stroke="none" /></svg>
+  ),
+};
+
 function SharePostButton({ url, title }) {
-  const [copied, setCopied] = useState(false);
-  const share = async (e) => {
+  const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState(null);
+  const [flash, setFlash] = useState('');
+  const rootRef = useRef(null);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onPointerDown = (e) => {
+      if (rootRef.current?.contains(e.target)) return;
+      if (menuRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e) => { if (e.key === 'Escape') setOpen(false); };
+    const onScroll = () => setOpen(false);
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    // Capture-phase so the card rail's own horizontal scroll closes it too.
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open]);
+
+  // 5 items × 42px + 12px padding + 2px border — used to decide whether the
+  // menu fits above the button; measured-after-render would flash misplaced.
+  const MENU_HEIGHT = 228;
+
+  const toggle = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (open) { setOpen(false); return; }
     const absolute = new URL(url, window.location.origin).toString();
-    if (navigator.share) {
-      try { await navigator.share({ title: title || 'Waves Pest Control', url: absolute }); } catch { /* canceled */ }
-      return;
+    // Capacitor shell: window.open(_blank) dead-ends the webview and the
+    // webview clipboard is unreliable (see nativeFile.js) — hand the link to
+    // the OS share sheet instead, which offers the same channels natively.
+    if (isNativeApp() && await shareUrlNative(absolute, title || 'Waves Pest Control').catch(() => false)) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const right = Math.max(8, window.innerWidth - rect.right);
+    // Prefer opening above the button (the footer sits at the card bottom),
+    // but a rail scrolled near the viewport top would push the top options
+    // off-screen — and the scroll-closes-menu listener makes them
+    // unreachable — so flip below when the space above is too short.
+    if (rect.top >= MENU_HEIGHT + 12) {
+      setMenuPos({ right, bottom: window.innerHeight - rect.top + 8 });
+    } else {
+      setMenuPos({ right, top: rect.bottom + 8 });
     }
-    try {
-      await navigator.clipboard.writeText(absolute);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1600);
-    } catch { /* clipboard unavailable */ }
+    setOpen(true);
   };
+
+  const shareTo = async (channel) => {
+    const absolute = new URL(url, window.location.origin).toString();
+    const text = title || 'Waves Pest Control';
+    setOpen(false);
+    if (channel === 'facebook') {
+      window.open(`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(absolute)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'twitter') {
+      window.open(`https://twitter.com/intent/tweet?url=${encodeURIComponent(absolute)}&text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+    } else if (channel === 'instagram') {
+      // No web share intent exists for Instagram: copy the link and open the
+      // app/site. Open FIRST (synchronously, keeping the click's popup
+      // activation), then report honestly — Instagram sharing depends
+      // entirely on the copied URL, so a swallowed copy failure would strand
+      // the customer there with nothing to paste and a false "copied" flash.
+      window.open('https://www.instagram.com/', '_blank', 'noopener,noreferrer');
+      try {
+        await navigator.clipboard.writeText(absolute);
+        setFlash('Link copied!');
+      } catch {
+        setFlash("Couldn't copy link");
+      }
+      setTimeout(() => setFlash(''), 2400);
+    } else if (channel === 'email') {
+      window.location.href = `mailto:?subject=${encodeURIComponent(text)}&body=${encodeURIComponent(absolute)}`;
+    } else if (channel === 'sms') {
+      window.location.href = `sms:?body=${encodeURIComponent(`${text} ${absolute}`)}`;
+    }
+  };
+
+  const options = [
+    { key: 'facebook', label: 'Facebook', icon: SHARE_BRAND_ICONS.facebook },
+    { key: 'twitter', label: 'Twitter', icon: SHARE_BRAND_ICONS.twitter },
+    { key: 'instagram', label: 'Instagram', icon: SHARE_BRAND_ICONS.instagram },
+    { key: 'email', label: 'Email', icon: <Icon name="mail" size={15} strokeWidth={2} /> },
+    { key: 'sms', label: 'Text message', icon: <Icon name="message" size={15} strokeWidth={2} /> },
+  ];
+
   return (
-    <button
-      type="button"
-      onClick={share}
-      style={{
-        border: 'none', background: 'none', padding: 0, cursor: 'pointer',
-        fontSize: 12, fontWeight: 800, color: PORTAL_SHELL.muted, fontFamily: FONTS.heading,
-      }}
-    >
-      {copied ? 'Copied!' : 'Share'}
-    </button>
+    <span ref={rootRef} style={{ marginLeft: 'auto', display: 'inline-flex' }}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{
+          border: 'none', background: 'none', padding: 0, cursor: 'pointer',
+          fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading,
+          color: open ? B.wavesBlue : PORTAL_SHELL.muted, whiteSpace: 'nowrap',
+        }}
+      >
+        {flash || 'Share'}
+      </button>
+      {open && menuPos && createPortal(
+        // Portaled to <body>: the glass cards carry transform/backdrop-filter,
+        // which would otherwise make the card (clipped, horizontally
+        // scrolling) the containing block for this fixed-position menu.
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{
+            position: 'fixed', right: menuPos.right, zIndex: 1200,
+            ...(menuPos.bottom != null ? { bottom: menuPos.bottom } : { top: menuPos.top }),
+            background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
+            boxShadow: '0 8px 24px rgba(15,23,42,0.14)', padding: 6, minWidth: 172,
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              role="menuitem"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); shareTo(opt.key); }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
+                padding: '10px 12px', minHeight: 42, borderRadius: 8,
+                fontSize: 14, fontWeight: 800, color: B.blueDeeper, fontFamily: FONTS.heading,
+              }}
+            >
+              <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', flexShrink: 0 }}>{opt.icon}</span>
+              {opt.label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+    </span>
   );
 }
 
+// Feed dates arrive in mixed shapes (ISO from Facebook, RFC-822 from the
+// RSS/newsletter feeds) — parseDate/fmtDate only handle YYYY-MM-DD, so this
+// mirrors the Learn tab's ContentCard: plain Date parse, month + day, no
+// year, and nothing rendered when the feed omits or mangles the date.
+function formatPostDate(d) {
+  if (!d) return null;
+  const dt = new Date(d);
+  if (isNaN(dt)) return null;
+  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 // Home-page content row (owner 2026-07-09): one glass section per source —
-// Facebook, the Waves blog, and the newsletter — each a swipeable card rail
-// mirroring the wavespestcontrol.com Social Hub cards (View Post + Share,
-// no quote CTA). Hidden entirely while its feed is empty or unreachable.
-function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compact, ctaLabel }) {
+// Facebook, the Waves blog, Instagram, and the newsletter — each a swipeable
+// card rail mirroring the wavespestcontrol.com Social Hub cards (View Post +
+// Share, no quote CTA). Hidden entirely while its feed is empty or
+// unreachable. Titles are deliberately plain and uniform (owner 2026-07-10
+// — reverted the playful set); the icon tile + CTA label carry the "where
+// does this go" signal.
+function WavesLogoTile({ compact }) {
+  return (
+    <span style={{
+      width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
+      background: '#fff', border: '1px solid #E7E2D7', overflow: 'hidden',
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <img src="/waves-logo.png" alt="" style={{ width: '84%', height: '84%', objectFit: 'contain', display: 'block' }} />
+    </span>
+  );
+}
+
+function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   if (!posts.length) return null;
   return (
-    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 18 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          {iconTile}
-          <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
-        </div>
-        {followHref && (
-          <a
-            href={followHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            data-glass="chip"
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 36,
-              padding: '0 14px', borderRadius: 999, textDecoration: 'none',
-              background: '#fff', border: '1px solid #E7E2D7',
-              color: B.blueDeeper, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {followLabel}
-          </a>
-        )}
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: compact ? 14 : 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: compact ? 10 : 14 }}>
+        {iconTile}
+        <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{title}</div>
       </div>
       <div style={{
         display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
@@ -1243,7 +1381,7 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               // Exactly three cards fill the rail on desktop (owner
               // 2026-07-09); extra posts overflow into the horizontal
               // scroll. Mobile keeps a fixed swipe width.
-              flex: compact ? '0 0 230px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
+              flex: compact ? '0 0 180px' : '0 0 calc((100% - 24px) / 3)', scrollSnapAlign: 'start',
               display: 'flex', flexDirection: 'column',
               background: '#fff', border: '1px solid #E7E2D7', borderRadius: 12,
               overflow: 'hidden', position: 'relative',
@@ -1251,15 +1389,18 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
           >
             <a href={post.url} target={post.external ? '_blank' : undefined} rel={post.external ? 'noopener noreferrer' : undefined} style={{ display: 'block', textDecoration: 'none' }}>
               {post.image ? (
+                // no-referrer: blog images live on wavespestcontrol.com,
+                // whose Cloudflare hotlink protection 403s foreign referers.
                 <img
                   src={post.image}
                   alt=""
                   loading="lazy"
-                  style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
+                  referrerPolicy="no-referrer"
+                  style={{ width: '100%', aspectRatio: compact ? '16 / 10' : '4 / 3', objectFit: 'cover', display: 'block' }}
                 />
               ) : (
                 <div style={{
-                  width: '100%', aspectRatio: '4 / 3', display: 'flex',
+                  width: '100%', aspectRatio: compact ? '16 / 10' : '4 / 3', display: 'flex',
                   alignItems: 'center', justifyContent: 'center',
                   background: PORTAL_SHELL.soft, color: B.blueDeeper,
                 }}>
@@ -1267,7 +1408,12 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
                 </div>
               )}
             </a>
-            <div style={{ padding: '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+            <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
+              {formatPostDate(post.date) && (
+                <div style={{ fontSize: 12, color: PORTAL_SHELL.muted }}>
+                  {formatPostDate(post.date)}
+                </div>
+              )}
               {post.title && (
                 <div style={{
                   fontSize: 14, fontWeight: 850, color: B.blueDeeper, lineHeight: 1.3,
@@ -1277,7 +1423,7 @@ function HomeContentRow({ iconTile, title, followHref, followLabel, posts, compa
               {post.text && (
                 <div style={{
                   fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.45,
-                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                  display: '-webkit-box', WebkitLineClamp: post.title ? 2 : (compact ? 2 : 3), WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>{post.text}</div>
               )}
               <div style={{ marginTop: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -1319,11 +1465,12 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satOfficeName, setSatOfficeName] = useState('');
   const [satSubmitting, setSatSubmitting] = useState(false);
   const [satDismissed, setSatDismissed] = useState(false);
-  // Home-page content rows (owner 2026-07-09) — Facebook (same public feed
-  // the wavespestcontrol.com Social Hub renders, Facebook only), the Waves
-  // blog, and the newsletter. Best-effort: an empty/failed feed just hides
-  // its row.
+  // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
+  // (same public feed the wavespestcontrol.com Social Hub renders), the
+  // Waves blog, and the newsletter. Best-effort: an empty/failed feed just
+  // hides its row.
   const [facebookPosts, setFacebookPosts] = useState([]);
+  const [instagramPosts, setInstagramPosts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
@@ -1375,10 +1522,11 @@ function DashboardTab({ customer, onSwitchTab }) {
     fetch(`${API_BASE}/public/social-feed`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        const posts = (d?.posts || [])
-          .filter((p) => p.platform === 'facebook' && p.postUrl)
+        const byPlatform = (platform) => (d?.posts || [])
+          .filter((p) => p.platform === platform && p.postUrl)
           .slice(0, 6);
-        setFacebookPosts(posts);
+        setFacebookPosts(byPlatform('facebook'));
+        setInstagramPosts(byPlatform('instagram'));
       })
       .catch(() => {});
     api.getBlogPosts()
@@ -1511,36 +1659,12 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
   const referralReward = Number(referralStats?.rewardPerReferral) || 25;
-  // Server-authoritative earned dollars — not an estimate off referrals *sent*.
-  const referralCredits = Math.round(Number(referralStats?.totalEarned || 0));
-  const referralTotal = referralCredits;
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
     { icon: 'card', label: hasBalance ? 'Pay now' : 'Billing', sub: billingSub, action: () => onSwitchTab?.('billing') },
     { icon: 'gift', label: 'Refer', sub: `$${referralReward} credit`, action: () => onSwitchTab?.('refer') },
   ];
-  const rewardCards = [
-    {
-      icon: 'coins',
-      label: 'WaveGuard Rewards',
-      // Server-backed dollars only — the old card summed in a client-invented,
-      // tenure-prorated "renewal credit" no system ever grants.
-      value: `$${referralCredits}`,
-      sub: `$${referralCredits} referral credits earned`,
-      actionLabel: null,
-    },
-    {
-      icon: 'gift',
-      label: referralStats?.totalReferrals ? `${referralStats.totalReferrals} referrals sent` : `Give $${referralReward}, get $${referralReward}`,
-      value: referralStats?.totalReferrals ? `$${referralTotal}` : `$${referralReward}`,
-      sub: referralStats?.totalReferrals
-        ? 'earned so far'
-        : 'Share Waves with a neighbor and you both get credit.',
-      actionLabel: 'Open referrals',
-    },
-  ];
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
@@ -1902,71 +2026,64 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
       )}
 
-      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog, and
-          the newsletter — Social Hub-style cards in glass, each with View
-          Post + Share (no quote CTA), above the rewards cards. */}
+      {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog,
+          Instagram, and the newsletter — Social Hub-style cards in glass,
+          each with View Post + Share (no quote CTA). Order is deliberate:
+          Facebook → blog → Instagram → newsletter. */}
       <HomeContentRow
         compact={compact}
-        title="Latest from Facebook"
-        followHref="https://facebook.com/wavespestcontrol"
-        followLabel="Follow Waves on Facebook"
+        title="Waves on Facebook"
         ctaLabel="View Post"
         iconTile={(
           <span style={{
-            width: 38, height: 38, borderRadius: 10, flexShrink: 0,
+            width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
             background: '#1877F2', color: '#fff',
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
           }}>
-            <svg viewBox="0 0 24 24" width={18} height={18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
+            <svg viewBox="0 0 24 24" width={compact ? 15 : 18} height={compact ? 15 : 18} fill="currentColor" aria-hidden="true"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z" /></svg>
           </span>
         )}
         posts={facebookPosts.map((p) => ({
-          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', external: true,
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Facebook.', date: p.postedAt, external: true,
         }))}
       />
       <HomeContentRow
         compact={compact}
-        title="Latest from the Blog"
-        followHref="https://www.wavespestcontrol.com/blog/"
-        followLabel="Visit the Waves Blog"
+        title="From the Blog"
         ctaLabel="Read Post"
-        iconTile={<ShellIconTile icon="bulb" size={38} />}
+        iconTile={<WavesLogoTile compact={compact} />}
         posts={blogPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description, external: true,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate, external: true,
+        }))}
+      />
+      <HomeContentRow
+        compact={compact}
+        title="Waves on Instagram"
+        ctaLabel="View Post"
+        iconTile={(
+          <span style={{
+            width: compact ? 30 : 38, height: compact ? 30 : 38, borderRadius: compact ? 8 : 10, flexShrink: 0,
+            background: 'radial-gradient(circle at 30% 107%, #FDF497 0%, #FDF497 5%, #FD5949 45%, #D6249F 60%, #285AEB 90%)',
+            color: '#fff',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <svg viewBox="0 0 24 24" width={compact ? 15 : 18} height={compact ? 15 : 18} fill="currentColor" aria-hidden="true"><path d="M12 0C8.74 0 8.333.015 7.053.072 5.775.132 4.905.333 4.14.63c-.789.306-1.459.717-2.126 1.384S.935 3.35.63 4.14C.333 4.905.131 5.775.072 7.053.012 8.333 0 8.74 0 12s.015 3.667.072 4.947c.06 1.277.261 2.148.558 2.913.306.788.717 1.459 1.384 2.126.667.666 1.336 1.079 2.126 1.384.766.296 1.636.499 2.913.558C8.333 23.988 8.74 24 12 24s3.667-.015 4.947-.072c1.277-.06 2.148-.262 2.913-.558.788-.306 1.459-.718 2.126-1.384.666-.667 1.079-1.335 1.384-2.126.296-.765.499-1.636.558-2.913.06-1.28.072-1.687.072-4.947s-.015-3.667-.072-4.947c-.06-1.277-.262-2.149-.558-2.913-.306-.789-.718-1.459-1.384-2.126C21.319 1.347 20.651.935 19.86.63c-.765-.297-1.636-.499-2.913-.558C15.667.012 15.26 0 12 0zm0 2.16c3.203 0 3.585.016 4.85.071 1.17.055 1.805.249 2.227.415.562.217.96.477 1.382.896.419.42.679.819.896 1.381.164.422.36 1.057.413 2.227.057 1.266.07 1.646.07 4.85s-.015 3.585-.074 4.85c-.061 1.17-.256 1.805-.421 2.227-.224.562-.479.96-.899 1.382-.419.419-.824.679-1.38.896-.42.164-1.065.36-2.235.413-1.274.057-1.649.07-4.859.07-3.211 0-3.586-.015-4.859-.074-1.171-.061-1.816-.256-2.236-.421-.569-.224-.96-.479-1.379-.899-.421-.419-.69-.824-.9-1.38-.165-.42-.359-1.065-.42-2.235-.045-1.26-.061-1.649-.061-4.844 0-3.196.016-3.586.061-4.861.061-1.17.255-1.814.42-2.234.21-.57.479-.96.9-1.381.419-.419.81-.689 1.379-.898.42-.166 1.051-.361 2.221-.421 1.275-.045 1.65-.06 4.859-.06l.045.03zm0 3.678c-3.405 0-6.162 2.76-6.162 6.162 0 3.405 2.76 6.162 6.162 6.162 3.405 0 6.162-2.76 6.162-6.162 0-3.405-2.76-6.162-6.162-6.162zM12 16c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm7.846-10.405c0 .795-.646 1.44-1.44 1.44-.795 0-1.44-.646-1.44-1.44 0-.794.646-1.439 1.44-1.439.793-.001 1.44.645 1.44 1.439z" /></svg>
+          </span>
+        )}
+        posts={instagramPosts.map((p) => ({
+          url: p.postUrl, image: p.image, text: p.caption || 'View this post on Instagram.', date: p.postedAt, external: true,
         }))}
       />
       <HomeContentRow
         compact={compact}
         title="The Waves Newsletter"
-        followHref="https://www.wavespestcontrol.com/newsletter/"
-        followLabel="Subscribe to the Waves Newsletter"
         ctaLabel="Read Issue"
-        iconTile={<ShellIconTile icon="newspaper" size={38} />}
+        iconTile={<WavesLogoTile compact={compact} />}
         posts={newsletterPosts.map((p) => ({
-          url: p.link, image: p.image, title: p.title, text: p.description,
+          url: p.link, image: p.image, title: p.title, text: p.description, date: p.pubDate,
           external: !String(p.link || '').startsWith('/'),
         }))}
       />
-
-      <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16 }}>
-        {rewardCards.map(item => (
-          <section key={item.label} data-glass="card" style={{ ...card, padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-              <ShellIconTile icon={item.icon} size={38} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 16, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>{item.label}</div>
-                <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>{item.sub}</div>
-              </div>
-              <div style={{ fontSize: 22, fontWeight: 850, color: B.blueDeeper, whiteSpace: 'nowrap' }}>{item.value}</div>
-            </div>
-            {item.actionLabel && (
-              <button type="button" onClick={() => onSwitchTab?.('refer')} data-glass-accent="" style={{ ...dashboardSecondaryButton, position: 'relative' }}>
-                {item.actionLabel}
-              </button>
-            )}
-          </section>
-        ))}
-      </div>
 
       {/* Store badges for web-portal regulars — hidden inside the native
           apps (isNativeApp), where advertising an install is noise. */}
@@ -3335,22 +3452,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
                 { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
-                // Phase 2E: per-customer auto-flip opt-out. Distinct
-                // from techEnRoute — that one fires when the tech taps
-                // "En Route". This one fires automatically when the
-                // tech's vehicle leaves the previous job. Default ON
-                // (column DEFAULT TRUE); user can toggle off to skip
-                // the auto-detected version while keeping the manual
-                // tap-triggered text.
-                { key: 'autoFlipEnRoute', label: 'Auto En Route from GPS', desc: "Send the en-route alert the moment we detect your tech leaving the previous job", icon: 'truck', locked: false, defaultOn: true },
-                { key: 'serviceCompleted', label: 'Service Complete Report', desc: 'Products applied, tech notes, and next steps', icon: 'checkCircle', locked: true },
-                { key: 'billingReminder', label: 'Billing Reminder', desc: '3-day heads up before your monthly charge', icon: 'card', locked: false },
-                // Kept as the customer's only in-portal opt-out: the irrigation
-                // weekly email and the retention/marketing policy key on
-                // notification_prefs.seasonal_tips. Email-only since the
-                // seasonal_alert SMS blast was retired (2026-07-06), so no
-                // delivery-channel select — the on/off toggle is the honest control.
-                { key: 'seasonalTips', label: 'Seasonal Lawn Tips', desc: 'Watering, mowing height, and care tips for SW Florida', icon: 'palm', locked: false },
+                // Owner ruling 2026-07-09: the list stops at the appointment
+                // alerts. Auto En Route from GPS (internal detail of the
+                // en-route alert above), Service Complete Report (locked
+                // always-on — a toggle that can't toggle is noise), Billing
+                // Reminder (copy promised a "monthly charge" that doesn't
+                // match per-application billing; the Billing tab keeps the
+                // real billing-texts control), and Seasonal Lawn Tips were
+                // removed from this customer-facing list. The underlying
+                // notification_prefs columns stay honored server-side —
+                // existing opt-outs keep working, and the irrigation weekly
+                // email footer offers the reply-to opt-out (migration
+                // 20260709000030).
               ];
               return items.map((p, i) => {
               const isOn = p.locked ? true : (prefs[p.key] !== undefined ? prefs[p.key] : (p.defaultOn || false));
@@ -3713,6 +3826,11 @@ function BillingTab({ customer }) {
         clearReturnedSetupIntent();
         setShowAddCard(false);
         await refreshCards();
+        // Same as the inline confirmSetup path (Codex #2507 round-7): a
+        // consented save can ENROLL Auto Pay server-side — remount the
+        // AutopayCard so a redirected save (3DS, bank auth) never leaves
+        // the page showing Auto Pay off after the server enabled it.
+        setAutopayRefreshKey((k) => k + 1);
       })
       .catch((err) => {
         setStripeError(err.message || 'Failed to finish bank account setup');
@@ -3778,6 +3896,11 @@ function BillingTab({ customer }) {
       elementsRef.current = null;
       stripeRef.current = null;
       await refreshCards();
+      // A consented save can ENROLL Auto Pay server-side (saveStripeCard →
+      // enrollConsentedMethod) — remount the AutopayCard so the page never
+      // shows Auto Pay off while the server has enabled off-session
+      // charging (Codex #2507 round-6), same as the remove-card path below.
+      setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
       setStripeError(err.message || 'Failed to save card');
     }
@@ -3901,6 +4024,10 @@ function BillingTab({ customer }) {
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
+  // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
+  // charge — the server sends next_charge_amount/date as null and the cron
+  // will not charge, so "Next charge $0.00" would be false.
+  const autopayMonthlyUnpriced = autopayState === 'active' && !nonMonthlyBilling && !(amountDue > 0);
   const autopayBaseAmount = Number(autopay?.next_charge_base_amount ?? 0);
   const autopaySurcharge = Number(autopay?.next_charge_surcharge_amount ?? 0);
   const dueDate = autopayState === 'active'
@@ -3965,14 +4092,18 @@ function BillingTab({ customer }) {
         ? 'Auto Pay is on — charged per visit'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
-          : daysUntilDue === 0
-            ? 'Auto Pay is processing today'
-            : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+          : autopayMonthlyUnpriced
+            ? 'Auto Pay is on — rate being finalized'
+            : daysUntilDue === 0
+              ? 'Auto Pay is processing today'
+              : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
       detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
         : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
-          : daysUntilDue === 0
+          : autopayMonthlyUnpriced
+            ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
+            : daysUntilDue === 0
           ? `Amount: ${money(amountDue)}`
           : autopaySurcharge > 0
             ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`
@@ -5199,28 +5330,6 @@ function PropertyTab({ customer }) {
     </div>
   );
 
-  const dateValue = (value) => {
-    if (!value) return '';
-    if (typeof value === 'string') return value.slice(0, 10);
-    const d = new Date(value);
-    return isNaN(d) ? '' : etDateString(d);
-  };
-
-  const dateInput = (field, label) => (
-    <div>
-      <label style={labelStyle}>{label}</label>
-      <input
-        type="date"
-        value={dateValue(prefs[field])}
-        onChange={e => updateField(field, e.target.value || null)}
-        aria-label={label}
-        style={inputStyle}
-        onFocus={focusBorder}
-        onBlur={blurBorder}
-      />
-    </div>
-  );
-
   const sqft = (n) => {
     const num = Number(n || 0);
     return num > 0 ? `${num.toLocaleString()} sq ft` : 'Not set';
@@ -5524,7 +5633,7 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Scheduling" icon="calendar" summary={scheduleSummary}>
-        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(2, minmax(0, 1fr))', gap: 14 }}>
           <div>
             <label style={labelStyle}>Preferred Day</label>
             <PillSelector
@@ -5548,27 +5657,6 @@ function PropertyTab({ customer }) {
                 { value: 'no_preference', label: 'Any' },
               ]}
             />
-          </div>
-          <div>
-            <label style={labelStyle}>Contact</label>
-            <PillSelector
-              value={prefs.contactPreference}
-              onChange={v => updateField('contactPreference', v)}
-              options={[
-                { value: 'call', label: 'Call' }, { value: 'text', label: 'Text' },
-                { value: 'email', label: 'Email' },
-              ]}
-            />
-          </div>
-        </div>
-        <div style={{ marginTop: 16, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.blueDeeper, marginBottom: 4 }}>Blackout dates</div>
-          <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
-            Do not service between these dates (vacation, events, etc.)
-          </div>
-          <div style={fieldGrid}>
-            {dateInput('blackoutStart', 'Start Date')}
-            {dateInput('blackoutEnd', 'End Date')}
           </div>
         </div>
       </PropertySection>
@@ -6501,24 +6589,8 @@ function LearnTab({ customer }) {
           />
         )}
 
-        {/* Glass material (owner 2026-07-09) — the sand wash read as the old
-            warm theme inside the glass Learn tab; sand stays as the non-glass
-            fallback. Nested inside a glass card → soft tier. */}
-        <div data-glass="soft" style={{
-          marginTop: 14,
-          padding: 16,
-          background: B.sand,
-          border: '1px solid #E7E2D7',
-          borderRadius: 8,
-          position: 'relative',
-        }}>
-          <NewsletterSignup
-            variant="light"
-            source="portal_learn"
-            heading="Get the next issue in your inbox"
-            blurb="Local SWFL events, seasonal pest tips, and the occasional deal - straight from the truck."
-          />
-        </div>
+        {/* Newsletter signup lives only on the newsletter pages
+            (owner 2026-07-09). */}
       </section>
 
       {renderFeedSection('Waves Newsletter', 'newspaper', sortedNewsletterPosts, 'Waves newsletter issues will appear here.')}
@@ -8748,6 +8820,7 @@ function ServiceTracker() {
               <img
                 src={tracker.technician.photoUrl}
                 alt={tracker.technician?.firstName || techName}
+                referrerPolicy="no-referrer"
                 style={{
                   width: 56, height: 56, borderRadius: '50%',
                   objectFit: 'cover', border: `2px solid ${B.offWhite}`, flexShrink: 0,
@@ -10452,10 +10525,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                   }}
                 >
                   {doc.previewImage ? (
+                    // Eager: presigned URL — lazy deferred the fetch past
+                    // expiry (same class as the report photo strips).
                     <img
                       src={doc.previewImage}
                       alt=""
-                      loading="lazy"
                       style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
                     />
                   ) : (
@@ -11778,9 +11852,32 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Per-message report state, keyed by message index: 'sending' | 'done' | 'error'.
+  const [reportState, setReportState] = useState({});
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
+
+  // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
+  // users must be able to flag AI-generated content for review).
+  const reportMessage = async (idx, content) => {
+    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+    setReportState(prev => ({ ...prev, [idx]: 'sending' }));
+    try {
+      const res = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('waves_token')}`,
+        },
+        body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
+      });
+      if (!res.ok) throw new Error('report failed');
+      setReportState(prev => ({ ...prev, [idx]: 'done' }));
+    } catch {
+      setReportState(prev => ({ ...prev, [idx]: 'error' }));
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -11826,7 +11923,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         body: JSON.stringify({ message: text, sessionId: sessionId.current }),
       });
       const data = await res.json();
-      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749." }]);
+      // Only model-generated replies are reportable — the greeting and the
+      // hardcoded fallback/error strings are not AI output.
+      setMessages(prev => [...prev, { role: 'assistant', content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.", reportable: !!data.reply && data.canReport !== false }]);
       if (data.escalated) {
         setMessages(prev => [...prev, { role: 'system', content: 'A team member has been notified and will follow up shortly.' }]);
       }
@@ -11898,7 +11997,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         }}>
           {messages.map((msg, i) => (
             <div key={i} style={{
-              display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              display: 'flex', flexDirection: 'column',
+              alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
               marginBottom: 10,
             }}>
               <div style={{
@@ -11921,6 +12021,29 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               }}>
                 {msg.content}
               </div>
+              {msg.reportable && (
+                reportState[i] === 'done' ? (
+                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Icon name="check" size={12} strokeWidth={2} /> Reported — our team will review this response.
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => reportMessage(i, msg.content)}
+                    disabled={reportState[i] === 'sending'}
+                    aria-label="Report this AI response as inappropriate"
+                    style={{
+                      border: 'none', background: 'transparent', cursor: 'pointer',
+                      fontSize: 12, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
+                      textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
+                    }}
+                  >
+                    {reportState[i] === 'sending' ? 'Reporting…'
+                      : reportState[i] === 'error' ? "Couldn't send report — try again"
+                      : 'Report this response'}
+                  </button>
+                )
+              )}
             </div>
           ))}
           {sending && (

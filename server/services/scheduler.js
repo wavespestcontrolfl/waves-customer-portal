@@ -533,6 +533,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
+  // rows: same phone, compatible identity, zero billing/portal artifacts);
+  // everything ambiguous stays in the /admin/customers/duplicates review
+  // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
+  // opt-in in every environment). Every merge is journaled + admin-notified.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    if (!isEnabled('customerDedupeAutoMerge')) return;
+    logger.info('Running: Customer duplicate auto-merge sweep');
+    try {
+      // runExclusive: read-then-act — an overlapping tick could pick the same
+      // loser row before the first merge soft-deletes it.
+      await runExclusive('customer-dedupe-auto-merge', async () => {
+        const { runAutoMergeSweep } = require('./customer-dedupe');
+        const result = await runAutoMergeSweep();
+        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+      });
+    } catch (err) {
+      logger.error(`Customer dedupe sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
@@ -1001,6 +1024,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:30AM ET — Voice-profile distiller (brand-voice loop, Loop 2).
+  // Runs after the 2:45am corpus miner so each day's calls/texts feed the
+  // voice profile the next morning (owner directive 2026-07-11: train on the
+  // data as it happens, hands-off). Exception-based review: a GREEN profile
+  // auto-applies (audit-logged); anything flagged parks + bells. At most one
+  // DEEP call per day; idle days skip on no-new-corpus.
+  // =========================================================================
+  cron.schedule('30 3 * * *', async () => {
+    if (!isEnabled('voiceProfileDistiller')) return;
+    logger.info('Running: Voice-profile distiller');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { distillVoiceProfile } = require('./voice-profile-distiller');
+      const result = await runExclusive('voice-profile-distiller', () => distillVoiceProfile());
+      if (result?.skipped) logger.info(`[voice-profile] run skipped: ${result.skipped}`);
+      else if (result?.version) logger.info(`[voice-profile] run complete: v${result.version} pending review`);
+    } catch (err) {
+      logger.error(`Voice-profile distiller failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:55AM ET — Shadow judge (SMS brand-voice loop, Phase C). Pairs
   // each 24h-matured shadow draft with the human reply that actually went
   // out and scores it per intent class. LLM only when the human replied;
@@ -1172,8 +1217,21 @@ function initScheduledJobs() {
       const { getCurrentNewsletterThursday } = require('./event-freshness');
       const weekOf = getCurrentNewsletterThursday();
       const cal = await db('newsletter_calendar').where('week_of', weekOf).first();
-      // Only catch up weeks that were never attempted.
-      if (cal && cal.status !== 'planned') return;
+      // Only catch up weeks that were never attempted — but a drafted week
+      // may still be missing its owner proof (a transient SendGrid failure
+      // releases the proof claim), and autoDraftFlagship is never reached
+      // for those rows, so retry the idempotent proof send here.
+      if (cal && cal.status !== 'planned') {
+        if (cal.status === 'drafted' && cal.send_id) {
+          try {
+            const { sendNewsletterProof } = require('./newsletter-proof');
+            await sendNewsletterProof(cal.send_id);
+          } catch (e) {
+            logger.warn(`[newsletter-autopilot-catchup] proof retry failed: ${e.message}`);
+          }
+        }
+        return;
+      }
       const { autoDraftFlagship } = require('./newsletter-autopilot');
       const result = await autoDraftFlagship();
       logger.info(`[newsletter-autopilot-catchup] ${result.skipped ? 'skipped' : 'drafted'}: ${result.reason || result.sendId}`);
@@ -1592,6 +1650,80 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // A decision-linked scheduled reply must clear TWO fire-time
+          // re-checks (the send-time checks ran at enqueue, potentially hours
+          // ago, and pre-rollout cards never saw the price rule at all):
+          //   (a) its anchoring inbound is still the newest on the thread;
+          //   (b) non-human-authored agent text carries no price quote.
+          // Either failure → block this queued row, retire the claimed
+          // decision, reopen parked siblings — in ONE thread-locked
+          // transaction over FRESHLY read metadata: the cancel route can
+          // transfer parked ids onto this row after our claim, and those must
+          // reopen here, not sit invisible until orphan recovery.
+          if (claimMeta.agent_decision_id) {
+            const suggest = require('./sms-suggest-mode');
+            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
+            if (anchorStale || pricedAgentText) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+              const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
+              // Everything under the lock, metadata read THROUGH the trx
+              // AFTER acquiring it — the cancel route can transfer parked
+              // ids onto this row right up until we hold the lock. strict
+              // retirement: a failure rolls the whole cleanup back (row
+              // stays 'sending' for the recovery rail) instead of
+              // committing a blocked SMS whose decision is still claimed.
+              await db.transaction(async (trx) => {
+                await suggest.lockSuggestThread(trx, threadKey);
+                const freshRow = await trx('sms_log').where({ id: msg.id }).first('metadata');
+                let freshMeta = freshRow?.metadata;
+                if (typeof freshMeta === 'string') {
+                  try { freshMeta = JSON.parse(freshMeta); } catch { freshMeta = {}; }
+                }
+                freshMeta = freshMeta || {};
+                await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                });
+                await suggest.supersedeStaleDecision({
+                  decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
+                  fromStatus: 'scheduled',
+                  note: anchorStale
+                    ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
+                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                  dbi: trx,
+                  strict: true,
+                });
+                // Reopen only siblings whose OWN anchor is still current —
+                // a card parked before the newer inbound is just as stale
+                // as the one we retired, and reopening it would resurface a
+                // stale actionable card beside the fresh one.
+                const parked = Array.isArray(freshMeta.parked_decision_ids) ? freshMeta.parked_decision_ids : [];
+                for (const parkedId of parked) {
+                  const parkedStale = await suggest.suggestionAnchorIsStale({ decisionId: parkedId, dbi: trx, excludeSmsLogId: msg.id });
+                  if (parkedStale) {
+                    await suggest.supersedeStaleDecision({
+                      decisionId: parkedId,
+                      fromStatus: 'scheduled',
+                      note: 'A newer customer message arrived while this suggestion was parked — review the thread.',
+                      dbi: trx,
+                      strict: true,
+                    });
+                  } else {
+                    await suggest.reopenScheduledSuggestions({
+                      decisionIds: [parkedId],
+                      reason: 'The scheduled reply ahead of this suggestion did not go out — review the thread.',
+                      dbi: trx,
+                    });
+                  }
+                }
+              });
+              logger.warn(`[scheduled-sms] ${msg.id} blocked (${blockedReason}): linked agent decision retired, parked suggestions rechecked`);
+              continue;
+            }
+          }
+
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
           if (!toPhone) {
             // Refresh-required row whose current customer phone can't be
@@ -1881,11 +2013,10 @@ function initScheduledJobs() {
 
   // =========================================================================
   // DAILY 4:40AM ET — Sync area rainfall (Open-Meteo) for Lawn Report V2 water
-  // areas. Only runs when the feature is on; idempotent 7-day backfill upsert so
-  // the report's water bar / 7-day chart have complete, current rainfall.
+  // areas. Idempotent 7-day backfill upsert so the report's water bar /
+  // 7-day chart have complete, current rainfall.
   // =========================================================================
   cron.schedule('40 4 * * *', async () => {
-    if (process.env.LAWN_REPORT_V2 !== 'true') return;
     try {
       const { runLawnAreaWeatherSync } = require('../scripts/sync-lawn-area-weather');
       const result = await runLawnAreaWeatherSync({ pastDays: 7 });
@@ -2987,6 +3118,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:15AM ET — Sunbiz annual-report reminder + late-fee sweep.
+  // Florida LLC annual reports open Jan 1 and are due May 1; filing late adds
+  // a non-waivable $400 statutory fee. January ticks ring the admin bell once
+  // per year (notifications-metadata dedupe; daily rather than Jan-1-only so
+  // a New Year's deploy gap can't swallow the reminder) and self-heal the
+  // Tax → Filing Calendar row. Ticks after May 1 bump the still-unfiled
+  // row's amount_due by the $400 fee so /admin/tax shows the real payable.
+  // runExclusive: read-then-act against notifications — a deploy overlap
+  // must not double-ring.
+  // =========================================================================
+  cron.schedule('15 6 * * *', async () => {
+    logger.info('Running: Sunbiz annual-report reminder');
+    try {
+      await runExclusive('sunbiz-annual-report-reminder', async () => {
+        const { runSunbizAnnualReportReminder } = require('./sunbiz-annual-report-reminder');
+        await runSunbizAnnualReportReminder();
+      });
+    } catch (err) {
+      logger.error(`Sunbiz annual-report reminder failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:30AM — Sync Google Business Profile performance metrics
   // =========================================================================
   cron.schedule('30 6 * * *', async () => {
@@ -3126,6 +3280,22 @@ function initScheduledJobs() {
       if (processor.recoverMissingRecentRecordings) await processor.recoverMissingRecentRecordings();
       if (processor.processAllPending) await processor.processAllPending();
     } catch (e) { logger.error(`Recording batch process failed: ${e.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NIGHTLY 3:40 AM ET — Call-pipeline self-audit (zero-triage drift loop).
+  // Samples ~25 recent calls, DEEP-tier re-read, drift metrics to
+  // call_audit_findings; admin alert ONLY on threshold breach. Gated
+  // GATE_CALL_SELF_AUDIT (checked inside the service). Silence = healthy.
+  // =========================================================================
+  cron.schedule('40 3 * * *', async () => {
+    await runExclusive('call-self-audit', async () => {
+      try {
+        const { runSelfAudit } = require('./call-self-audit');
+        const result = await runSelfAudit();
+        if (!result.skipped) logger.info(`[self-audit] nightly run: ${JSON.stringify({ audited: result.audited, breaches: result.breaches })}`);
+      } catch (e) { logger.error(`Call self-audit failed: ${e.message}`); }
+    });
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3642,6 +3812,27 @@ function initScheduledJobs() {
       await runUnassignedOverdueCheck();
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // Call-ingest completeness watchdog — every 30 min, diff Twilio's own call
+  // ledger against call_log and ring an admin bell for any answered inbound
+  // call the pipeline never received (webhook outage / misrouted number).
+  // Born from the 2026-07 reconciliation that found 391 Feb–Mar calls (and
+  // 11 later stragglers, incl. real booked jobs) silently never ingested.
+  // Dark behind GATE_CALL_INGEST_WATCHDOG; read-only against Twilio.
+  // See server/services/call-ingest-watchdog.js.
+  // =========================================================================
+  cron.schedule('7,37 * * * *', async () => {
+    try {
+      const { runCallIngestWatchdog } = require('./call-ingest-watchdog');
+      const result = await runCallIngestWatchdog();
+      if (!result.skipped && (result.missed > 0 || result.alerted > 0)) {
+        logger.warn(`[call-ingest-watchdog] scanned=${result.scanned} missed=${result.missed} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-ingest watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

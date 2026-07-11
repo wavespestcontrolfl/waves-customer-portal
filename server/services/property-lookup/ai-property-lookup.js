@@ -28,7 +28,7 @@ const DEFAULT_MAX_SEARCHES = 5;
 const DEFAULT_COUNTY_TIMEOUT_MS = 8000;
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_PROPERTY_MODEL = process.env.OPENAI_PROPERTY_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
-const GEMINI_PROPERTY_MODEL = process.env.GEMINI_PROPERTY_MODEL || 'gemini-2.5-flash';
+const GEMINI_PROPERTY_MODEL = process.env.GEMINI_PROPERTY_MODEL || 'gemini-3.5-flash';
 const MANATEE_PAO_BASE = 'https://www.manateepao.gov';
 const MANATEE_PAO_SEARCH_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-parcel-search-results.php`;
 const MANATEE_PAO_LAND_URL = `${MANATEE_PAO_BASE}/wp-content/themes/frontier-child/models/pao-model-land.php`;
@@ -1563,7 +1563,7 @@ async function fetchManateePaoJson(url, timeoutMs, init = {}) {
         Origin: MANATEE_PAO_BASE,
         Referer: `${MANATEE_PAO_BASE}/search/`,
         'X-Requested-With': 'XMLHttpRequest',
-        'User-Agent': 'Mozilla/5.0 (compatible; WavesPropertyLookup/1.0)',
+        'User-Agent': COUNTY_LOOKUP_UA,
         ...(init.headers || {}),
       },
     });
@@ -1683,6 +1683,14 @@ async function fetchCharlotteOwnership(parcelId, timeoutMs) {
   return data?.features?.[0] || null;
 }
 
+// County-lookup UA. Self-identifying bot UA by default; COUNTY_LOOKUP_UA is a
+// no-deploy lever for when a county WAF starts tarpitting requests from
+// datacenter IPs (sc-pa.com has hung every nightly canary request for 17
+// nights while the same URL + UA answers in <1s from residential — the
+// canary's browser-UA probe distinguishes UA-scoring from IP-only blocking).
+const COUNTY_LOOKUP_UA = process.env.COUNTY_LOOKUP_UA
+  || 'Mozilla/5.0 (compatible; WavesPropertyLookup/1.0)';
+
 async function fetchCountyText(url, timeoutMs, init = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1691,7 +1699,7 @@ async function fetchCountyText(url, timeoutMs, init = {}) {
       ...init,
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; WavesPropertyLookup/1.0)',
+        'User-Agent': COUNTY_LOOKUP_UA,
         ...(init.headers || {}),
       },
     });

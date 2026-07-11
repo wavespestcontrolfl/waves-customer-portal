@@ -74,10 +74,45 @@ function looksLikeEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
 }
 
+// True when at least one of the appointment's SMS recipients (the same set
+// getAppointmentContacts routes sends to) has a delivered SMS in the last 60
+// days AND could still receive one today: SMS not disabled at the customer
+// level and no active suppression (STOP / wrong number / DNC / carrier
+// landline) on that number. Checking the recipient set — not just the primary
+// phone — matters when the notice routes to a distinct service contact; the
+// owner's phone being reachable doesn't reach the person the appointment
+// notifies. Best-effort — DB misses fail open per leg but never throw.
+async function hasTextReachableApptRecipient(customer) {
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  // sms_enabled=false blocks every SMS to this customer at send time, so a
+  // past delivery can't make them text-reachable today.
+  if (prefs?.sms_enabled === false) return false;
+
+  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+    const digits = lastTenDigits(contact.phone);
+    if (!digits) continue;
+    const delivered = await db('sms_log')
+      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('status', 'delivered')
+      .where('created_at', '>=', db.raw("now() - interval '60 days'"))
+      .first('id')
+      .catch(() => null);
+    if (!delivered) continue;
+    // An active suppression blocks every send now, regardless of history.
+    const suppressed = await db('messaging_suppression')
+      .whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('active', true)
+      .first('phone')
+      .catch(() => null);
+    if (!suppressed) return true;
+  }
+  return false;
+}
+
 // Raise a single admin alert when an appointment notice can reach the customer
 // by neither SMS nor email, so a human can call them or add an email. Deduped to
 // one bell entry per customer+occurrence per 24h.
-async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = null }) {
+async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = null, emailReason = 'missing' }) {
   try {
     if (!customerId) return;
     const dedupeKey = `appt-no-channel:${customerId}:${scheduledServiceId || kind}`;
@@ -90,14 +125,37 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     if (existing) return;
 
     const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
+
+    // False-positive guard: this alert claims the customer is reachable by
+    // "neither text nor email". But a one-off Twilio 30006 permanently caches the
+    // primary phone as landline, and a suppressed email (hard bounce / spam
+    // complaint) blocks the email leg — so a customer whose mobile actually
+    // DELIVERS texts can wrongly trip this bell. Before ringing it, confirm there
+    // is genuinely no working text channel — judged against the numbers this
+    // appointment actually notifies AND their current eligibility, so an old
+    // delivery to an opted-out number (or to the owner when the notice routes
+    // to a service contact) doesn't swallow a real alert.
+    if (customer && await hasTextReachableApptRecipient(customer)) {
+      logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS to an appointment recipient proves text-reachable`);
+      return;
+    }
+
     const name = customer
       ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || customer.company_name || 'Customer')
       : 'Customer';
     const label = FALLBACK_KIND_LABEL[kind] || 'appointment notice';
+    // State the ACTUAL email failure. The old copy hardcoded "(landline / no
+    // mobile) and there is no email on file", which misreported suppressed
+    // addresses as missing ones (prod 2026-07-07: customer HAD an email on
+    // file — it was hard-bounced) and asserted a landline diagnosis this
+    // code never made. SMS failure detail isn't available here; don't guess.
+    const emailClause = emailReason === 'suppressed'
+      ? 'the email address on file is suppressed (hard bounce / do-not-email) — collect a working address'
+      : 'there is no email on file';
     await NotificationService.notifyAdmin(
       'alert',
       'Appointment notice undeliverable — no text or email',
-      `${name}: the ${label} could not be delivered by text (landline / no mobile) and there is no email on file. Call the customer or add an email address.`,
+      `${name}: the ${label} could not be delivered by text, and ${emailClause}. Call the customer.`,
       {
         link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
         metadata: { dedupeKey, customer_id: customerId, scheduled_service_id: scheduledServiceId, kind },
@@ -158,7 +216,12 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
     // No usable channel: the SMS failed and email is either unavailable (no
     // address on file) or suppressed (hard bounce / spam complaint / do-not-email,
     // which block even transactional sends). Alert a human to reach the customer.
-    await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    await alertNoReachableChannel({
+      customerId,
+      kind,
+      scheduledServiceId,
+      emailReason: res?.blocked ? 'suppressed' : 'missing',
+    });
   } else if (res?.reason !== 'unsupported_kind') {
     logger.warn(`[appt-remind] ${kind} email fallback not sent for customer ${customerId}: ${res?.reason || res?.error || 'unknown'}`);
   }
@@ -190,13 +253,17 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     }
   };
 
+  // The no-channel alert copy states the ACTUAL email failure — carry it
+  // from whichever email result this path saw (suppressed vs missing).
+  const emailReasonOf = (res) => (res?.blocked ? 'suppressed' : 'missing');
+
   if (ch === 'email') {
     const res = await sendAppointmentNoticeEmail(emailArgs);
     if (res?.ok) return true;
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
-    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(res) });
     return smsOk;
   }
 
@@ -206,7 +273,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     const emailOk = !!emailRes?.ok;
     // Neither channel reached the customer — raise the same human-follow-up
     // alert the SMS-only path uses.
-    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId });
+    if (!smsOk && !emailOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(emailRes) });
     return smsOk || emailOk;
   }
 

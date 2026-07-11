@@ -28,8 +28,17 @@ import {
   FONTS,
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import {
+  DOC_COLUMN_MAX,
+  DOC_FONT,
+  FS,
+  FW,
+  LH,
+  SP,
+  docButton,
+  docTransition,
+} from '../theme-doc';
 import BrandFooter from '../components/BrandFooter';
-import GlassNewsletterCard from '../components/GlassNewsletterCard';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -38,7 +47,7 @@ import ActivityCard from '../components/ActivityCard';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
 const WAVES_PHONE_TEL = '+19412975749';
-const FONT_BODY = "'Inter', system-ui, sans-serif";
+const FONT_BODY = DOC_FONT; // "'Inter', system-ui, sans-serif" — the one customer body stack
 const ESTIMATE_BG = CUSTOMER_SURFACE.page;
 const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
 // Normalized from drifted gray-500 #6B7280 to the portal's slate-600.
@@ -345,7 +354,12 @@ function formatReportTitleDate(value) {
 }
 
 function serviceDisplayName(data = {}) {
-  return data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  const raw = data.serviceDisplayName || data.serviceType || data.serviceLineDisplay || 'Service';
+  // Customers see the service, not the billing cadence: "Quarterly Pest Control"
+  // renders as "Pest Control" (owner 2026-07-09 — match lawn / tree & shrub, which
+  // carry no term qualifier).
+  const stripped = String(raw).replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '').trim();
+  return stripped || raw;
 }
 
 function reportDocumentTitle(data = {}) {
@@ -425,6 +439,17 @@ function formatCustomerPhone(phone) {
 // "Tue, Jul 22 · 9:00 AM–11:00 AM" from the payload's nextAppointment.
 // The displayed arrival window is ALWAYS window_start + 2 hours — window_end
 // is the internal job block and never renders on customer surfaces.
+// "Every 6 Weeks Lawn Care Service" -> "Lawn Care": the next-service cell names
+// the service, not the billing cadence (owner 2026-07-09).
+function nextServiceName(serviceType) {
+  const cleaned = String(serviceType || '')
+    .replace(/^(quarterly|bi-?monthly|monthly|weekly|semi-?annual|bi-?annual|annual|yearly|one-?time)\s+/i, '')
+    .replace(/^every\s+\d+\s+(weeks?|months?|days?)\s+/i, '')
+    .replace(/\s+service$/i, '')
+    .trim();
+  return cleaned || null;
+}
+
 function formatNextAppointmentLabel(nextAppointment) {
   if (!nextAppointment?.scheduledDate) return null;
   const dateLabel = (() => {
@@ -435,7 +460,8 @@ function formatNextAppointmentLabel(nextAppointment) {
   })();
   if (!dateLabel) return null;
   const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppointment.windowStart || ''));
-  if (!m) return dateLabel;
+  const noWindowName = nextServiceName(nextAppointment.serviceType);
+  if (!m) return noWindowName ? `${noWindowName} · ${dateLabel}` : dateLabel;
   const fmt = (mins) => {
     const h24 = Math.floor(mins / 60) % 24;
     const h12 = h24 % 12 || 12;
@@ -443,7 +469,9 @@ function formatNextAppointmentLabel(nextAppointment) {
     return `${h12}:${String(mm).padStart(2, '0')} ${h24 >= 12 ? 'PM' : 'AM'}`;
   };
   const start = (Number(m[1]) * 60) + Number(m[2]);
-  return `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const when = `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
+  const name = nextServiceName(nextAppointment.serviceType);
+  return name ? `${name} · ${when}` : when;
 }
 
 export function serviceReportDateTimeLabel(data = {}) {
@@ -1103,14 +1131,85 @@ function weatherIconInfo(conditions = {}, weatherCall) {
   const headline = String(weatherCall?.headline || '').toLowerCase();
   const signal = `${sky} ${headline}`.toLowerCase();
 
-  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted' };
+  if ((Number.isFinite(wind) && wind > 10) || /\bwind\b/.test(headline)) return { Icon: Wind, label: 'Wind noted', kind: 'wind' };
   if ((Number.isFinite(rain) && rain > 0.1) || /\brain|storm|shower|drizzle\b/.test(signal)) {
-    return { Icon: CloudRain, label: 'Rain noted' };
+    return { Icon: CloudRain, label: 'Rain noted', kind: 'rain' };
   }
-  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions' };
-  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy' };
-  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover' };
-  return { Icon: CloudSun, label: 'Treatment weather' };
+  if (/\bclear|sun|sunny\b/.test(signal)) return { Icon: Sun, label: 'Sunny conditions', kind: 'sun' };
+  if (/\bpartly|mostly sunny|few clouds\b/.test(signal)) return { Icon: CloudSun, label: 'Partly cloudy', kind: 'partly' };
+  if (/\bcloud|overcast\b/.test(signal)) return { Icon: Cloud, label: 'Cloud cover', kind: 'cloud' };
+  return { Icon: CloudSun, label: 'Treatment weather', kind: 'partly' };
+}
+
+// Animated weather mark for the conditions panel — etched-instrument line work
+// in the report ink at one 1.6px stroke weight, cool glass tints, and a single
+// condition-matched motion each (sun turns, rain falls, clouds drift, wind
+// flows). Animates in live mode only; static/pdf/reduced-motion get the
+// settled frame via the shared media block.
+function AnimatedWeatherIcon({ kind = 'partly', live = false }) {
+  const ink = 'var(--text)';
+  const s = { fill: 'none', stroke: ink, strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  const cloud = (d, tint = 'rgba(175, 225, 255, 0.28)', w = 1.6) => (
+    <path d={d} fill={tint} stroke={ink} strokeWidth={w} strokeLinejoin="round" />
+  );
+  return (
+    <svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true" className={live ? 'wx wx--live' : 'wx'} style={{ display: 'block', overflow: 'visible' }}>
+      {kind === 'sun' && (
+        <>
+          <g className="wx-rays">
+            {[0, 45, 90, 135, 180, 225, 270, 315].map((a) => (
+              <line key={a} x1="18" y1="5" x2="18" y2={a % 90 === 0 ? '8.4' : '7.4'} {...s} strokeWidth={1.4} transform={`rotate(${a} 18 18)`} />
+            ))}
+          </g>
+          <circle className="wx-core" cx="18" cy="18" r="6.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.6" />
+          <path d="M13.6 15.4 a5.4 5.4 0 0 1 3.4-2.4" fill="none" stroke="rgba(255,255,255,0.95)" strokeWidth="1.1" strokeLinecap="round" />
+        </>
+      )}
+      {kind === 'partly' && (
+        <>
+          <g className="wx-rays" style={{ transformOrigin: '13px 12px' }}>
+            {[0, 60, 120, 180, 240, 300].map((a) => (
+              <line key={a} x1="13" y1="3.6" x2="13" y2="5.8" {...s} strokeWidth={1.3} transform={`rotate(${a} 13 12)`} />
+            ))}
+          </g>
+          <circle cx="13" cy="12" r="4.2" fill="rgba(255, 222, 120, 0.4)" stroke={ink} strokeWidth="1.4" />
+          <g className="wx-cloud">
+            {cloud('M11.5 28.5 a4.9 4.9 0 0 1 1.2-9.6 A6.4 6.4 0 0 1 25 17 a4.5 4.5 0 0 1 1.5 8.8 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M13.6 20.6 a5 5 0 0 1 3.2-1.9" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'cloud' && (
+        <>
+          <g className="wx-cloud-back">
+            {cloud('M14.5 16.5 a4.2 4.2 0 0 1 1-8.2 A5.6 5.6 0 0 1 26 7.4 a3.9 3.9 0 0 1 1.3 7.6 Z', 'rgba(175, 225, 255, 0.22)', 1.3)}
+          </g>
+          <g className="wx-cloud">
+            {cloud('M9.5 27.5 a5.3 5.3 0 0 1 1.3-10.4 A7 7 0 0 1 24.6 14.6 a4.9 4.9 0 0 1 1.7 9.6 Z', 'rgba(255,255,255,0.92)')}
+            <path d="M11.8 20.6 a5.4 5.4 0 0 1 3.5-2.1" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          </g>
+        </>
+      )}
+      {kind === 'rain' && (
+        <>
+          {cloud('M10 22.5 a5.6 5.6 0 0 1 1.4-11 A7.4 7.4 0 0 1 26 9.9 a5.1 5.1 0 0 1 1.7 10.1 Z', 'rgba(255,255,255,0.92)')}
+          <path d="M12.4 15.2 a5.6 5.6 0 0 1 3.6-2.2" fill="none" stroke="rgba(175,225,255,0.85)" strokeWidth="1" strokeLinecap="round" />
+          <g stroke="#0A7EC2" strokeWidth="1.7" strokeLinecap="round">
+            <line className="wx-drop wx-drop-1" x1="13.5" y1="26" x2="12.4" y2="30" />
+            <line className="wx-drop wx-drop-2" x1="19" y1="26" x2="17.9" y2="30" />
+            <line className="wx-drop wx-drop-3" x1="24.5" y1="26" x2="23.4" y2="30" />
+          </g>
+        </>
+      )}
+      {kind === 'wind' && (
+        <g fill="none" strokeLinecap="round">
+          <path className="wx-gust wx-gust-1" d="M4.5 13 h15.5 a3.4 3.4 0 1 0 -3.4 -3.4" stroke="#0A7EC2" strokeWidth="1.7" />
+          <path className="wx-gust wx-gust-2" d="M4.5 19 h21.5 a3.4 3.4 0 1 1 -3.4 3.4" stroke={ink} strokeWidth="1.6" />
+          <path className="wx-gust wx-gust-3" d="M4.5 25 h12.5 a2.9 2.9 0 1 1 -2.9 2.9" stroke="#7CC7F0" strokeWidth="1.6" />
+        </g>
+      )}
+    </svg>
+  );
 }
 
 function recommendedFinding(findings = []) {
@@ -1121,29 +1220,11 @@ function recommendedFinding(findings = []) {
   return ranked.find((finding) => String(finding.recommendation || '').trim()) || null;
 }
 
+// THE document button — theme-doc's docButton() is the canonical spec
+// (identical values to the previous local object; DocumentActionBar consumes
+// the same factory). Local 'plain' kind maps to the doc 'chip' outline.
 function actionButtonStyle(kind = 'plain') {
-  const isPrimary = kind === 'primary';
-  return {
-    minHeight: 48,
-    padding: '0 18px',
-    borderRadius: 10,
-    border: isPrimary ? `1px solid ${ESTIMATE_BUTTON_BG}` : `1px solid ${ESTIMATE_BORDER}`,
-    background: isPrimary ? ESTIMATE_BUTTON_BG : '#FFFFFF',
-    color: isPrimary ? '#FFFFFF' : ESTIMATE_TEXT,
-    fontFamily: FONT_BODY,
-    fontWeight: 700,
-    fontSize: 14,
-    lineHeight: 1,
-    cursor: 'pointer',
-    textDecoration: 'none',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    boxShadow: 'none',
-    textTransform: 'none',
-    whiteSpace: 'nowrap',
-  };
+  return docButton(kind === 'primary' ? 'primary' : 'chip');
 }
 
 function reviewLocationForReport(data = {}) {
@@ -1593,7 +1674,7 @@ function TechnicianVisitLine({ data }) {
   return (
     <div className="tech-visit-line">
       {technician.photoUrl ? (
-        <img src={technician.photoUrl} alt={name} className="tech-photo" />
+        <img src={technician.photoUrl} alt={name} className="tech-photo" referrerPolicy="no-referrer" />
       ) : (
         <div className="tech-photo tech-photo-fallback" aria-hidden="true">{initials}</div>
       )}
@@ -1675,13 +1756,23 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <h1 className="sr-title">Hey {firstName}, {headline}</h1>
         {(() => {
           // Mirrors the estimate header's contact block: each of name / email /
-          // phone / address on its own eyebrow-styled line.
+          // phone / address on its own line, rendered mixed-case ("Chris Whitney",
+          // not "CHRIS WHITNEY" — owner 2026-07-09). Records stored ALL-CAPS
+          // (common on older customer rows) are title-cased for display only.
+          const displayContactLine = (raw) => {
+            const s = String(raw || '').trim();
+            if (!s || s !== s.toUpperCase()) return s;
+            if (s.includes('@')) return s.toLowerCase();
+            return s.toLowerCase()
+              .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+              .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+          };
           const contactLines = [
             data.customerName,
             data.customerEmail,
             formatCustomerPhone(data.customerPhone),
             data.serviceAddress,
-          ].map((line) => String(line || '').trim()).filter(Boolean);
+          ].map(displayContactLine).filter(Boolean);
           return contactLines.length ? (
             <div className="service-meta-contact">
               {contactLines.map((line) => (
@@ -1719,8 +1810,9 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           </div>
           {nextAppointmentLabel && (
             <div className="sr-cell">
-              <div className="sr-cell-label">Next appointment</div>
+              <div className="sr-cell-label">Next service</div>
               <div className="sr-cell-value">{nextAppointmentLabel}</div>
+              <div className="sr-cell-note">Subject to change</div>
             </div>
           )}
         </div>
@@ -1728,6 +1820,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
         <HeroConditions
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
+          live={mode === 'live'}
         />
       </div>
     </section>
@@ -1763,8 +1856,6 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
   return (
     <section data-glass="card" className="report-action-bar" aria-label="Report tools">
       <div className="section-eyebrow">Report Tools</div>
-      <h2 className="report-action-title">Download, share, or print</h2>
-      <p className="report-action-copy">For your records.</p>
       <div className="report-action-buttons">
         {pdfUrl
           ? <a
@@ -1819,7 +1910,7 @@ function RecapVideoCard({ recap, token }) {
         preload="metadata"
         playsInline
         onError={() => setVideoFailed(true)}
-        style={{ width: '100%', maxWidth: 420, borderRadius: 14, background: '#000', display: 'block', margin: '12px auto 0' }}
+        style={{ width: '100%', maxWidth: 420, borderRadius: 12, background: '#000', display: 'block', margin: '12px auto 0' }}
       />
     </section>
   );
@@ -1878,17 +1969,17 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall }) {
+function HeroConditions({ conditions, weatherCall, live = false }) {
   const rows = conditionRows(conditions);
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
-  const { Icon, label } = weatherIconInfo(conditions, weatherCall);
+  const { label, kind } = weatherIconInfo(conditions, weatherCall);
   return (
     <div className="hero-conditions">
       <div className="hero-conditions-copy">
         <div className="weather-call-title">
-          <span className="weather-call-icon" aria-hidden="true"><Icon size={18} strokeWidth={1.8} /></span>
+          <span className="weather-call-icon weather-call-icon-animated" aria-hidden="true"><AnimatedWeatherIcon kind={kind} live={live} /></span>
           <div>
             <div className="section-eyebrow">{weatherCall ? 'Weather call' : 'Conditions at application'}</div>
             <div className="weather-call-icon-label">{label}</div>
@@ -2022,6 +2113,96 @@ function ReportAskBox({ mode, token, serviceLine, data }) {
   );
 }
 
+// Floating Ask Waves — the report's AI helper as a slim bar pinned under the
+// shell header while the customer scrolls (owner ask 2026-07-09: inline, sleek —
+// small header, contextual prompt pills, chat input + button). Live mode only;
+// pdf/static keep the legacy "Need help with this report?" section untouched.
+function FloatingAskWaves({ mode, token, serviceLine, data }) {
+  const prompts = reportAskPrompts(data, serviceLine);
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [asking, setAsking] = useState(false);
+
+  const ask = async (text) => {
+    const q = String((text ?? question) || '').trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setAnswer('');
+    try {
+      const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'question_failed');
+      // Server records report_question_asked — no client event (double-count).
+      setAnswer(payload.answer || 'I could not answer that from this report.');
+    } catch {
+      setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  if (mode !== 'live') return null;
+
+  return (
+    <div className="floating-ask-wrap">
+      <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
+        <span className="floating-ask-title">Waves AI</span>
+
+        {/* marquee: prompts drift slowly left, vanish behind the label edge, and
+            re-enter from the input side; list is doubled for a seamless loop.
+            Hover/focus pauses so a moving pill can be clicked. */}
+        <div className="floating-ask-pills" aria-label="Example questions">
+          <div className="floating-ask-track">
+            {[...prompts, ...prompts].map((prompt, i) => (
+              <button
+                data-glass="chip"
+                type="button"
+                key={`${prompt}-${i}`}
+                className="floating-ask-pill"
+                onClick={() => ask(prompt)}
+                disabled={asking}
+                tabIndex={i < prompts.length ? 0 : -1}
+                aria-hidden={i >= prompts.length}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="floating-ask-form">
+          <input
+            id="floating-report-question"
+            name="floating_report_question"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                ask();
+              }
+            }}
+            placeholder="Ask Waves"
+            aria-label="Ask Waves about this service report"
+          />
+          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+            {asking ? 'Checking…' : 'Ask'}
+          </button>
+        </div>
+        {answer && (
+          <div className="floating-ask-answer" role="status" data-glass="soft">
+            <span>{answer}</span>
+            <button type="button" className="floating-ask-dismiss" onClick={() => setAnswer('')} aria-label="Dismiss answer">{'\u2715'}</button>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true } = {}) {
   return [
     ['#visit-summary', 'Summary'],
@@ -2102,7 +2283,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
       <h2>What we found & did</h2>
       <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
         {items.map((item) => (
-          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 10 }}>
+          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 12 }}>
             <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
@@ -4352,7 +4533,7 @@ function SmsReportPreview({ data }) {
           min-height: 1500px;
           background: #f7f7f7;
           color: #171717;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           padding: 72px;
           box-sizing: border-box;
         }
@@ -4490,9 +4671,9 @@ function LoadingState({ glass = false }) {
           boxSizing: 'border-box',
         }}
       >
-        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 4 }} />
-        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 4, marginTop: 14 }} />
-        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 4, marginTop: 10 }} />
+        <div style={{ height: 12, width: 120, background: skeleton, borderRadius: 6 }} />
+        <div style={{ height: 32, width: '70%', background: skeleton, borderRadius: 6, marginTop: 16 }} />
+        <div style={{ height: 14, width: '50%', background: skeleton, borderRadius: 6, marginTop: 12 }} />
       </div>
     </div>
   );
@@ -4513,10 +4694,10 @@ function NotFoundState({ glass = false }) {
         }}
       >
         <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: glass ? '#04395E' : ESTIMATE_TEXT }}>Report unavailable</div>
-        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.55, marginTop: 8 }}>
+        <div style={{ fontSize: 15, color: glass ? 'rgba(12, 21, 40, 0.7)' : ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 18 }}>Call Waves</a>
+        <a href={`tel:${WAVES_PHONE_TEL}`} data-glass-accent={glass ? '' : undefined} style={{ ...actionButtonStyle('primary'), marginTop: 16 }}>Call Waves</a>
       </div>
     </div>
   );
@@ -4549,9 +4730,9 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <main style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
-          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
+          <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
@@ -4563,7 +4744,7 @@ function LegacyReport({ data, token, glass = false }) {
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>Report details</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: glass ? '#04395E' : ESTIMATE_TEXT }}>{data.serviceType}</div>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 4 }}>{[formatDate(data.serviceDate), data.technicianName].filter(Boolean).join(' | ')}</div>
-          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.6, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
+          {data.notes && <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 16, whiteSpace: 'pre-wrap' }}>{data.notes}</p>}
           <a
             href={pdfUrl}
             download
@@ -4577,7 +4758,7 @@ function LegacyReport({ data, token, glass = false }) {
                   .catch(() => window.alert('Could not save the PDF. Please try again.'));
               }
             }}
-            style={{ ...actionButtonStyle('primary'), marginTop: 18 }}
+            style={{ ...actionButtonStyle('primary'), marginTop: 16 }}
           ><Download size={16} /> Download PDF</a>
         </section>
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
@@ -4772,7 +4953,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-brand-lockup {
           display: flex;
           align-items: center;
-          gap: 10px;
+          gap: 12px;
           min-width: 0;
         }
         .sr-brand-logo {
@@ -4782,7 +4963,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-brand-title {
           font-family: ${FONTS.heading};
           font-size: 16px;
-          font-weight: 850;
+          font-weight: 800;
           color: var(--text);
           line-height: 1.1;
           letter-spacing: 0;
@@ -4796,7 +4977,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           white-space: nowrap;
         }
         .sr-shell {
-          max-width: 720px;
+          max-width: 800px;
           width: 100%;
           margin: 0 auto;
           padding: 32px 20px 64px;
@@ -4805,17 +4986,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
-          margin: 0 0 18px;
-          padding: 20px 22px;
+          margin: 0 0 16px;
+          padding: 20px 24px;
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
         }
         .report-action-bar .section-eyebrow {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .report-action-title {
-          margin: 6px 0 4px;
+          margin: 8px 0 4px;
           font-family: ${FONTS.serif};
           font-weight: 500;
           font-size: 24px;
@@ -4826,12 +5007,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 2px 0 0;
           color: ${ESTIMATE_BODY};
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .report-action-buttons {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .report-action-buttons > a,
@@ -4864,19 +5045,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-meta {
           margin-top: 8px;
-          color: ${ESTIMATE_BODY};
+          /* var(--muted): one supporting gray on this surface (was ESTIMATE_BODY,
+             a third ink — owner palette reduction 2026-07-09) */
+          color: var(--muted);
           font-size: 15px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .smart-status-result {
           color: var(--text);
-          font-size: 22px;
-          line-height: 1.25;
-          font-weight: 750;
+          font-size: 24px;
+          line-height: 1.2;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .smart-status-detail {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -4893,11 +5076,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 12px;
+          font-size: 13px;
           line-height: 1.5;
-          font-weight: 700;
+          font-weight: 600;
           letter-spacing: 0;
-          text-transform: uppercase;
+          /* mixed-case contact lines (owner 2026-07-09) — no uppercase transform */
         }
         .service-meta-contact {
           margin-top: 4px;
@@ -4912,11 +5095,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           gap: 12px;
           margin-top: 16px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: var(--wash);
-          max-width: 820px;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .tech-photo {
           width: 54px;
@@ -4939,7 +5122,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .tech-name {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
         }
         .tech-role {
@@ -4951,13 +5134,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .tech-visit-times {
           margin-top: 3px;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
-          font-weight: 650;
+          font-weight: 600;
         }
         .hero-conditions {
           margin-top: 16px;
-          padding: 12px 14px 14px;
+          padding: 12px 16px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
@@ -4966,8 +5149,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 14px;
-          margin-bottom: 10px;
+          gap: 16px;
+          margin-bottom: 12px;
         }
         .hero-conditions-copy .section-eyebrow {
           margin-bottom: 0;
@@ -4976,7 +5159,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .weather-call-title {
           display: flex;
           align-items: center;
-          gap: 10px;
+          gap: 12px;
           flex: 0 0 auto;
           min-width: 176px;
         }
@@ -5001,8 +5184,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-conditions-copy p {
           margin: 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
           text-align: right;
         }
         .hero-condition-row {
@@ -5019,11 +5202,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-condition-cell {
           flex: 0 0 148px;
           min-height: 62px;
-          padding: 10px;
+          padding: 12px;
           background: var(--wash);
         }
         .sr-hero-summary {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--text);
           font-size: 16px;
           line-height: 1.5;
@@ -5047,13 +5230,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 34px;
           border: 1px solid #86efac;
           border-radius: 999px;
-          background: #dcfce7;
-          color: #14532d;
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           font-size: 12px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
           white-space: nowrap;
-          padding: 8px 11px;
+          padding: 8px 12px;
         }
         .status-badge.status-pending {
           border-color: #cbd5e1;
@@ -5061,9 +5244,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .status-badge.status-warning {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .status-badge.status-neutral {
           border-color: #cbd5e1;
@@ -5087,20 +5270,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .service-status-timeline {
           margin-top: 16px;
-          padding: 15px;
+          padding: 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
         }
         .status-timeline-list {
           display: grid;
-          gap: 10px;
-          margin-top: 10px;
+          gap: 12px;
+          margin-top: 12px;
         }
         .status-timeline-item {
           display: grid;
           grid-template-columns: 30px minmax(0, 1fr);
-          gap: 10px;
+          gap: 12px;
           align-items: start;
         }
         .status-timeline-marker {
@@ -5110,9 +5293,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
         }
         .status-timeline-marker-pending {
           border-color: #cbd5e1;
@@ -5126,13 +5309,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .status-timeline-title {
           color: var(--text);
           font-size: 15px;
-          line-height: 1.3;
+          line-height: 1.35;
           font-weight: 800;
         }
         .status-timeline-time {
           margin-top: 2px;
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
         }
         .status-timeline-summary {
@@ -5140,21 +5323,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: baseline;
           justify-content: space-between;
           gap: 12px;
-          margin-top: 13px;
-          padding-top: 13px;
+          margin-top: 12px;
+          padding-top: 12px;
           border-top: 1px solid var(--line);
         }
         .status-timeline-summary-label {
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
         .status-timeline-summary-value {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
           white-space: nowrap;
         }
         .readiness-facts,
@@ -5162,7 +5345,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
         .readiness-card {
-          border-color: #bbf7d0;
+          border-color: rgba(22, 163, 74, 0.35);
           background: #f0fdf4;
         }
         .readiness-card h2 {
@@ -5176,7 +5359,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .quick-report-tools .report-ask-box {
           max-width: none;
@@ -5194,17 +5377,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 999px;
           background: #fff;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 800;
           text-decoration: none;
-          padding: 9px 11px;
+          padding: 8px 12px;
         }
         .timeline-note {
           margin: 12px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .visit-timeline-details {
           display: grid;
@@ -5215,20 +5398,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px 12px;
+          padding: 12px;
         }
         .visit-timeline-detail span {
           display: block;
           color: var(--text);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
-          font-weight: 850;
+          font-weight: 800;
         }
         .visit-timeline-detail p {
           margin: 3px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .visit-timeline-data-source {
           font-size: 12px;
@@ -5246,15 +5429,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .visit-progress-summary span {
           color: var(--muted);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.35;
           font-weight: 700;
         }
         .visit-progress-summary strong {
           color: var(--text);
           font-size: 16px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
           white-space: nowrap;
         }
         .legacy-section-anchor {
@@ -5268,33 +5451,33 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
-          margin: 14px 0;
+          margin: 16px 0;
         }
         .service-coverage-chip {
           display: inline-flex;
           align-items: center;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
           min-width: 132px;
           border: 1px solid var(--line);
           border-radius: 999px;
-          padding: 8px 11px;
+          padding: 8px 12px;
           background: #fff;
           font-size: 12px;
           line-height: 1;
           font-weight: 800;
         }
         .service-coverage-chip strong {
-          font-size: 13px;
+          font-size: 14px;
         }
-        .service-coverage-chip.status-green { border-color: #86efac; background: #dcfce7; color: #14532d; }
-        .service-coverage-chip.status-blue { border-color: #93c5fd; background: #dbeafe; color: #1e3a8a; }
-        .service-coverage-chip.status-orange { border-color: #fdba74; background: #ffedd5; color: #7c2d12; }
+        .service-coverage-chip.status-green { border-color: #86efac; background: rgba(22, 163, 74, 0.12); color: #15803D; }
+        .service-coverage-chip.status-blue { border-color: rgba(10, 126, 194, 0.45); background: rgba(10, 126, 194, 0.12); color: #0A7EC2; }
+        .service-coverage-chip.status-orange { border-color: rgba(245, 158, 11, 0.45); background: rgba(245, 158, 11, 0.12); color: #B45309; }
         .service-coverage-card-grid {
           display: grid;
           grid-template-columns: minmax(0, .88fr) minmax(320px, 1.12fr);
           grid-template-areas: "list map";
-          gap: 14px;
+          gap: 16px;
           align-items: start;
         }
         .service-coverage-card-grid.list-only {
@@ -5323,8 +5506,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 2px 0 4px;
           color: var(--text);
           font-size: 14px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
         }
         .coverage-map-unavailable {
           grid-area: map;
@@ -5333,20 +5516,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-radius: 12px;
           background: var(--wash);
           color: var(--muted);
-          padding: 14px;
-          font-size: 13px;
-          line-height: 1.45;
+          padding: 16px;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .sr-pressure {
           justify-self: end;
           background: var(--paper);
           border: .5px solid var(--line);
           border-radius: 8px;
-          padding: 18px;
+          padding: 16px;
           min-width: 220px;
         }
         .sr-pressure-value { font-size: 44px; line-height: 1; font-weight: 500; }
-        .sr-pressure-label { margin-top: 6px; font-size: 13px; color: var(--muted); }
+        .sr-pressure-label { margin-top: 8px; font-size: 14px; color: var(--muted); }
         .sr-band {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5358,22 +5541,37 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           overflow: hidden;
         }
         .sr-metric { background: var(--paper); padding: 16px; min-height: 86px; }
-        .sr-metric-value { color: var(--text); font-size: 26px; line-height: 1; font-weight: 650; }
-        .sr-metric-label { margin-top: 10px; font-size: 13px; color: var(--muted); }
+        .sr-metric-value { color: var(--text); font-size: 24px; line-height: 1; font-weight: 600; }
+        .sr-metric-label { margin-top: 12px; font-size: 14px; color: var(--muted); }
         .sr-section {
           background: var(--paper);
           border: 1px solid var(--line);
           border-radius: 16px;
           padding: 24px;
-          margin-top: 16px;
+          /* 20px rhythm: the glass hover lift (translateY(-4px) + scale 1.016)
+             intrudes ~8px into the gap above a card — at 16px cards read as
+             near-collision on hover (owner 2026-07-09). */
+          margin-top: 20px;
           break-inside: avoid;
+        }
+        /* a nested glass card that closes its host section drops its trailing
+           margin — the host's 24px padding is the tail spacing; the stacked
+           margin+padding read as dead space (owner 2026-07-09). The embed
+           wrapper's trailing chain flattens for the same reason (an inner
+           grouping div was still holding 16px of tail). */
+        .sr-section [data-glass="card"]:last-child,
+        .sr-section div:last-child > [data-glass="card"]:last-child,
+        .report-v2-embed > :last-child,
+        .report-v2-embed > :last-child > :last-child,
+        .report-v2-embed > :last-child > :last-child > :last-child {
+          margin-bottom: 0 !important;
         }
         .sr-section h2 {
           margin: 0 0 16px;
           color: var(--text);
           font-family: ${FONTS.serif};
           font-size: 28px;
-          line-height: 1.18;
+          line-height: 1.2;
           font-weight: 500;
           letter-spacing: 0;
         }
@@ -5390,30 +5588,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: flex-start;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .treatment-map-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .map-context-copy,
         .map-footnote {
           margin: 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .map-footnote {
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .coverage-section-header {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .coverage-section-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .coverage-map-meta {
           display: grid;
@@ -5484,7 +5682,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-green,
         .coverage-marker.status-green .coverage-marker-inner {
           fill: #15803D;
-          stroke: #14532d;
+          stroke: #15803D;
         }
         .coverage-area.status-light-green,
         .coverage-area.status-partially_treated {
@@ -5494,7 +5692,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-area.status-blue,
         .coverage-marker.status-blue .coverage-marker-inner {
           fill: #2563eb;
-          stroke: #1e3a8a;
+          stroke: #0A7EC2;
         }
         .coverage-area.status-orange,
         .coverage-marker.status-orange .coverage-marker-inner {
@@ -5515,7 +5713,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           fill: rgba(22,163,74,.28);
         }
         .coverage-partial-line {
-          stroke: #14532d;
+          stroke: #15803D;
           stroke-width: 2;
           opacity: .65;
         }
@@ -5558,16 +5756,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .coverage-marker-text {
           fill: #fff;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 14px;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
         }
         .coverage-map-label {
           fill: #111827;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 12px;
-          font-weight: 750;
+          font-weight: 700;
           letter-spacing: 0;
           paint-order: stroke;
           stroke: rgba(255,255,255,.92);
@@ -5588,23 +5786,23 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-status-chip {
           display: inline-flex;
           align-items: center;
-          gap: 7px;
+          gap: 8px;
           border: 1px solid var(--line);
           border-radius: 999px;
           background: #fff;
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           white-space: nowrap;
         }
         .coverage-legend-item {
           min-height: 30px;
-          padding: 6px 9px;
+          padding: 6px 8px;
         }
         .coverage-status-chip {
           align-self: center;
-          padding: 7px 9px;
+          padding: 8px 8px;
           flex: 0 0 auto;
         }
         .coverage-legend-swatch {
@@ -5617,16 +5815,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
         }
         .coverage-legend-item.status-green .coverage-legend-swatch,
-        .coverage-status-chip.status-green { background: #dcfce7; border-color: #86efac; color: #14532d; }
+        .coverage-status-chip.status-green { background: rgba(22, 163, 74, 0.12); border-color: #86efac; color: #15803D; }
         .coverage-legend-item.status-green .coverage-legend-swatch { background: #16a34a; color: #fff; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch,
         .coverage-status-chip.status-light-green { background: #ecfccb; border-color: #bef264; color: #365314; }
         .coverage-legend-item.status-light-green .coverage-legend-swatch { background: #65a30d; color: #fff; }
         .coverage-legend-item.status-blue .coverage-legend-swatch,
-        .coverage-status-chip.status-blue { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+        .coverage-status-chip.status-blue { background: rgba(10, 126, 194, 0.12); border-color: rgba(10, 126, 194, 0.45); color: #0A7EC2; }
         .coverage-legend-item.status-blue .coverage-legend-swatch { background: #2563eb; color: #fff; }
         .coverage-legend-item.status-orange .coverage-legend-swatch,
-        .coverage-status-chip.status-orange { background: #ffedd5; border-color: #fdba74; color: #7c2d12; }
+        .coverage-status-chip.status-orange { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.45); color: #B45309; }
         .coverage-legend-item.status-orange .coverage-legend-swatch { background: #f59e0b; color: #fff; }
         .coverage-legend-item.status-red .coverage-legend-swatch,
         .coverage-status-chip.status-red { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
@@ -5648,14 +5846,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-left: 5px solid var(--zone-color, var(--line));
           border-radius: 10px;
           background: #fff;
-          padding: 11px 12px;
+          padding: 12px;
         }
         .zone-service-row {
           align-items: center;
         }
         .service-coverage-item {
           cursor: pointer;
-          transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+          transition: ${docTransition('border-color', 'box-shadow', 'transform')};
         }
         .service-coverage-item:hover,
         .service-coverage-item:focus,
@@ -5680,8 +5878,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           justify-content: center;
           flex: 0 0 auto;
-          font-size: 13px;
-          font-weight: 850;
+          font-size: 14px;
+          font-weight: 800;
           line-height: 1;
         }
         .zone-service-copy {
@@ -5691,7 +5889,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
           letter-spacing: 0;
         }
@@ -5699,21 +5897,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .coverage-evidence-note {
           margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .coverage-product-line {
           margin-top: 8px;
           color: var(--text);
           font-size: 12px;
           line-height: 1.35;
-          font-weight: 750;
+          font-weight: 700;
         }
         .coverage-evidence-note {
           margin-top: 12px;
         }
         .coverage-status-chip.zone-status-chip {
-          font-weight: 850;
+          font-weight: 800;
         }
         .zone-status-chips {
           display: flex;
@@ -5725,8 +5923,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .zone-status-description {
           margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .zone-status-description + .zone-status-description {
           margin-top: 2px;
@@ -5738,7 +5936,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--muted);
           padding: 16px;
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .coverage-empty-state-map {
           min-height: 210px;
@@ -5777,9 +5975,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          border: 1px solid #bbf7d0;
-          background: #dcfce7;
-          color: #14532d;
+          border: 1px solid rgba(22, 163, 74, 0.35);
+          background: rgba(22, 163, 74, 0.12);
+          color: #15803D;
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -5791,47 +5989,47 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #475569;
         }
         .workflow-status-current .workflow-event-icon {
-          border-color: #93c5fd;
-          background: #dbeafe;
-          color: #1e3a8a;
+          border-color: rgba(10, 126, 194, 0.45);
+          background: rgba(10, 126, 194, 0.12);
+          color: #0A7EC2;
         }
         .workflow-status-skipped .workflow-event-icon {
-          border-color: #fdba74;
-          background: #ffedd5;
-          color: #7c2d12;
+          border-color: rgba(245, 158, 11, 0.45);
+          background: rgba(245, 158, 11, 0.12);
+          color: #B45309;
         }
         .workflow-event-body {
           min-width: 0;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
-          padding: 11px 12px;
+          padding: 12px;
         }
         .workflow-event-heading {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
         }
         .workflow-event-heading h3 {
           margin: 0;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
+          line-height: 1.2;
           font-weight: 800;
           letter-spacing: 0;
         }
         .workflow-event-heading time {
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.3;
+          font-size: 14px;
+          line-height: 1.35;
           white-space: nowrap;
         }
         .workflow-event-body p {
-          margin: 5px 0 0;
+          margin: 4px 0 0;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .coverage-skeleton-map,
         .coverage-skeleton-list span,
@@ -5874,8 +6072,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           color: var(--muted);
           font: inherit;
-          font-size: 13px;
-          padding: 8px 11px;
+          font-size: 14px;
+          padding: 8px 12px;
           cursor: pointer;
         }
         .map-toggle button:first-child { border-left: 0; }
@@ -5921,7 +6119,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .satellite-bait-label,
         .satellite-flag-mark,
         .satellite-flag-label {
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           letter-spacing: 0;
         }
         .satellite-zone-label {
@@ -5951,7 +6149,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .satellite-application-badge text {
           fill: #fff;
-          font-family: Inter, Arial, sans-serif;
+          font-family: ${FONT_BODY};
           font-size: 10px;
           font-weight: 800;
           letter-spacing: 0;
@@ -6002,9 +6200,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: rgba(255,255,255,.86);
           color: #404040;
           border: .5px solid rgba(0,0,0,.12);
-          border-radius: 4px;
+          border-radius: 6px;
           padding: 3px 6px;
-          font-size: 10px;
+          font-size: 11px;
           line-height: 1.2;
         }
         .treatment-overlay-key {
@@ -6022,14 +6220,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .treatment-overlay-row {
           display: grid;
           grid-template-columns: auto minmax(0, 1fr);
-          gap: 10px;
+          gap: 12px;
           align-items: center;
           width: 100%;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
           color: var(--text);
-          padding: 10px;
+          padding: 12px;
           text-align: left;
           font: inherit;
           cursor: pointer;
@@ -6050,7 +6248,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: #fff;
           font-size: 12px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
         }
         .treatment-overlay-row-copy {
           min-width: 0;
@@ -6073,15 +6271,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 14px;
+          padding: 16px;
           min-height: 148px;
         }
         .treatment-overlay-detail h3 {
-          margin: 6px 0 8px;
+          margin: 8px 0 8px;
           color: var(--text);
-          font-size: 19px;
+          font-size: 18px;
           line-height: 1.2;
-          font-weight: 850;
+          font-weight: 800;
           letter-spacing: 0;
         }
         .treatment-overlay-detail p {
@@ -6093,7 +6291,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .treatment-overlay-meta {
           display: flex;
           flex-wrap: wrap;
-          gap: 6px;
+          gap: 8px;
           margin-top: 12px;
         }
         .treatment-overlay-meta span {
@@ -6103,48 +6301,54 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           padding: 6px 8px;
         }
         .sr-grid-2 { display: grid; grid-template-columns: 1fr; gap: 0; }
         .sr-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--line); }
-        .sr-cell { background: #fff; padding: 14px; min-height: 72px; }
+        .sr-cell { background: #fff; padding: 16px; min-height: 72px; }
+        .sr-cell-note {
+          margin-top: 3px;
+          color: var(--muted);
+          font-size: 11px;
+          line-height: 1.4;
+        }
         .sr-cell-label { font-size: 12px; color: var(--soft); }
-        .sr-cell-value { margin-top: 6px; font-size: 15px; color: var(--text); }
-        .sr-list { display: grid; gap: 10px; }
+        .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
+        .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
           border-radius: 10px;
-          padding: 13px 14px;
+          padding: 12px 16px;
           display: grid;
           grid-template-columns: 1fr auto;
           gap: 12px;
         }
         .sr-row-title { font-size: 15px; font-weight: 700; color: var(--text); }
-        .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; }
-        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; font-size: 12px; color: ${B.blueDeeper}; background: var(--wash); white-space: nowrap; height: fit-content; }
+        .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: ${B.blueDeeper}; background: var(--wash); white-space: nowrap; height: fit-content; }
         .sr-finding-high { border-left: 3px solid var(--red); }
         .sr-advisory { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-        .sr-advisory strong { font-size: 22px; font-weight: 500; display: block; }
-        .sr-advisory span { color: var(--muted); font-size: 13px; }
-        .sr-footer { color: var(--soft); font-size: 12px; line-height: 1.6; padding: 22px 0 0; }
+        .sr-advisory strong { font-size: 20px; font-weight: 500; display: block; }
+        .sr-advisory span { color: var(--muted); font-size: 14px; }
+        .sr-footer { color: var(--soft); font-size: 12px; line-height: 1.5; padding: 24px 0 0; }
         .ai-summary-card h2 {
           color: var(--text);
-          font-size: 26px;
+          font-size: 24px;
           line-height: 1.2;
-          max-width: 820px;
-          font-weight: 650;
+          max-width: ${DOC_COLUMN_MAX}px;
+          font-weight: 600;
         }
         .ai-summary-body {
           margin: 0;
           color: var(--muted);
           font-size: 16px;
-          line-height: 1.55;
-          max-width: 820px;
+          line-height: 1.5;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .pressure-methodology {
-          margin: 12px 0 14px;
-          max-width: 820px;
+          margin: 12px 0 16px;
+          max-width: ${DOC_COLUMN_MAX}px;
           background: var(--wash);
         }
         .pressure-methodology summary {
@@ -6156,7 +6360,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .ai-summary-bullets {
           margin-top: 16px;
@@ -6166,26 +6370,203 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .ai-summary-bullet {
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 11px 12px;
+          padding: 12px;
           color: var(--report-text);
           background: var(--wash);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
+        }
+        /* Floating Ask Waves bar — sticky under the 49px shell header (live only).
+           Grid areas: desktop "title pills form"; phone stacks form + pills. */
+        .floating-ask-wrap {
+          position: sticky;
+          top: 57px;
+          z-index: 8;
+          margin-top: 20px;
+        }
+        .floating-ask-bar {
+          display: grid;
+          grid-template-areas: 'title pills form';
+          grid-template-columns: auto minmax(0, 1fr) minmax(280px, 38%);
+          align-items: center;
+          gap: 10px;
+          border: 1px solid var(--line);
+          border-radius: 18px;
+          background: var(--wash);
+          padding: 10px 14px;
+        }
+        .floating-ask-title {
+          grid-area: title;
+          color: var(--text);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        .floating-ask-title::before {
+          /* \\2726 = four-pointed star (escaped: raw glyphs fail check:portal-brand) */
+          content: '\\2726  ';
+          color: ${B.yellow};
+        }
+        /* prompt marquee: pills drift slowly left, fade out behind the Waves AI
+           label and re-enter from the input side (owner ask 2026-07-09). The
+           track holds the prompt list twice and loops at exactly half its own
+           width, so the belt is seamless; hover/focus pauses it for clicking. */
+        .floating-ask-pills {
+          grid-area: pills;
+          min-width: 0;
+          overflow: hidden;
+          -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+          mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+        }
+        .floating-ask-track {
+          display: flex;
+          gap: 8px;
+          width: max-content;
+          animation: floatingPillMarquee 56s linear infinite;
+        }
+        .floating-ask-pills:hover .floating-ask-track,
+        .floating-ask-track:focus-within {
+          animation-play-state: paused;
+        }
+        @keyframes floatingPillMarquee {
+          from { transform: translateX(0); }
+          /* -4px = half the 8px gap, so the loop point is invisible */
+          to { transform: translateX(calc(-50% - 4px)); }
+        }
+        .floating-ask-pill {
+          flex: 0 0 auto;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          background: #fff;
+          color: var(--text);
+          font: inherit;
+          font-size: 13px;
+          line-height: 1;
+          font-weight: 700;
+          padding: 9px 12px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .floating-ask-track { animation: none; }
+        }
+        .floating-ask-form {
+          grid-area: form;
+          display: flex;
+          gap: 8px;
+          min-width: 0;
+        }
+        .floating-ask-form input {
+          flex: 1;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 9px 14px;
+          color: var(--text);
+          font: inherit;
+          font-size: 14px;
+          outline: none;
+          background: #fff;
+        }
+        .floating-ask-form button {
+          border: 1px solid ${B.blueDeeper};
+          border-radius: 999px;
+          background: ${B.yellow};
+          color: ${B.blueDeeper};
+          font: inherit;
+          font-size: 14px;
+          font-weight: 800;
+          padding: 9px 16px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .floating-ask-form button:disabled,
+        .floating-ask-pills button:disabled {
+          opacity: .5;
+          cursor: default;
+        }
+        /* answer floats as a dropdown UNDER the bar (absolute — an in-flow answer
+           grows the sticky bar and scroll-anchoring yanks the page) */
+        .floating-ask-answer {
+          position: absolute !important;
+          top: calc(100% + 8px);
+          left: 0;
+          right: 0;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          border: 1px solid var(--line);
+          border-radius: 14px;
+          background: var(--wash);
+          padding: 12px 14px;
+          color: var(--text);
+          font-size: 14px;
+          line-height: 1.5;
+          box-shadow: 0 18px 50px rgba(4, 57, 94, 0.18);
+        }
+        .floating-ask-dismiss {
+          flex: 0 0 auto;
+          border: 0;
+          background: transparent;
+          color: var(--muted);
+          font-size: 14px;
+          line-height: 1;
+          padding: 2px 4px;
+          cursor: pointer;
+        }
+        @media (max-width: 700px) {
+          .floating-ask-bar {
+            grid-template-areas:
+              'title form'
+              'pills pills';
+            grid-template-columns: auto minmax(0, 1fr);
+            border-radius: 16px;
+          }
+        }
+        /* animated weather mark — live only; the media block below parks it */
+        .weather-call-icon-animated {
+          width: 44px;
+          height: 44px;
+          display: grid;
+          place-items: center;
+        }
+        .wx .wx-rays, .wx .wx-core { transform-box: view-box; transform-origin: 18px 18px; }
+        .wx--live .wx-rays { animation: wxSpin 70s linear infinite; }
+        .wx--live .wx-core { animation: wxPulse 9s ease-in-out infinite; }
+        .wx--live .wx-cloud { animation: wxDrift 12s ease-in-out infinite; }
+        .wx--live .wx-cloud-back { animation: wxDriftBack 15s ease-in-out infinite; }
+        .wx--live .wx-drop { animation: wxDrop 3.4s linear infinite; }
+        .wx--live .wx-drop-2 { animation-delay: 1.1s; }
+        .wx--live .wx-drop-3 { animation-delay: 2.2s; }
+        .wx--live .wx-gust { stroke-dasharray: 34 14; animation: wxFlow 5.6s linear infinite; }
+        .wx--live .wx-gust-2 { animation-duration: 6.8s; }
+        .wx--live .wx-gust-3 { animation-duration: 4.8s; }
+        @keyframes wxSpin { to { transform: rotate(360deg); } }
+        @keyframes wxPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+        @keyframes wxDrift { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(2.5px); } }
+        @keyframes wxDriftBack { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(-2.5px); } }
+        @keyframes wxDrop { 0% { transform: translateY(-2px); opacity: 0; } 25% { opacity: 1; } 80% { opacity: 1; } 100% { transform: translateY(5px); opacity: 0; } }
+        @keyframes wxFlow { to { stroke-dashoffset: -48; } }
+        @media (print), (prefers-reduced-motion: reduce) {
+          .wx--live * { animation: none !important; }
         }
         .report-ask-box {
           margin-top: 16px;
           border: 1px solid var(--report-border);
           border-radius: 12px;
           background: var(--wash);
-          padding: 14px;
-          max-width: 820px;
+          padding: 16px;
+          max-width: ${DOC_COLUMN_MAX}px;
         }
         .report-ask-prompt {
           color: var(--report-text);
           font-size: 14px;
-          line-height: 1.4;
-          font-weight: 650;
-          margin: -2px 0 10px;
+          line-height: 1.35;
+          font-weight: 600;
+          margin: -2px 0 12px;
         }
         .report-ask-form {
           display: flex;
@@ -6196,7 +6577,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-width: 0;
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 11px 12px;
+          padding: 12px;
           color: var(--report-text);
           font: inherit;
           font-size: 14px;
@@ -6210,7 +6591,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--report-text);
           font: inherit;
           font-size: 14px;
-          padding: 10px 12px;
+          padding: 12px;
           cursor: pointer;
         }
         .report-ask-form button {
@@ -6229,7 +6610,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 8px;
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .report-ask-actions button {
           min-height: 48px;
@@ -6253,29 +6634,29 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .applied-products-header {
           display: flex;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
           align-items: flex-start;
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .applied-products-header h2 {
-          margin-bottom: 6px;
+          margin-bottom: 8px;
         }
         .applied-products-header p {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .applied-products-grid {
           display: grid;
           grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-          gap: 10px;
+          gap: 12px;
         }
         .applied-product-card {
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
           min-height: 158px;
         }
         .applied-product-card h3 {
@@ -6287,7 +6668,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
         }
         .solution-detail {
-          margin-top: 10px;
+          margin-top: 12px;
         }
         .solution-detail summary {
           align-items: flex-start;
@@ -6295,59 +6676,59 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .solution-detail summary > span:first-child {
           color: var(--text);
           font-size: 14px;
-          line-height: 1.45;
-          font-weight: 650;
+          line-height: 1.5;
+          font-weight: 600;
         }
         .solution-detail-body {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .solution-product-detail {
           display: grid;
-          gap: 6px;
+          gap: 8px;
         }
         .solution-product-detail + .solution-product-detail {
           border-top: 1px solid var(--line);
-          padding-top: 10px;
+          padding-top: 12px;
         }
         .solution-product-name {
           color: var(--text);
           font-size: 15px;
           font-weight: 800;
-          line-height: 1.3;
+          line-height: 1.35;
         }
         .solution-product-facts {
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.45;
+          line-height: 1.5;
           font-weight: 700;
         }
         .manufacturer-guideline-note {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 12px 14px;
-          margin-bottom: 14px;
+          padding: 12px 16px;
+          margin-bottom: 16px;
           color: var(--text);
           font-size: 14px;
           line-height: 1.5;
         }
         .manufacturer-guideline-note strong {
           color: var(--text);
-          font-weight: 750;
+          font-weight: 700;
         }
         .applied-product-maker {
           margin: -2px 0 8px;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.3;
+          font-size: 14px;
+          line-height: 1.35;
           font-weight: 600;
         }
         .product-watering-guidance {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px;
+          padding: 12px;
         }
         .product-watering-guidance .watering-headline {
           margin-top: 4px;
@@ -6358,17 +6739,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 4px;
         }
         .product-manufacturer-line {
-          font-size: 13px;
+          font-size: 14px;
         }
         .applied-product-card p {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .product-purpose-grid {
           display: grid;
-          gap: 10px;
+          gap: 12px;
           margin-top: 12px;
         }
         .product-purpose-grid > div,
@@ -6376,10 +6757,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
-          padding: 10px;
+          padding: 12px;
         }
         .product-why {
-          margin-top: 10px;
+          margin-top: 12px;
           background: #fff;
         }
         .product-purpose-grid p,
@@ -6391,7 +6772,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 0;
         }
         .product-group-list {
-          margin-top: 14px;
+          margin-top: 16px;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: var(--wash);
@@ -6408,7 +6789,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: baseline;
           justify-content: space-between;
-          gap: 10px;
+          gap: 12px;
           color: var(--text);
           font-size: 14px;
           line-height: 1.35;
@@ -6421,7 +6802,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .applied-product-meta {
           display: flex;
           flex-wrap: wrap;
-          gap: 6px;
+          gap: 8px;
           margin-top: 12px;
         }
         .applied-product-meta span {
@@ -6431,7 +6812,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 12px;
           line-height: 1;
-          font-weight: 750;
+          font-weight: 700;
           padding: 6px 8px;
         }
         .executive-status-grid {
@@ -6448,7 +6829,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .executive-status-cell {
           background: #fff;
-          padding: 18px;
+          padding: 16px;
           min-height: 112px;
         }
         .executive-status-value {
@@ -6462,11 +6843,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 18px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .where-accordion-list {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .report-accordion {
           background: #fff;
@@ -6480,9 +6861,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
           min-height: 52px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           cursor: pointer;
         }
         .report-accordion summary::-webkit-details-marker {
@@ -6493,7 +6874,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-bottom: 1px solid var(--line);
         }
         .accordion-body {
-          padding: 13px 14px 14px;
+          padding: 12px 16px 16px;
         }
         .accordion-action {
           flex: 0 0 auto;
@@ -6502,7 +6883,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           line-height: 1;
           border: 1px solid var(--line);
           border-radius: 999px;
-          padding: 5px 8px;
+          padding: 4px 8px;
           background: #fff;
         }
         .where-place {
@@ -6513,7 +6894,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .where-detail {
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
           margin: 0;
         }
         .report-card {
@@ -6521,33 +6902,41 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--report-border);
           border-radius: 16px;
           padding: 20px;
-          margin-top: 16px;
+          /* matches .sr-section's 20px rhythm — hover-lift headroom */
+          margin-top: 20px;
           break-inside: avoid;
           page-break-inside: avoid;
         }
+        /* THE section eyebrow — single rule matching theme-doc's DOC_EYEBROW
+           (12px/700/0.11em/1.2/uppercase/var(--muted)), same spec the glass
+           runtime forces at [data-gt="eyebrow"]. Replaces the two previously
+           conflicting .section-eyebrow rules. */
         .section-eyebrow {
-          color: ${B.blueDeeper};
-          font-size: 12px;
-          line-height: 1.2;
-          margin-bottom: 8px;
-          font-weight: 800;
+          color: var(--muted);
+          font-family: ${FONT_BODY};
+          font-size: ${FS.caption}px;
+          line-height: ${LH.heading};
+          margin-bottom: ${SP.xs}px;
+          font-weight: ${FW.bold};
+          letter-spacing: 0.11em;
+          text-transform: uppercase;
         }
         .report-card h2 {
-          margin: 0 0 14px;
+          margin: 0 0 16px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .review-request-card {
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           align-items: center;
-          gap: 14px;
+          gap: 16px;
         }
         .review-request-card-top {
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .review-request-card h2 {
           margin-bottom: 0;
@@ -6564,12 +6953,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: ${B.yellow};
           color: ${B.blueDeeper};
           font: inherit;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
-          font-weight: 900;
+          font-weight: 800;
           text-decoration: none;
           box-shadow: 3px 3px 0 ${B.blueDeeper};
-          transition: transform .15s ease, box-shadow .15s ease;
+          transition: ${docTransition('transform', 'box-shadow')};
         }
         .review-request-card .review-cta:hover,
         .review-request-card .review-cta:focus-visible {
@@ -6581,7 +6970,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--muted);
           font-size: 14px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .sr-muted {
           margin: 12px 0 0;
@@ -6591,14 +6980,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .hero-reentry-status {
           margin-top: 12px;
-          padding: 12px 14px;
+          padding: 12px 16px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: #fff;
-          max-width: 820px;
+          max-width: ${DOC_COLUMN_MAX}px;
           display: grid;
           grid-template-columns: minmax(128px, .7fr) minmax(0, 1.3fr);
-          gap: 14px;
+          gap: 16px;
           align-items: center;
         }
         .hero-reentry-status .section-eyebrow {
@@ -6608,8 +6997,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 18px;
-          line-height: 1.25;
-          font-weight: 750;
+          line-height: 1.2;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .reentry-details {
@@ -6618,20 +7007,25 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .reentry-target-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
+        }
+        /* a single ready-time target fills the row instead of leaving a
+           half-empty column (owner ask 2026-07-09) */
+        .readiness-target-grid {
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         }
         .reentry-target-tile {
           border: 1px solid var(--report-border);
           border-radius: 10px;
-          padding: 14px;
+          padding: 16px;
           min-height: 78px;
           background: var(--wash);
         }
         .reentry-target-value {
           margin-top: 8px;
           color: var(--report-text);
-          font-size: 22px;
-          line-height: 1.15;
+          font-size: 20px;
+          line-height: 1.2;
           font-weight: 700;
         }
         .hero-reentry-status .reentry-target-grid {
@@ -6645,7 +7039,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 58px;
           border: 0;
           border-radius: 0;
-          padding: 10px 12px;
+          padding: 12px;
           background: var(--wash);
         }
         .hero-reentry-status .reentry-target-value {
@@ -6656,17 +7050,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .reentry-notes {
           display: flex;
           flex-wrap: wrap;
-          gap: 4px 14px;
+          gap: 4px 16px;
           margin-top: 8px;
         }
         .reentry-notes .sr-muted {
           margin: 0;
-          font-size: 13px;
+          font-size: 14px;
         }
         .pressure-trend-layout {
           display: grid;
           grid-template-columns: minmax(0, 1fr) minmax(260px, 420px);
-          gap: 18px;
+          gap: 20px;
           align-items: center;
         }
         .pressure-summary {
@@ -6715,7 +7109,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .pressure-value-label {
           fill: ${B.blueDeeper};
           font-size: 10px;
-          font-weight: 850;
+          font-weight: 800;
           pointer-events: none;
         }
         .neighborhood-pressure-line {
@@ -6724,10 +7118,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           stroke-dasharray: 4 4;
         }
         .neighborhood-pressure-summary {
-          margin: 10px 0 0;
+          margin: 12px 0 0;
           color: var(--report-muted);
-          font-size: 13px;
-          line-height: 1.45;
+          font-size: 14px;
+          line-height: 1.5;
         }
         .pressure-legend {
           display: flex;
@@ -6743,11 +7137,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-top: 1px solid var(--line);
         }
         .pressure-trend-card-embedded h2 {
-          margin: 0 0 10px;
+          margin: 0 0 12px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .lawn-assessment-card-embedded {
@@ -6759,9 +7153,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-assessment-card-embedded h2 {
           margin: 0 0 12px;
           color: var(--text);
-          font-size: 21px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 650;
+          font-weight: 600;
           letter-spacing: 0;
         }
         .lawn-program-overview-card {
@@ -6789,10 +7183,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .lawn-program-copy,
         .lawn-program-distinction {
-          margin: 14px 0 0;
+          margin: 16px 0 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .lawn-program-distinction {
           padding: 12px;
@@ -6806,7 +7200,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 1px;
-          margin-top: 14px;
+          margin-top: 16px;
           overflow: hidden;
           border: 1px solid var(--line);
           border-radius: 10px;
@@ -6819,16 +7213,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .lawn-program-fact strong {
           display: block;
-          margin-top: 7px;
+          margin-top: 8px;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.25;
-          font-weight: 850;
+          line-height: 1.2;
+          font-weight: 800;
         }
         .lawn-assessment-layout {
           display: grid;
           grid-template-columns: minmax(0, 1fr) minmax(260px, 420px);
-          gap: 18px;
+          gap: 20px;
           align-items: center;
         }
         /* First assessment: no trend chart yet — collapse to a single column so
@@ -6841,7 +7235,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           align-items: center;
           gap: 12px;
           margin-bottom: 12px;
-          padding: 10px 12px;
+          padding: 12px;
           border: 1px solid var(--line);
           border-radius: 12px;
           background: var(--wash);
@@ -6871,14 +7265,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .lawn-profile-line,
         .lawn-water-line,
         .lawn-before-after-line {
-          margin-top: 10px;
+          margin-top: 12px;
           color: var(--muted);
-          font-size: 13px;
-          line-height: 1.45;
-          font-weight: 650;
+          font-size: 14px;
+          line-height: 1.5;
+          font-weight: 600;
         }
         .lawn-water-line {
-          padding: 10px 12px;
+          padding: 12px;
           border: 1px solid var(--line);
           border-radius: 8px;
           background: var(--wash);
@@ -6932,16 +7326,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding: 12px;
         }
         .lawn-score-value {
-          margin-top: 7px;
+          margin-top: 8px;
           color: var(--text);
-          font-size: 22px;
+          font-size: 20px;
           line-height: 1.1;
           font-weight: 800;
         }
         .lawn-photo-strip {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .lawn-photo-strip figure {
@@ -6958,30 +7352,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           object-fit: cover;
         }
         .lawn-photo-strip figcaption {
-          padding: 8px 10px;
+          padding: 8px 12px;
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.3;
+          line-height: 1.35;
           font-weight: 700;
         }
         .premium-section-header {
           display: flex;
           align-items: flex-start;
           justify-content: space-between;
-          gap: 14px;
+          gap: 16px;
         }
         .the-one-thing {
           background: ${B.blueSurface};
         }
         .the-one-thing h2 {
-          font-size: 25px;
-          line-height: 1.22;
+          font-size: 24px;
+          line-height: 1.2;
           margin-bottom: 0;
         }
         .one-thing-detail {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 10px;
+          gap: 12px;
           margin-top: 16px;
         }
         .one-thing-detail > div {
@@ -6994,7 +7388,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .why-activity-card p,
         .bug-file-row p,
         .when-to-text p {
-          margin: 6px 0 0;
+          margin: 8px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -7011,12 +7405,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .defense-status-item {
           min-height: 118px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
         }
         .defense-status-value {
           margin-top: 8px;
           color: var(--text);
-          font-size: 17px;
+          font-size: 16px;
           line-height: 1.2;
           font-weight: 800;
         }
@@ -7031,28 +7425,28 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .bug-file-grid {
           display: grid;
           grid-template-columns: 1fr;
-          gap: 10px;
+          gap: 12px;
         }
         .bug-file-section-embedded,
         .why-activity-card-embedded {
-          margin-top: 14px;
+          margin-top: 16px;
           border-top: 1px solid var(--line);
-          padding-top: 14px;
+          padding-top: 16px;
         }
         .bug-file-section-embedded h2,
         .why-activity-card-embedded h2 {
-          margin: 0 0 10px;
+          margin: 0 0 12px;
           color: var(--text);
           font-size: 20px;
           line-height: 1.2;
-          font-weight: 750;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .bug-file-card {
           background: var(--wash);
         }
         .bug-file-suspect {
-          margin-top: 6px;
+          margin-top: 8px;
           color: var(--text);
           display: block;
           font-size: 18px;
@@ -7060,7 +7454,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 800;
         }
         .bug-file-row + .bug-file-row {
-          margin-top: 14px;
+          margin-top: 16px;
         }
         .why-activity-card {
           background: var(--wash);
@@ -7069,10 +7463,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-size: 16px;
-          line-height: 1.55;
+          line-height: 1.5;
         }
         .when-to-text {
-          margin-top: 14px;
+          margin-top: 16px;
           border: 1px solid var(--line);
           border-radius: 10px;
           background: #fff;
@@ -7087,7 +7481,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .customer-action-list,
         .property-memory-grid {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .customer-action-item,
         .property-memory-item {
@@ -7105,7 +7499,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .customer-action-item p,
         .customer-action-section > p,
         .property-memory-item p {
-          margin: 6px 0 0;
+          margin: 8px 0 0;
           color: var(--muted);
           font-size: 14px;
           line-height: 1.5;
@@ -7119,30 +7513,30 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           padding-left: 20px;
           color: var(--text);
           font-size: 15px;
-          line-height: 1.6;
+          line-height: 1.5;
         }
         .contact-waves-cta {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          margin-top: 14px;
+          margin-top: 16px;
           min-height: 40px;
           border: 1px solid ${B.blueDeeper};
           border-radius: 8px;
           background: ${B.blueDeeper};
           color: #fff;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
-          font-weight: 850;
+          font-weight: 800;
           text-decoration: none;
-          padding: 10px 14px;
+          padding: 12px 16px;
         }
         .supporting-details-list {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .supporting-details-section > h2 {
-          margin-bottom: 14px;
+          margin-bottom: 16px;
         }
         .supporting-detail-grid {
           margin-top: 12px;
@@ -7154,7 +7548,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .supporting-metadata {
           display: grid;
-          gap: 10px;
+          gap: 12px;
         }
         .supporting-metadata p,
         .supporting-note {
@@ -7178,19 +7572,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .receipt-stat {
           min-height: 100px;
           background: #fff;
-          padding: 14px;
+          padding: 16px;
         }
         .receipt-value {
           margin-top: 8px;
           color: var(--text);
           font-size: 24px;
-          line-height: 1.05;
+          line-height: 1.1;
           font-weight: 800;
         }
         .map-tap-prompt {
           margin: 8px 0 0;
           color: ${B.blueDeeper};
-          font-size: 13px;
+          font-size: 14px;
           font-weight: 800;
           line-height: 1.35;
         }
@@ -7198,7 +7592,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 8px;
           color: var(--muted);
           font-size: 12px;
-          line-height: 1.45;
+          line-height: 1.5;
         }
         .sr-section,
         .report-card {
@@ -7219,7 +7613,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-section h2,
         .report-card h2 {
           font-size: 28px;
-          line-height: 1.18;
+          line-height: 1.2;
         }
         .sr-band,
         .sr-grid-3,
@@ -7267,21 +7661,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           letter-spacing: 0;
           text-transform: uppercase;
         }
-        .section-eyebrow {
-          color: var(--muted);
-          font-family: ${FONT_BODY};
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 0;
-          text-transform: uppercase;
-        }
         .map-toggle {
           border-color: var(--line-strong);
           border-radius: 8px;
         }
         .map-toggle button {
           font-family: ${FONTS.heading};
-          font-weight: 850;
+          font-weight: 800;
         }
         .map-toggle button.is-active {
           background: ${B.blueDeeper};
@@ -7317,8 +7703,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-          .sr-shell { padding: 14px 14px 36px; }
-          .report-action-bar { padding: 18px 16px; }
+          .sr-shell { padding: 16px 16px 36px; }
+          .report-action-bar { padding: 16px; }
           .report-action-buttons { grid-template-columns: 1fr; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
@@ -7330,7 +7716,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .premium-section-header { flex-direction: column; }
           .sr-row { grid-template-columns: 1fr; }
           .hero-conditions-copy { display: block; }
-          .hero-conditions-copy p { margin-top: 6px; text-align: left; }
+          .hero-conditions-copy p { margin-top: 8px; text-align: left; }
           .hero-condition-cell { flex-basis: 138px; }
           .report-ask-form { flex-direction: column; }
           .report-ask-actions { grid-template-columns: 1fr; }
@@ -7385,7 +7771,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
            ("Overall Lawn Status") without touching their inner list labels */
         html[data-glass-theme] .service-report-v1 .section-eyebrow,
-        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1) { display: none; }
+        /* V2 hero eyebrows hide under glass; the heroes are h2 now (one h1 per
+           page — codex P3 on #2567), so match them by class alongside the h1. */
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
+        html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title) { display: none; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);
@@ -7393,11 +7782,34 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* inner fact grids + weather panel: the navy hairline wash / solid-white
            panels read legacy on the scene — go whisper-white (owner ask 2026-07-05) */
-        html[data-glass-theme] .service-report-v1 .service-status-grid,
-        html[data-glass-theme] .service-report-v1 .hero-condition-row,
-        html[data-glass-theme] .service-report-v1 .readiness-facts {
+        html[data-glass-theme] .service-report-v1 .hero-condition-row {
           background: rgba(255, 255, 255, 0.6);
           border-color: rgba(255, 255, 255, 0.7);
+        }
+        /* fact grids: the legacy 1px-hairline separators disappear on glass and the
+           cells read as one merged slab — give the tiles real gutters instead
+           (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .service-status-grid,
+        html[data-glass-theme] .service-report-v1 .readiness-facts,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid {
+          gap: 10px;
+          background: transparent;
+          border: 0;
+          overflow: visible;
+        }
+        html[data-glass-theme] .service-report-v1 .service-status-grid .sr-cell,
+        html[data-glass-theme] .service-report-v1 .readiness-facts .sr-cell,
+        html[data-glass-theme] .service-report-v1 .supporting-detail-grid .sr-cell {
+          border: 1px solid rgba(255, 255, 255, 0.7);
+        }
+        /* visit-timeline event tiles: solid #fff borders vanish on glass — restate
+           as glass tiles and keep the connector visible (owner ask 2026-07-09) */
+        html[data-glass-theme] .service-report-v1 .workflow-event-body {
+          background: rgba(255, 255, 255, 0.42);
+          border-color: rgba(255, 255, 255, 0.7);
+        }
+        html[data-glass-theme] .service-report-v1 .workflow-event:not(:last-child)::before {
+          background: rgba(4, 57, 94, 0.14);
         }
         html[data-glass-theme] .service-report-v1 .hero-conditions {
           background: rgba(255, 255, 255, 0.42);
@@ -7486,6 +7898,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
 
+        {/* Ask Waves floats with the customer: sticky under the shell header for
+            the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
+            document keeps the legacy section below instead. */}
+        <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
+
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
@@ -7531,21 +7948,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
-            <div id="service-timeline">
+            {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
+                only a bottom margin, so without this it sat flush against the
+                Re-enter card above (owner-flagged overlap 2026-07-09). */}
+            <div id="service-timeline" style={{ marginTop: 20 }}>
               <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
             </div>
-            <QuickNavigationAndAsk
-              mode={mode}
-              token={token}
-              serviceLine={data.serviceLine}
-              data={data}
-              hasProducts={hasApplications}
-              hasVisitTimeline={normalizedVisitTimeline.enabled}
-              hasPestPressure={hasPestPressure}
-              hasReentry={hasReentry}
-              hasActivity={Boolean(data.activity)}
-              hasCoverageMap={!hideCoverageCard}
-            />
+            {mode !== 'live' && (
+              <QuickNavigationAndAsk
+                mode={mode}
+                token={token}
+                serviceLine={data.serviceLine}
+                data={data}
+                hasProducts={hasApplications}
+                hasVisitTimeline={normalizedVisitTimeline.enabled}
+                hasPestPressure={hasPestPressure}
+                hasReentry={hasReentry}
+                hasActivity={Boolean(data.activity)}
+                hasCoverageMap={!hideCoverageCard}
+              />
+            )}
           </>
         )}
 
@@ -7656,8 +8078,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
         )}
 
-        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here. */}
-        {!isV2LeadLayout && (
+        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here.
+            Live mode replaces this section with the floating bar; pdf/static keep it. */}
+        {!isV2LeadLayout && mode !== 'live' && (
           <QuickNavigationAndAsk
             mode={mode}
             token={token}
@@ -7696,7 +8119,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {orderedProofMoments.length > 0 && (
           <section data-glass="card" className="sr-section" id="service-highlights">
             <h2>Service Highlights</h2>
-            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '0 0 14px' }}>
+            <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '0 0 16px' }}>
               {visualProofMomentIntro(orderedProofMoments)}
             </p>
             <div className="sr-grid-3">
@@ -7723,7 +8146,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                       {moment.locationArea}
                     </div>
                   )}
-                  <div style={{ fontSize: 14, lineHeight: 1.45, color: ESTIMATE_BODY, marginTop: 6 }}>
+                  <div style={{ fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY, marginTop: 8 }}>
                     {moment.customerCaption || 'Service highlight documented by your technician.'}
                   </div>
                 </div>
@@ -7739,7 +8162,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.55, margin: '0 0 14px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.5, margin: '0 0 16px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -7772,7 +8195,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             footer — same as /track (owner 2026-07-08/09). PDF/static/
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
-        {mode === 'live' && <GlassNewsletterCard source="report_footer" />}
+        {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
       </main>
     </div>
