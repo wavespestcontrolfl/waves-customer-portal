@@ -334,6 +334,34 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Quarterly Pest Control Service');
   });
 
+  test('"was on / used to be on" cadences are history, not intent', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I was on quarterly service years ago, just need the nest gone.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: we used to be on monthly with another company.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('"not interested in monthly" is a negated cadence, not intent', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I'm not interested in monthly, just remove the wasp nest.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('calendar "plans" are not program interest; offer-inquiry "plans" still are', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have plans this afternoon, but I need the wasp nest removed.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: do you have plans?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('filler before an affirmation still accepts the offer', () => {
+    const t = [
+      'Caller: I have a wasp nest.',
+      'Agent: we could put you on our quarterly service.',
+      'Caller: um, yes, that works.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');

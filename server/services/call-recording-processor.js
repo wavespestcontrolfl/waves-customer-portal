@@ -2747,12 +2747,12 @@ const RECURRING_PEST_PROGRAMS = new Set([
 // "ongoing"/"year-round" are nowhere: as descriptions ("an ongoing ant
 // problem", "year-round bugs") they're pressure, and the genuine asks are
 // the service-anchored forms here (plus "keep … year-round").
-const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+to\b)|plans\b(?!\s+to\b)|packages?|memberships?)\b/i;
+const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already)\b)|plans\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already)\b)|packages?|memberships?)\b/i;
 const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
 // "we get/see/have fire ants every month" describes pressure, not a plan
 // ask. "have" is pressure ONLY as possession — request idioms ("can I
 // have…", "want to have…") are excluded by lookbehind.
-const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:want|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in))\b[^.?!]{0,40}$/i;
+const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:want|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in)|(?:was|were|used to be) (?:on|with|getting|doing))\b[^.?!]{0,40}$/i;
 // ...but a request verb AFTER the pressure verb re-frames the clause as an
 // ask: "I HAVE ants and WANT monthly service".
 const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
@@ -2775,7 +2775,7 @@ const PROGRAM_DECLINE_RE = /\b(?:recurring|plans?|packages?|memberships?|ongoing
 
 // A cadence word the caller is EXCLUDING ("but not monthly", "instead of
 // monthly") must not count as their chosen cadence.
-const NEGATED_CADENCE_BEFORE_RE = /\b(?:not|no|never|without|rather than|instead of|don'?t (?:want|need|do))\s+(?:the |a |any )?$/i;
+const NEGATED_CADENCE_BEFORE_RE = /\b(?:not|no|never|without|rather than|instead of|don'?t (?:want|need|do)|(?:not|never) (?:interested in|looking for|into)|no longer (?:want|need|on|interested in))\s+(?:the |a |any )?$/i;
 
 // True when `re` (global) matches somewhere that reads as SERVICE cadence:
 // not negated, and not preceded by a pest-pressure verb in the same clause —
@@ -2852,7 +2852,7 @@ function nonNegatedMatch(re, text) {
 // Bare "ok(ay)" is deliberately absent — it's conversational acknowledgment
 // ("okay." while the agent pitches), not acceptance. A negation right after
 // the affirmation word ("definitely not", "yeah, no") is a REJECTION.
-const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b(?!\s*,?\s*(?:not|no|never|don'?t)\b)/i;
+const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:(?:um|uh|well|hmm|so|oh|ok(?:ay)?)[,.\s]+){0,3}(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b(?!\s*,?\s*(?:not|no|never|don'?t)\b)/i;
 function acceptedPlanOffer(turns, afterIndex = -1) {
   for (let i = Math.max(0, afterIndex + 1); i + 1 < turns.length; i++) {
     if (turns[i].speaker !== 'other' || turns[i + 1].speaker !== 'caller') continue;
