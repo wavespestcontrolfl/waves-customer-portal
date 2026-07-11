@@ -181,24 +181,45 @@ function externalIdFor(item) {
   return `${(item.title || '').slice(0, 100)}|${item.pubDate || ''}`.slice(0, 256);
 }
 
+// Escape bare ampersands that aren't already part of a valid entity.
+// Real-world WP feeds (The Gabber) ship titles like "Rock & Roll" unescaped;
+// rss-parser's strict sax backend fails the ENTIRE feed on one bad entity
+// ("Invalid character in entity name"), and it has no tolerant option.
+function escapeBareXmlEntities(xml) {
+  return xml.replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+}
+
 async function pullRssSource(source) {
   if (!Parser) {
     throw new Error('rss-parser not installed');
   }
-  const parser = new Parser({
-    timeout: HTTP_TIMEOUT_MS,
-    headers: {
-      // Polite bot UA by default. Some hosts (e.g. The Gabber's WP Engine
-      // host) UA-filter anything that isn't a real browser — those sources
-      // set scrape_config.userAgent to a browser string instead of being
-      // abandoned. Per-source override, not global, so we stay identifiable
-      // everywhere we're allowed to be.
-      'User-Agent': source.scrape_config?.userAgent
-        || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
-    },
-  });
+  const parser = new Parser({ timeout: HTTP_TIMEOUT_MS });
 
-  const feed = await parser.parseURL(source.feed_url);
+  // Fetch the body ourselves (same UA/timeout parseURL used) so the XML can
+  // be entity-sanitized before parsing — parseURL offers no hook for that.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  let xml;
+  try {
+    const resp = await fetch(source.feed_url, {
+      signal: controller.signal,
+      headers: {
+        // Polite bot UA by default. Some hosts (e.g. The Gabber's WP Engine
+        // host) UA-filter anything that isn't a real browser — those sources
+        // set scrape_config.userAgent to a browser string instead of being
+        // abandoned. Per-source override, not global, so we stay identifiable
+        // everywhere we're allowed to be.
+        'User-Agent': source.scrape_config?.userAgent
+          || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+      },
+    });
+    if (!resp.ok) throw new Error(`Status code ${resp.status}`);
+    xml = await resp.text();
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const feed = await parser.parseString(escapeBareXmlEntities(xml));
   const items = (feed.items || []).slice(0, MAX_ITEMS_PER_FEED);
 
   // RSS feeds come in two shapes, selected per-source via
@@ -911,4 +932,5 @@ module.exports = {
   buildExtractionSystemPrompt,
   normalizeExtractedEvent,
   recoverEventObjectsFromTruncatedJson,
+  escapeBareXmlEntities,
 };
