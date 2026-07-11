@@ -222,23 +222,18 @@ const COMPETITOR_BRAND_SIGNALS = [
   'Catseye',
   // Suffix-less lawn/mosquito franchise brands — no pest-industry suffix, so
   // the comparison gate's provider-name shape can't catch them in option
-  // headers; recognition must come from this curated list. Only unambiguous
-  // brand tokens here — generic-word brands go in the CASE-SENSITIVE list
-  // below so ordinary prose ("ask a lawn doctor", "bugs out") stays clean.
+  // headers; recognition must come from this curated list. ONLY unambiguous
+  // brand-tokens belong here (invented words, brand-only phrases). Brands
+  // built from ordinary English words ("Lawn Doctor", "Bug Out", "Moxie")
+  // are deliberately ABSENT in every casing: case-insensitive matching flags
+  // lowercase prose ("ask a lawn doctor"), and case-sensitive matching flags
+  // title-cased headings ("Why Ants Bug Out After Rain") — four Codex rounds
+  // on PR #2590 demonstrated there is no safe automatic casing rule. When
+  // such a brand matters, add a full COMPETITORS record with aliasesCS (see
+  // Rodent Solutions Inc above) — scoped, sourced, and always human-reviewed.
   'TruGreen',
   'Mosquito Joe',
   'Greenix',
-];
-
-// Case-SENSITIVE brand signals: brands built from ordinary English words.
-// Matched only in their capitalized brand form ("Lawn Doctor franchise"),
-// never in lowercase prose ("ask a lawn doctor to diagnose the turf").
-// Single ambiguous tokens ("Moxie" — also a common noun, sentence-start
-// capitalization) stay out entirely; add such brands as full COMPETITORS
-// records with aliasesCS when they matter.
-const COMPETITOR_BRAND_SIGNALS_CS = [
-  'Lawn Doctor',
-  'Bug Out',
 ];
 
 function normalize(s) {
@@ -276,7 +271,6 @@ const DETECTABLE_NAMES = (() => {
 const DETECTABLE_NAMES_CS = (() => {
   const set = new Set();
   for (const c of COMPETITORS) for (const a of c.aliasesCS || []) set.add(a);
-  for (const s of COMPETITOR_BRAND_SIGNALS_CS) set.add(s);
   return [...set].sort((a, b) => b.length - a.length);
 })();
 

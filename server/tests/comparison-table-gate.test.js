@@ -125,11 +125,34 @@ describe('comparison-table-gate', () => {
   });
 
   test('suffix-less franchise brands are recognized via the curated signal list (Codex round-2 P1)', () => {
-    for (const brand of ['TruGreen', 'Mosquito Joe', 'Lawn Doctor', 'Greenix', 'Bug Out']) {
+    // Unambiguous brand tokens only. English-word brands ("Lawn Doctor",
+    // "Bug Out") are deliberately NOT signals in any casing — see the
+    // competitor-facts comment; they false-block title-cased headings.
+    for (const brand of ['TruGreen', 'Mosquito Joe', 'Greenix']) {
       const t = CATEGORY_TABLE.replace('National chain', brand);
       const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
       expect(r.pass).toBe(false);
       expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    }
+  });
+
+  test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
+    for (const body of [
+      'Why Ants Bug Out After Rain. Palmetto bugs scatter when the barrier is fresh. No table.',
+      'When to Call a Lawn Doctor: signs your turf needs a pro diagnosis. No table.',
+    ]) {
+      const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(true);
+      expect(r.findings).toHaveLength(0);
+    }
+  });
+
+  test('digit-led provider headers fail closed (Codex round-5 P2)', () => {
+    for (const header of ['360 Pest Control', '911 pest control']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
     }
   });
 
@@ -178,11 +201,12 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
   });
 
-  test('ALL-CAPS generic-word brand headers are still recognized (Codex round-4 P2)', () => {
-    const t = CATEGORY_TABLE.replace('National chain', 'LAWN DOCTOR');
+  test('ALL-CAPS styling of a curated case-sensitive alias is still recognized (Codex round-4 P2)', () => {
+    // "Rodent Solutions" is an allowlisted competitor detected via aliasesCS;
+    // an uppercased table heading is the same brand.
+    const t = CATEGORY_TABLE.replace('National chain', 'RODENT SOLUTIONS');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
-    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
   });
 
   test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {

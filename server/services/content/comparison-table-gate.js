@@ -168,8 +168,10 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 //     Possessives stay case-sensitive even here — "season's" etc.
 const HEADER_LEAD_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|Spring|Summer|Fall|Autumn|Winter|Early|Late|January|February|March|April|May|June|July|August|September|October|November|December`;
 const HEADER_SUFFIX_SRC = `${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+Care`;
+// Lead token may start with a digit — "360 Pest Control" / "911 Pest
+// Control" are real provider-name shapes (Codex round-5).
 const HEADER_PROVIDER_NAME_RE = new RegExp(
-  `\\b((?!(?:${HEADER_LEAD_EXCLUSIONS})\\b)[A-Za-z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Za-z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${HEADER_SUFFIX_SRC}))\\b`,
+  `\\b((?!(?:${HEADER_LEAD_EXCLUSIONS})\\b)[A-Za-z0-9][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Za-z0-9][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${HEADER_SUFFIX_SRC}))\\b`,
   'i',
 );
 const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
