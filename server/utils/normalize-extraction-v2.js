@@ -1,6 +1,7 @@
 const { toE164 } = require('./phone');
 const { normalizeEmail, properCaseName, collapseWhitespace } = require('./contact-normalize');
 const { normalizeStreetLine } = require('./address-normalizer');
+const { correctEmailDomain, meetsConfidence } = require('./email-typo-correction');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -13,7 +14,17 @@ function cleanText(value) {
 function cleanValidEmail(value) {
   if (!value) return null;
   const normalized = normalizeEmail(value);
-  return normalized && EMAIL_RE.test(normalized) ? normalized : null;
+  if (normalized && EMAIL_RE.test(normalized)) return normalized;
+  // Repair a HIGH-confidence domain error before rejecting — a mis-heard/dropped
+  // TLD ("brandon@gmail" → "brandon@gmail.com") otherwise drops the email or (via
+  // another path) gets stored raw and emailed straight to a bounce. Only high
+  // confidence auto-applies (missing_dot / unambiguous domain typo); anything
+  // weaker stays null and is surfaced for review by deriveEmailReview.
+  const fix = normalized ? correctEmailDomain(normalized) : null;
+  if (fix && meetsConfidence(fix.confidence, 'high') && EMAIL_RE.test(fix.corrected)) {
+    return fix.corrected;
+  }
+  return null;
 }
 
 function normalizePhone(value) {

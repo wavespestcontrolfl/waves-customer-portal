@@ -54,6 +54,19 @@ describe('email-typo-correction: correctEmailDomain', () => {
     });
   });
 
+  test('a bare known second-level label (whole TLD dropped) is reconstructed high-confidence', () => {
+    // "…at gmail" that lost ".com" — the exact bounce pattern from live calls
+    // (brandon.post00@gmail, ricjudit@hotmail).
+    expect(correctEmailDomain('brandon.post00@gmail')).toEqual({
+      corrected: 'brandon.post00@gmail.com', rule: 'missing_tld', confidence: 'high',
+    });
+    expect(correctEmailDomain('x@hotmail')).toEqual({
+      corrected: 'x@hotmail.com', rule: 'missing_tld', confidence: 'high',
+    });
+    // An unknown bare label is NEVER guessed.
+    expect(correctEmailDomain('x@notaprovider')).toBeNull();
+  });
+
   test('wrong TLD on a known provider is fixed high-confidence', () => {
     expect(correctEmailDomain('jane@gmail.con')).toMatchObject({ corrected: 'jane@gmail.com', rule: 'tld_fix', confidence: 'high' });
     expect(correctEmailDomain('jane@gmail.co')).toMatchObject({ corrected: 'jane@gmail.com', rule: 'tld_fix' });

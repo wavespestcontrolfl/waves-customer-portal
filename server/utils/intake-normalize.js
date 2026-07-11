@@ -2,6 +2,7 @@ const { normalizeEmail, collapseWhitespace } = require('./contact-normalize');
 const { toE164 } = require('./phone');
 const { normalizeStreetLine, titleCaseWords, normalizeState } = require('./address-normalizer');
 const { properCase } = require('./name-case');
+const { correctEmailDomain, meetsConfidence } = require('./email-typo-correction');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -29,7 +30,14 @@ function cleanEmail(value) {
 
 function cleanValidEmailOrNull(value) {
   const email = cleanEmail(value);
-  return EMAIL_RE.test(email) ? email : null;
+  if (EMAIL_RE.test(email)) return email;
+  // Repair a HIGH-confidence domain error before rejecting (mis-heard/dropped
+  // TLD, e.g. "@gmail" → "@gmail.com"); weaker cases stay null for review.
+  const fix = email ? correctEmailDomain(email) : null;
+  if (fix && meetsConfidence(fix.confidence, 'high') && EMAIL_RE.test(fix.corrected)) {
+    return fix.corrected;
+  }
+  return null;
 }
 
 // A syntactically-valid email whose local part reads like a URL fragment is a
