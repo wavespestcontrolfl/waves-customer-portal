@@ -773,6 +773,31 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const { container } = render(<PlanTotalSummary combined={null} />);
     expect(container).toBeEmptyDOMElement();
   });
+
+  it('tracks the SELECTED cadence over the default subtotal', () => {
+    // Customer switched to a pricier cadence: net $110/mo, $1320/yr. Credit is
+    // cadence-invariant ($2.08/mo), so subtotal = $112.08 and net follows the
+    // selection — not the frozen $82 default subtotal.
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} />,
+    );
+    const text = container.textContent;
+    expect(text).toContain('$112.08'); // 110 + 2.08 credit
+    expect(text).toContain('$110');
+    expect(text).toContain('$1,320 / year');
+    expect(text).not.toContain('$82');
+  });
+
+  it('renders nothing for a ranged low-confidence plan (no exact net)', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(<PlanTotalSummary combined={ranged} />);
+    expect(container).toBeEmptyDOMElement();
+    // Also suppressed when the range rides on the selected frequency.
+    const { container: c2 } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} />,
+    );
+    expect(c2).toBeEmptyDOMElement();
+  });
 });
 
 describe('ReviewPhase — site-confirmation hold copy', () => {
