@@ -2082,7 +2082,7 @@ function hasUsablePhone(value) {
   return String(value || '').replace(/\D/g, '').length >= 10;
 }
 
-function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null, resolvedSecondaryContacts = []) {
+function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, callerPhone = null) {
   // A service-contact slot email satisfies the email requirement: it is a
   // deliverable account email (appointment-email's resolveRecipients includes
   // slot emails). Load-bearing for the realtor-books-for-buyer flow — the
@@ -2094,36 +2094,21 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
     || customer.service_contact2_email
     || customer.service_contact3_email
     || null;
-  // Kill-switch leg of the same rule: with GATE_CALL_SECONDARY_CONTACT off,
-  // the slot write above never happens, but the attribution prompt still
-  // (correctly) keeps a relayed buyer/tenant email out of extracted.email —
-  // the EXTRACTED secondary contact's email is the deliverable channel then.
-  // Validation-only: nothing here writes it onto the customer
-  // (backfillCustomerFromAppointmentContact reads extracted.email, which
-  // stays clean), so the misattribution this prompt rule fixes can't recur.
-  // resolvedSecondaryContacts (resolveCallSecondaryContacts output) folds in
-  // contacts that exist only in the V2 payload — without it a realtor/lender
-  // call where V2 captured the buyer email but V1 did not still fails here.
-  // Notification intent required: persistCallSecondaryContact only stores
-  // contacts with wants_notifications === true, so only those can ever
-  // RECEIVE the appointment email — an access-contact email captured for the
-  // record (wants_notifications false) must not let the booking pass with no
-  // deliverable address anywhere. Mirrors the implicit guarantee of the
-  // slotEmail leg (slots are only written for notification-intent contacts).
-  const secondaryCandidates = [
-    extracted.secondary_contact,
-    ...(Array.isArray(extracted.secondary_contacts) ? extracted.secondary_contacts : []),
-    ...(Array.isArray(resolvedSecondaryContacts) ? resolvedSecondaryContacts : []),
-  ];
-  const extractedSecondaryEmail = secondaryCandidates
-    .filter((c) => c && typeof c === 'object' && c.wants_notifications === true)
-    .map((c) => String(c.email || '').trim().toLowerCase())
-    .find((e) => EMAIL_RE.test(e)) || null;
+  // PERSISTED-OR-REVIEW: only emails actually STORED (customer.email or a
+  // service-contact slot) satisfy this gate — appointment-email's recipient
+  // resolver reads stored addresses only, so an email that exists solely in
+  // the extraction (slot write gated off, slots full, race, or a
+  // persistCallSecondaryContact skip) could never receive the confirmation.
+  // The gated persistence runs BEFORE this gate on a freshly re-read customer
+  // row, so a successfully stored secondary email passes via slotEmail; when
+  // it wasn't stored, the booking correctly holds as
+  // missing_required_customer_fields for the office instead of auto-creating
+  // an appointment whose named recipient is unreachable.
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
     lastName: customer.last_name || extracted.last_name || null,
     phone: customer.phone || extracted.phone || callerPhone || null,
-    email: customer.email || extracted.email || slotEmail || extractedSecondaryEmail || null,
+    email: customer.email || extracted.email || slotEmail || null,
     streetAddress: customer.address_line1 || extracted.address_line1 || null,
     city: customer.city || extracted.city || null,
     state: customer.state || extracted.state || null,
@@ -5405,7 +5390,7 @@ const CallRecordingProcessor = {
         let customer = await db('customers').where({ id: customerId }).first();
         if (customer) {
           customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone);
-          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone, callSecondaryContacts);
+          const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
           if (!customerValidation.ok) {
             appointmentResult = {
               service: serviceResolution.service,

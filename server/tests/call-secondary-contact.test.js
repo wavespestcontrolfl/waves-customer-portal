@@ -472,53 +472,29 @@ describe('persistCallSecondaryContact', () => {
     expect(validatePhoneCallAppointmentCustomer(withSlot, {}, '+14074933469').missing).not.toContain('email');
   });
 
-  test('with slot persistence gated OFF, the EXTRACTED secondary email keeps the booking valid (kill-switch path)', () => {
-    // The attribution prompt keeps the buyer's email out of extracted.email
-    // by design; when GATE_CALL_SECONDARY_CONTACT is unset no slot write
-    // happens either. The extracted secondary contact itself must satisfy
-    // the email requirement or the exact realtor/lender-books-for-buyer call
-    // skips as missing_required_customer_fields in the kill-switch config.
+  test('PERSISTED-OR-REVIEW: an email that exists only in the extraction never satisfies the gate', () => {
+    // appointment-email's recipient resolver reads STORED addresses only
+    // (customer.email + service-contact slots). The gated persistence runs
+    // BEFORE this gate on a freshly re-read customer row, so a successfully
+    // stored secondary email passes via slotEmail (test above). When it was
+    // NOT stored — GATE_CALL_SECONDARY_CONTACT off, slots full, race, or a
+    // persistCallSecondaryContact skip — the booking must hold as
+    // missing_required_customer_fields for the office rather than
+    // auto-create an appointment whose named recipient is unreachable.
     const base = {
       first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
       email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
     };
-    const extracted = {
-      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
-    };
-    const res = validatePhoneCallAppointmentCustomer(base, extracted, '+14074933469');
-    expect(res.missing).not.toContain('email');
-    // Validation-only: the buyer's email is used as the deliverable channel,
-    // and merged.email surfacing it must not imply a customer write —
-    // backfillCustomerFromAppointmentContact reads extracted.email (null here).
-    expect(extracted.email).toBeUndefined();
-
-    // Array form (1.4.0 secondary_contacts) works too.
-    const resArr = validatePhoneCallAppointmentCustomer(base, {
-      secondary_contacts: [{ first_name: 'Leslie', email: 'lferraro@hotmail.com', role: 'home_buyer', wants_notifications: true }],
-    }, '+14074933469');
-    expect(resArr.missing).not.toContain('email');
-
-    // V2-only capture: the buyer email exists only in the V2 payload, so it
-    // arrives via the RESOLVED contacts param (resolveCallSecondaryContacts),
-    // not the legacy extracted fields.
-    const resResolved = validatePhoneCallAppointmentCustomer(base, {}, '+14074933469', [
-      { first_name: 'Joseph', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
-    ]);
-    expect(resResolved.missing).not.toContain('email');
-  });
-
-  test('a secondary email WITHOUT notification intent does NOT satisfy the requirement (access contact)', () => {
-    // persistCallSecondaryContact skips wants_notifications !== true, so this
-    // email would never be stored or notified — letting it pass validation
-    // would auto-create an appointment with no deliverable email anywhere.
-    const base = {
-      first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
-      email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
-    };
+    // Notification-intent buyer captured in the extraction but never stored:
     const res = validatePhoneCallAppointmentCustomer(base, {
-      secondary_contact: { first_name: 'Rigo', email: 'rigo@example.com', role: 'home_seller', wants_notifications: false, notes: 'access contact' },
+      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
     }, '+14074933469');
     expect(res.missing).toContain('email');
+    // Access contact without intent — same hold.
+    const resAccess = validatePhoneCallAppointmentCustomer(base, {
+      secondary_contact: { first_name: 'Rigo', email: 'rigo@example.com', role: 'home_seller', wants_notifications: false, notes: 'access contact' },
+    }, '+14074933469');
+    expect(resAccess.missing).toContain('email');
   });
 
   test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {
