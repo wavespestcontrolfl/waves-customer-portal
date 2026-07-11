@@ -1664,6 +1664,26 @@ async function handleChargeRefunded(charge) {
   const cumulativeRefundAmountDollars = (charge.amount_refunded || refundAmountCents) / 100;
   const isFullRefund = charge.refunded === true;
 
+  // Out-of-order bounce guard: Stripe can deliver refund.failed BEFORE this
+  // creation event. handleRefundFailed records the bounced id in the
+  // payments row's metadata — stamping that refund as successful here (and
+  // running the credit/deposit side effects) would resurrect money Stripe
+  // kept. Events for OTHER refunds on the same charge carry different ids
+  // and proceed normally.
+  if (refundId) {
+    const bounceCheck = await db('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+    if (bounceCheck) {
+      let bounceMeta = {};
+      try {
+        bounceMeta = bounceCheck.metadata ? (typeof bounceCheck.metadata === 'string' ? JSON.parse(bounceCheck.metadata) : bounceCheck.metadata) : {};
+      } catch { bounceMeta = {}; }
+      if (Array.isArray(bounceMeta.failed_refund_ids) && bounceMeta.failed_refund_ids.includes(refundId)) {
+        logger.warn(`[stripe-webhook] charge.refunded for ${refundId} arrived after its failure was already recorded — skipping stamp + side effects`);
+        return;
+      }
+    }
+  }
+
   // Statement refund REORDERED ahead of settlement: if a FULL refund arrives
   // before payment_intent.succeeded wrote the statement payments row, resolve the
   // statement by PI and clear/reset its active PI (so the later succeeded fails
@@ -1883,15 +1903,21 @@ async function handleRefundFailed(refund) {
       // Rewind the cumulative surcharge-returned tracker to match the new
       // refunded total (rs = R·S/(B+S), the inverse of the gross-up split) —
       // leaving it stale would make StripeService.refund treat the bounced
-      // share as already returned and under-refund the retry.
-      const surchargeCents = Math.max(0, Math.round(parseFloat(row.card_surcharge || 0) * 100));
-      if (surchargeCents > 0 && rowPaidCents > 0 && nextMeta.refunded_surcharge_cents !== undefined) {
-        nextMeta.refunded_surcharge_cents = Math.min(
-          surchargeCents,
-          Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
-        );
-      }
+      // share as already returned and under-refund the retry. min() with the
+      // current value: a bounce only ever REMOVES returned surcharge, and a
+      // legacy row whose refunds were never grossed keeps its 0.
+      const surchargeCents = Math.max(0, Number(row.surcharge_amount_cents) || 0);
+      const currentReturnedSurcharge = Math.max(0, Number(row.refunded_surcharge_cents) || 0);
+      const surchargeRewind = surchargeCents > 0 && rowPaidCents > 0 && currentReturnedSurcharge > 0
+        ? {
+            refunded_surcharge_cents: Math.min(
+              currentReturnedSurcharge,
+              Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
+            ),
+          }
+        : {};
       await trx('payments').where({ id: row.id }).update({
+        ...surchargeRewind,
         refund_amount: nextRefundCents / 100,
         // 'failed' when this bounce erased the whole refund; a surviving
         // remainder means an EARLIER partial refund did clear.
@@ -1909,13 +1935,30 @@ async function handleRefundFailed(refund) {
   }
 
   // Operator signal: the ledger revert above is mechanical, but the side
-  // effects of the optimistic refund are not — account credit restored by
-  // returnAppliedCreditOnRefund is spendable, the customer already got a
-  // "refund issued" email, and estimate-deposit refunds flip the deposit
-  // ledger with no payments row at all. Those need a human decision. Fenced
-  // with the revert (refund.failed and charge.refund.updated both fire for
-  // one bounce — a replay that changed nothing must not re-notify).
+  // effects of the optimistic refund are DELIBERATELY not auto-reversed —
+  // account credit restored by returnAppliedCreditOnRefund may already be
+  // spent (a mechanical claw-back could drive a balance negative), a payer
+  // statement reopened by the cascade reversal may have re-collection in
+  // flight, and the customer already got a "refund issued" email. Those need
+  // a human decision, so the notification names the exact records to
+  // reconcile. Fenced with the revert (refund.failed and charge.refund.updated
+  // both fire for one bounce — a replay that changed nothing must not
+  // re-notify).
   if (payment && !reverted) return;
+  let sideEffectHint = '';
+  try {
+    if (payment) {
+      let pMeta = {};
+      try { pMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {}; } catch { pMeta = {}; }
+      const inv = pMeta.invoice_id
+        ? await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number')
+        : (piId ? await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number') : null);
+      if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
+      if (payment.statement_id) sideEffectHint += ` Statement S-${payment.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
+    }
+  } catch (err) {
+    logger.warn(`[stripe-webhook] refund-failed side-effect lookup failed: ${err.message}`);
+  }
   try {
     await db('notifications').insert({
       recipient_type: 'admin',
@@ -1923,7 +1966,7 @@ async function handleRefundFailed(refund) {
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
       body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). `
         + (payment
-          ? `Payment row ${payment.id} was reverted to collected — verify any restored account credit and follow up with the customer (a refund-issued email already went out).`
+          ? `Payment row ${payment.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`
           : 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.'),
       icon: '⚠️',
       link: '/admin/invoices',

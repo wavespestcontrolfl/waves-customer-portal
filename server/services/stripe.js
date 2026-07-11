@@ -1523,11 +1523,13 @@ const StripeService = {
     // recorded card surcharge, not just the entered base dollars — the
     // surcharge was collected on the refunded portion too. All math comes
     // from the one authority (computeRefundSurcharge in stripe-pricing);
-    // meta.refunded_surcharge_cents tracks the cumulative returned share so
-    // successive partials prorate without drift. Full ("rest") refunds already
-    // return everything and skip this.
-    const surchargeCents = Math.max(0, Math.round(parseFloat(payment.card_surcharge || 0) * 100));
-    const alreadyRefundedSurchargeCents = Math.min(surchargeCents, Math.max(0, Number(meta.refunded_surcharge_cents) || 0));
+    // payments.surcharge_amount_cents is the recorded surcharge (the
+    // compliance-migration column every Stripe insert path populates) and
+    // payments.refunded_surcharge_cents tracks the cumulative returned share
+    // so successive partials prorate without drift. Full ("rest") refunds
+    // already return everything and skip this.
+    const surchargeCents = Math.max(0, Number(payment.surcharge_amount_cents) || 0);
+    const alreadyRefundedSurchargeCents = Math.min(surchargeCents, Math.max(0, Number(payment.refunded_surcharge_cents) || 0));
     const surchargeShareCents = requestCents !== null && surchargeCents > 0
       ? computeRefundSurcharge({
           refundBaseCents: requestCents,
@@ -1727,19 +1729,6 @@ const StripeService = {
     }
     const isFullRefund = totalRefundedCents >= paidCents;
 
-    // Cumulative surcharge-returned tracker — the NEXT partial prorates from
-    // this. The share actually sent this attempt = Stripe's refund amount
-    // minus the entered base (0 on legacy/no-surcharge attempts); a full
-    // refund returns the whole surcharge by definition.
-    if (surchargeCents > 0) {
-      clearedMeta.refunded_surcharge_cents = isFullRefund
-        ? surchargeCents
-        : Math.min(
-            surchargeCents,
-            alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
-          );
-    }
-
     try {
       await db('payments')
         .where({ id: paymentId })
@@ -1748,6 +1737,20 @@ const StripeService = {
           refund_amount: totalRefundedCents / 100,
           refund_status: refund.status,
           stripe_refund_id: refund.id,
+          // Cumulative surcharge-returned tracker — the NEXT partial prorates
+          // from this. The share actually sent this attempt = Stripe's refund
+          // amount minus the entered base (0 on legacy/no-surcharge attempts);
+          // a full refund returns the whole surcharge by definition.
+          ...(surchargeCents > 0
+            ? {
+                refunded_surcharge_cents: isFullRefund
+                  ? surchargeCents
+                  : Math.min(
+                      surchargeCents,
+                      alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
+                    ),
+              }
+            : {}),
           metadata: JSON.stringify(clearedMeta),
         });
     } catch (dbErr) {

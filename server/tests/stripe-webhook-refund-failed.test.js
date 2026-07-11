@@ -145,22 +145,22 @@ describe('handleRefundFailed', () => {
     // actually cleared (round(5145×290/10290) = 145¢), or the retry would
     // read the bounced share as already returned and under-refund.
     paymentRow.status = 'refunded';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.refund_amount = '102.90';
-    paymentRow.metadata = JSON.stringify({ refunded_surcharge_cents: 290 });
+    paymentRow.refunded_surcharge_cents = 290;
     await handleRefundFailed(failedRefund({ amount: 5145 }));
 
     const args = trxUpdate.mock.calls[0][0];
-    expect(JSON.parse(args.metadata).refunded_surcharge_cents).toBe(145);
+    expect(args.refunded_surcharge_cents).toBe(145);
   });
 
   test('never invents a tracker on legacy rows that had none', async () => {
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.metadata = null;
     await handleRefundFailed(failedRefund({ amount: 5145 }));
 
     const args = trxUpdate.mock.calls[0][0];
-    expect(JSON.parse(args.metadata).refunded_surcharge_cents).toBeUndefined();
+    expect(args.refunded_surcharge_cents).toBeUndefined();
   });
 
   test('replay (same refund id already recorded) changes nothing and does NOT re-notify', async () => {

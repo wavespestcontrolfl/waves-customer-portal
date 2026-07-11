@@ -433,7 +433,7 @@ describe('StripeService.refund', () => {
 
   test('partial refund on a surcharged payment grosses up by the prorated share', async () => {
     paymentRow.amount = '102.90';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     const StripeService = loadService();
     await StripeService.refund('pay-1', { amount: 50 });
 
@@ -448,14 +448,14 @@ describe('StripeService.refund', () => {
 
     const finalArgs = updatePayments.mock.calls[1][0];
     expect(finalArgs.refund_amount).toBe(51.45);
-    expect(JSON.parse(finalArgs.metadata).refunded_surcharge_cents).toBe(145);
+    expect(finalArgs.refunded_surcharge_cents).toBe(145);
   });
 
   test('second partial completes the surcharge exactly and flips to refunded', async () => {
     paymentRow.amount = '102.90';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.refund_amount = '51.45';
-    paymentRow.metadata = JSON.stringify({ refunded_surcharge_cents: 145 });
+    paymentRow.refunded_surcharge_cents = 145;
     const StripeService = loadService();
     await StripeService.refund('pay-1', { amount: 50 });
 
@@ -464,7 +464,7 @@ describe('StripeService.refund', () => {
     const finalArgs = updatePayments.mock.calls[1][0];
     expect(finalArgs.status).toBe('refunded');
     expect(finalArgs.refund_amount).toBe(102.9);
-    expect(JSON.parse(finalArgs.metadata).refunded_surcharge_cents).toBe(290);
+    expect(finalArgs.refunded_surcharge_cents).toBe(290);
   });
 
   test('gross-up is capped at the remaining balance (never over-refunds)', async () => {
@@ -472,7 +472,7 @@ describe('StripeService.refund', () => {
     // remaining = 10290−6000 = 4290¢; $42 base + full remaining share (290¢)
     // would be 4490¢ → capped to 4290¢.
     paymentRow.amount = '102.90';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.refund_amount = '60.00';
     const StripeService = loadService();
     await StripeService.refund('pay-1', { amount: 42 });
@@ -487,7 +487,7 @@ describe('StripeService.refund', () => {
     // would hit Stripe's changed-params idempotency rejection, clear the
     // marker, and open a double-refund window.
     paymentRow.amount = '102.90';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_4000_0',
       pending_refund_request: '4000',
@@ -503,7 +503,7 @@ describe('StripeService.refund', () => {
 
   test('replay of a grossed attempt matches on the ENTERED base and resends the stored gross', async () => {
     paymentRow.amount = '102.90';
-    paymentRow.card_surcharge = '2.90';
+    paymentRow.surcharge_amount_cents = 290;
     paymentRow.metadata = JSON.stringify({
       pending_refund_key: 'refund_pay_pay-1_5145_0',
       pending_refund_request: '5145',
