@@ -64,6 +64,38 @@ describe('applyRecurringIntentDefault', () => {
     expect(applyRecurringIntentDefault(null, 'Caller: quarterly')).toBeNull();
   });
 
+  test('explicit bi-monthly cadence is honored, not defaulted to quarterly', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: could you come out every other month?').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want the bi-monthly plan.').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: maybe every two months?').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+  });
+
+  test('negated one-time wording is a recurring REQUEST, not a decline', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: not just a one-time treatment, I want a package.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: more than just a one-time thing, something recurring.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('unsuffixed catalog aliases still trigger the rule', () => {
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Bee / Wasp Nest Removal' }), 'Caller: a quarterly package please').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Fire Ant Treatment' }), 'Caller: recurring please').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('a singular specific_service_name is corrected too (it outranks matched_service in booking)', () => {
+    const out = applyRecurringIntentDefault(
+      lead({ matched_service: 'Quarterly Pest Control Service', specific_service_name: 'Bee / Wasp Nest Removal Service' }),
+      'Caller: I want the quarterly package.'
+    );
+    expect(out.specific_service_name).toBe('Quarterly Pest Control Service');
+    expect(out.matched_service).toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');

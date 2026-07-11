@@ -2705,15 +2705,21 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
 // their own recurring semantics), the caller's own words only (an agent's
 // ignored upsell must not flip the classification), and never when the
 // caller explicitly declines a plan.
+// Keys are suffix-normalized (trailing " Service" stripped): the model copies
+// names from the live catalog, and specialty rows have carried both suffixed
+// and unsuffixed forms across catalog renames.
 const RECURRING_OVERRIDE_SOURCES = new Set([
-  'one-time pest control service',
-  'bee / wasp nest removal service',
-  'mud dauber nest removal service',
-  'fire ant treatment service',
+  'one-time pest control',
+  'bee / wasp nest removal',
+  'mud dauber nest removal',
+  'fire ant treatment',
   'general pest control',
 ]);
+const normalizeServiceKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+service$/, '');
 const RECURRING_INTENT_RE = /\b(recurring|re-?occurring|ongoing|year[- ]?round|(?:service|maintenance|pest|treatment) plan|package|membership|quarterly|bi[- ]?monthly|semi[- ]?annual(?:ly)?|twice a year|every (?:other )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?|monthly)\b/i;
-const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b[^.?!]{0,50}\b(?:recurring|plan|package|membership|ongoing)|\bjust (?:a |the )?one[- ]?time\b/i;
+// "just a one-time" is a decline ONLY when not itself negated ("NOT just a
+// one-time, I want a package" is a recurring request).
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b[^.?!]{0,50}\b(?:recurring|plan|package|membership|ongoing)|(?<!\b(?:not|than)\s)\bjust (?:a |the )?one[- ]?time\b/i;
 
 // The caller's own lines when the transcript is speaker-labelled; the whole
 // transcript otherwise (fail-open — better a rare agent-word trigger than
@@ -2725,24 +2731,34 @@ function callerOnlyText(transcription) {
 
 function applyRecurringIntentDefault(extracted, transcription) {
   if (!extracted || extracted.is_lead !== true) return extracted;
-  const matched = String(extracted.matched_service || '').trim().toLowerCase();
-  if (!RECURRING_OVERRIDE_SOURCES.has(matched)) return extracted;
+  // specific_service_name outranks matched_service in catalog booking
+  // resolution (call-booking-catalog.js), so a singular value THERE would
+  // book the one-time service no matter what matched_service says — both
+  // fields get the rule.
+  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(extracted.matched_service));
+  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(extracted.specific_service_name));
+  if (!matchedIsSingular && !specificIsSingular) return extracted;
   const callerText = callerOnlyText(transcription);
   if (!RECURRING_INTENT_RE.test(callerText) || RECURRING_DECLINED_RE.test(callerText)) return extracted;
   // Cadence: honor the ONE cadence the caller actually chose; when they
   // float several ("quarterly or every six months? I don't know") or name
   // none, pest defaults to quarterly — same default as the estimate engine
-  // (estimate-converter.js).
+  // (estimate-converter.js). Names are live-catalog-exact (verified in prod
+  // 2026-07-11) so catalog booking resolves them by exact match.
   const families = [
     { name: 'Monthly Pest Control Service', re: /\bmonthly\b/i, veto: /\bbi[- ]?monthly\b/i },
+    { name: 'Bi-Monthly Pest Control Service', re: /\bbi[- ]?monthly\b|\bevery other month\b|\bevery (?:two|2) months\b/i },
     { name: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/i },
     { name: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/i },
   ];
   const hits = families.filter((f) => f.re.test(callerText) && !(f.veto && f.veto.test(callerText)));
   const target = hits.length === 1 ? hits[0].name : 'Quarterly Pest Control Service';
-  if (target === extracted.matched_service) return extracted;
-  logger.info(`[call-proc] recurring-intent default: matched_service "${extracted.matched_service}" -> "${target}"`);
-  return { ...extracted, matched_service: target };
+  const out = { ...extracted };
+  if (matchedIsSingular) out.matched_service = target;
+  if (specificIsSingular) out.specific_service_name = target;
+  if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
+  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${target}"`);
+  return out;
 }
 
 // ── AI extraction via Gemini ──
@@ -5485,6 +5501,12 @@ const CallRecordingProcessor = {
       // (AV-normalized address was already written into `extracted` at the gate
       // approval branch above, before the customer/lead upsert — see there.)
       logger.info(`[call-proc-v2] Using v2-approved scheduling fields for ${callSid} appointment`);
+      // The V2 merge can restore a singular service — specific_service_name
+      // outranks matched_service in catalog booking, and the V2 prompt does
+      // not carry the recurring-interest rule (adding it would re-version the
+      // shadow prompt mid-promotion-cohort). Re-assert the owner rule over
+      // the merged fields; no-op when nothing singular survived.
+      extracted = applyRecurringIntentDefault(extracted, transcription);
     }
 
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS
