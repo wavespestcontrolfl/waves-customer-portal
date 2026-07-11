@@ -1640,7 +1640,7 @@ function initScheduledJobs() {
           // reopen here, not sit invisible until orphan recovery.
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
-            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id });
+            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
             const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
             if (anchorStale || pricedAgentText) {
               const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
@@ -1679,7 +1679,7 @@ function initScheduledJobs() {
                 // stale actionable card beside the fresh one.
                 const parked = Array.isArray(freshMeta.parked_decision_ids) ? freshMeta.parked_decision_ids : [];
                 for (const parkedId of parked) {
-                  const parkedStale = await suggest.suggestionAnchorIsStale({ decisionId: parkedId, dbi: trx });
+                  const parkedStale = await suggest.suggestionAnchorIsStale({ decisionId: parkedId, dbi: trx, excludeSmsLogId: msg.id });
                   if (parkedStale) {
                     await suggest.supersedeStaleDecision({
                       decisionId: parkedId,

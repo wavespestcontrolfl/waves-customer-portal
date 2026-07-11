@@ -91,6 +91,14 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('it costs nothing to reschedule')).toBe(false);
   });
 
+  test('detects charge verbs, copula quotes, balance-due, and word-amount USD (Codex P1 r7)', () => {
+    expect(hasPriceQuote('We charge 415.75')).toBe(true);
+    expect(hasPriceQuote('That will be 415.75')).toBe(true);
+    expect(hasPriceQuote('Your balance due is 415.75')).toBe(true);
+    expect(hasPriceQuote('forty-five USD')).toBe(true);
+    expect(hasPriceQuote('that will be 3 stops before yours')).toBe(false);
+  });
+
   test('dates, durations, and idioms near price nouns pass (connector required — Codex P1 r4)', () => {
     expect(hasPriceQuote('Your estimate expires in 30 days')).toBe(false);
     expect(hasPriceQuote('The quote you requested on the 15th is attached')).toBe(false);

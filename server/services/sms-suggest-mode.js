@@ -79,7 +79,7 @@ const PRICE_WORD_ES = '(?:precio|costo|total|tarifa|saldo)';
 const PRICE_QUOTE_RE = new RegExp(
   '\\$\\s*\\.?\\d' // $45, $ 1,200.50, $.99
   + '|\\bUSD\\s*\\d' // USD 50
-  + '|\\b\\d[\\d,]*(?:\\.\\d+)?\\s*USD\\b' // 45 USD (reversed)
+  + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s*USD\\b` // 45 USD, forty-five USD (reversed)
   + `|\\b${PRICE_EN_AMOUNT}[-\\s]+(?:dollars?|bucks?|cents?)\\b` // 45 dollars, a 50-dollar credit, 99 cents
   + `|${PRICE_EN_AMOUNT}\\s*¢` // 99¢
   + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?|centavos?)\\b` // 45 dólares, doscientos dólares, noventa centavos
@@ -89,13 +89,16 @@ const PRICE_QUOTE_RE = new RegExp(
   // both languages — a connector is required on purpose: "the price is 415" /
   // "the price is fifty" / "el precio es 45" quote a price, while "your
   // estimate expires in 30 days" (no connector) is a date and must pass.
-  + `|\\b${PRICE_WORD_EN}\\b\\s*(?:is|was|will\\s+be|would\\s+be|(?:will\\s+|would\\s+)?comes?\\s+(?:out\\s+)?to|came\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty, total will come to 415.75
+  + `|\\b${PRICE_WORD_EN}\\b(?:\\s+due|\\s+owed)?\\s*(?:is|was|will\\s+be|would\\s+be|(?:will\\s+|would\\s+)?comes?\\s+(?:out\\s+)?to|came\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty, balance due is 415.75
   + `|\\b${PRICE_WORD_ES}\\b\\s*(?:es|ser[íi]a|ser[áa]|de|:)\\s*\\$?${PRICE_ES_AMOUNT}\\b` // el precio es 45
   + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:${PRICE_WORD_EN}|${PRICE_WORD_ES})\\b` // 415.75 is the total
-  // Direct price VERBS — "the service costs 415.75", "cuesta 45.50",
-  // "cobramos 60" — no connector involved, the verb IS the price claim.
-  + `|\\bcosts?\\s+(?:you\\s+|about\\s+|around\\s+|just\\s+)?\\$?${PRICE_EN_AMOUNT_STRICT}\\b`
+  // Direct price VERBS — "the service costs 415.75", "we charge 415.75",
+  // "cuesta 45.50", "cobramos 60" — no connector, the verb IS the claim.
+  + `|\\b(?:costs?|charge[sd]?|charging)\\s+(?:you\\s+|about\\s+|around\\s+|just\\s+)?\\$?${PRICE_EN_AMOUNT_STRICT}\\b`
   + `|\\b(?:cuestan?|cobramos|cobran?)\\s+\\$?${PRICE_ES_AMOUNT}\\b`
+  // Cents-bearing amount after a bare copula — "that will be 415.75". Cents
+  // are required: "that will be 3" is a time or a count, not a quote.
+  + '|\\b(?:that|it|this)\\s+(?:will\\s+be|would\\s+be|is|comes?\\s+to)\\s+\\$?\\d[\\d,]*\\.\\d{2}\\b'
   // Weak words that double as identifiers (invoice, payment, pay) require
   // CENTS so "invoice #04395" stays clean.
   + '|\\b(?:invoice|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
@@ -400,7 +403,7 @@ async function supersedeStaleSuggestions({ customerId, smsLogId } = {}) {
  * Anchor-less decisions (no sms_log link) return false: they can't be judged
  * here, and the send path's ownership/claim guards still apply.
  */
-async function suggestionAnchorIsStale({ decisionId, dbi = db } = {}) {
+async function suggestionAnchorIsStale({ decisionId, dbi = db, excludeSmsLogId } = {}) {
   const row = await dbi('agent_decisions as ad')
     .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
     .where('ad.id', decisionId)
@@ -414,7 +417,21 @@ async function suggestionAnchorIsStale({ decisionId, dbi = db } = {}) {
     .where('created_at', '>', row.inbound_at)
     .whereNot('id', row.sms_log_id)
     .first('id');
-  return Boolean(newer);
+  if (newer) return true;
+  // A HUMAN answer landing after the anchor makes a queued agent reply just
+  // as obsolete as a newer inbound — staff manually replied while this one
+  // sat scheduled. excludeSmsLogId is the caller's OWN claimed row (the
+  // scheduled send being fired was created after the anchor by definition
+  // and must not self-flag).
+  const humanReply = await dbi('sms_log')
+    .where({ direction: 'outbound' })
+    .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereIn('message_type', HUMAN_REPLY_TYPES)
+    .whereIn('status', [...SENT_STATUSES, 'scheduled', 'sending'])
+    .where('created_at', '>', row.inbound_at)
+    .modify((q) => { if (excludeSmsLogId) q.whereNot('id', excludeSmsLogId); })
+    .first('id');
+  return Boolean(humanReply);
 }
 
 /**

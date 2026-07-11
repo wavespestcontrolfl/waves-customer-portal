@@ -24,6 +24,8 @@ const {
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   lockSuggestThread,
+  suggestionAnchorIsStale,
+  supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
 
@@ -292,6 +294,7 @@ router.post('/sms', async (req, res, next) => {
     // exception reopens them; a crash mid-send is bounded by the 30-min
     // orphan recovery.
     let autoSendInFlight = false;
+    let staleAtClaim = false;
     // The auto-send interlock only matters when Phase E auto-send is enabled.
     // Gated so the manual send path carries ZERO extra work while the feature
     // is dormant (the usual state): no claim lookup, no reservation row.
@@ -301,6 +304,16 @@ router.post('/sms', async (req, res, next) => {
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (claimedDecisionId) {
+            // FINAL freshness gate, under the thread lock and AFTER the
+            // claim: Twilio inbound inserts don't take this lock, so an
+            // inbound committed between verification and the claim is only
+            // visible here — the last point before the provider window.
+            if (await suggestionAnchorIsStale({ decisionId: claimedDecisionId, dbi: trx })) {
+              staleAtClaim = true;
+              return [];
+            }
+          }
           if (autoSendInterlock) {
             // An autonomous house-voice reply (Phase E) may be mid-send to this
             // thread — it claimed under THIS same lock. Don't let a manual send
@@ -355,6 +368,14 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (staleAtClaim) {
+      // A newer inbound (or a colleague's reply) landed between verification
+      // and our claim — retire the card rather than reopen it: its context
+      // is stale and the newer message's own lane decides what happens next.
+      await supersedeStaleDecision({ decisionId: claimedDecisionId, fromStatus: 'scheduled' });
+      return res.status(409).json({ error: 'A newer message just arrived on this thread — refresh before sending.' });
     }
 
     if (autoSendInFlight) {
