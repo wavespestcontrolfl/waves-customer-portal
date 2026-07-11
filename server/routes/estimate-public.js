@@ -14457,12 +14457,36 @@ async function buildPricingBundle(estimate) {
       estimate.onetime_total,
     );
 
+  // Solo pest / solo mosquito recurring mixes carry the $99 WaveGuard setup
+  // (owner directive 2026-07-10 evening). The v1 branch pushes the fee card
+  // from v1.services and the accept path invoices it via
+  // shouldIncludeWaveGuardSetupFeeForRecurring — engine-backed estimates
+  // (quote-wizard / engine inputs) must show the same fee card or accept
+  // bills a charge the page never displayed. Same gate as the v1 branch:
+  // prepay-eligible (which is also false for existing customers, whose fee
+  // is waived outright) + qualifying mix.
+  const engineFirstVisitFees = [];
+  const engineRecurringServices = anchorEngineResult
+    ? recurringServicesWithSupplements(anchorEngineResult)
+    : [];
+  const engineMembershipFeeMixApplies = require('../services/estimate-converter')
+    .recurringMixHasMembershipFeeService(engineRecurringServices);
+  if (!oneTimeOnly && engineMembershipFeeMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+    engineFirstVisitFees.push({
+      service: 'waveguard_setup',
+      amount: Number(PEST.initialFee || 99) || 99,
+      label: 'WaveGuard setup',
+      waivedWithPrepay: true,
+    });
+  }
+
   const payload = finalizePricingBundle(withManualDiscount({
     frequencies,
     waveGuardTier: estimate.waveguard_tier || 'Bronze',
     anchorOneTimePrice,
     defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
+    firstVisitFees: engineFirstVisitFees,
     source: 'engine_invocation',
   }), estimate, estData);
   setEstimatePricingCache(estimate, payload);
