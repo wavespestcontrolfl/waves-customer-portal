@@ -76,6 +76,16 @@ describe('normalizeCallExtraction — secondary_contact', () => {
     expect(out.secondary_contact.is_billing_party).toBe(true);
   });
 
+  test('1.7.0: lender role survives the V1 allowlist (loan officer named as a party)', () => {
+    const out = normalizeCallExtraction({
+      secondary_contact: {
+        first_name: 'Robert', last_name: 'Cozzano',
+        email: 'rc@example.com', role: 'lender', wants_notifications: true,
+      },
+    });
+    expect(out.secondary_contact.role).toBe('lender');
+  });
+
   test('nulls a garbled email and an unusable phone; junk role becomes unknown', () => {
     const out = normalizeCallExtraction({
       secondary_contact: {
@@ -256,8 +266,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.6.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.6.0');
+  test('current SCHEMA_VERSION is 1.7.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.7.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -277,6 +287,29 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     // Explicit null is also valid — the model is told to emit null when no
     // second person was named.
     expect(validateModelOutput({ ...validModelOutput(), secondary_contact: null }).valid).toBe(true);
+  });
+
+  test('1.7.0: arranger caller relationships validate (real_estate_agent, lender)', () => {
+    // The live failure this encodes: realtor and loan-officer callers were
+    // forced into relationship_to_property "other", making arranger calls
+    // undetectable downstream.
+    for (const rel of ['real_estate_agent', 'lender']) {
+      const data = validModelOutput();
+      data.caller.relationship_to_property = rel;
+      const model = validateModelOutput(data);
+      expect(model.errors).toBeNull();
+      expect(model.valid).toBe(true);
+      expect(validatePersisted(persistedMeta(data, '1.7.0')).valid).toBe(true);
+    }
+  });
+
+  test('1.7.0: secondary role lender validates in both schemas (New Day USA pattern)', () => {
+    const lenderContact = { ...secondaryContact, name_full: 'Robert Cozzano', first_name: 'Robert', last_name: 'Cozzano', role: 'lender' };
+    const withLender = { ...validModelOutput(), secondary_contact: lenderContact, secondary_contacts: [lenderContact] };
+    const model = validateModelOutput(withLender);
+    expect(model.errors).toBeNull();
+    expect(model.valid).toBe(true);
+    expect(validatePersisted(persistedMeta({ ...validModelOutput(), secondary_contact: lenderContact, secondary_contacts: [lenderContact] }, '1.7.0')).valid).toBe(true);
   });
 
   test('model-output tolerates a non-E.164 secondary phone (server normalizes; must not schema-fail the extraction)', () => {
@@ -437,6 +470,45 @@ describe('persistCallSecondaryContact', () => {
     expect(validatePhoneCallAppointmentCustomer(base, {}, '+14074933469').missing).toContain('email');
     const withSlot = { ...base, service_contact_email: 'joseph.haught89431@gmail.com' };
     expect(validatePhoneCallAppointmentCustomer(withSlot, {}, '+14074933469').missing).not.toContain('email');
+  });
+
+  test('PERSISTED-OR-REVIEW: an email that exists only in the extraction never satisfies the gate', () => {
+    // appointment-email's recipient resolver reads STORED addresses only
+    // (customer.email + service-contact slots). The gated persistence runs
+    // BEFORE this gate on a freshly re-read customer row, so a successfully
+    // stored secondary email passes via slotEmail (test above). When it was
+    // NOT stored — GATE_CALL_SECONDARY_CONTACT off, slots full, race, or a
+    // persistCallSecondaryContact skip — the booking must hold as
+    // missing_required_customer_fields for the office rather than
+    // auto-create an appointment whose named recipient is unreachable.
+    const base = {
+      first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
+      email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
+    };
+    // Notification-intent buyer captured in the extraction but never stored:
+    const res = validatePhoneCallAppointmentCustomer(base, {
+      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
+    }, '+14074933469');
+    expect(res.missing).toContain('email');
+    // Access contact without intent — same hold.
+    const resAccess = validatePhoneCallAppointmentCustomer(base, {
+      secondary_contact: { first_name: 'Rigo', email: 'rigo@example.com', role: 'home_seller', wants_notifications: false, notes: 'access contact' },
+    }, '+14074933469');
+    expect(resAccess.missing).toContain('email');
+  });
+
+  test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {
+    const { slotOnlyLinkAllowed } = require('../services/call-recording-processor')._test;
+    const customer = {
+      service_contact_phone: '+18777175476', service_contact_name: 'Robert Cozzano',
+      service_contact_role: 'lender',
+    };
+    // Same number, same first name — still blocked: the lender's next call is
+    // usually a DIFFERENT buyer's inspection.
+    expect(slotOnlyLinkAllowed(customer, '+18777175476', { first_name: 'Robert' })).toBe(false);
+    // Household-type role on the same shape still links (control).
+    const householdCustomer = { ...customer, service_contact_role: 'tenant' };
+    expect(slotOnlyLinkAllowed(householdCustomer, '+18777175476', { first_name: 'Robert' })).toBe(true);
   });
 
   test('a name-only placeholder slot never carried notifications: prefs are still set, and the placeholder is not overwritten', async () => {

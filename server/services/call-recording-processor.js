@@ -1072,9 +1072,12 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // duplicate customer the next time that person called (audit #7/F1).
 const CONTACT_MATCH_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
 // Slot roles that identify the HOUSEHOLD/account vs people who serve many
-// accounts and must never auto-link on a slot-phone hit alone.
+// accounts and must never auto-link on a slot-phone hit alone. lender is
+// agent-type (schema 1.7.0): a loan officer/title coordinator arranges
+// inspections for MANY buyers — their next call is usually a different
+// customer, so a slot-phone hit alone must go to review, not auto-link.
 const HOUSEHOLD_SLOT_ROLES = new Set(['tenant', 'spouse_partner', 'family_member', 'home_buyer', 'home_seller', 'landlord']);
-const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager']);
+const AGENT_TYPE_SLOT_ROLES = new Set(['real_estate_agent', 'property_manager', 'lender']);
 // Slot-only match gating: the number belongs to a person STORED ON this
 // account (tenant/spouse/buyer/agent). Household-type roles identify the
 // account; agent-type people (realtor, property manager) serve MANY accounts
@@ -2091,6 +2094,16 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
     || customer.service_contact2_email
     || customer.service_contact3_email
     || null;
+  // PERSISTED-OR-REVIEW: only emails actually STORED (customer.email or a
+  // service-contact slot) satisfy this gate — appointment-email's recipient
+  // resolver reads stored addresses only, so an email that exists solely in
+  // the extraction (slot write gated off, slots full, race, or a
+  // persistCallSecondaryContact skip) could never receive the confirmation.
+  // The gated persistence runs BEFORE this gate on a freshly re-read customer
+  // row, so a successfully stored secondary email passes via slotEmail; when
+  // it wasn't stored, the booking correctly holds as
+  // missing_required_customer_fields for the office instead of auto-creating
+  // an appointment whose named recipient is unreachable.
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
     lastName: customer.last_name || extracted.last_name || null,
@@ -2616,7 +2629,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
-  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, lender, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -2646,8 +2659,10 @@ IMPORTANT — multiple properties (address_line1 vs additional_properties):
 
 IMPORTANT — secondary_contact (a SECOND person who is a party to the service):
 - Set secondary_contact when the caller names ANOTHER person as a party to the service being arranged AND gives at least their name or contact info — a realtor booking an inspection names the home buyer, a landlord names the tenant, a spouse names the account holder, an adult child books for a parent.
+- ARRANGER CALLS HAVE A SECONDARY CONTACT BY DEFAULT: a caller who identifies as a realtor/agent, lender or title/closing coordinator, property manager, or landlord is arranging service for someone else — real-estate/WDO-inspection calls almost always name the buyer (and often the seller/occupant providing access). If such a caller named anyone with a name or contact detail and you are about to return null, re-scan the transcript — you likely missed the party.
+- RELAYED DETAILS BELONG TO THE OTHER PERSON: a phone/email the caller dictates FOR another person ("the buyer is Joseph — his email is ...", "her phone number is ...") goes on secondary_contact, NEVER into the top-level email/phone, even though the caller is the one speaking it.
 - The CALLER's own identity always goes in the top-level first_name/last_name/phone/email fields. secondary_contact is ONLY the other person — never duplicate the caller into it, and never put the other person's phone/email into the caller's fields.
-- role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent).
+- role describes the secondary person's relationship to the transaction (the BUYER a realtor is booking for is home_buyer, not real_estate_agent; a loan officer named as a party is lender).
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — gets wants_notifications false.
 - When several other people are mentioned, extract the one the caller designates for contact/notifications; if none is designated, the one most central to the service (the property's buyer/occupant beats a bystander).
 - Apply the same spelled-out-input, correction, and do-not-invent rules as the caller's own contact fields. A person mentioned with no name AND no contact info: secondary_contact is null.
@@ -6845,6 +6860,7 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
+  slotOnlyLinkAllowed,
   extractedNameMatchesCustomer,
   findCustomerForCallContact,
   normalizeCallExtraction,
