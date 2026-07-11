@@ -330,7 +330,13 @@ function findBusinessMentions(text) {
     // Escape regex metachars, then let any whitespace match between words so
     // "Truly Nolen" matches "Truly  Nolen" / a line-wrapped mention too.
     const pattern = escapeRegExp(display).replace(/ /g, '\\s+');
-    const re = new RegExp(`\\b${pattern}\\b`, ci ? 'ig' : 'g');
+    // Case-sensitive tokens also match their ALL-CAPS styling ("LAWN DOCTOR"
+    // in an uppercased table heading is the same brand) — what stays
+    // unmatched is ordinary lowercase prose ("ask a lawn doctor").
+    const upperPattern = escapeRegExp(display.toUpperCase()).replace(/ /g, '\\s+');
+    const re = ci
+      ? new RegExp(`\\b${pattern}\\b`, 'ig')
+      : new RegExp(`\\b(?:${pattern}${upperPattern !== pattern ? `|${upperPattern}` : ''})\\b`, 'g');
     let m;
     while ((m = re.exec(haystack)) !== null) {
       const start = m.index;

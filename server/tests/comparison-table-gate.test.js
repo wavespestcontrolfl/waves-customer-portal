@@ -159,6 +159,32 @@ describe('comparison-table-gate', () => {
     expect(prose.findings).toHaveLength(0);
   });
 
+  test('geo lawn-care education in prose is not a disparaged business (Codex round-4 P2)', () => {
+    const prose = gate.evaluate({ body: 'Sarasota lawn care is unreliable without irrigation tuned first. No table here.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
+  });
+
+  test('month-led PROVIDER names in prose stay detectable (Codex round-4 P1)', () => {
+    const r = gate.evaluate({ body: 'May Pest Control is dishonest. No table here.' }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('lowercase legal-entity headers fail closed (Codex round-4 P2)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', "bob's bugs llc");
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+  });
+
+  test('ALL-CAPS generic-word brand headers are still recognized (Codex round-4 P2)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'LAWN DOCTOR');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+  });
+
   test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {
     const t = CATEGORY_TABLE.replace('National chain', 'Acme Lawn Care');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
