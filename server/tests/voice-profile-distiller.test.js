@@ -9,6 +9,7 @@ const {
   sanitizeCorpusText,
   buildDistillationPrompt,
   styleOnlyFlags,
+  evaluateAutoApproval,
   reviewVoiceProfile,
   MAX_TRANSCRIPTS,
   MAX_SMS_PAIRS,
@@ -75,6 +76,42 @@ describe('styleOnlyFlags — deterministic reviewer aids', () => {
   });
 });
 
+describe('evaluateAutoApproval — exception-based review (green auto, exceptions park)', () => {
+  const CLEAN = 'Warm and plain-spoken. Greets with "Hey there!" and closes with "We got you."\n'.repeat(5);
+  const GOOD_STATS = { transcripts: 12, smsPairs: 8 };
+
+  test('a clean profile with call evidence auto-applies', () => {
+    expect(evaluateAutoApproval({ profileText: CLEAN, stats: GOOD_STATS, flags: [] }))
+      .toEqual({ approve: true, reasons: [] });
+  });
+
+  test('style-only flags are an exception', () => {
+    const v = evaluateAutoApproval({ profileText: CLEAN, stats: GOOD_STATS, flags: ['contains_price'] });
+    expect(v.approve).toBe(false);
+    expect(v.reasons.join(' ')).toMatch(/contains_price/);
+  });
+
+  test('content the consumption sanitizer would strip is an exception', () => {
+    const v = evaluateAutoApproval({ profileText: `${CLEAN}\nThey often say "that runs $99 per visit"`, stats: GOOD_STATS, flags: [] });
+    expect(v.approve).toBe(false);
+    expect(v.reasons.join(' ')).toMatch(/stripped at consumption/);
+  });
+
+  test('a suspiciously short profile is an exception', () => {
+    expect(evaluateAutoApproval({ profileText: 'Be nice.', stats: GOOD_STATS, flags: [] }).approve).toBe(false);
+  });
+
+  test('no call-transcript evidence is an exception (phone guidance without phone data)', () => {
+    const v = evaluateAutoApproval({ profileText: CLEAN, stats: { transcripts: 0, smsPairs: 20 }, flags: [] });
+    expect(v.approve).toBe(false);
+    expect(v.reasons.join(' ')).toMatch(/no call-transcript evidence/);
+  });
+
+  test('frame delimiters are an exception', () => {
+    expect(evaluateAutoApproval({ profileText: `${CLEAN}\n<<<sneaky>>>`, stats: GOOD_STATS, flags: [] }).approve).toBe(false);
+  });
+});
+
 describe('reviewVoiceProfile — the human gate state machine', () => {
   // Minimal fake knex: dbi.transaction(cb) hands cb a callable trx whose
   // builder supports where().forUpdate().first(), where().update(), and
@@ -136,6 +173,21 @@ describe('reviewVoiceProfile — the human gate state machine', () => {
     const { dbi } = makeFakeDbi(undefined);
     const missing = await reviewVoiceProfile({ id: 'nope', action: 'approve', dbi });
     expect(missing).toMatchObject({ ok: false, status: 404 });
+  });
+
+  test('revoke retires the APPROVED profile (kill switch for auto-approval)', async () => {
+    const { dbi, updates } = makeFakeDbi({ id: 'p1', status: 'approved', version: 4 });
+    const result = await reviewVoiceProfile({ id: 'p1', action: 'revoke', reviewedBy: 'Adam', dbi, audit: { adminUserId: 'a1' } });
+    expect(result).toMatchObject({ ok: true, status: 'rejected' });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].patch.status).toBe('rejected');
+  });
+
+  test('revoke on a non-approved profile 409s; approve/reject on approved still 409', async () => {
+    const pending = makeFakeDbi({ id: 'p1', status: 'pending', version: 4 });
+    expect(await reviewVoiceProfile({ id: 'p1', action: 'revoke', dbi: pending.dbi })).toMatchObject({ ok: false, status: 409 });
+    const approved = makeFakeDbi({ id: 'p1', status: 'approved', version: 4 });
+    expect(await reviewVoiceProfile({ id: 'p1', action: 'approve', dbi: approved.dbi })).toMatchObject({ ok: false, status: 409 });
   });
 });
 

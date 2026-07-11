@@ -325,16 +325,18 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
         <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Voice profile</div>
         <div style={{ fontSize: 12, color: D.muted }}>
-          Distilled weekly from real Waves calls + texts. Approved profile feeds the phone agent; style only, never facts.
+          Distilled daily from real Waves calls + texts. Green profiles auto-apply to the phone agent; exceptions park here. Style only, never facts.
         </div>
       </div>
       <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>v{row.version}</span>
           {pending ? (
-            <Chip tone={{ bg: "#FEF3C7", fg: "#92400E", label: "Pending review" }}>Pending review</Chip>
+            <Chip tone={{ bg: "#FEF3C7", fg: "#92400E", label: "Exception" }}>Exception — review needed</Chip>
           ) : (
-            <Chip tone={{ bg: "#DCFCE7", fg: D.green, label: "Approved" }}>Approved{row.reviewed_by ? ` by ${row.reviewed_by}` : ""}</Chip>
+            <Chip tone={{ bg: "#DCFCE7", fg: D.green, label: "Approved" }}>
+              {row.reviewed_by === "auto:distiller" ? "Live (auto-approved)" : `Approved${row.reviewed_by ? ` by ${row.reviewed_by}` : ""}`}
+            </Chip>
           )}
           {flags.length > 0 && (
             <span style={{ background: "#FEE2E2", color: D.red, fontWeight: 750, borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>
@@ -369,6 +371,18 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
               style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
             >
               Reject
+            </button>
+          </div>
+        )}
+        {!pending && approved && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onReview(approved, "revoke")}
+              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+            >
+              Revoke — back to base voice
             </button>
           </div>
         )}
@@ -421,6 +435,12 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     if (action === "approve") {
       const ok = window.confirm(
         `Approve voice profile v${row.version}?\n\nIt becomes the live voice guidance for the phone agent (and any future consumer). The previous approved version is superseded.`
+      );
+      if (!ok) return;
+    }
+    if (action === "revoke") {
+      const ok = window.confirm(
+        `Revoke voice profile v${row.version}?\n\nThe phone agent goes back to its base voice until the next green profile auto-applies.`
       );
       if (!ok) return;
     }

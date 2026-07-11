@@ -139,15 +139,55 @@ function styleOnlyFlags(profileText) {
 }
 
 /**
- * Weekly distillation run. Fail-closed skips (in order): gate handled by the
- * caller; a pending profile awaiting review; empty corpus; no corpus rows
- * newer than the last non-rejected profile (nothing new to learn).
+ * Exception-based auto-approval (owner directive 2026-07-11: hands-off —
+ * "train on the data as it happens"; and the standing house rule from the
+ * agronomic brain: green auto / exceptions parked, never approve-everything
+ * flows). A profile auto-applies ONLY when every deterministic check is
+ * green; anything ambiguous parks as pending + bell, exactly the old flow.
+ * The only consumer is the owner-activation-gated phone agent, and its
+ * consumption-side sanitizer still runs on whatever is approved.
+ */
+function evaluateAutoApproval({ profileText, stats, flags } = {}) {
+  const reasons = [];
+  const text = String(profileText || '');
+  if ((flags || []).length) reasons.push(`style-only flags: ${flags.join(', ')}`);
+  if (text.trim().length < 200) reasons.push('profile suspiciously short');
+  // The consumption sanitizer must be a NO-OP on a green profile — a profile
+  // that needs lines stripped is exactly the exception a human should read.
+  // Lazy require: relay-conversation imports our MAX_PROFILE_CHARS.
+  const { PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE } = require('./voice-agent/relay-conversation');
+  const offending = text.split('\n').filter((l) => PROFILE_INJECTION_LINE_RE.test(l) || PROFILE_FACTUAL_LINE_RE.test(l)).length;
+  if (offending) reasons.push(`${offending} line(s) would be stripped at consumption`);
+  if (/<<<|>>>/.test(text)) reasons.push('contains frame delimiters');
+  if (!stats || !Number(stats.transcripts)) reasons.push('no call-transcript evidence in this distillation');
+  return { approve: reasons.length === 0, reasons };
+}
+
+/**
+ * Daily distillation run (after the nightly corpus miner). Fail-closed skips
+ * (in order): gate handled by the caller; empty corpus; no corpus rows newer
+ * than the last non-rejected profile (nothing new to learn — idle days cost
+ * nothing). A pending EXCEPTION from a prior run does NOT wedge the
+ * pipeline: if new corpus accrued since it parked, it is superseded and a
+ * fresh distillation takes its place (which may well come out green).
  */
 async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
-  const pending = await dbi('voice_profiles').where({ status: 'pending' }).first('id');
+  const pending = await dbi('voice_profiles').where({ status: 'pending' }).first('id', 'created_at');
   if (pending) {
-    logger.info('[voice-profile] pending profile awaiting review — skipping run');
-    return { skipped: 'pending_review' };
+    const newSincePending = await dbi('voice_corpus_examples')
+      .where('created_at', '>', pending.created_at)
+      .count('* as count')
+      .first();
+    if ((Number(newSincePending?.count) || 0) === 0) {
+      logger.info('[voice-profile] pending exception awaiting review and no new corpus — skipping run');
+      return { skipped: 'pending_review' };
+    }
+    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
+      status: 'superseded',
+      reviewed_by: 'auto:distiller',
+      reviewed_at: dbi.fn.now(),
+    });
+    logger.info('[voice-profile] superseded an unreviewed pending exception — new corpus accrued, distilling fresh');
   }
 
   const lastProfile = await dbi('voice_profiles')
@@ -229,20 +269,38 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     })
     .returning(['id', 'version']);
 
+  // Exception-based review: green auto-applies (audit-logged, no bell —
+  // nothing for a human to do); anything else parks + bells, the old flow.
+  const verdict = evaluateAutoApproval({ profileText, stats, flags });
+  if (verdict.approve) {
+    const applied = await reviewVoiceProfile({
+      id: row.id,
+      action: 'approve',
+      reviewedBy: 'auto:distiller',
+      audit: { adminUserId: null, source: 'auto_distiller' },
+      dbi,
+    });
+    if (applied.ok) {
+      logger.info(`[voice-profile] v${row.version} distilled + AUTO-APPROVED (green: ${stats.transcripts} transcripts, ${stats.smsPairs} sms pairs) — live for the phone agent`);
+      return { id: row.id, version: row.version, autoApproved: true, flags, ...stats };
+    }
+    logger.warn(`[voice-profile] v${row.version} auto-approval did not apply (${applied.error}) — left pending`);
+  }
+
   try {
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'agents',
-      `Voice profile v${row.version} ready for review`,
-      `Distilled from ${stats.transcripts} call transcripts + ${stats.smsPairs} SMS replies.${flags.length ? ` Flagged: ${flags.join(', ')}.` : ''} Review it in Agents → Shadow Drafts.`,
+      `Voice profile v${row.version} needs review (exception)`,
+      `Distilled from ${stats.transcripts} call transcripts + ${stats.smsPairs} SMS replies. Held because: ${verdict.reasons.join('; ')}. Review it in Agents → Shadow Drafts.`,
       { link: '/admin/agents' }
     );
   } catch (err) {
     logger.warn(`[voice-profile] bell notification failed: ${err.message}`);
   }
 
-  logger.info(`[voice-profile] v${row.version} distilled (${stats.transcripts} transcripts, ${stats.smsPairs} sms pairs)${flags.length ? ` FLAGS=${flags.join(',')}` : ''} — parked for approval`);
-  return { id: row.id, version: row.version, flags, ...stats };
+  logger.info(`[voice-profile] v${row.version} distilled — EXCEPTION, parked for review (${verdict.reasons.join('; ')})`);
+  return { id: row.id, version: row.version, autoApproved: false, exceptionReasons: verdict.reasons, flags, ...stats };
 }
 
 /** Latest approved profile text, or null. The ONLY thing consumers may read. */
@@ -255,24 +313,28 @@ async function getApprovedVoiceProfile({ dbi = db } = {}) {
 }
 
 /**
- * One-click review. Only a PENDING profile is reviewable (409-shaped result
- * otherwise). Approving supersedes any previously approved profile so exactly
- * one is ever live (also enforced by the voice_profiles_one_approved partial
- * unique index — a concurrent double-approve fails at commit, not silently).
+ * One-click review. approve/reject act on a PENDING profile; revoke acts on
+ * the APPROVED one — that's the operator kill switch now that green profiles
+ * auto-apply: revoke → rejected → getApprovedVoiceProfile returns null → the
+ * phone agent is back on its base prompt, no deploy. Wrong-state calls get a
+ * 409-shaped result. Approving supersedes any previously approved profile so
+ * exactly one is ever live (also enforced by the voice_profiles_one_approved
+ * partial unique index — a concurrent double-approve fails at commit).
  *
  * The activity_log audit row commits IN THE SAME TRANSACTION as the status
  * flip: a profile must never go live with the audit insert failed behind it
- * (pass `audit: { adminUserId }` — the caller owns the actor identity).
+ * (pass `audit: { adminUserId, source? }` — the caller owns actor identity).
  */
 async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = {}) {
-  if (!['approve', 'reject'].includes(action)) {
-    return { ok: false, status: 400, error: 'action must be approve or reject' };
+  if (!['approve', 'reject', 'revoke'].includes(action)) {
+    return { ok: false, status: 400, error: 'action must be approve, reject, or revoke' };
   }
   return dbi.transaction(async (trx) => {
     const row = await trx('voice_profiles').where({ id }).forUpdate().first('id', 'status', 'version');
     if (!row) return { ok: false, status: 404, error: 'profile not found' };
-    if (row.status !== 'pending') {
-      return { ok: false, status: 409, error: `profile is ${row.status}, not pending` };
+    const requiredStatus = action === 'revoke' ? 'approved' : 'pending';
+    if (row.status !== requiredStatus) {
+      return { ok: false, status: 409, error: `profile is ${row.status}, not ${requiredStatus}` };
     }
     if (action === 'approve') {
       await trx('voice_profiles').where({ status: 'approved' }).update({ status: 'superseded' });
@@ -287,8 +349,8 @@ async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = 
       await trx('activity_log').insert({
         admin_user_id: audit.adminUserId || null,
         action: 'voice_profile_reviewed',
-        description: `Voice profile v${row.version} ${finalStatus}`,
-        metadata: JSON.stringify({ source: 'agents_hub', profile_id: id, action }),
+        description: `Voice profile v${row.version} ${action === 'revoke' ? 'revoked (back to base voice)' : finalStatus}`,
+        metadata: JSON.stringify({ source: audit.source || 'agents_hub', profile_id: id, action }),
       });
     }
     return { ok: true, version: row.version, status: finalStatus };
@@ -303,6 +365,7 @@ module.exports = {
   sanitizeCorpusText,
   buildDistillationPrompt,
   styleOnlyFlags,
+  evaluateAutoApproval,
   distillVoiceProfile,
   getApprovedVoiceProfile,
   reviewVoiceProfile,

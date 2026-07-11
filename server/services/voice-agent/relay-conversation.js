@@ -394,4 +394,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE };
