@@ -4,11 +4,12 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn()
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/project-email', () => ({
-  // Drive channel selection off the customer's email field for the test.
+  // Mirrors the real resolver: a configured service contact wins the email
+  // recipient (address + name); otherwise the primary customer.
   resolveProjectEmailRecipient: (customer) => ({
-    email: customer.email || '',
-    name: customer.first_name || '',
-    role: 'primary',
+    email: customer.service_contact_email || customer.email || '',
+    name: customer.service_contact_name || customer.first_name || '',
+    role: customer.service_contact_email ? 'service_contact' : 'primary',
   }),
 }));
 
@@ -65,10 +66,44 @@ describe('sendPrepToCustomer', () => {
       templateKey: 'prep.flea',
       to: 'megan@example.com',
       recipientId: 'cust-1',
+      // Provider errors can echo the recipient address — keep them out of logs.
+      suppressProviderErrorLog: true,
     });
     // Companion SMS (references the emailed guide), not the standalone variant.
     expect(renderSmsTemplate).toHaveBeenCalledWith(
       'auto_flea', { first_name: 'Megan' }, expect.any(Object),
+    );
+  });
+
+  test('service-contact account: email greets the contact, SMS greets the phone owner', async () => {
+    customerRow = {
+      ...customerRow,
+      first_name: 'Megan',
+      service_contact_name: 'Jamie Onsite',
+      service_contact_email: 'jamie@example.com',
+    };
+
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    // Email is addressed to the service contact (recipient), by their name.
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].to).toBe('jamie@example.com');
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.first_name).toBe('Jamie');
+    // The SMS goes to the primary's phone, so it greets the primary — not Jamie.
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_flea', { first_name: 'Megan' }, expect.any(Object),
+    );
+  });
+
+  test('manual send is attributed to the operator', async () => {
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', actorId: 'tech-9' });
+
+    // adminUserId (not actor_id) is the key the Twilio path reads for sms_log.
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+      adminUserId: 'tech-9',
+      manual: true,
+    });
+    expect(interactionsInsert).toHaveBeenCalledWith(
+      expect.objectContaining({ admin_user_id: 'tech-9' }),
     );
   });
 
@@ -112,7 +147,7 @@ describe('sendPrepToCustomer', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('email send fails but SMS succeeds → still ok', async () => {
+  test('email present but send fails → SMS falls back to the standalone text', async () => {
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
 
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
@@ -120,5 +155,10 @@ describe('sendPrepToCustomer', () => {
     expect(result.ok).toBe(true);
     expect(result.emailSent).toBe(false);
     expect(result.smsSent).toBe(true);
+    // The companion text claims "we emailed your guide" — since the email did
+    // not send, the self-contained variant goes out instead.
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
+    );
   });
 });

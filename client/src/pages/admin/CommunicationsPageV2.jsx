@@ -2319,6 +2319,9 @@ function FleaPrepDialog({ open, onClose }) {
     const q = search.trim();
     if (q.length < 2) {
       setResults([]);
+      // Clearing back below 2 chars cancels any in-flight debounce; reset the
+      // spinner too, or it stays stuck on "Searching…" with an empty input.
+      setSearching(false);
       return undefined;
     }
     let cancelled = false;

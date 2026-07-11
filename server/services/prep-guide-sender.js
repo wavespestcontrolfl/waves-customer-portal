@@ -92,6 +92,9 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
       suppressionGroupKey: SERVICE_GROUP,
       categories: ['project_prep', 'manual_prep', `prep_${config.emailTemplateKey.replace(/\./g, '_')}`],
       triggerEventId: `manual_prep:${customer.id}:${config.emailTemplateKey}`,
+      // Provider rejections can echo the recipient address; keep the raw
+      // SendGrid body out of the logs (email addresses in logs are a P1).
+      suppressProviderErrorLog: true,
       payload: {
         first_name: firstName,
         customer_name: [customer.first_name, customer.last_name].map((v) => String(v || '').trim()).filter(Boolean).join(' '),
@@ -106,7 +109,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
     });
     return !!result?.sent;
   } catch (err) {
-    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id}: ${err.message}`);
+    // Sanitized: never log err.message — provider errors can carry the email.
+    logger.error(`[prep-guide-sender] email send failed for customer ${customer.id} (${err?.name || 'Error'})`);
     return false;
   }
 }
@@ -132,7 +136,10 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, pestType, 
       pest_type: pestType,
       prep_variant: templateKey.endsWith('_no_email') ? 'standalone' : 'companion',
       manual: true,
-      actor_id: actorId || undefined,
+      // adminUserId is the key the Twilio send path forwards into
+      // sms_log.admin_user_id — keeps the manual send attributed to the
+      // operator instead of reading as system-authored.
+      adminUserId: actorId || undefined,
     },
   });
   if (!res.sent) {
@@ -153,7 +160,11 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
 
   const recipient = resolveProjectEmailRecipient(customer);
-  const firstName = String(recipient.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
+  // The email greets the resolved recipient (which may be a service contact);
+  // the SMS greets the phone owner — customer.phone is the primary's line — so
+  // it must use the customer's own first name, not the service contact's.
+  const emailFirstName = String(recipient.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
+  const smsFirstName = String(customer.first_name || '').trim().split(/\s+/)[0] || 'there';
   const phone = String(customer.phone || '').trim();
 
   const result = {
@@ -167,12 +178,17 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
   };
 
   if (recipient.email) {
-    result.emailSent = await sendPrepEmail({ customer, recipient, firstName, config });
+    result.emailSent = await sendPrepEmail({ customer, recipient, firstName: emailFirstName, config });
     if (phone) {
-      result.smsSent = await sendPrepSms({ customer, firstName, phone, templateKey: config.smsCompanionKey, pestType, actorId });
+      // The companion text claims "we emailed your guide" — only send it when
+      // the email actually went out. If the email was suppressed or failed,
+      // fall back to the self-contained steps so the customer still gets real
+      // prep instructions instead of a text pointing at a guide that never came.
+      const templateKey = result.emailSent ? config.smsCompanionKey : config.smsStandaloneKey;
+      result.smsSent = await sendPrepSms({ customer, firstName: smsFirstName, phone, templateKey, pestType, actorId });
     }
   } else if (phone) {
-    result.smsSent = await sendPrepSms({ customer, firstName, phone, templateKey: config.smsStandaloneKey, pestType, actorId });
+    result.smsSent = await sendPrepSms({ customer, firstName: smsFirstName, phone, templateKey: config.smsStandaloneKey, pestType, actorId });
   } else {
     return { ...result, reason: 'no_email_or_phone' };
   }
@@ -185,6 +201,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
       await db('customer_interactions').insert({
         customer_id: customer.id,
         interaction_type: result.emailSent ? 'email_outbound' : 'sms_outbound',
+        admin_user_id: actorId || null,
         subject: `${config.label} prep sent (manual)`,
         body: `Prep sent manually via Communications — ${[
           result.emailSent ? `email to ${recipient.email}` : null,

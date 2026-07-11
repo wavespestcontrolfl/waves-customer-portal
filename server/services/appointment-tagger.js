@@ -314,7 +314,14 @@ class AppointmentTagger {
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
-        return { queued: false, reason: 'no_email' };
+        // The no-email standalone-SMS fallback fires on reason:'no_email'. But
+        // this check runs BEFORE processTrigger, so a disabled/inactive
+        // automation is not yet observed — an email-capable customer would get
+        // zero executor results (no SMS), so a phone-only customer must be held
+        // to the same pause. Only advertise 'no_email' when the automation is
+        // actually active; otherwise report 'not_queued' so no standalone sends.
+        const active = await this.isPrepAutomationActive(automationKey);
+        return { queued: false, reason: active ? 'no_email' : 'not_queued' };
       }
       const firstName = String(recipient.name || '').trim().split(/\s+/)[0]
         || String(service.first_name || '').trim()
@@ -357,6 +364,25 @@ class AppointmentTagger {
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);
       return { queued: false, reason: 'error' };
+    }
+  }
+
+  // True only when the prep automation for this key is live. Matches the
+  // executor's own selector (email_template_automations, trigger
+  // appointment.booked, status 'active') so the standalone-SMS fallback
+  // respects the same per-prep pause the email path already honors. Fails
+  // CLOSED — if we can't confirm the automation is active, don't send (the
+  // email path fails closed on the same lookup error too, so both channels
+  // stay silent together and the kill switch is never bypassed on a hiccup).
+  async isPrepAutomationActive(automationKey) {
+    try {
+      const row = await db('email_template_automations')
+        .where({ automation_key: automationKey, trigger_event_key: 'appointment.booked', status: 'active' })
+        .first('id');
+      return !!row;
+    } catch (err) {
+      logger.warn(`[appointment-tagger] prep automation active-check failed for ${automationKey}: ${err.message}`);
+      return false;
     }
   }
 

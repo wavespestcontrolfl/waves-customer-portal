@@ -60,6 +60,16 @@ function service(overrides = {}) {
 
 let customerRow;
 let priorBookingRow;
+let automationActiveRow;
+
+// isPrepAutomationActive lookup (email_template_automations) — a row = active.
+function automationsQuery() {
+  const q = {
+    where: jest.fn(() => q),
+    first: jest.fn(async () => automationActiveRow),
+  };
+  return q;
+}
 
 function customersQuery() {
   const q = {
@@ -93,9 +103,11 @@ describe('appointment tagger prep email automation', () => {
       email: 'taylor@example.com',
     };
     priorBookingRow = null;
+    automationActiveRow = { id: 'auto-1' };
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return { insert: jest.fn(async () => [1]) };
+      if (table === 'email_template_automations') return automationsQuery();
       return customersQuery();
     });
   });
@@ -285,6 +297,19 @@ describe('appointment tagger prep email automation', () => {
       metadata: expect.objectContaining({ prep_variant: 'standalone', pest_type: 'bed_bug' }),
     });
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('prep.bed_bug'));
+  });
+
+  test('no email AND the prep automation is inactive → no standalone SMS (kill switch honored)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    customerRow = { ...customerRow, email: '' };
+    automationActiveRow = null; // automation paused/disabled
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
+
+    // A paused automation suppresses email-capable customers (zero executor
+    // results); the phone-only fallback must respect the same pause.
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
   test('flea with no email on file renders the auto_flea_no_email variant', async () => {
