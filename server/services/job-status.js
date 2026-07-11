@@ -300,6 +300,24 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   const auditNotes = notes == null || notes === '' ? null : String(notes);
 
   async function doWrites(t) {
+    // A pending outbound-callback booking (AI call pipeline, held for office
+    // review) must NOT advance to a day-of / operational status until the office
+    // confirms it — en_route fires the customer tracking SMS, completed mints an
+    // invoice, etc. Guarded HERE (the one shared status writer) so EVERY caller
+    // — dispatch, tech-track, admin-schedule — is covered, not just some routes.
+    // Only 'confirmed' / 'cancelled' are allowed out of the pending review state.
+    if (!['confirmed', 'cancelled'].includes(toStatus)) {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+      const guardRow = await t('scheduled_services')
+        .where({ id: jobId })
+        .first('source_action', 'status', 'customer_confirmed');
+      if (guardRow
+        && guardRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && guardRow.status === 'pending'
+        && !guardRow.customer_confirmed) {
+        throw new Error(`transitionJobStatus: ${jobId} is a pending outbound-review booking awaiting office confirmation (cannot ${toStatus})`);
+      }
+    }
     // Atomic guard: only update if the row is currently in fromStatus.
     // 0-row update means a racing transition already advanced past it
     // (or fromStatus is wrong). Either way, we abort — the audit log

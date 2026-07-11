@@ -5325,9 +5325,13 @@ const CallRecordingProcessor = {
     const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
     const inboundCanCreate = !isOutboundCall(call)
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
+    // Outbound requires a REAL catalog row (never a coarse ok-label with
+    // service_id null) AND must respect a hard veto: resolveSchedulableCallService
+    // returns ok:false WITHOUT noMatch for an unsupported/admin-only call, and
+    // that must stay un-bookable even if a catalog keyword happened to match.
     const outboundCanCreate = outboundReviewBooking
-      && !resolvedGenericOnly
-      && (!!callBookingCatalogRow || serviceResolution.ok);
+      && !!callBookingCatalogRow
+      && (serviceResolution.ok || serviceResolution.noMatch === true);
     const canCreateAppointmentFromCall = !genericBookingUnbookable
       && (inboundCanCreate || outboundCanCreate);
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
@@ -5736,13 +5740,18 @@ const CallRecordingProcessor = {
                   // conversion failure) must not strand the lead as open. The
                   // helper's won/duplicate + ownership guards make this a no-op
                   // when the lead already converted.
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: primaryRow.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
+                  // Don't convert the lead for a pending outbound-review booking
+                  // (same as the fresh-insert path) — it closes from the office
+                  // confirmation, not a reused/reprocessed pending row.
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: primaryRow.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
                   // After the backfill so the child inherits the assigned tech.
                   followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   return primaryRow;
@@ -5934,14 +5943,18 @@ const CallRecordingProcessor = {
                   reusedExistingSchedule = true;
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
-                  // the lead must still convert (idempotent, ownership-guarded).
-                  await convertCallLeadOnPhoneBooking(trx, {
-                    leadId,
-                    customerId,
-                    scheduledServiceId: existingByKey.id,
-                    callSid,
-                    keepOpenForQuote: callQuotePromised,
-                  });
+                  // the lead must still convert (idempotent, ownership-guarded) —
+                  // unless this is a pending outbound-review booking, which closes
+                  // its lead from the office confirmation path, not here.
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: existingByKey.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
                   // This is exactly the retry whose first attempt may have
                   // lost the savepointed follow-up insert — ensure visit 2.
                   followUpCreated = await ensureCallFollowUpVisit(existingByKey);

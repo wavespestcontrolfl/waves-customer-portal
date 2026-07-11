@@ -5036,6 +5036,31 @@ router.put('/:id/status', async (req, res, next) => {
           );
           logger.info(`[admin-schedule] Armed reminders for confirmed outbound-review booking ${svc.id}`);
         } catch (e) { logger.error(`[admin-schedule] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
+        // Close the originating call lead now that the office confirmed — the
+        // insert path deliberately skipped conversion for the pending review row
+        // so it wouldn't show a phantom closed sale before staff approved it.
+        // Best-effort; only when EXACTLY ONE active lead maps to this customer
+        // (avoids converting the wrong lead when ambiguous). Terminal statuses
+        // mirror the pipeline's TERMINAL_LEAD_STATUSES.
+        try {
+          const CallProc = require('../services/call-recording-processor');
+          const activeLeads = await db('leads')
+            .where({ customer_id: svc.customer_id })
+            .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+            .whereNull('deleted_at')
+            .orderBy('created_at', 'desc')
+            .limit(2)
+            .select('id');
+          if (activeLeads.length === 1) {
+            await CallProc.convertCallLeadOnPhoneBooking(db, {
+              leadId: activeLeads[0].id,
+              customerId: svc.customer_id,
+              scheduledServiceId: svc.id,
+              callSid: null,
+            });
+            logger.info(`[admin-schedule] Converted lead ${activeLeads[0].id} for confirmed outbound-review booking ${svc.id}`);
+          }
+        } catch (e) { logger.error(`[admin-schedule] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
       }
     }
 
