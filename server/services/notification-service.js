@@ -1,10 +1,19 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const NotificationService = {
   // Create a notification
   async create({ recipientType, recipientId, category, title, body, icon, link, metadata }) {
     try {
+      // Demo/internal test accounts (App Store review account) must not ring
+      // the admin bell — their bounce alerts and junk service requests are
+      // noise. Central gate: emitters carry the customer id in metadata.
+      if (recipientType === 'admin'
+          && isInternalTestCustomerId(metadata?.customerId || metadata?.customer_id)) {
+        logger.info(`[notifications] Suppressed admin notification for internal test customer (${category})`);
+        return null;
+      }
       const [notif] = await db('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,

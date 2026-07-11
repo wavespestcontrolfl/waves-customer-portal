@@ -378,9 +378,27 @@ class GoogleBusinessService {
     // who never reviewed. Treat 2+ matches as "no match" so the review falls
     // through to the manual-match alert instead of an arbitrary auto-link.
     // limit(2) is all we need to detect ambiguity.
+    //
+    // Match on first + last name TOKEN, tolerating middle names/initials and
+    // punctuation in the Google display name — "Michael P. Fossier" must
+    // match customer "Michael Fossier" (prod miss 2026-07-10). Single-token
+    // display names can't produce a confident match and fall through to the
+    // manual queue.
+    const tokens = String(reviewerName)
+      .replace(/[.,]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    if (tokens.length < 2) return null;
+    const firstToken = tokens[0];
+    // Multi-word first names ("Mary Ann" + "Smith") matched under the old
+    // full-string equality — accept the joined leading tokens too, so that
+    // shape keeps matching alongside the middle-initial-tolerant first token.
+    const leadingTokens = tokens.slice(0, -1).join(' ');
+    const lastToken = tokens[tokens.length - 1];
     const matches = await db('customers')
       .whereNull('deleted_at')
-      .whereRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))) = LOWER(?)", [reviewerName])
+      .whereRaw('(LOWER(TRIM(first_name)) = LOWER(?) OR LOWER(TRIM(first_name)) = LOWER(?))', [firstToken, leadingTokens])
+      .whereRaw("LOWER(TRIM(COALESCE(last_name, ''))) = LOWER(?)", [lastToken])
       .select('id')
       .limit(2);
     if (matches.length !== 1) {

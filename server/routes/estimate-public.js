@@ -1894,6 +1894,17 @@ function fmtMoney(n) {
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
 }
 
+// Price label for the "Estimate viewed" admin notification. One-time-only
+// estimates (pre-slab, WDO) have monthly_total 0/null — rendering them with
+// monthly framing produced "$0/mo as proposed" in the bell.
+function proposalPriceLabel(estimate) {
+  const monthly = Number(estimate?.monthly_total || 0);
+  if (monthly > 0) return `${fmtMoney(monthly)}/mo as proposed`;
+  const oneTime = Number(estimate?.onetime_total || 0);
+  if (oneTime > 0) return `${fmtMoney(oneTime)} one-time as proposed`;
+  return `${fmtMoney(0)}/mo as proposed`;
+}
+
 function roundPositiveMoney(value) {
   const amount = Number(value || 0);
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 0;
@@ -6796,7 +6807,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -14631,7 +14642,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         await NotificationService.notifyAdmin(
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`,
+          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
           { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }

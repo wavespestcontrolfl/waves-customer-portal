@@ -112,9 +112,12 @@ async function sendCriticalChurnAlert(customerId, result, source = 'inbound') {
     const trigger = top?.value || top?.message || top?.signal || 'Multiple signals';
     const rate = customer.monthly_rate ? `$${customer.monthly_rate}/mo` : '';
     const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Customer';
+    // Join only the non-empty parts — customers with no tier and no rate
+    // used to render as "Marty Polona (— )" with a stray trailing space.
+    const meta = [customer.waveguard_tier, rate].filter(Boolean).join(' ');
 
     const title = `🚨 Churn risk (live): ${name}`;
-    const body = `${name} (${customer.waveguard_tier || '—'} ${rate}) just dropped to CRITICAL — ${result.overall}/100.\n`
+    const body = `${name}${meta ? ` (${meta})` : ''} just dropped to CRITICAL — ${result.overall}/100.\n`
       + `Trigger: ${trigger}\n`
       + `📞 ${customer.phone || 'no phone on file'}`;
 

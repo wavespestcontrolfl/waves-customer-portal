@@ -487,7 +487,24 @@ router.post('/sms', async (req, res) => {
     // (known customers) — for owner phones it is redirected to the SAME admin
     // notification, so sending both raised a duplicate. Unknown senders have no
     // customer match (sms_reply never fires), so they still get this alert.
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    // Per-sender rate limit for UNKNOWN senders: spam robotext threads from
+    // one number raised a separate owner alert per message (19 alerts from a
+    // single roof-repair thread, 2026-07). One alert per unknown sender per
+    // 4h window — the full thread is still in /admin/communications and
+    // sms_log. Known customers are unaffected. Fails open on query error.
+    let repeatUnknownSender = false;
+    if (!customer && (Body || inboundMedia.length)) {
+      try {
+        const prior = await db('sms_log')
+          .where({ direction: 'inbound', from_phone: From })
+          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+          .whereNot('twilio_sid', MessageSid)
+          .first('id');
+        repeatUnknownSender = Boolean(prior);
+      } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
+    }
+
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length

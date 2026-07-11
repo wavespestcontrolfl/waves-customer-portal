@@ -51,9 +51,16 @@ function createDbMock(initialRows = {}) {
         if (typeof sql === 'string' && sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
           const name = String(bindings[0] || '').toLowerCase();
           this._rawFilters.push(row => String(row.reviewer_name || '').toLowerCase() === name);
-        } else if (typeof sql === 'string' && sql.includes("first_name || ' ' || COALESCE(last_name")) {
-          const name = String(bindings[0] || '').trim().toLowerCase();
-          this._rawFilters.push(row => `${row.first_name || ''} ${row.last_name || ''}`.trim().toLowerCase() === name);
+        } else if (typeof sql === 'string' && sql.includes('LOWER(TRIM(first_name)) = LOWER(?) OR')) {
+          const first = String(bindings[0] || '').trim().toLowerCase();
+          const leading = String(bindings[1] || '').trim().toLowerCase();
+          this._rawFilters.push(row => {
+            const fn = String(row.first_name || '').trim().toLowerCase();
+            return fn === first || fn === leading;
+          });
+        } else if (typeof sql === 'string' && sql.includes("COALESCE(last_name, ''))) = LOWER(?)")) {
+          const last = String(bindings[0] || '').trim().toLowerCase();
+          this._rawFilters.push(row => String(row.last_name || '').trim().toLowerCase() === last);
         }
         return this;
       },
@@ -463,6 +470,63 @@ describe('Google Business review sync', () => {
     expect(customer.review_marked_at).toBeTruthy();
     // No admin "unlinked" notification when the review matched a customer.
     expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('a middle initial in the Google display name still matches the customer (prod 2026-07-10 miss)', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-fossier',
+      first_name: 'Michael',
+      last_name: 'Fossier',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-mi',
+        reviewer: { displayName: 'Michael P. Fossier' },
+        starRating: 'FIVE',
+        comment: 'Great service!',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-fossier');
+    expect(customer.has_left_google_review).toBe(true);
+    expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('a two-word first name still matches its exact display-name shape', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-maryann',
+      first_name: 'Mary Ann',
+      last_name: 'Smith',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-ma',
+        reviewer: { displayName: 'Mary Ann Smith' },
+        starRating: 'FIVE',
+        comment: 'Wonderful',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-maryann');
+    expect(customer.has_left_google_review).toBe(true);
   });
 
   test('notifies admin when a newly synced review cannot be matched to a customer', async () => {
