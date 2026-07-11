@@ -155,8 +155,8 @@ describe('is_billing_party flows through the extraction mapping', () => {
 });
 
 describe('extraction schema version', () => {
-  test('SCHEMA_VERSION bumped to 1.6.0 for the additive is_billing_party field', () => {
+  test('SCHEMA_VERSION is at least 1.6.0 (the additive is_billing_party bump)', () => {
     const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
-    expect(SCHEMA_VERSION).toBe('1.6.0');
+    expect(SCHEMA_VERSION >= '1.6.0').toBe(true);
   });
 });

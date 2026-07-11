@@ -26,7 +26,11 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // 1.6.0: additive — secondary_contact(.s[]).is_billing_party boolean (the
 // paying third party for call→payer Bill-To linkage). Optional; older payloads
 // (which lack it) still validate.
-const SCHEMA_VERSION = '1.6.0';
+// 1.7.0: additive enum widening (multi-party extraction gap 2026-07-11 —
+// WDO/realtor/lender arranger calls produced NO secondary_contact):
+// caller.relationship_to_property gains real_estate_agent + lender;
+// secondary_contact(.s[]).role gains lender. Older payloads still validate.
+const SCHEMA_VERSION = '1.7.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

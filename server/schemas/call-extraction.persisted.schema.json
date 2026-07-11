@@ -44,7 +44,8 @@
             "1.3.0",
             "1.4.0",
             "1.5.0",
-            "1.6.0"
+            "1.6.0",
+            "1.7.0"
           ],
           "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings) — older payloads remain valid."
         },
@@ -170,6 +171,8 @@
             "property_manager",
             "hoa_board_member",
             "employee",
+            "real_estate_agent",
+            "lender",
             "other",
             "unknown"
           ]
@@ -252,6 +255,7 @@
             "home_seller",
             "tenant",
             "landlord",
+            "lender",
             "spouse_partner",
             "family_member",
             "real_estate_agent",
@@ -335,6 +339,7 @@
               "home_seller",
               "tenant",
               "landlord",
+              "lender",
               "spouse_partner",
               "family_member",
               "real_estate_agent",

@@ -218,7 +218,7 @@ function normalizeAdditionalProperties(value) {
 // the role, and drop the object entirely when nothing identifying survives —
 // a hallucinated empty shell must not fan out into service-contact writes.
 const SECONDARY_CONTACT_ROLES = new Set([
-  'home_buyer', 'home_seller', 'tenant', 'landlord', 'spouse_partner',
+  'home_buyer', 'home_seller', 'tenant', 'landlord', 'lender', 'spouse_partner',
   'family_member', 'real_estate_agent', 'property_manager', 'other', 'unknown',
 ]);
 function normalizeSecondaryContact(value) {

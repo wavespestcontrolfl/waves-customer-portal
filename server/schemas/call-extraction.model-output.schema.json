@@ -140,6 +140,8 @@
             "property_manager",
             "hoa_board_member",
             "employee",
+            "real_estate_agent",
+            "lender",
             "other",
             "unknown"
           ]
@@ -224,6 +226,7 @@
             "home_seller",
             "tenant",
             "landlord",
+            "lender",
             "spouse_partner",
             "family_member",
             "real_estate_agent",
@@ -309,6 +312,7 @@
               "home_seller",
               "tenant",
               "landlord",
+              "lender",
               "spouse_partner",
               "family_member",
               "real_estate_agent",
