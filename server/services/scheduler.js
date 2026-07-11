@@ -1649,6 +1649,80 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // A decision-linked scheduled reply must clear TWO fire-time
+          // re-checks (the send-time checks ran at enqueue, potentially hours
+          // ago, and pre-rollout cards never saw the price rule at all):
+          //   (a) its anchoring inbound is still the newest on the thread;
+          //   (b) non-human-authored agent text carries no price quote.
+          // Either failure → block this queued row, retire the claimed
+          // decision, reopen parked siblings — in ONE thread-locked
+          // transaction over FRESHLY read metadata: the cancel route can
+          // transfer parked ids onto this row after our claim, and those must
+          // reopen here, not sit invisible until orphan recovery.
+          if (claimMeta.agent_decision_id) {
+            const suggest = require('./sms-suggest-mode');
+            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
+            if (anchorStale || pricedAgentText) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+              const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
+              // Everything under the lock, metadata read THROUGH the trx
+              // AFTER acquiring it — the cancel route can transfer parked
+              // ids onto this row right up until we hold the lock. strict
+              // retirement: a failure rolls the whole cleanup back (row
+              // stays 'sending' for the recovery rail) instead of
+              // committing a blocked SMS whose decision is still claimed.
+              await db.transaction(async (trx) => {
+                await suggest.lockSuggestThread(trx, threadKey);
+                const freshRow = await trx('sms_log').where({ id: msg.id }).first('metadata');
+                let freshMeta = freshRow?.metadata;
+                if (typeof freshMeta === 'string') {
+                  try { freshMeta = JSON.parse(freshMeta); } catch { freshMeta = {}; }
+                }
+                freshMeta = freshMeta || {};
+                await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                });
+                await suggest.supersedeStaleDecision({
+                  decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
+                  fromStatus: 'scheduled',
+                  note: anchorStale
+                    ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
+                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                  dbi: trx,
+                  strict: true,
+                });
+                // Reopen only siblings whose OWN anchor is still current —
+                // a card parked before the newer inbound is just as stale
+                // as the one we retired, and reopening it would resurface a
+                // stale actionable card beside the fresh one.
+                const parked = Array.isArray(freshMeta.parked_decision_ids) ? freshMeta.parked_decision_ids : [];
+                for (const parkedId of parked) {
+                  const parkedStale = await suggest.suggestionAnchorIsStale({ decisionId: parkedId, dbi: trx, excludeSmsLogId: msg.id });
+                  if (parkedStale) {
+                    await suggest.supersedeStaleDecision({
+                      decisionId: parkedId,
+                      fromStatus: 'scheduled',
+                      note: 'A newer customer message arrived while this suggestion was parked — review the thread.',
+                      dbi: trx,
+                      strict: true,
+                    });
+                  } else {
+                    await suggest.reopenScheduledSuggestions({
+                      decisionIds: [parkedId],
+                      reason: 'The scheduled reply ahead of this suggestion did not go out — review the thread.',
+                      dbi: trx,
+                    });
+                  }
+                }
+              });
+              logger.warn(`[scheduled-sms] ${msg.id} blocked (${blockedReason}): linked agent decision retired, parked suggestions rechecked`);
+              continue;
+            }
+          }
+
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
           if (!toPhone) {
             // Refresh-required row whose current customer phone can't be

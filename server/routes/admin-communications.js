@@ -24,6 +24,8 @@ const {
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   lockSuggestThread,
+  suggestionAnchorIsStale,
+  supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
 
@@ -80,7 +82,7 @@ function normalizeReplyForComparison(value) {
 // draft may only resolve a decision the sender actually owns — pending,
 // phone-matched through its inbound sms_log or customer record, and (when a
 // customer is selected) belonging to that customer.
-async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId }) {
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
     const decision = await db('agent_decisions as ad')
@@ -90,7 +92,9 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       .select(
         'ad.id',
         'ad.customer_id',
+        'ad.sms_log_id',
         'ad.suggested_message',
+        's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
         'c.phone as customer_phone'
@@ -102,7 +106,46 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
       decision?.customer_phone,
     ].some((phone) => normalizePhoneLast10(phone) === sentPhoneLast10);
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
-    if (decision?.id && customerMatches && decisionPhoneMatches) return decision;
+    if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
+
+    // House rule at the send boundary: check the OUTGOING body — the text
+    // that will actually reach the customer — not the stored suggestion.
+    // The composer keeps the draft linkage across textarea edits, so an
+    // operator who REMOVED a hallucinated price must be allowed through
+    // (price-free correction), while a body still carrying one (pre-rollout
+    // card sent verbatim, or a price typed back in under the agent link) is
+    // refused. The card is NOT retired — the operator can edit and resend,
+    // or send a deliberate quote as a plain manual message (no draft link).
+    const suggestMode = require('../services/sms-suggest-mode');
+    if (outgoingBody && suggestMode.hasPriceQuote(outgoingBody)) {
+      logger.info(`[agent-review] outgoing agent-linked body quotes a price (decision ${decision.id}) — refusing send`);
+      return null;
+    }
+
+    // STALENESS: a card is only sendable while its anchoring inbound is
+    // still the newest customer message on the thread. Drafting lanes that
+    // never publish (scheduling, escalation, withheld/priced drafts, LLM
+    // latency, failures) leave older cards pending — this send-time check is
+    // the one gate that covers every lane. Verification failure 409s with a
+    // "refresh the thread" message, which is exactly right here.
+    if (decision.inbound_created_at) {
+      const threadLast10 = normalizePhoneLast10(decision.sms_from_phone) || sentPhoneLast10;
+      const newerInbound = await db('sms_log')
+        .where({ direction: 'inbound' })
+        .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10])
+        .where('created_at', '>', decision.inbound_created_at)
+        .whereNot('id', decision.sms_log_id)
+        .first('id');
+      if (newerInbound) {
+        logger.info(`[agent-review] decision ${decision.id} is stale (newer inbound on thread) — refusing send`);
+        // Retire it now, guardedly — otherwise a newer inbound whose own lane
+        // produced no replacement card (withheld draft, reaction, failure)
+        // leaves this card resurfacing after every "refresh" 409, forever.
+        await require('../services/sms-suggest-mode').supersedeStaleDecision({ decisionId: decision.id });
+        return null;
+      }
+    }
+    return decision;
   } catch (verifyErr) {
     logger.warn(`[agent-review] failed to verify inbox draft decision ownership: ${verifyErr.message}`);
   }
@@ -212,7 +255,7 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
       // A supplied draft id that fails verification means the card the
       // operator is acting on is stale — most often another operator just
       // handled the same suggestion. Sending anyway risks a duplicate reply.
@@ -251,6 +294,7 @@ router.post('/sms', async (req, res, next) => {
     // exception reopens them; a crash mid-send is bounded by the 30-min
     // orphan recovery.
     let autoSendInFlight = false;
+    let staleAtClaim = false;
     // The auto-send interlock only matters when Phase E auto-send is enabled.
     // Gated so the manual send path carries ZERO extra work while the feature
     // is dormant (the usual state): no claim lookup, no reservation row.
@@ -260,6 +304,16 @@ router.post('/sms', async (req, res, next) => {
       if (parkPhoneLast10) {
         parkedThreadIds = await db.transaction(async (trx) => {
           await lockSuggestThread(trx, parkPhoneLast10);
+          if (claimedDecisionId) {
+            // FINAL freshness gate, under the thread lock and AFTER the
+            // claim: Twilio inbound inserts don't take this lock, so an
+            // inbound committed between verification and the claim is only
+            // visible here — the last point before the provider window.
+            if (await suggestionAnchorIsStale({ decisionId: claimedDecisionId, dbi: trx })) {
+              staleAtClaim = true;
+              return [];
+            }
+          }
           if (autoSendInterlock) {
             // An autonomous house-voice reply (Phase E) may be mid-send to this
             // thread — it claimed under THIS same lock. Don't let a manual send
@@ -314,6 +368,14 @@ router.post('/sms', async (req, res, next) => {
         });
       }
       return res.status(503).json({ error: 'Could not reserve this conversation for sending — try again in a moment.' });
+    }
+
+    if (staleAtClaim) {
+      // A newer inbound (or a colleague's reply) landed between verification
+      // and our claim — retire the card rather than reopen it: its context
+      // is stale and the newer message's own lane decides what happens next.
+      await supersedeStaleDecision({ decisionId: claimedDecisionId, fromStatus: 'scheduled' });
+      return res.status(409).json({ error: 'A newer message just arrived on this thread — refresh before sending.' });
     }
 
     if (autoSendInFlight) {
@@ -1252,7 +1314,7 @@ router.post('/schedule-sms', async (req, res, next) => {
     // ignored/expired despite a human-approved send.
     let scheduledAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
       // Stale card — most often another operator just handled the same
       // suggestion. Queueing anyway would schedule a duplicate reply with
       // no decision linkage to resolve or cancel.

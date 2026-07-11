@@ -587,12 +587,20 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] draft copied a redaction placeholder — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
 
+    // House rule: no prices in customer SMS. The live judge caught the drafter
+    // inventing dollar figures — a draft quoting any amount stays shadow (the
+    // judge still covers it); a human quotes prices when one is warranted.
+    const replyHasPrice = suggestMode.hasPriceQuote(parsed.reply);
+    if (replyHasPrice) {
+      logger.warn(`[sms-shadow] draft quotes a price — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
+    }
+
     // Only verified-clean drafts (verify loop converged) may leave the silent
     // shadow lane — a draft still asserting unsupported facts after the
     // revision budget is never shown to a human OR sent to a customer; it
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
-    if (row?.id && converged && !replyHasPlaceholder) {
+    if (row?.id && converged && !replyHasPlaceholder && !replyHasPrice) {
       if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
@@ -656,6 +664,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         });
         if (decisionId) deliveredAs = suggestMode.SUGGESTED_STATUS;
       }
+    }
+
+    // A draft that stayed shadow on a suggest/auto-send thread still means
+    // the conversation MOVED: older pending cards were drafted against a
+    // stale context, and only publishSuggestion's supersede step normally
+    // retires them. Run that step standalone so a withheld draft (price,
+    // placeholder, unconverged) can't leave a stale card one click from
+    // sending. Idempotent; fail-soft inside.
+    if (row?.id && deliveredAs === SHADOW_STATUS && smsLogId
+        && (deliveryMode === 'suggest' || deliveryMode === suggestMode.AUTO_SEND_MODE)) {
+      await suggestMode.supersedeStaleSuggestions({ customerId: customer?.id || null, smsLogId });
     }
 
     logger.info(
