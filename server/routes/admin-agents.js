@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const leadAttribution = require('../services/lead-attribution');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -1599,6 +1599,55 @@ router.put('/intent-modes/:intent', async (req, res, next) => {
       updatedAt: row.updated_at || null,
       reason: row.reason || null,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /voice-profiles — Loop 2 review surface: the pending profile (if any),
+// the currently approved one, and recent history. Read-only.
+router.get('/voice-profiles', async (req, res, next) => {
+  try {
+    const cols = ['id', 'version', 'profile_text', 'source_stats', 'model', 'status', 'reviewed_by', 'reviewed_at', 'created_at'];
+    // The approved row is fetched OUTSIDE the history window: after enough
+    // rejected/superseded weekly versions, the live profile could age past
+    // the latest-10 limit and this surface would falsely show "none live".
+    const [rows, approved] = await Promise.all([
+      db('voice_profiles').select(cols).orderBy('version', 'desc').limit(10),
+      db('voice_profiles').select(cols).where({ status: 'approved' }).orderBy('version', 'desc').first(),
+    ]);
+    res.json({
+      generatedAt: new Date().toISOString(),
+      gateEnabled: require('../config/feature-gates').isEnabled('voiceProfileDistiller'),
+      pending: rows.find((r) => r.status === 'pending') || null,
+      approved: approved || null,
+      history: rows,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /voice-profiles/:id/review — one-click approve/reject of a PENDING
+// profile (Loop 2's human gate; nothing auto-applies without this click).
+// Approving supersedes the previously approved version server-side; every
+// review writes an activity_log audit row. requireAdmin on top of the
+// router-level tech-or-admin: approving changes live customer-facing phone
+// behavior, so a technician bearer token must not be able to flip it.
+router.post('/voice-profiles/:id/review', requireAdmin, async (req, res, next) => {
+  try {
+    const { reviewVoiceProfile } = require('../services/voice-profile-distiller');
+    const action = String(req.body?.action || '').trim();
+    // The audit row commits inside the same transaction as the status flip —
+    // a profile never goes live with its promised audit missing.
+    const result = await reviewVoiceProfile({
+      id: req.params.id,
+      action,
+      reviewedBy: actorName(req),
+      audit: { adminUserId: req.technicianId || null },
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ version: result.version, status: result.status });
   } catch (err) {
     next(err);
   }

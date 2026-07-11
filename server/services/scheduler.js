@@ -1024,6 +1024,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY SUN 3:15AM ET — Voice-profile distiller (brand-voice loop,
+  // Loop 2). Distills the redacted corpus into a style-only voice profile,
+  // parked as a PENDING voice_profiles row for one-click approval in the
+  // Agents hub — nothing auto-applies. One DEEP call per run; skips itself
+  // when a pending profile awaits review or no new corpus accrued.
+  // =========================================================================
+  cron.schedule('15 3 * * 0', async () => {
+    if (!isEnabled('voiceProfileDistiller')) return;
+    logger.info('Running: Voice-profile distiller');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { distillVoiceProfile } = require('./voice-profile-distiller');
+      const result = await runExclusive('voice-profile-distiller', () => distillVoiceProfile());
+      if (result?.skipped) logger.info(`[voice-profile] run skipped: ${result.skipped}`);
+      else if (result?.version) logger.info(`[voice-profile] run complete: v${result.version} pending review`);
+    } catch (err) {
+      logger.error(`Voice-profile distiller failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 3:55AM ET — Shadow judge (SMS brand-voice loop, Phase C). Pairs
   // each 24h-matured shadow draft with the human reply that actually went
   // out and scores it per intent class. LLM only when the human replied;

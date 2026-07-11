@@ -134,6 +134,13 @@ const gates = {
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
+  // Voice-Profile Distiller (brand-voice loop, Loop 2) — weekly distillation
+  // of the redacted corpus into a style-only voice profile, PARKED as a
+  // pending voice_profiles row for one-click approval in the Agents hub.
+  // Nothing auto-applies; no sends, no customer-visible effect; prod opt-in
+  // per house pattern.
+  voiceProfileDistiller: isProd ? process.env.GATE_VOICE_PROFILE_DISTILLER === 'true' : true,
+
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
   // sent, per intent class (shadow_draft_judgments). LLM is called only
