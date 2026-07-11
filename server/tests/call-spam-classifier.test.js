@@ -166,11 +166,13 @@ describe('detectRobocallScriptSignature', () => {
     expect(detectRobocallScriptSignature('Their phone tree said press 1 for sales, so I hung up.').match).toBe(false);
   });
 
-  test('real customer transcripts do not match', () => {
-    const kathy = 'Caller: Hi, do you do WDO inspection reports for real estate residential? '
-      + 'I need one for a home I just sold this weekend. 4471 McIntosh Lake Avenue, Sarasota. '
-      + 'I am the realtor, the buyer\'s agent. Her email is lferraro@hotmail.com and her phone number is 978-501-0169.';
-    expect(detectRobocallScriptSignature(kathy).match).toBe(false);
+  test('a realistic legitimate transcript does not match (synthetic fixture)', () => {
+    // Shape mirrors a real arranger call — realtor + address + relayed
+    // contact details — with fully synthetic values (555 number, example.com).
+    const realtorCall = 'Caller: Hi, do you do WDO inspection reports for real estate residential? '
+      + 'I need one for a home I just sold this weekend. 123 Example Lake Avenue, Sarasota. '
+      + 'I am the realtor, the buyer\'s agent. Her email is buyer.example@example.com and her phone number is 941-555-0142.';
+    expect(detectRobocallScriptSignature(realtorCall).match).toBe(false);
     expect(detectRobocallScriptSignature(null).match).toBe(false);
     expect(detectRobocallScriptSignature('').match).toBe(false);
   });
