@@ -835,9 +835,14 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   }
   const norm = (v) => String(v || '').trim().toLowerCase();
   const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-  const callerEmail = norm(caller?.email);
-  // Match against EVERY caller number — the ANI AND any stated callback — since
-  // the caller may be duplicated into a slot carrying only the callback number.
+  // Match against EVERY caller identifier — from BOTH extractors, since the
+  // helper scans raw V2 contacts and V2 may be the only side that captured the
+  // caller's email/alternate phone. The caller may be duplicated into a slot
+  // carrying only a callback number or a V2-only email.
+  const callerEmails = new Set(
+    [caller?.email, ...(Array.isArray(caller?.emails) ? caller.emails : [])]
+      .map((e) => norm(e)).filter(Boolean),
+  );
   const callerPhone10s = new Set(
     [caller?.phone, ...(Array.isArray(caller?.phones) ? caller.phones : [])]
       .map((p) => last10(p)).filter((p) => p.length === 10),
@@ -847,7 +852,7 @@ async function resolveCallBillingPayer(secondaryContacts, v2Extraction = null, c
   // pay" call (that would turn a self-pay booking into a payer-billed invoice).
   const flagged = candidates.filter((c) => c && c.is_billing_party === true
     && EMAIL_RE.test(norm(c.email))
-    && !(callerEmail && norm(c.email) === callerEmail)
+    && !callerEmails.has(norm(c.email))
     && !(last10(c.phone).length === 10 && callerPhone10s.has(last10(c.phone))));
   // Fail closed on ambiguity: a call naming multiple DISTINCT billing parties
   // (tenant+owner+manager, or a model duplicate) must NOT silently pick one —
@@ -5543,9 +5548,13 @@ const CallRecordingProcessor = {
               // reusable find-or-create keyed on AP email, independent of the
               // booking's atomicity), for the fresh insert + fresh follow-up
               // child to stamp. Reused rows are left as-is (see the note below).
+              const v2CallerForPayer = v2CanonicalExtraction?.caller || {};
               const callBookingPayerId = await resolveCallBillingPayer(
                 callSecondaryContacts, v2CanonicalExtraction,
-                { email: callerEmailPreScrub || extracted.email, phones: [contactPhone, extracted.phone] },
+                {
+                  emails: [callerEmailPreScrub, extracted.email, v2CallerForPayer.email],
+                  phones: [contactPhone, extracted.phone, v2CallerForPayer.phone_e164, v2CallerForPayer.phone_raw_spoken],
+                },
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);

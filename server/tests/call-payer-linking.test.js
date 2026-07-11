@@ -81,6 +81,16 @@ describe('resolveCallBillingPayer', () => {
     expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
   });
 
+  test('rejects a caller duplicated into a V2 billing contact when only V2 has the caller email', async () => {
+    // The billing candidate lives in raw V2 (pruned from the merged list) with
+    // the caller's OWN email, and V2 is the only extractor that captured it.
+    // Passing the V2 caller email in `emails` must reject it as self-pay.
+    const v2 = { secondary_contact: { name_full: 'Self Caller', email: 'caller@example.com', is_billing_party: true } };
+    const caller = { emails: [null, 'caller@example.com'] };
+    expect(await proc._test.resolveCallBillingPayer([], v2, caller)).toBeNull();
+    expect(PayerService.findOrCreatePayerByEmail).not.toHaveBeenCalled();
+  });
+
   test('rejects the caller by their CALLBACK number (differs from the ANI)', async () => {
     // Self-pay caller duplicated into a slot carrying only the callback number,
     // which differs from the ANI. Both caller numbers must be checked.
