@@ -116,11 +116,23 @@ describe('comparison-table-gate', () => {
   });
 
   test('generic lawn-care CATEGORY headers are not phantom businesses (Codex round-2 P2)', () => {
-    for (const header of ['DIY lawn care', 'Professional lawn care', 'DIY Lawn Care']) {
+    for (const header of ['DIY lawn care', 'Professional lawn care', 'quarterly pest control']) {
       const t = CATEGORY_TABLE.replace('National chain', header);
       const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
       expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
       expect(r.pass).toBe(true);
+    }
+  });
+
+  test('Title-Cased modifier-led service names read as NAMES and fail closed (Codex round-8 P1)', () => {
+    // "National Pest Control" / "May Pest Control" are company-name shapes;
+    // the category exemption requires sentence/lower casing. A Title-Cased
+    // "DIY Lawn Care" column routes to review too — cheap, reversible.
+    for (const header of ['National Pest Control', 'May Pest Control', 'DIY Lawn Care', 'Acme Rodent Removal', 'Acme Pest Treatment']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
     }
   });
 

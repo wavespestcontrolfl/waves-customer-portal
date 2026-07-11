@@ -169,8 +169,11 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // (species, attributes, methods) classify as category/educational.
 // Legal-entity markers are checked case-insensitively ("bob's bugs llc");
 // possessives stay case-sensitive (BUSINESS_MARKER_RE) — "season's" etc.
+// Superset of the prose suffix set: adds the Rodent noun and the
+// Care/Removal/Treatment service verbs so "Acme Rodent Removal" /
+// "Acme Pest Treatment" are business-shaped here (Codex round-8).
 const HEADER_BUSINESS_SUFFIX_RE = new RegExp(
-  `\\b(?:${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+Care)\\b`,
+  `\\b(?:${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife|Rodent)\\s+(?:Care|Control|Management|Solutions?|Services?|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?|Removal|Treatments?))\\b`,
   'i',
 );
 // Only UNAMBIGUOUS category modifiers — method (DIY/professional/basic),
@@ -186,6 +189,16 @@ const HEADER_CATEGORY_FORM_RE = new RegExp(
   `^(?:${HEADER_CATEGORY_MODS}\\s+)*${HEADER_GENERIC_SERVICE_PHRASE}\\??$`,
   'i',
 );
+// A fully Title-Cased multi-word phrase reads as a NAME ("National Pest
+// Control", "May Pest Control"), not a category — the category-form
+// exemption additionally requires sentence/lower casing ("National pest
+// control", "quarterly pest control"). Leading acronyms like "DIY" are why
+// only words AFTER the first must be lowercase-led for the exemption.
+function isTitleCasedPhrase(header) {
+  const words = String(header).split(/\s+/).filter((w) => /[A-Za-z]/.test(w));
+  if (words.length < 2) return false;
+  return words.slice(1).every((w) => /^[A-Z0-9]/.test(w));
+}
 const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
 
 // Cell value affirms the row criterion → the CLAIM is the row label (so an
@@ -290,7 +303,7 @@ function classifyOption(header) {
   // header — fail closed unless the WHOLE header is a strict category form.
   if (BUSINESS_MARKER_RE.test(h) || HEADER_LEGAL_MARKER_RE.test(h)) return 'unclassified';
   if (HEADER_BUSINESS_SUFFIX_RE.test(h)) {
-    return HEADER_CATEGORY_FORM_RE.test(h) ? 'category' : 'unclassified';
+    return HEADER_CATEGORY_FORM_RE.test(h) && !isTitleCasedPhrase(h) ? 'category' : 'unclassified';
   }
   // Not business-SHAPED (no proper-name + industry suffix, no company
   // marker, no recognized competitor): a generic option header.
