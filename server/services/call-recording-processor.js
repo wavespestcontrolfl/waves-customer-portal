@@ -3845,7 +3845,13 @@ const CallRecordingProcessor = {
 
     // Owner rule: recurring interest beats the single presenting pest — a
     // deterministic backstop on top of the same instruction in the prompt.
-    extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+    // INBOUND ONLY (all three call sites): diarization label assignment is
+    // inconsistent on outbound calls — observed live 2026-07-11, the Copeman
+    // outbound call labeled the WAVES AGENT as "Caller:" — so the caller-text
+    // scan could read the agent's own plan pitch as customer intent. The
+    // prompt-driven model, which sees the whole conversation, still applies
+    // the rule on outbound calls.
+    if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -3958,7 +3964,7 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
     // Skip spam and non-workable voicemail
@@ -5710,7 +5716,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
