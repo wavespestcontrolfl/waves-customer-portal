@@ -108,6 +108,7 @@ function mapSecondaryContactToLegacy(contact) {
     email: contact.email || null,
     role: contact.role || 'unknown',
     wants_notifications: contact.wants_notifications === true,
+    is_billing_party: contact.is_billing_party === true,
     notes: contact.notes || null,
   };
   if (!mapped.first_name && !mapped.last_name && !mapped.phone && !mapped.email) return null;

@@ -356,6 +356,19 @@ const gates = {
   // (established business relationship). do-not-contact always overrides.
   // Sends customer SMS — owner-flip only.
   callInboundImpliedConsent: process.env.GATE_CALL_INBOUND_IMPLIED_CONSENT === 'true',
+  // Payer (third-party Bill-To) linkage from a call: when a caller names a
+  // DISTINCT paying party (e.g. "the owner Jim pays by credit card", "bill the
+  // management company"), find-or-create a `payers` Bill-To from that contact
+  // and stamp payer_id on the booking so the completion invoice routes to the
+  // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
+  // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
+  callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
+  // Review-gated OUTBOUND-callback bookings: a confirmed booking on an outbound
+  // call (a return call to an inbound lead) creates the appointment in a
+  // `pending`/needs-review status (NOT auto-confirmed, NO auto-SMS) with an
+  // outbound_booking_review triage item, instead of being silently skipped as
+  // 'outbound_call'. Off → outbound bookings stay manual (current behavior).
+  callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message

@@ -236,3 +236,49 @@ describe('PayerService.resolveForInvoice — throwOnError (strict) mode', () => 
     ).rejects.toThrow('db down');
   });
 });
+
+describe('PayerService.findOrCreatePayerByEmail', () => {
+  const db = require('../models/db');
+  afterEach(() => db.mockReset());
+
+  // A chain that satisfies BOTH the lookup (whereRaw→andWhere→orderBy→first)
+  // and createPayer's insert (insert→returning).
+  function chain({ existing = null, inserted = null }) {
+    const c = {
+      whereRaw() { return c; },
+      andWhere() { return c; },
+      orderBy() { return c; },
+      first: () => Promise.resolve(existing),
+      insert() { return c; },
+      returning: () => Promise.resolve(inserted ? [inserted] : []),
+    };
+    return c;
+  }
+
+  test('missing/invalid AP email → { payer: null } and never queries', async () => {
+    db.mockImplementation(() => { throw new Error('should not query'); });
+    expect(await PayerService.findOrCreatePayerByEmail({ apEmail: '' })).toEqual({ payer: null });
+    expect(await PayerService.findOrCreatePayerByEmail({ apEmail: 'nope' })).toEqual({ payer: null });
+  });
+
+  test('reuses an existing ACTIVE payer by case-insensitive email (no insert)', async () => {
+    const existing = { id: 7, ap_email: 'jim@example.com', active: true };
+    db.mockImplementation(() => chain({ existing }));
+    const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'JIM@Example.com' });
+    expect(out).toEqual({ payer: existing });
+  });
+
+  test('creates a payer when none exists, defaulting display_name to the email local-part', async () => {
+    const inserted = { id: 9, ap_email: 'owner@example.com', display_name: 'owner' };
+    db.mockImplementation(() => chain({ existing: null, inserted }));
+    const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'owner@example.com' });
+    expect(out.payer).toEqual(inserted);
+  });
+
+  test('uses the provided display name when given', async () => {
+    const inserted = { id: 11, ap_email: 'jim@example.com', display_name: 'James Brenner' };
+    db.mockImplementation(() => chain({ existing: null, inserted }));
+    const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com', displayName: 'James Brenner' });
+    expect(out.payer.display_name).toBe('James Brenner');
+  });
+});

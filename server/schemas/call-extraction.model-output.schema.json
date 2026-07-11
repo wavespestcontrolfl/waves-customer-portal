@@ -242,6 +242,10 @@
             "string",
             "null"
           ]
+        },
+        "is_billing_party": {
+          "type": "boolean",
+          "description": "true ONLY when the caller clearly says THIS person pays for the service (e.g. 'the owner Jim will pay by credit card', 'bill the management company'). Merely being the owner/landlord/manager is NOT enough — the caller must indicate they cover the cost. 1.6.0 additive; absent in older payloads."
         }
       }
     },
@@ -322,6 +326,10 @@
               "string",
               "null"
             ]
+          },
+          "is_billing_party": {
+            "type": "boolean",
+            "description": "true ONLY when the caller clearly says THIS person pays for the service (e.g. 'the owner Jim pays by credit card', 'bill the management company'). Merely being the owner/landlord/manager is NOT enough. 1.6.0 additive."
           }
         }
       }

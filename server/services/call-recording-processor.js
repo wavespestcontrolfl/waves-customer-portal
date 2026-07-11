@@ -731,6 +731,8 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
+    // OR for the same reason: either extractor hearing "the owner pays" is enough.
+    is_billing_party: v1.is_billing_party === true || v2.is_billing_party === true,
     notes: v1.notes || v2.notes,
   };
 }
@@ -791,6 +793,36 @@ function resolveCallSecondaryContacts(extracted = {}, v2Extraction = null) {
     if (out.length >= 3) break;
   }
   return out;
+}
+
+// Third-party payer (Bill-To) linkage from a call (GATE_CALL_PAYER_LINKING):
+// when the caller named a DISTINCT paying party (is_billing_party) with a usable
+// AP email, find-or-create a `payers` Bill-To and return its id so it can be
+// stamped on the booking — the existing PayerService.resolveForInvoice()
+// precedence (scheduled_service.payer_id ?? customer.payer_id) then routes the
+// completion invoice to the payer's AP inbox with zero further changes. An AP
+// email is REQUIRED: a payer with no inbox can't be invoiced, so we skip (book
+// without a payer) rather than mint an unroutable Bill-To. Gated behind BOTH the
+// payer-linking gate AND secondary-contact capture (the payer IS a secondary
+// party). Never throws — a payer-lookup blip must not block the booking.
+async function resolveCallBillingPayer(secondaryContacts) {
+  if (!isEnabled('callPayerLinking') || process.env.GATE_CALL_SECONDARY_CONTACT !== 'true') return null;
+  const list = Array.isArray(secondaryContacts) ? secondaryContacts : [];
+  const party = list.find((c) => c && c.is_billing_party === true
+    && EMAIL_RE.test(String(c.email || '').trim().toLowerCase()));
+  if (!party) return null;
+  try {
+    const PayerService = require('./payer');
+    const { payer } = await PayerService.findOrCreatePayerByEmail({
+      apEmail: party.email,
+      displayName: [party.first_name, party.last_name].filter(Boolean).join(' ').trim() || null,
+      apPhone: party.phone || null,
+    });
+    return payer ? payer.id : null;
+  } catch (err) {
+    logger.warn(`[call-proc] payer linkage failed: ${err.message}`);
+    return null;
+  }
 }
 
 // Persist a call's secondary contact into the customer's first EMPTY
@@ -2527,7 +2559,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "state": "FL",
   "zip": "string or null",
   "additional_properties": [{"address_line1": "street address", "address_line2": "unit or null", "city": "string or null", "state": "FL", "zip": "string or null", "is_rental": true/false, "property_type": "condo/house/commercial/etc or null", "notes": "anything the caller said about this property, or null"}],
-  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "notes": "string or null"} or null,
+  "secondary_contact": {"first_name": "string or null", "last_name": "string or null", "phone": "string or null", "email": "string or null", "role": "one of: home_buyer, home_seller, tenant, landlord, spouse_partner, family_member, real_estate_agent, property_manager, other, unknown", "wants_notifications": true/false, "is_billing_party": true/false (true ONLY when the caller clearly says THIS person pays — 'the owner pays by credit card', 'bill the management company'; merely being owner/landlord/manager is NOT enough), "notes": "string or null"} or null,
   "requested_service": "what service they're calling about",
   "appointment_confirmed": true/false,
   "preferred_date_time": "ISO 8601 local (no timezone) in Eastern Time: YYYY-MM-DDTHH:MM — e.g. 2026-04-20T14:00 for April 20, 2026 at 2:00 PM ET. null if not confirmed.",
@@ -5222,7 +5254,14 @@ const CallRecordingProcessor = {
     // when the service was UNCLEAR (noMatch) under fail-open, so the existing
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
-    const canCreateAppointmentFromCall = !isOutboundCall(call)
+    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
+    // confirmed booking on an OUTBOUND call (a return call to an inbound lead)
+    // still creates the appointment — but PENDING/needs-review, never
+    // auto-confirmed and with no auto-SMS (see the insert + send guards below).
+    // Fail-open leniency and the Waves Assessment fallback stay INBOUND-only, so
+    // an outbound booking only lands when the service genuinely resolves.
+    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
+    const canCreateAppointmentFromCall = (!isOutboundCall(call) || outboundReviewBooking)
       && !genericBookingUnbookable
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
@@ -5664,8 +5703,16 @@ const CallRecordingProcessor = {
                     || v2CanonicalExtraction?.property?.service_address?.street_line_2
                     || null,
                 }, trx);
+                // Bill-To linkage: if the call named a distinct paying party,
+                // stamp payer_id (per-job) so the completion invoice routes to
+                // the payer. Resolved outside the booking's atomicity on purpose
+                // — a payer is a reusable account (find-or-create by AP email),
+                // so a rolled-back booking never needs to unwind it, and a payer
+                // blip never blocks the booking (helper returns null).
+                const callBookingPayerId = await resolveCallBillingPayer(callSecondaryContacts);
                 const insertData = {
                   customer_id: customerId,
+                  payer_id: callBookingPayerId || null,
                   technician_id: defaultTechnicianId,
                   property_id: propertyLinkage.propertyId,
                   ...(propertyLinkage.lat != null && propertyLinkage.lng != null
@@ -5688,11 +5735,14 @@ const CallRecordingProcessor = {
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
+                  // Outbound-callback bookings land PENDING/needs-review (the
+                  // office confirms + no auto-SMS goes out); inbound confirmed
+                  // bookings auto-confirm as before.
+                  status: outboundReviewBooking ? 'pending' : 'confirmed',
+                  customer_confirmed: !outboundReviewBooking,
+                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
                   notes: [
-                    'Booked via phone call.',
+                    outboundReviewBooking ? 'Booked via outbound callback — CONFIRM with customer before dispatch.' : 'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
                     priceInfo.price != null
@@ -5753,6 +5803,13 @@ const CallRecordingProcessor = {
                     callSid,
                     keepOpenForQuote: callQuotePromised,
                   });
+                  if (outboundReviewBooking) {
+                    // Pending outbound-callback booking — surface it for office
+                    // confirmation (it did NOT auto-confirm and no SMS went out).
+                    await trx('triage_items')
+                      .insert(buildTriageItem({ callLogId: call.id, flag: 'outbound_booking_review', extraction: v2Extraction || extracted, severity: 'advisory' }))
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                  }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
                 }
@@ -5908,7 +5965,12 @@ const CallRecordingProcessor = {
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && v2SmsBlocked) {
+          if (scheduledServiceId && outboundReviewBooking) {
+            // Outbound-callback booking is PENDING office confirmation — never
+            // auto-text a "confirmed" appointment the customer wasn't re-confirmed on.
+            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
+            appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'outbound_booking_review' };
+          } else if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
@@ -6652,6 +6714,7 @@ CallRecordingProcessor._test = {
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
   resolveCallSecondaryContacts,
+  resolveCallBillingPayer,
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,

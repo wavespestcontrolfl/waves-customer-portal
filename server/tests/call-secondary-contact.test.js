@@ -113,6 +113,7 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      is_billing_party: false,
       notes: null,
     });
     expect(mapSecondaryContactToLegacy(null)).toBeNull();
@@ -148,6 +149,7 @@ describe('secondary_contact V2 mapping', () => {
       email: 'joseph.haught89431@gmail.com',
       role: 'home_buyer',
       wants_notifications: true,
+      is_billing_party: false,
       notes: null,
     });
     expect(resolveCallSecondaryContact({}, { secondary_contact: v2Contact }).first_name).toBe('Joseph');
@@ -243,8 +245,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.5.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.5.0');
+  test('current SCHEMA_VERSION is 1.6.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.6.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
