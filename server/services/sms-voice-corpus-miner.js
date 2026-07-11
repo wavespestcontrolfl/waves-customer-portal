@@ -246,8 +246,11 @@ async function mineCallTranscripts({ since, skipped }) {
     // NULL and would drop consented calls that simply haven't been
     // assigned an outcome yet (Codex P2).
     .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
+    // The live processor marks spam/voicemail on processing_status WITHOUT
+    // stamping call_outcome — those transcripts must not train the voice.
+    .where((q) => q.whereNull('processing_status').orWhereNotIn('processing_status', ['spam', 'voicemail']))
     .select('id', 'customer_id', 'transcription', 'call_outcome', 'created_at',
-      'call_recording_consent_disclaimer_played');
+      'retranscribed_at', 'call_recording_consent_disclaimer_played');
 
   const customerIds = [...new Set(calls.map((c) => c.customer_id).filter(Boolean))];
   const customers = customerIds.length
@@ -279,7 +282,12 @@ async function mineCallTranscripts({ since, skipped }) {
       reply_text: null,
       transcript_text: redactCorpusText(String(call.transcription).slice(0, MAX_TRANSCRIPT_CHARS), context),
       outcome: JSON.stringify({ callOutcome: call.call_outcome || null }),
-      occurred_at: call.created_at,
+      // Backfilled legacy calls surface as of their RE-transcription: the
+      // distiller samples the newest N by occurred_at, so keeping the
+      // original call date would let a full window of newer calls starve
+      // every backfilled transcript out of the prompt forever (its corpus
+      // row would still bump newCorpusRows and trigger runs — pure waste).
+      occurred_at: call.retranscribed_at || call.created_at,
       schema_version: SCHEMA_VERSION,
     });
   }

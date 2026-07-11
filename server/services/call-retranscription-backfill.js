@@ -58,6 +58,10 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     // The miner drops wrong_number/spam — don't pay to transcribe them.
     // NULL outcome stays eligible (NOT IN is UNKNOWN on NULL).
     .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
+    // The live processor classifies spam/voicemail on processing_status
+    // WITHOUT stamping call_outcome — the outcome filter alone would pay to
+    // re-transcribe them and feed spam into the training corpus.
+    .where((q) => q.whereNull('processing_status').orWhereNotIn('processing_status', ['spam', 'voicemail']))
     .select('id', 'recording_url', 'transcription', 'from_phone', 'to_phone', 'customer_id',
       'created_at', 'recording_duration_seconds', 'duration_seconds')
     .orderBy('created_at', 'desc')
@@ -128,6 +132,14 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
           transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
           transcription: text,
           retranscribed_at: dbi.fn.now(),
+          // TRAINING-ONLY: a sweep-eligible status (processAllPending picks
+          // up no_transcription unconditionally) plus a fresh transcript
+          // would resurrect this legacy call into live extraction/lead/
+          // appointment workflows. Park it as processed; terminal statuses
+          // (spam/voicemail/processed) are preserved as-is.
+          processing_status: dbi.raw(
+            "CASE WHEN processing_status IS NULL OR processing_status IN ('pending','no_transcription','extraction_failed','processing') THEN 'processed' ELSE processing_status END"
+          ),
         });
       if (changed) {
         summary.upgraded += 1;
