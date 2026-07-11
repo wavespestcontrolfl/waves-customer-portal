@@ -89,9 +89,13 @@ const PRICE_QUOTE_RE = new RegExp(
   // both languages — a connector is required on purpose: "the price is 415" /
   // "the price is fifty" / "el precio es 45" quote a price, while "your
   // estimate expires in 30 days" (no connector) is a date and must pass.
-  + `|\\b${PRICE_WORD_EN}\\b\\s*(?:is|was|will be|would be|comes?\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty
+  + `|\\b${PRICE_WORD_EN}\\b\\s*(?:is|was|will\\s+be|would\\s+be|(?:will\\s+|would\\s+)?comes?\\s+(?:out\\s+)?to|came\\s+to|runs?|of|at|:)\\s*\\$?${PRICE_EN_AMOUNT_STRICT}\\b` // the price is 415 / fifty, total will come to 415.75
   + `|\\b${PRICE_WORD_ES}\\b\\s*(?:es|ser[íi]a|ser[áa]|de|:)\\s*\\$?${PRICE_ES_AMOUNT}\\b` // el precio es 45
   + `|\\b${PRICE_EN_AMOUNT_STRICT}\\s+(?:is|was|will be|es|ser[áa])\\s+(?:the\\s+|el\\s+|la\\s+)?(?:${PRICE_WORD_EN}|${PRICE_WORD_ES})\\b` // 415.75 is the total
+  // Direct price VERBS — "the service costs 415.75", "cuesta 45.50",
+  // "cobramos 60" — no connector involved, the verb IS the price claim.
+  + `|\\bcosts?\\s+(?:you\\s+|about\\s+|around\\s+|just\\s+)?\\$?${PRICE_EN_AMOUNT_STRICT}\\b`
+  + `|\\b(?:cuestan?|cobramos|cobran?)\\s+\\$?${PRICE_ES_AMOUNT}\\b`
   // Weak words that double as identifiers (invoice, payment, pay) require
   // CENTS so "invoice #04395" stays clean.
   + '|\\b(?:invoice|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
@@ -419,25 +423,32 @@ async function suggestionAnchorIsStale({ decisionId, dbi = db } = {}) {
  * superseded, and a house-voice suggestion's draft returns to the judge
  * pool. Without this, a stale card whose newer inbound produced no
  * replacement (withheld draft, reaction, failure) would resurface after
- * every "refresh the thread" 409, forever. Guarded + idempotent; fail-soft.
+ * every "refresh the thread" 409, forever. Guarded + idempotent. Fail-soft
+ * by default (the 409 path must never break a send response); `strict: true`
+ * rethrows instead — callers running inside their OWN transaction (the
+ * scheduler's fire-time cleanup) must roll back rather than commit a blocked
+ * SMS with its decision still claimed. In both modes, `false` means the row
+ * was not in fromStatus (someone else already handled it) — never an error.
  */
-async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review', note, dbi = db } = {}) {
+async function supersedeStaleDecision({ decisionId, fromStatus = 'pending_review', note, dbi = db, strict = false } = {}) {
+  const run = () => dbi.transaction(async (trx) => {
+    const [row] = await trx('agent_decisions')
+      .where({ id: decisionId, status: fromStatus })
+      .update({
+        status: 'superseded',
+        correction_note: note || 'A newer customer message arrived — review the thread before replying.',
+        updated_at: new Date(),
+      })
+      .returning(['id', 'entity_id', 'entity_type', 'workflow']);
+    if (!row) return false;
+    if (row.workflow === SUGGEST_WORKFLOW && row.entity_type === 'message_draft') {
+      await revertDraftsToShadow(trx, [row.entity_id]);
+    }
+    return true;
+  });
+  if (strict) return run();
   try {
-    return await dbi.transaction(async (trx) => {
-      const [row] = await trx('agent_decisions')
-        .where({ id: decisionId, status: fromStatus })
-        .update({
-          status: 'superseded',
-          correction_note: note || 'A newer customer message arrived — review the thread before replying.',
-          updated_at: new Date(),
-        })
-        .returning(['id', 'entity_id', 'entity_type', 'workflow']);
-      if (!row) return false;
-      if (row.workflow === SUGGEST_WORKFLOW && row.entity_type === 'message_draft') {
-        await revertDraftsToShadow(trx, [row.entity_id]);
-      }
-      return true;
-    });
+    return await run();
   } catch (err) {
     logger.warn(`[sms-suggest] stale-decision supersede failed (${decisionId}): ${err.message}`);
     return false;

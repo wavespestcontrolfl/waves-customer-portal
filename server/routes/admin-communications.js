@@ -80,7 +80,7 @@ function normalizeReplyForComparison(value) {
 // draft may only resolve a decision the sender actually owns — pending,
 // phone-matched through its inbound sms_log or customer record, and (when a
 // customer is selected) belonging to that customer.
-async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId }) {
+async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody }) {
   try {
     const sentPhoneLast10 = normalizePhoneLast10(to);
     const decision = await db('agent_decisions as ad')
@@ -106,17 +106,17 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
     if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
 
-    // House rule at the send boundary too: a card whose AGENT text quotes a
-    // price (drafted before the delivery guards rolled out, or by an old pod
-    // mid-deploy) is refused and retired. The operator can still type a
-    // price manually — that's a human decision with no agent linkage.
+    // House rule at the send boundary: check the OUTGOING body — the text
+    // that will actually reach the customer — not the stored suggestion.
+    // The composer keeps the draft linkage across textarea edits, so an
+    // operator who REMOVED a hallucinated price must be allowed through
+    // (price-free correction), while a body still carrying one (pre-rollout
+    // card sent verbatim, or a price typed back in under the agent link) is
+    // refused. The card is NOT retired — the operator can edit and resend,
+    // or send a deliberate quote as a plain manual message (no draft link).
     const suggestMode = require('../services/sms-suggest-mode');
-    if (suggestMode.hasPriceQuote(decision.suggested_message)) {
-      logger.info(`[agent-review] decision ${decision.id} quotes a price — refusing send and retiring the card`);
-      await suggestMode.supersedeStaleDecision({
-        decisionId: decision.id,
-        note: 'This draft quoted a price — house rule: no prices in SMS. Write the reply manually if needed.',
-      });
+    if (outgoingBody && suggestMode.hasPriceQuote(outgoingBody)) {
+      logger.info(`[agent-review] outgoing agent-linked body quotes a price (decision ${decision.id}) — refusing send`);
       return null;
     }
 
@@ -253,7 +253,7 @@ router.post('/sms', async (req, res, next) => {
 
     let verifiedAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      verifiedAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
       // A supplied draft id that fails verification means the card the
       // operator is acting on is stale — most often another operator just
       // handled the same suggestion. Sending anyway risks a duplicate reply.
@@ -1293,7 +1293,7 @@ router.post('/schedule-sms', async (req, res, next) => {
     // ignored/expired despite a human-approved send.
     let scheduledAgentDecision = null;
     if (agentDecisionId && agentDraft) {
-      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId });
+      scheduledAgentDecision = await verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomerId, outgoingBody: body });
       // Stale card — most often another operator just handled the same
       // suggestion. Queueing anyway would schedule a duplicate reply with
       // no decision linkage to resolve or cancel.

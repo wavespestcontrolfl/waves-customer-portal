@@ -83,6 +83,14 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('El precio es 45')).toBe(true);
   });
 
+  test('detects direct price verbs, both languages (Codex P1 r6)', () => {
+    expect(hasPriceQuote('The service costs 415.75')).toBe(true);
+    expect(hasPriceQuote('Your total will come to 415.75')).toBe(true);
+    expect(hasPriceQuote('Cuesta 45.50')).toBe(true);
+    expect(hasPriceQuote('cobramos 60 por visita')).toBe(true);
+    expect(hasPriceQuote('it costs nothing to reschedule')).toBe(false);
+  });
+
   test('dates, durations, and idioms near price nouns pass (connector required — Codex P1 r4)', () => {
     expect(hasPriceQuote('Your estimate expires in 30 days')).toBe(false);
     expect(hasPriceQuote('The quote you requested on the 15th is attached')).toBe(false);
