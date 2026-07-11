@@ -317,7 +317,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         && guardRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
         && guardRow.status === 'pending'
         && !guardRow.customer_confirmed) {
-        throw new Error(`transitionJobStatus: ${jobId} is a pending outbound-review booking awaiting office confirmation (cannot ${toStatus})`);
+        // Typed operational conflict, not a plain Error: shared-writer callers
+        // (tech-track en-route/on-site, dispatch, admin-schedule) allow
+        // 'pending' as a source status, so this is an EXPECTED block for them
+        // — they translate the code to a 409, same as the 'not in state' race.
+        // A bare Error here bubbled to Express as a 500.
+        const guardErr = new Error(`transitionJobStatus: ${jobId} is a pending outbound-review booking awaiting office confirmation (cannot ${toStatus})`);
+        guardErr.code = 'OUTBOUND_REVIEW_UNCONFIRMED';
+        throw guardErr;
       }
     }
     // Atomic guard: only update if the row is currently in fromStatus.

@@ -1772,6 +1772,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
         const lifecycleAt = new Date();
+        if (toStatus === 'confirmed') {
+          // Same lifecycle semantics as the admin-schedule status route. For a
+          // pending outbound-review booking this is the flag the shared-writer
+          // guard and the customer self-service filters key on — without it a
+          // dispatch-side confirm left the row permanently review-locked.
+          lifecycleUpdates.customer_confirmed = true;
+        }
         if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, lifecycleAt));
         }
@@ -1802,12 +1809,31 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
         });
       }
       throw err;
+    }
+
+    // Office confirmation of a pending outbound-review booking from THIS route
+    // must run the same side effects as the admin-schedule confirm path (arm
+    // deferred reminders, convert the originating call lead, resolve the
+    // outbound_booking_review card) — shared hook so the two can't drift.
+    // Post-commit + best-effort, same as every other block below.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-dispatch');
+      }
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.
@@ -3960,6 +3986,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (preCommitCompletionPhotoRows.length) {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
+        }
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          // Completing a pending outbound-review booking is an expected block
+          // from the shared writer — record the failed attempt and conflict.
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
         }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);

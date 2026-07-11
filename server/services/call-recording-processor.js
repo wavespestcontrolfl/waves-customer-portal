@@ -5897,9 +5897,22 @@ const CallRecordingProcessor = {
                     // to won (that would show a phantom closed sale in pipeline/
                     // conversion metrics that reverts if staff reject the review).
                     // The lead closes from the office confirmation path instead.
-                    // Surface the pending booking for that review.
+                    // Surface the pending booking for that review — and carry
+                    // the ORIGINATING lead id (+ the booking-time quote flag)
+                    // on the card: the booking can reuse an existing unclaimed
+                    // phone lead that never gets customer_id stamped, so the
+                    // confirm hook's customer_id lookup alone would miss it.
                     await trx('triage_items')
-                      .insert(buildTriageItem({ callLogId: call.id, flag: 'outbound_booking_review', extraction: v2ApprovedExtraction || extracted, severity: 'advisory' }))
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'outbound_booking_review',
+                        extraction: v2ApprovedExtraction || extracted,
+                        severity: 'advisory',
+                        extraPayload: {
+                          lead_id: leadId || null,
+                          keep_open_for_quote: !!callQuotePromised,
+                        },
+                      }))
                       .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
                   } else {
                     // A phone-booked appointment is the deal closing — convert the

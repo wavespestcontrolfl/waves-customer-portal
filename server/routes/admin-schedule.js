@@ -4962,6 +4962,15 @@ router.put('/:id/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        // Expected block from the shared writer's review-booking guard —
+        // conflict, not a 500 (mirrors the pre-guard above for statuses it
+        // doesn't cover, e.g. a race past it).
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -5014,68 +5023,16 @@ router.put('/:id/status', async (req, res, next) => {
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 
-    // Outbound-callback booking confirmed by the office → arm the 72h/24h
-    // reminders that were deferred at booking time. The AI call pipeline creates
-    // these PENDING and intentionally skips reminder registration (the reminder
-    // cron doesn't skip 'pending', so arming at booking would text the customer
-    // before this confirmation). Idempotent (registerAppointment dedupes by
-    // scheduled_service_id) + best-effort; sendConfirmation:false = arm reminders
-    // only, the office owns any confirmation message.
+    // Outbound-callback booking confirmed by the office → arm the deferred
+    // reminders, convert the originating call lead, resolve the review card.
+    // Shared hook (services/outbound-review-confirm) so the admin-dispatch
+    // status route — the other surface staff confirm from — runs the exact
+    // same side effects and the two paths can't drift.
     {
       const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
       if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
-        try {
-          const AppointmentReminders = require('../services/appointment-reminders');
-          await AppointmentReminders.registerAppointment(
-            svc.id,
-            svc.customer_id,
-            `${dateOnly(svc.scheduled_date)}T${svc.window_start || '09:00'}`,
-            svc.service_type,
-            'admin_manual',
-            { sendConfirmation: false },
-          );
-          logger.info(`[admin-schedule] Armed reminders for confirmed outbound-review booking ${svc.id}`);
-        } catch (e) { logger.error(`[admin-schedule] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
-        // Close the originating call lead now that the office confirmed — the
-        // insert path deliberately skipped conversion for the pending review row
-        // so it wouldn't show a phantom closed sale before staff approved it.
-        // Best-effort; only when EXACTLY ONE active lead maps to this customer
-        // (avoids converting the wrong lead when ambiguous). Terminal statuses
-        // mirror the pipeline's TERMINAL_LEAD_STATUSES.
-        try {
-          const CallProc = require('../services/call-recording-processor');
-          const activeLeads = await db('leads')
-            .where({ customer_id: svc.customer_id })
-            .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
-            .whereNull('deleted_at')
-            .orderBy('created_at', 'desc')
-            .limit(2)
-            .select('id', 'status');
-          if (activeLeads.length === 1) {
-            // Preserve a promised-quote follow-up: if the lead is mid-estimate,
-            // claim it but keep it OPEN (mirrors the insert path's
-            // keepOpenForQuote) so the booking doesn't hide an owed quote.
-            const keepOpenForQuote = /estimate|quote/i.test(String(activeLeads[0].status || ''));
-            await CallProc.convertCallLeadOnPhoneBooking(db, {
-              leadId: activeLeads[0].id,
-              customerId: svc.customer_id,
-              scheduledServiceId: svc.id,
-              callSid: null,
-              keepOpenForQuote,
-            });
-            logger.info(`[admin-schedule] Converted lead ${activeLeads[0].id} (keepOpenForQuote=${keepOpenForQuote}) for confirmed outbound-review booking ${svc.id}`);
-          }
-        } catch (e) { logger.error(`[admin-schedule] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
-        // Resolve the outbound_booking_review Needs-Review card now that the
-        // office confirmed — otherwise it lingers in the queue as already-handled.
-        try {
-          if (svc.source_call_log_id) {
-            await db('triage_items')
-              .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
-              .whereIn('status', ['open', 'in_progress'])
-              .update({ status: 'resolved', updated_at: db.fn.now() });
-          }
-        } catch (e) { logger.error(`[admin-schedule] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
       }
     }
 
