@@ -17,7 +17,7 @@
  *   - No emoji icons
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, CardBody, cn } from '../ui';
 import {
   DndContext,
@@ -123,14 +123,44 @@ export function ViewModeSelectorV2({ viewMode, onViewModeChange, allowed }) {
 }
 
 
+// ─── FAILED-LOAD CARD ────────────────────────────────────────────
+
+// A fetch error used to render a silent blank (data stayed null and the view
+// returned null), which read as "no appointments scheduled". Show the failure
+// and offer an in-place retry instead.
+function CalendarLoadError({ label, onRetry }) {
+  return (
+    <div className="py-10 text-center">
+      <div className="text-13 text-ink-secondary mb-3">
+        Couldn&rsquo;t load the {label}. Check your connection and try again.
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50 u-focus-ring transition-colors"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+
 // ─── WEEK VIEW ───────────────────────────────────────────────────
 
 export function WeekViewV2({ startDate, onDateClick }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
 
   useEffect(() => {
+    // Cancelled flag: rapid week navigation fires overlapping fetches, and an
+    // older response landing last would render the wrong week (or a stale
+    // error over a fresh load).
+    let cancelled = false;
     setLoading(true);
+    setError(false);
     const d = new Date(startDate + 'T12:00:00');
     const day = d.getDay();
     const monday = new Date(d);
@@ -138,11 +168,13 @@ export function WeekViewV2({ startDate, onDateClick }) {
     const mondayStr = etDateString(monday);
 
     adminFetch(`/admin/schedule/week?start=${mondayStr}`)
-      .then((res) => { setData(res); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [startDate]);
+      .then((res) => { if (cancelled) return; setData(res); setLoading(false); })
+      .catch(() => { if (cancelled) return; setError(true); setLoading(false); });
+    return () => { cancelled = true; };
+  }, [startDate, retryTick]);
 
   if (loading) return <div className="py-10 text-center text-13 text-ink-secondary">Loading week…</div>;
+  if (error) return <CalendarLoadError label="week" onRetry={() => setRetryTick((t) => t + 1)} />;
   if (!data?.days) return null;
 
   const today = etDateString(new Date());
@@ -365,17 +397,31 @@ function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
 export function MonthViewV2({ date, onDateClick, onViewCustomer }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
+  // Latest-wins guard: reload is also called after a reschedule commit, so
+  // rapid month navigation (or a retry racing an in-flight fetch) can have
+  // overlapping requests — only the newest one may write state.
+  const reloadSeqRef = useRef(0);
 
   const yearMonth = date.slice(0, 7); // "2026-04"
 
   const reload = useCallback(() => {
+    const seq = ++reloadSeqRef.current;
     setOptimistic(null);
+    setError(false);
     return adminFetch(`/admin/schedule/month?month=${yearMonth}`)
-      .then((res) => { setData(res); setLoading(false); return res; })
-      .catch(() => setLoading(false));
+      .then((res) => {
+        if (reloadSeqRef.current !== seq) return res;
+        setData(res); setLoading(false);
+        return res;
+      })
+      .catch(() => {
+        if (reloadSeqRef.current !== seq) return;
+        setError(true); setLoading(false);
+      });
   }, [yearMonth]);
 
   useEffect(() => {
@@ -473,6 +519,7 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer }) {
   const viewData = optimistic || data;
 
   if (loading) return <div className="py-10 text-center text-13 text-ink-secondary">Loading calendar…</div>;
+  if (error) return <CalendarLoadError label="calendar" onRetry={() => { setLoading(true); reload(); }} />;
   if (!viewData?.weeks) return null;
 
   const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];

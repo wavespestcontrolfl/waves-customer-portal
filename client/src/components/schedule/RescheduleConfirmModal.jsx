@@ -7,7 +7,7 @@
 // visually) — this modal only confirms and commits via onConfirm
 // (called with { notificationType, scope }), or tells the parent to
 // revert via onCancel.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '../ui';
 
 function formatDateLong(dateStr) {
@@ -42,6 +42,14 @@ export default function RescheduleConfirmModal({
 }) {
   const [notificationType, setNotificationType] = useState('none');
   const [busy, setBusy] = useState(false);
+
+  // The modal stays mounted between drags (open just flips), so a previous
+  // reschedule's notification choice would silently carry into the next one —
+  // an accidental customer SMS one click away. Reset to the no-SMS default
+  // each time it opens.
+  useEffect(() => {
+    if (open) setNotificationType('none');
+  }, [open]);
 
   if (!open) return null;
 
