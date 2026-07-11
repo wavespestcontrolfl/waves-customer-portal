@@ -2721,48 +2721,97 @@ const RECURRING_OVERRIDE_SOURCES = new Set([
   'initial pest cleanout',
 ]);
 const normalizeServiceKey = (v) => String(v || '').trim().toLowerCase().replace(/\s+service$/, '');
-// Program words that are unambiguous on their own. Bare cadence phrases
-// ("every month", "monthly") are NOT here — they only count with the
-// pest-pressure guard below ("we get ants every month" is an observation).
-const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing|year[- ]?round|(?:service|maintenance|pest|treatment) plan|package|membership|quarterly|semi[- ]?annual(?:ly)?|twice a year)\b/i;
-const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
+// The recurring pest programs (suffix-normalized). All five carry these
+// EXACT names in the live catalog, active + booking_enabled (verified in
+// prod 2026-07-11), so catalog booking resolves them by exact match. Also
+// used to RETARGET a model-picked cadence when the caller unambiguously
+// chose a different one.
+const RECURRING_PEST_PROGRAMS = new Set([
+  'monthly pest control',
+  'bi-monthly pest control',
+  'quarterly pest control',
+  'semiannual pest control',
+]);
+// Program words that are unambiguous on their own. Bare cadence/duration
+// phrases ("every month", "monthly", "ongoing", "year-round") are NOT here —
+// they only count with the pest-pressure guard below ("we get ants every
+// month" / "an ongoing ant problem" are observations, not plan asks).
+const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|(?:service|maintenance|pest|treatment) plan|package|membership|quarterly|semi[- ]?annual(?:ly)?|twice a year)\b/i;
+const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bongoing\b|\byear[- ]?round\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
 // "we get/see/have fire ants every month" describes pressure, not a plan ask.
-const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|see(?:ing|n)?|have|had|having|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in))\b[^.?!]{0,40}$/i;
+const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in))\b[^.?!]{0,40}$/i;
+// ...but a request verb AFTER the pressure verb re-frames the clause as an
+// ask: "I HAVE ants and WANT monthly service".
+const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
 // Declines: negated-want forms, bare opt-outs ("no package, only the nest"),
 // and "just a one-time" — the latter only when not itself negated ("NOT just
-// a one-time, I want a package" is a recurring request).
+// a one-time" / "I don't want just a one-time" are recurring requests).
 // NOTE: "contract"/"subscription" are deliberately NOT opt-out words — "no
 // contract" is month-to-month sales language ("can I do quarterly with no
 // contract?") and usually accompanies WANTING the plan.
-const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b[^.?!]{0,50}\b(?:recurring|plan|package|membership|ongoing)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:recurring|plans?|packages?|memberships?)\b|(?<!\b(?:not|than)\s)\bjust (?:a |the )?one[- ]?time\b/i;
+// The negated-want gap is clause-bounded (no ;) and must not cross another
+// "want/need" — "I don't want just a one-time; I want a package" pivots to a
+// request and is NOT a decline.
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plan|package|membership|ongoing)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:recurring|plans?|packages?|memberships?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
 
-// True when `re` (global) matches somewhere that is NOT preceded by a
-// pest-pressure verb in the same clause — cadence talk about the SERVICE.
+// True when `re` (global) matches somewhere that reads as SERVICE cadence:
+// not preceded by a pest-pressure verb in the same clause, unless a request
+// verb after the pressure verb turned the clause into an ask.
 function serviceCadenceMatch(re, text) {
   const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
   while ((m = scan.exec(text))) {
     const before = text.slice(Math.max(0, m.index - 60), m.index);
-    if (!PEST_PRESSURE_BEFORE_RE.test(before)) return true;
+    const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
+    if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
     if (scan.lastIndex === m.index) scan.lastIndex++;
   }
   return false;
 }
 
-// The caller's own SPANS when the transcript is speaker-labelled — a
-// diarized turn can wrap onto unlabelled continuation lines, which inherit
-// the current speaker. Whole transcript otherwise (fail-open — better a
-// rare agent-word trigger than silently losing the rule).
-function callerOnlyText(transcription) {
+// Speaker turns from a labelled transcript: a turn starts at a
+// "Speaker:" label and absorbs unlabelled continuation lines (a diarized
+// turn can wrap), so continuations inherit their speaker.
+function speakerTurns(transcription) {
   const lines = String(transcription || '').split('\n');
-  let speaker = null;
-  const out = [];
+  const turns = [];
   for (const line of lines) {
     const label = line.match(/^\s*([A-Za-z][A-Za-z ]{0,20}?)\s*:/);
-    if (label) speaker = /^(caller|customer)$/i.test(label[1].trim()) ? 'caller' : 'other';
-    if (speaker === 'caller') out.push(line);
+    if (label) {
+      turns.push({ speaker: /^(caller|customer)$/i.test(label[1].trim()) ? 'caller' : 'other', text: line });
+    } else if (turns.length) {
+      turns[turns.length - 1].text += `\n${line}`;
+    }
   }
-  return out.length ? out.join('\n') : String(transcription || '');
+  return turns;
+}
+
+// The caller's own turns when the transcript is speaker-labelled; the whole
+// transcript otherwise (fail-open — better a rare agent-word trigger than
+// silently losing the rule on unlabelled transcripts).
+function callerOnlyText(transcription) {
+  const callerTurns = speakerTurns(transcription).filter((t) => t.speaker === 'caller');
+  return callerTurns.length ? callerTurns.map((t) => t.text).join('\n') : String(transcription || '');
+}
+
+// An agent plan offer the caller ACCEPTS is caller intent too ("we can put
+// you on quarterly service" → "yes, that works"). Returns the offer turn's
+// text (it carries the cadence) or null. The ignored-upsell guard survives:
+// an offer with no affirmative reply returns nothing.
+// Bare "ok(ay)" is deliberately absent — it's conversational acknowledgment
+// ("okay." while the agent pitches), not acceptance.
+const PLAN_AFFIRMATION_RE = /^\s*(?:caller|customer)\s*:\s*(?:yes|yeah|yep|yup|sure|sounds good|that works|that'?s fine|let'?s do (?:that|it)|perfect|please do|sign me up|absolutely|definitely)\b/i;
+function acceptedPlanOfferText(transcription) {
+  const turns = speakerTurns(transcription);
+  for (let i = 0; i + 1 < turns.length; i++) {
+    if (turns[i].speaker !== 'other' || turns[i + 1].speaker !== 'caller') continue;
+    const offer = turns[i].text;
+    if ((RECURRING_INTENT_STRONG_RE.test(offer) || serviceCadenceMatch(RECURRING_CADENCE_RE, offer))
+      && PLAN_AFFIRMATION_RE.test(turns[i + 1].text)) {
+      return offer;
+    }
+  }
+  return null;
 }
 
 function applyRecurringIntentDefault(extracted, transcription) {
@@ -2771,32 +2820,48 @@ function applyRecurringIntentDefault(extracted, transcription) {
   // resolution (call-booking-catalog.js), so a singular value THERE would
   // book the one-time service no matter what matched_service says — both
   // fields get the rule.
-  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(extracted.matched_service));
-  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(normalizeServiceKey(extracted.specific_service_name));
-  if (!matchedIsSingular && !specificIsSingular) return extracted;
+  const matchedKey = normalizeServiceKey(extracted.matched_service);
+  const specificKey = normalizeServiceKey(extracted.specific_service_name);
+  const matchedIsSingular = RECURRING_OVERRIDE_SOURCES.has(matchedKey);
+  const specificIsSingular = RECURRING_OVERRIDE_SOURCES.has(specificKey);
+  const matchedIsRecurring = RECURRING_PEST_PROGRAMS.has(matchedKey);
+  const specificIsRecurring = RECURRING_PEST_PROGRAMS.has(specificKey);
+  if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
+
   const callerText = callerOnlyText(transcription);
-  const hasIntent = RECURRING_INTENT_STRONG_RE.test(callerText)
+  if (RECURRING_DECLINED_RE.test(callerText)) return extracted;
+  const callerVoiced = RECURRING_INTENT_STRONG_RE.test(callerText)
     || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
-  if (!hasIntent || RECURRING_DECLINED_RE.test(callerText)) return extracted;
-  // Cadence: honor the ONE cadence the caller actually chose; when they
-  // float several ("quarterly or every six months? I don't know") or name
-  // none, pest defaults to quarterly — same default as the estimate engine
-  // (estimate-converter.js). Names are live-catalog-exact (verified in prod
-  // 2026-07-11) so catalog booking resolves them by exact match. Family
-  // matches carry the same pest-pressure guard as intent detection.
+  const acceptedOffer = callerVoiced ? null : acceptedPlanOfferText(transcription);
+  if (!callerVoiced && !acceptedOffer) return extracted;
+  // Cadence: honor the ONE cadence the caller actually chose (from their own
+  // words, or from the agent offer they accepted); when they float several
+  // ("quarterly or every six months? I don't know") or name none, pest
+  // defaults to quarterly — same default as the estimate engine
+  // (estimate-converter.js). Family matches carry the same pest-pressure
+  // guard as intent detection.
+  const cadenceText = acceptedOffer || callerText;
   const families = [
     { name: 'Monthly Pest Control Service', re: /\bmonthly\b|\bevery (?:single )?month\b/gi, veto: /\bbi[- ]?monthly\b|\bevery other month\b/i },
     { name: 'Bi-Monthly Pest Control Service', re: /\bbi[- ]?monthly\b|\bevery other month\b|\bevery (?:two|2) months\b/gi },
     { name: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/gi },
     { name: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/gi },
   ];
-  const hits = families.filter((f) => serviceCadenceMatch(f.re, callerText) && !(f.veto && f.veto.test(callerText)));
-  const target = hits.length === 1 ? hits[0].name : 'Quarterly Pest Control Service';
+  const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText) && !(f.veto && f.veto.test(cadenceText)));
+
+  const retarget = (isSingular, isRecurring, current) => {
+    if (isSingular) return hits.length === 1 ? hits[0].name : 'Quarterly Pest Control Service';
+    // Already a recurring program: retarget ONLY on one unambiguous caller
+    // cadence (the model can default to quarterly over an explicit
+    // bi-monthly ask); ambiguity keeps the model's pick.
+    if (isRecurring && hits.length === 1) return hits[0].name;
+    return current;
+  };
   const out = { ...extracted };
-  if (matchedIsSingular) out.matched_service = target;
-  if (specificIsSingular) out.specific_service_name = target;
+  out.matched_service = retarget(matchedIsSingular, matchedIsRecurring, extracted.matched_service);
+  out.specific_service_name = retarget(specificIsSingular, specificIsRecurring, extracted.specific_service_name);
   if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
-  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${target}"`);
+  logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${out.specific_service_name || out.matched_service}"`);
   return out;
 }
 
@@ -2947,7 +3012,8 @@ IMPORTANT — appointment_confirmed rules:
 
 IMPORTANT — matched_service: recurring interest beats the single presenting pest:
 - When the caller voices ANY interest in recurring/ongoing service — a "package", a "plan", a "membership", treatments "every X months/weeks", "quarterly", "monthly", "twice a year", keeping bugs away year-round, or asking what cadence you usually do — matched_service MUST be the recurring pest program, even when the visible complaint is a single pest (a wasp nest, an ant trail, one roach sighting). The single-pest service (Bee / Wasp Nest Removal Service, One-Time Pest Control Service, Fire Ant Treatment Service, …) is correct ONLY when no recurring interest is voiced.
-- Cadence: use the one the CALLER chose — "Monthly Pest Control Service", "Quarterly Pest Control Service", or "Semiannual Pest Control Service". When they float options without choosing ("quarterly or every six months? I don't know what you usually do") or name no cadence, use "Quarterly Pest Control Service" — pest defaults to quarterly.
+- Cadence: use the one the CALLER chose — "Monthly Pest Control Service", "Bi-Monthly Pest Control Service" (every other month), "Quarterly Pest Control Service", or "Semiannual Pest Control Service" (every six months / twice a year). When they float options without choosing ("quarterly or every six months? I don't know what you usually do") or name no cadence, use "Quarterly Pest Control Service" — pest defaults to quarterly.
+- A caller ACCEPTING the agent's plan offer ("we can put you on quarterly service" → "yes, that works") counts as voicing recurring interest.
 - This rule reads the CALLER's interest, not the agent's pitch: an agent offering a plan the caller ignores or declines does not trigger it. A caller who explicitly wants one-time only ("just the one treatment, no plan", "no package") keeps the single service.
 - Pest-frequency OBSERVATIONS are not plan interest: "we get fire ants every month in that corner" describes pressure, not a request for monthly service — do not classify it as recurring unless the caller also asks about ongoing treatment.
 - The specific pest still belongs in requested_service and pain_points — only matched_service defaults to the program.

@@ -144,6 +144,60 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Initial German Roach Knockdown Service');
   });
 
+  test('a request verb after the pest mention preserves the cadence ask', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have ants and want monthly service.').matched_service)
+      .toBe('Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: we have roaches and I need you out every six months.').matched_service)
+      .toBe('Semiannual Pest Control Service');
+  });
+
+  test('"I don\'t want just a one-time" is a recurring request, not a decline', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want just a one-time treatment; I want a package.").matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // The plain form still declines.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want just a one-time treatment.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('an ACCEPTED agent plan offer counts as intent, with the cadence from the offer', () => {
+    const accepted = [
+      'Caller: I have a wasp nest by the garage.',
+      'Agent: we could put you on our quarterly service, most folks do that.',
+      'Caller: yes, that works.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), accepted).matched_service).toBe('Quarterly Pest Control Service');
+    // The same offer with no affirmative reply stays an ignored upsell.
+    const ignored = [
+      'Caller: I have a wasp nest by the garage.',
+      'Agent: we could put you on our quarterly service, most folks do that.',
+      'Caller: no, let me think about it.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), ignored).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('"ongoing"/"year-round" as pest descriptions are not plan interest; as service asks they are', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have an ongoing ant problem.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: this has been ongoing for months.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want ongoing service.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: something to keep the bugs away year-round.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('a model-picked recurring cadence is retargeted when the caller chose ONE other cadence', () => {
+    expect(applyRecurringIntentDefault(
+      lead({ matched_service: 'Quarterly Pest Control Service' }),
+      'Caller: could you come every other month?'
+    ).matched_service).toBe('Bi-Monthly Pest Control Service');
+    // Ambiguous cadence keeps the model's pick.
+    expect(applyRecurringIntentDefault(
+      lead({ matched_service: 'Quarterly Pest Control Service' }),
+      'Caller: quarterly or every six months, whatever you recommend.'
+    ).matched_service).toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
