@@ -190,6 +190,7 @@ function GraduationNote({ g }) {
   const context = [];
   if (j.judged > 0) context.push(`${j.judged} live judged (${Math.round((j.unsafeRate || 0) * 100)}% unsafe)`);
   if (j.backfillJudged > 0) context.push(`${j.backfillJudged} backfill excluded`);
+  if (j.priorVersionJudged > 0) context.push(`${j.priorVersionJudged} prior-version excluded`);
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
@@ -198,6 +199,18 @@ function GraduationNote({ g }) {
       )}
       {g.eligibleFor === "auto_send" && (
         <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
+      )}
+      {/* Intent is AT auto_send but the send-time gate is blocking (e.g. a
+          prompt bump reset the cohort evidence) — mirror the executor. */}
+      {g.autoSendHealth && !g.autoSendHealth.sendReady && (
+        <>
+          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>
+            ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
+          </span>
+          <span style={{ color: D.muted }}>
+            Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.
+          </span>
+        </>
       )}
       {!g.eligibleFor && rungLabel && (
         <span style={{ color: D.muted }}>
