@@ -72,6 +72,26 @@ describe('list_call_partners aggregation', () => {
     expect(res.partners[0].relationship).toBe('lender');
   });
 
+  test('a legacy row with NO enriched payload still matches via its summary', async () => {
+    // Pre-V2 rows (or failed V2 runs) have null ai_extraction_enriched but a
+    // usable summary — the fallback must see them or the aggregate undercounts
+    // exactly the legacy partners the tool documents supporting.
+    db.mockImplementation(() => rowsChain([
+      mkRow({ from_phone: '+19410000003', ai_extraction_enriched: null, call_summary: 'A realtor called about a WDO inspection for a pending sale.' }),
+    ]));
+    const res = await executeCommsTool('list_call_partners', {});
+    expect(res.partner_count).toBe(1);
+    expect(res.partners[0].relationship).toBe('real_estate_agent');
+  });
+
+  test('split first/last caller names label the partner when name_full is absent', async () => {
+    db.mockImplementation(() => rowsChain([
+      mkRow({ ai_extraction_enriched: enriched({ first_name: 'Kathy', last_name: 'Callahan', relationship_to_property: 'real_estate_agent' }) }),
+    ]));
+    const res = await executeCommsTool('list_call_partners', {});
+    expect(res.partners[0].name).toBe('Kathy Callahan');
+  });
+
   test('legacy rows: malformed JSON never throws, full arranger phrases match, relationship is inferred', async () => {
     db.mockImplementation(() => rowsChain([
       // Malformed legacy extraction — must be skipped gracefully, not throw.
@@ -108,11 +128,27 @@ describe('get_partner_call_history', () => {
         },
         // Staff called the partner back — outbound leg must appear too.
         { id: 'c2', created_at: '2026-07-09T10:00:00.000Z', direction: 'outbound', duration_seconds: 60, call_summary: 'Callback about scheduling', disposition: null, ai_extraction: '{broken' },
+        // Post-1.7.0 call: parties + service exist ONLY in the V2 payload.
+        {
+          id: 'c3', created_at: '2026-07-10T10:00:00.000Z', direction: 'inbound', duration_seconds: 200, call_summary: 'WDO for a closing', disposition: null,
+          ai_extraction: null,
+          ai_extraction_enriched: JSON.stringify({
+            service_request: { specific_service_name: 'WDO Inspection Service' },
+            secondary_contacts: [
+              { first_name: 'Leslie', last_name: 'Ferraro', role: 'home_buyer' },
+              { first_name: 'Rigo', last_name: 'Rivera', role: 'home_seller' },
+            ],
+          }),
+        },
       ]);
       return q;
     });
     const res = await executeCommsTool('get_partner_call_history', { phone: '+1 (407) 493-3469' });
-    expect(res.call_count).toBe(2);
+    expect(res.call_count).toBe(3);
+    // V2-only multi-party context surfaces in the drilldown.
+    const v2only = res.calls.find((c) => c.id === 'c3');
+    expect(v2only.requested_service).toBe('WDO Inspection Service');
+    expect(v2only.other_party).toBe('Leslie Ferraro (home_buyer); Rigo Rivera (home_seller)');
     const inbound = res.calls.find((c) => c.id === 'c1');
     expect(inbound.other_party).toBe('Joseph Haught (home_buyer)');
     expect(inbound.requested_service).toBe('WDO inspection');

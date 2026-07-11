@@ -850,7 +850,12 @@ async function listCallPartners(input = {}) {
     .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
     .where('direction', 'inbound')
     .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
-    .whereNotNull('ai_extraction_enriched')
+    // Legacy rows (pre-V2, or a failed V2 run) have NO enriched payload but a
+    // usable summary — they must reach the ARRANGER_PHRASE_RE fallback, not be
+    // filtered out here. safeJson fails open on the null enriched.
+    .where(function () {
+      this.whereNotNull('ai_extraction_enriched').orWhereRaw("COALESCE(call_summary, '') <> ''");
+    })
     .select('from_phone', 'created_at', 'call_summary', 'ai_extraction_enriched')
     .orderBy('created_at', 'desc')
     .limit(2000);
@@ -885,7 +890,12 @@ async function listCallPartners(input = {}) {
     if (WDO_RE.test(summary)) p.wdo_calls += 1;
     if (r.created_at < p.first_call) p.first_call = r.created_at;
     // Rows arrive newest-first: keep the first non-null identity fields.
-    if (!p.name && caller.name_full) p.name = caller.name_full;
+    // name_full may be absent while first/last survive (persisted schema
+    // allows it) — an identified partner must not list as unnamed.
+    const callerName = caller.name_full
+      || [caller.first_name, caller.last_name].filter(Boolean).join(' ')
+      || null;
+    if (!p.name && callerName) p.name = callerName;
     if (!p.organization && org) p.organization = org;
     if (!p.relationship && rel) p.relationship = rel;
     // Legacy fallback: infer the enum from phrasing so pre-1.7.0 partners
@@ -915,25 +925,42 @@ async function getPartnerCallHistory(input = {}) {
   // malformed rows would throw the whole tool) — JSON parses per-row in JS.
   const rows = await db('call_log')
     .whereRaw(`(${phoneKeyExpr('from_phone')} = ? OR ${phoneKeyExpr('to_phone')} = ?)`, [digits, digits])
-    .select('id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition', 'ai_extraction')
+    .select('id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition', 'ai_extraction', 'ai_extraction_enriched')
     .orderBy('created_at', 'desc')
     .limit(limit);
+
+  const contactLabel = (c) => {
+    if (!c || typeof c !== 'object') return null;
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ') || c.name_full || null;
+    return name ? `${name}${c.role ? ` (${c.role})` : ''}` : null;
+  };
 
   return {
     phone: input.phone,
     call_count: rows.length,
     calls: rows.map((r) => {
       const v1 = safeJson(r.ai_extraction) || {};
-      const sc = v1.secondary_contact && typeof v1.secondary_contact === 'object' ? v1.secondary_contact : null;
-      const scName = sc ? [sc.first_name, sc.last_name].filter(Boolean).join(' ') : null;
+      const v2 = safeJson(r.ai_extraction_enriched) || {};
+      // Multi-party context from BOTH generations: legacy V1 secondary_contact
+      // plus the 1.4.0+ V2 secondary_contacts array — the whole point of the
+      // drilldown is who each arranger call was FOR.
+      const parties = [];
+      const seen = new Set();
+      for (const c of [v1.secondary_contact, v2.secondary_contact, ...(Array.isArray(v2.secondary_contacts) ? v2.secondary_contacts : [])]) {
+        const label = contactLabel(c);
+        if (label && !seen.has(label)) { seen.add(label); parties.push(label); }
+      }
       return {
         id: r.id,
         at: r.created_at,
         direction: r.direction,
         duration_seconds: r.duration_seconds,
         summary: String(r.call_summary || '').slice(0, 300) || null,
-        requested_service: v1.requested_service || null,
-        other_party: scName ? `${scName}${sc.role ? ` (${sc.role})` : ''}` : null,
+        requested_service: v1.requested_service
+          || v2.service_request?.specific_service_name
+          || v2.service_request?.primary_service_category
+          || null,
+        other_party: parties.length ? parties.join('; ') : null,
         disposition: r.disposition || null,
       };
     }),
