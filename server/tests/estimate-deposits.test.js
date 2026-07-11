@@ -79,6 +79,7 @@ const {
   ensureDepositSatisfied,
   handleDepositIntentSucceeded,
   pendingDepositCredit,
+  pendingDepositCreditForCustomer,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
   _private: { depositIntentMatchesEstimate },
@@ -1164,6 +1165,44 @@ describe('webhook + invoice credit', () => {
       select: async () => [{ id: 'd1', amount: '70.00', credited_amount: '70.00' }],
     });
     expect(await pendingDepositCredit('est-1')).toBeNull();
+  });
+
+  it('pendingDepositCreditForCustomer skips exhausted estimates and tags the owning estimateId', async () => {
+    // est-old's deposit is fully consumed; est-new still has an open $49 —
+    // the helper must skip past est-old (oldest first) and return est-new's
+    // credit with the estimateId the caller needs for consumption.
+    mockDbHandler = (table) => ({
+      join() { return this; },
+      where() { return this; },
+      orderBy() { return this; },
+      select: async () => (table === 'estimate_deposits as d'
+        ? [
+          { estimate_id: 'est-old', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
+          { estimate_id: 'est-new', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' },
+        ]
+        : [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }]),
+    });
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-new');
+    expect(credit.amount).toBe(49);
+    expect(credit.lineItem.unit_price).toBe(-49);
+    expect(credit.lineItem.category).toBe('deposit_credit');
+  });
+
+  it('pendingDepositCreditForCustomer returns null when every row is consumed or refunded (or none exist)', async () => {
+    mockDbHandler = () => ({
+      join() { return this; },
+      where() { return this; },
+      orderBy() { return this; },
+      select: async () => [
+        { estimate_id: 'est-1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
+        { estimate_id: 'est-2', amount: '99.00', credited_amount: '0.00', refunded_amount: '99.00' },
+      ],
+    });
+    expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();
+    mockDbHandler = () => ({ join() { return this; }, where() { return this; }, orderBy() { return this; }, select: async () => [] });
+    expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();
+    expect(await pendingDepositCreditForCustomer(null)).toBeNull();
   });
 });
 

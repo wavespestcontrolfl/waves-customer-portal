@@ -3460,6 +3460,21 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   const [amountTouched, setAmountTouched] = useState(false);
   const cadenceTouchedRef = useRef(false);
   const visitCountTouchedRef = useRef(false);
+  // Open estimate-deposit credit on file (e.g. restored by voiding a prior
+  // prepay invoice). The server auto-applies it to the minted invoice, so the
+  // operator enters the FULL plan amount and the invoice bills the
+  // difference. Preview-only read — the authoritative ledger read re-runs
+  // inside the mint transaction.
+  const [depositCredit, setDepositCredit] = useState(null);
+  const [applyCredit, setApplyCredit] = useState(true);
+  useEffect(() => {
+    if (!customer?.id) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customer.id}/deposit-credit`)
+      .then((r) => { if (!cancelled) setDepositCredit(r?.credit || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [customer?.id]);
 
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(" ").trim() || "Customer";
   const count = Number.parseInt(visitCount, 10);
@@ -3554,6 +3569,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
+          applyDepositCredit: applyCredit,
         }),
       });
       if (result?.delivery && result.delivery.ok === false) {
@@ -3589,6 +3605,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
+          applyDepositCredit: applyCredit,
           chargeInPerson: true,
         }),
       });
@@ -3625,6 +3642,25 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           {activeTermEnd && (
             <div className="sm:col-span-2 text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
               Current term ends {fmtDate(activeTermEnd)}
+            </div>
+          )}
+          {depositCredit && (
+            <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={applyCredit}
+                  onChange={(e) => setApplyCredit(e.target.checked)}
+                  className="mt-0.5 u-focus-ring"
+                />
+                <span>
+                  Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file.
+                  Enter the full plan amount — the credit comes off the invoice automatically
+                  {applyCredit && Number(amount) > 0
+                    ? ` (customer pays $${Math.max(0, estTaxInclusiveTotal - Number(depositCredit.amount)).toFixed(2)})`
+                    : ""}.
+                </span>
+              </label>
             </div>
           )}
           <label className="block sm:col-span-2">

@@ -1399,6 +1399,39 @@ async function pendingDepositCredit(estimateId, trx = db) {
   };
 }
 
+// Customer-scoped variant for flows that mint an invoice OFF the estimate
+// path (Customer 360 / AnnualPrepayLauncher manual annual-prepay invoice):
+// find the customer's oldest estimate deposit row with an unapplied received
+// balance and return the same shape as pendingDepositCredit PLUS the owning
+// estimateId — consumption is per-estimate, so the caller passes that id to
+// consumeDepositCredit. Oldest-open-first mirrors consumeDepositCredit's
+// FIFO allocation, so a credit restored by voiding a prior prepay invoice is
+// re-applied before any newer deposit. One estimate per call: a single
+// invoice consumes from a single estimate's ledger, keeping the credit line
+// dollar-for-dollar traceable to one estimate's deposits.
+async function pendingDepositCreditForCustomer(customerId, trx = db) {
+  if (!customerId) return null;
+  const rows = await trx('estimate_deposits as d')
+    .join('estimates as e', 'd.estimate_id', 'e.id')
+    .where('e.customer_id', customerId)
+    .where('d.status', 'received')
+    .orderBy('d.created_at', 'asc')
+    .select('d.estimate_id', 'd.amount', 'd.credited_amount', 'd.refunded_amount');
+  const checked = new Set();
+  for (const row of rows) {
+    const estimateId = row.estimate_id;
+    if (!estimateId || checked.has(estimateId)) continue;
+    checked.add(estimateId);
+    const availableCents = Math.round(Number(row.amount || 0) * 100)
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - Math.round(Number(row.refunded_amount || 0) * 100);
+    if (availableCents <= 0) continue;
+    const credit = await pendingDepositCredit(estimateId, trx);
+    if (credit) return { ...credit, estimateId };
+  }
+  return null;
+}
+
 // Allocate an applied credit against received rows (oldest first), tracking
 // per-row credited_amount in integer cents. A row flips to 'credited' (and
 // is stamped with the invoice) only when fully consumed; a partially
@@ -1635,6 +1668,7 @@ module.exports = {
   handleDepositIntentSucceeded,
   isDepositEnforced,
   pendingDepositCredit,
+  pendingDepositCreditForCustomer,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
