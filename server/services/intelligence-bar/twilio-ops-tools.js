@@ -25,6 +25,7 @@ const MAX_HOURS = 24 * 7;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MESSAGES_PAGE_SIZE = 100;
+const MAX_MESSAGE_PAGES = 5;
 const MAX_ALERT_TEXT_CHARS = 300;
 
 const TWILIO_OPS_TOOLS = [
@@ -129,30 +130,57 @@ async function getTwilioFailedMessages(input) {
   const limit = clampLimit(input.limit);
   const since = Date.now() - hours * 60 * 60 * 1000;
   const sid = process.env.TWILIO_ACCOUNT_SID;
-  // The Messages list has no status filter — pull one recent page and filter
-  // here. `DateSent>` narrows server-side to the window's first day.
-  const json = await twilioGet(TWILIO_API_BASE, `/2010-04-01/Accounts/${sid}/Messages.json`, {
+  // The Messages list has no status filter — page through recent messages
+  // (newest first) and filter here. `DateSent>` narrows server-side to the
+  // window's first day; pagination stops once a page runs past the window,
+  // the failure limit is filled, or the page cap is hit (busy accounts can
+  // have thousands of messages — the cap keeps this bounded, and the
+  // response says whether the scan was exhaustive).
+  const failed = [];
+  let scanned = 0;
+  let pagesFetched = 0;
+  let nextPath = `/2010-04-01/Accounts/${sid}/Messages.json`;
+  let params = {
     PageSize: MESSAGES_PAGE_SIZE,
     'DateSent>': new Date(since).toISOString().slice(0, 10),
-  });
-  const failed = (json.messages || [])
-    .filter(m => (m.status === 'failed' || m.status === 'undelivered'))
-    .filter(m => !m.date_sent || new Date(m.date_sent).getTime() >= since)
-    .slice(0, limit)
-    .map(m => ({
-      sid: m.sid,
-      to: m.to,
-      direction: m.direction,
-      status: m.status,
-      error_code: m.error_code,
-      error_message: truncate(m.error_message),
-      date_sent: m.date_sent,
-    }));
+  };
+
+  while (nextPath && pagesFetched < MAX_MESSAGE_PAGES && failed.length < limit) {
+    const json = await twilioGet(TWILIO_API_BASE, nextPath, params);
+    pagesFetched += 1;
+    const messages = json.messages || [];
+    scanned += messages.length;
+    for (const m of messages) {
+      if (failed.length >= limit) break;
+      if (m.status !== 'failed' && m.status !== 'undelivered') continue;
+      if (m.date_sent && new Date(m.date_sent).getTime() < since) continue;
+      failed.push({
+        sid: m.sid,
+        to: m.to,
+        direction: m.direction,
+        status: m.status,
+        error_code: m.error_code,
+        error_message: truncate(m.error_message),
+        date_sent: m.date_sent,
+      });
+    }
+    // Newest-first ordering: once the page's last message predates the
+    // window, later pages are entirely outside it.
+    const last = messages[messages.length - 1];
+    const pastWindow = Boolean(last?.date_sent && new Date(last.date_sent).getTime() < since);
+    nextPath = !pastWindow && json.next_page_uri ? json.next_page_uri : null;
+    params = undefined; // next_page_uri already carries the query string
+  }
+  // Exiting with a next page pending (page cap or failure limit reached)
+  // means the window was not fully scanned.
+  const exhaustive = !nextPath;
+
   return {
     window_hours: hours,
     failed_messages: failed,
     total: failed.length,
-    scanned_recent_messages: (json.messages || []).length,
+    scanned_recent_messages: scanned,
+    scan_exhaustive: exhaustive,
     note: 'Delivery metadata only — message bodies are never exposed through the Intelligence Bar.',
   };
 }

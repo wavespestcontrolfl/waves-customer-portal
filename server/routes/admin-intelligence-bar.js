@@ -124,6 +124,15 @@ const PII_TOOL_NAMES = new Set([
   // Railway runtime logs can echo customer identifiers from app logging —
   // redact like any other PII-bearing tool result.
   'get_railway_logs',
+  // Sentry reports with sendDefaultPii — issue titles, culprits, and event
+  // messages/values can embed customer emails, phones, or request data.
+  'get_sentry_top_issues',
+  'get_sentry_new_issues',
+  'get_sentry_issue_detail',
+  // Twilio results carry recipient phone numbers (and alert texts can echo
+  // them) — redact like the comms tools.
+  'get_twilio_alerts',
+  'get_twilio_failed_messages',
 ]);
 
 function isNonAdminDashboardRequest(req) {

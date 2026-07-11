@@ -92,6 +92,65 @@ describe('intelligence bar Twilio ops tools', () => {
     expect(result.failed_messages[0].body).toBeUndefined();
   });
 
+  test('get_twilio_failed_messages follows next_page_uri until the window is covered', async () => {
+    process.env.TWILIO_ACCOUNT_SID = 'AC123';
+    process.env.TWILIO_AUTH_TOKEN = 'auth';
+    const now = new Date().toISOString();
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({
+        messages: [
+          { sid: 'SM-ok', to: '+1', direction: 'outbound-api', status: 'delivered', date_sent: now },
+        ],
+        next_page_uri: '/2010-04-01/Accounts/AC123/Messages.json?PageToken=PT2&PageSize=100',
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        messages: [
+          { sid: 'SM-fail-p2', to: '+1', direction: 'outbound-api', status: 'failed', error_code: 30003, error_message: null, date_sent: now },
+        ],
+      }));
+
+    const result = await executeTwilioOpsTool('get_twilio_failed_messages', {});
+    expect(result.error).toBeUndefined();
+    expect(result.failed_messages.map(m => m.sid)).toEqual(['SM-fail-p2']);
+    expect(result.scanned_recent_messages).toBe(2);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('PageToken=PT2');
+  });
+
+  test('get_twilio_failed_messages stops paging past the window and reports exhaustive scan', async () => {
+    process.env.TWILIO_ACCOUNT_SID = 'AC123';
+    process.env.TWILIO_AUTH_TOKEN = 'auth';
+    const stale = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      messages: [
+        { sid: 'SM-old', to: '+1', direction: 'outbound-api', status: 'delivered', date_sent: stale },
+      ],
+      next_page_uri: '/2010-04-01/Accounts/AC123/Messages.json?PageToken=PT2&PageSize=100',
+    }));
+
+    const result = await executeTwilioOpsTool('get_twilio_failed_messages', { hours: 24 });
+    expect(result.error).toBeUndefined();
+    expect(result.scan_exhaustive).toBe(true); // page ran past the window — nothing left to scan
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('get_twilio_failed_messages flags a non-exhaustive scan at the page cap', async () => {
+    process.env.TWILIO_ACCOUNT_SID = 'AC123';
+    process.env.TWILIO_AUTH_TOKEN = 'auth';
+    const now = new Date().toISOString();
+    const page = {
+      messages: [{ sid: 'SM-x', to: '+1', direction: 'outbound-api', status: 'delivered', date_sent: now }],
+      next_page_uri: '/2010-04-01/Accounts/AC123/Messages.json?PageToken=PTn&PageSize=100',
+    };
+    global.fetch.mockResolvedValue(jsonResponse(page));
+
+    const result = await executeTwilioOpsTool('get_twilio_failed_messages', {});
+    expect(result.error).toBeUndefined();
+    expect(result.scan_exhaustive).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(5); // MAX_MESSAGE_PAGES
+  });
+
   test('get_twilio_failed_messages excludes failures older than the window', async () => {
     process.env.TWILIO_ACCOUNT_SID = 'AC123';
     process.env.TWILIO_AUTH_TOKEN = 'auth';
