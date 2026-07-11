@@ -56,7 +56,6 @@ Use for: "any errors in the logs?", "show me the last 100 log lines", "search th
       type: 'object',
       properties: {
         service_name: { type: 'string', description: 'Service to read logs from (default: the portal server service)' },
-        deployment_id: { type: 'string', description: 'Specific deployment id (default: the latest deployment)' },
         filter: { type: 'string', description: 'Railway log filter, e.g. "@level:error" or a search term' },
         since_minutes: { type: 'number', description: 'Only logs from the last N minutes' },
         limit: { type: 'number', description: `Max log lines (default ${DEFAULT_LOG_LINES}, max ${MAX_LOG_LINES})` },
@@ -220,21 +219,30 @@ async function getRailwayDeployments(input) {
   const limit = Math.min(Math.max(Number(input.limit) || 10, 1), MAX_DEPLOYMENTS);
   const deploymentsInput = { projectId, environmentId };
   let serviceLabel = 'all services';
+  // Map serviceId → name so every row can be attributed to a service — a
+  // failed deploy in a multi-service environment is useless without knowing
+  // which service failed.
+  let nameById;
   if (input.service_name) {
     const service = await resolveService(input.service_name);
     deploymentsInput.serviceId = service.serviceId;
     serviceLabel = service.serviceName;
+    nameById = { [service.serviceId]: service.serviceName };
+  } else {
+    const { services } = await getServiceInstances();
+    nameById = Object.fromEntries(services.map(s => [s.serviceId, s.serviceName]));
   }
   const data = await railwayGraphQL(
     `query deployments($input: DeploymentListInput!, $first: Int!) {
       deployments(input: $input, first: $first) {
-        edges { node { id status createdAt } }
+        edges { node { id status createdAt serviceId } }
       }
     }`,
     { input: deploymentsInput, first: limit },
   );
   const deployments = (data?.deployments?.edges || []).map(e => ({
     id: e.node.id,
+    service: nameById[e.node.serviceId] || e.node.serviceId || null,
     status: e.node.status,
     created_at: e.node.createdAt,
   }));
@@ -242,14 +250,14 @@ async function getRailwayDeployments(input) {
 }
 
 async function getRailwayLogs(input) {
-  let deploymentId = input.deployment_id;
-  let serviceLabel = null;
-  if (!deploymentId) {
-    const service = await resolveService(input.service_name);
-    serviceLabel = service.serviceName;
-    deploymentId = service.latestDeployment?.id;
-    if (!deploymentId) throw new Error(`Service "${service.serviceName}" has no deployment to read logs from.`);
-  }
+  // Always resolve the deployment through the environment-scoped service
+  // path — never accept a caller-supplied deployment id. A raw id would let a
+  // broadly-scoped account token (RAILWAY_API_TOKEN) read logs from a
+  // deployment outside this portal's project/environment.
+  const service = await resolveService(input.service_name);
+  const serviceLabel = service.serviceName;
+  const deploymentId = service.latestDeployment?.id;
+  if (!deploymentId) throw new Error(`Service "${service.serviceName}" has no deployment to read logs from.`);
 
   const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LOG_LINES, 1), MAX_LOG_LINES);
   const variables = { deploymentId, limit };
@@ -280,7 +288,7 @@ async function getRailwayLogs(input) {
       : l.message,
   }));
   return {
-    ...(serviceLabel ? { service: serviceLabel } : {}),
+    service: serviceLabel,
     deployment_id: deploymentId,
     filter: input.filter || null,
     lines: logs,
@@ -310,6 +318,15 @@ async function getRailwayVariableNames(input) {
 }
 
 async function executeOpsTool(toolName, input = {}) {
+  // "Not configured" is the expected DARK state (no token yet), not a
+  // failure. Returning an { error } result here would count against the
+  // SHARED admin circuit breaker (the /query loop records any result.error as
+  // a tool failure), so a few Infra Check clicks before the token is set could
+  // trip the breaker and fast-fail unrelated Intelligence Bar tools. Surface a
+  // benign, non-error result instead.
+  if (!getAuthHeaders()) {
+    return { configured: false, message: NOT_CONFIGURED_MESSAGE };
+  }
   try {
     switch (toolName) {
       case 'get_railway_status': return await getRailwayStatus();
