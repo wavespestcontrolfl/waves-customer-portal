@@ -2624,11 +2624,14 @@ const DETAILS_ACTION_STYLE = (disabled) => ({
   pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
 });
 
-function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false }) {
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false }) {
   const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
   if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
   const send = async (channel) => {
-    if (state.status === 'sending') return;
+    // Staff draft preview mirrors the customer layout for parity but never
+    // fires a real send: the estimate hasn't reached the customer yet, and
+    // the PDF endpoint 404s on drafts by design. The buttons render inert.
+    if (preview || state.status === 'sending') return;
     setState({ status: 'sending', channel, message: '' });
     try {
       const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
@@ -2669,10 +2672,11 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               2026-07-11). */}
           <a
             className="gc-section-cta"
-            href={`${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={DETAILS_ACTION_STYLE(disabled)}
+            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
+            target={preview ? undefined : '_blank'}
+            rel={preview ? undefined : 'noopener noreferrer'}
+            onClick={preview ? (e) => e.preventDefault() : undefined}
+            style={{ ...DETAILS_ACTION_STYLE(preview ? false : disabled), ...(preview ? { cursor: 'pointer' } : null) }}
           >
             <PdfDocIcon />View the PDF
           </a>
@@ -2680,9 +2684,9 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
             <button
               type="button"
               className="gc-section-cta"
-              disabled={disabled || state.status === 'sending'}
-              onClick={() => send('email')}
-              style={DETAILS_ACTION_STYLE(disabled || state.status === 'sending')}
+              disabled={!preview && (disabled || state.status === 'sending')}
+              onClick={preview ? undefined : () => send('email')}
+              style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
             >
               <EnvelopeIcon />{state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
             </button>
@@ -2691,12 +2695,17 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
             <button
               type="button"
               className="gc-section-cta"
-              disabled={disabled || state.status === 'sending'}
-              onClick={() => send('sms')}
-              style={DETAILS_ACTION_STYLE(disabled || state.status === 'sending')}
+              disabled={!preview && (disabled || state.status === 'sending')}
+              onClick={preview ? undefined : () => send('sms')}
+              style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
             >
               <ChatBubbleIcon />{state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
             </button>
+          ) : null}
+          {preview ? (
+            <div style={{ flexBasis: '100%', fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4, fontStyle: 'italic' }}>
+              Preview only. This is exactly what the customer sees; the buttons become active once the estimate is sent.
+            </div>
           ) : null}
         </div>
       )}
@@ -2946,6 +2955,8 @@ export function ServiceSection({
             // Only the submit-phase lock disables the request — the
             // mirror-section cadence lock (section `disabled`) must not.
             disabled={serviceDetailsRequest.disabled === true}
+            // Staff draft preview: render for parity, but inert (no sends).
+            preview={serviceDetailsRequest.preview === true}
           />
         ) : null}
 
@@ -3964,11 +3975,12 @@ export default function EstimateViewPage() {
                 // its own box; single-service keeps the afterPrice breakdown.
                 oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
                 // Details-packet request buttons (GATE_SERVICE_DETAILS_PDF
-                // kill switch, on by default). Live estimates only — the
-                // read-only accepted recap and staff draft preview must not
-                // offer customer sends.
-                serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly && !adminDraftPreview
-                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled }
+                // kill switch, on by default). The staff draft preview shows
+                // the row for customer-view parity but in an inert `preview`
+                // state (no real sends, no draft PDF); the read-only accepted
+                // recap still omits it entirely.
+                serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly
+                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: adminDraftPreview }
                   : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}

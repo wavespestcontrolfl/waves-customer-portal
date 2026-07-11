@@ -971,3 +971,60 @@ describe('oneTimeExtrasForPaymentNote', () => {
     expect(oneTimeExtrasForPaymentNote(noSetup, {}, 'recurring')).toBe(249);
   });
 });
+
+describe('ServiceSection — details-packet preview parity', () => {
+  const lawnSection = {
+    key: 'lawn_care',
+    label: 'Lawn Care',
+    isRecurring: true,
+    isPest: false,
+    frequencies: [{
+      key: 'standard',
+      label: 'Monthly',
+      serviceCategory: 'lawn_care',
+      monthly: 50,
+      annual: 600,
+      included: [{ key: 'lawn_care_standard', label: 'Monthly lawn care program' }],
+    }],
+    copy: { priceWording: {} },
+  };
+
+  const renderRow = (preview) => render(
+    <ServiceSection
+      section={lawnSection}
+      selectedFrequencyKey="standard"
+      selectedAddOns={new Set()}
+      onFrequencyChange={vi.fn()}
+      onAddOnToggle={vi.fn()}
+      renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      serviceDetailsRequest={{
+        token: 'tok-123',
+        customerEmail: 'a@b.com',
+        customerPhone: '+19415551234',
+        disabled: false,
+        preview,
+      }}
+    />,
+  );
+
+  it('links View the PDF and shows no preview caption on a live estimate', () => {
+    renderRow(false);
+    const link = screen.getByText('View the PDF').closest('a');
+    expect(link.getAttribute('href')).toContain('/estimates/tok-123/service-details/lawn_care/pdf');
+    expect(screen.queryByText(/Preview only\./)).not.toBeInTheDocument();
+  });
+
+  it('renders the row inert with a preview caption in the staff draft preview', () => {
+    renderRow(true);
+    // View the PDF renders for customer-view parity but carries no href — a
+    // draft has no public PDF, so the link must not be able to navigate to a
+    // 404.
+    const link = screen.getByText('View the PDF').closest('a');
+    expect(link.getAttribute('href')).toBeNull();
+    // The send buttons still render (parity) but the caption makes clear they
+    // are inert until the estimate is sent.
+    expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Text me the link/ })).toBeInTheDocument();
+    expect(screen.getByText(/Preview only\./)).toBeInTheDocument();
+  });
+});
