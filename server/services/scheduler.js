@@ -3719,6 +3719,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // Call-ingest completeness watchdog — every 30 min, diff Twilio's own call
+  // ledger against call_log and ring an admin bell for any answered inbound
+  // call the pipeline never received (webhook outage / misrouted number).
+  // Born from the 2026-07 reconciliation that found 391 Feb–Mar calls (and
+  // 11 later stragglers, incl. real booked jobs) silently never ingested.
+  // Dark behind GATE_CALL_INGEST_WATCHDOG; read-only against Twilio.
+  // See server/services/call-ingest-watchdog.js.
+  // =========================================================================
+  cron.schedule('7,37 * * * *', async () => {
+    try {
+      const { runCallIngestWatchdog } = require('./call-ingest-watchdog');
+      const result = await runCallIngestWatchdog();
+      if (!result.skipped && (result.missed > 0 || result.alerted > 0)) {
+        logger.warn(`[call-ingest-watchdog] scanned=${result.scanned} missed=${result.missed} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-ingest watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
