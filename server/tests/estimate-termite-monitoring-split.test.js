@@ -231,6 +231,56 @@ describe('solo termite-bait estimates (no pest, no mosquito)', () => {
   });
 });
 
+describe('legacy no-engine fallback setup fee', () => {
+  // Solo mosquito estimates with NO v1 shape and NO engine inputs fall back
+  // to stored totals — the accept path still invoices the $99 setup, so the
+  // fallback payload must show the fee card and lift the one-time anchor
+  // (the stored totals were created before the fee rule).
+  test('solo mosquito legacy estimate shows the fee card and lifted anchor', async () => {
+    const bundle = await buildPricingBundle({
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'sent',
+      monthly_total: 66,
+      annual_total: 792,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+      // Root-level recurring, no result/engineResult wrapper and no engine
+      // inputs — the shape that misses readV1Shape and the engine branch.
+      estimate_data: {
+        recurring: {
+          services: [{ name: 'Mosquito', service: 'mosquito', mo: 66, monthly: 66 }],
+        },
+      },
+    });
+    expect(bundle.fallback).toBe('no_engine_inputs');
+    const fee = (bundle.firstVisitFees || []).find((f) => f.service === 'waveguard_setup');
+    expect(fee).toBeTruthy();
+    expect(fee.amount).toBeCloseTo(99, 2);
+    expect(fee.waivedWithPrepay).toBe(true);
+  });
+
+  test('a non-qualifying legacy mix gets no fee card', async () => {
+    const bundle = await buildPricingBundle({
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'sent',
+      monthly_total: 120,
+      annual_total: 1440,
+      onetime_total: 0,
+      waveguard_tier: 'Silver',
+      estimate_data: {
+        recurring: {
+          services: [
+            { name: 'Mosquito', service: 'mosquito', mo: 66, monthly: 66 },
+            { name: 'Tree & Shrub', service: 'tree_shrub', mo: 54, monthly: 54 },
+          ],
+        },
+      },
+    });
+    expect(bundle.fallback).toBe('no_engine_inputs');
+    expect((bundle.firstVisitFees || []).find((f) => f.service === 'waveguard_setup')).toBeFalsy();
+  });
+});
+
 describe('stale-snapshot bypass guards', () => {
   // Snapshots frozen before the split: the termite row has neither a
   // per-visit price nor `monthly`, so the fast path would keep serving the

@@ -14358,6 +14358,30 @@ async function buildPricingBundle(estimate) {
     // shape goes quote-required (accept + deposit-intent gate on the same
     // resolver) and shows the call-to-refresh copy.
     const legacyLawnRequote = estimateDataHasRecurringLawn(estData);
+    // Solo pest / solo mosquito recurring mixes carry the $99 WaveGuard
+    // setup on accept (shouldIncludeWaveGuardSetupFeeForRecurring) — this
+    // legacy stored-totals fallback must show the same fee card, and lift
+    // the one-time anchor ONLY when the stored totals were created without
+    // the fee (legacy solo pest baked it in; pre-rule solo mosquito did
+    // not) — mirrors the v1 branch's membershipFee guard, so accept never
+    // invoices a charge this page hid.
+    const fallbackFirstVisitFees = [];
+    let fallbackAnchorLift = 0;
+    const fallbackMixApplies = require('../services/estimate-converter')
+      .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
+    if (fallbackMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+      const storedSetupRow = (Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [])
+        .find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
+      const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
+      const feeAmount = storedSetupAmount > 0 ? storedSetupAmount : (Number(PEST.initialFee || 99) || 99);
+      fallbackFirstVisitFees.push({
+        service: 'waveguard_setup',
+        amount: feeAmount,
+        label: 'WaveGuard setup',
+        waivedWithPrepay: true,
+      });
+      if (!storedSetupRow) fallbackAnchorLift = feeAmount;
+    }
     const payload = finalizePricingBundle(withManualDiscount({
       ...(legacyLawnRequote
         ? { quoteRequired: true, quoteRequiredReason: 'legacy_lawn_pricing_requote' }
@@ -14374,7 +14398,10 @@ async function buildPricingBundle(estimate) {
         addOns: [],
       }],
       waveGuardTier: estimate.waveguard_tier || 'Bronze',
-      anchorOneTimePrice: storedChoiceOneTimePrice ?? (Number(estimate.onetime_total || 0) || null),
+      anchorOneTimePrice: storedChoiceOneTimePrice
+        ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
+      setupFee: fallbackFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      firstVisitFees: fallbackFirstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
     }), estimate, estData);
@@ -14486,6 +14513,7 @@ async function buildPricingBundle(estimate) {
     anchorOneTimePrice,
     defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
+    setupFee: engineFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
     source: 'engine_invocation',
   }), estimate, estData);
