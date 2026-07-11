@@ -7,6 +7,60 @@ const { etDateString, addETDays } = require("../utils/datetime-et");
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
+const PhotoService = require("./photos");
+const config = require("../config");
+
+// Customer-facing presign TTL: photo URLs mint per page-load, so the TTL must
+// cover page DWELL time, not link age (the customer-photo blank-render class).
+// Falls back to 24h until PhotoService.CUSTOMER_DWELL_TTL_SECONDS ships.
+const SERVICE_PHOTO_VIEW_TTL_SECONDS =
+  PhotoService.CUSTOMER_DWELL_TTL_SECONDS || 24 * 60 * 60;
+
+// Recover the S3 object key from a legacy stored service_photos.s3_url so
+// pre-fix invoice snapshots (URL-only, long expired) can be re-signed instead
+// of served dead. Only trusts amazonaws.com hosts; unknown shapes return null.
+function s3KeyFromStoredUrl(storedUrl) {
+  if (!storedUrl || typeof storedUrl !== "string") return null;
+  try {
+    const url = new URL(storedUrl);
+    if (!url.hostname.endsWith(".amazonaws.com")) return null;
+    const path = decodeURIComponent(url.pathname.replace(/^\/+/, "")).split("?")[0];
+    const bucket = config.s3?.bucket;
+    if (!path || !bucket) return null;
+    // Virtual-hosted style: <bucket>.s3.<region>.amazonaws.com/<key>
+    if (url.hostname.startsWith(`${bucket}.`)) return path;
+    // Path-style: s3.<region>.amazonaws.com/<bucket>/<key>
+    if (path.startsWith(`${bucket}/`)) return path.slice(bucket.length + 1);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Presign snapshot photos fresh at read time (presign-first, stored-URL-last).
+// Snapshots persist the durable s3_key; s3_url in the OUTPUT is always a fresh
+// presign when a key is resolvable, so no consumer ever renders an expired URL.
+async function withFreshServicePhotoUrls(photos) {
+  if (!Array.isArray(photos) || photos.length === 0) return photos || [];
+  return Promise.all(
+    photos.map(async (photo) => {
+      const key =
+        photo?.s3_key || photo?.storage_key || s3KeyFromStoredUrl(photo?.s3_url);
+      if (key) {
+        try {
+          const fresh = await PhotoService.getViewUrl(
+            key,
+            SERVICE_PHOTO_VIEW_TTL_SECONDS,
+          );
+          return { ...photo, s3_url: fresh, url: fresh };
+        } catch (err) {
+          logger.warn(`[invoice] photo presign failed key=${key}: ${err.message}`);
+        }
+      }
+      return { ...photo, url: photo?.s3_url || null };
+    }),
+  );
+}
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -889,10 +943,13 @@ const InvoiceService = {
             "notes",
           );
 
+        // Snapshot the durable s3_key, not a presigned URL — stored URLs expire
+        // (new uploads don't even populate s3_url), so the read path presigns
+        // fresh at view time. Legacy s3_url kept only as a last-resort fallback.
         const photos = await database("service_photos")
           .where({ service_record_id: serviceRecordId })
           .orderBy("sort_order", "asc")
-          .select("photo_type", "s3_url", "caption");
+          .select("photo_type", "s3_key", "s3_url", "caption");
 
         const invoiceServiceDate = serviceDate || sr.service_date;
         serviceData = {
@@ -1645,10 +1702,11 @@ const InvoiceService = {
         typeof invoice.products_applied === "string"
           ? JSON.parse(invoice.products_applied)
           : invoice.products_applied || [],
-      service_photos:
+      service_photos: await withFreshServicePhotoUrls(
         typeof invoice.service_photos === "string"
           ? JSON.parse(invoice.service_photos)
           : invoice.service_photos || [],
+      ),
       annual_prepay_term: annualPrepayTerm,
     };
   },
@@ -3587,3 +3645,5 @@ module.exports = InvoiceService;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
+module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
