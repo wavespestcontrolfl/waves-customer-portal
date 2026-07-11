@@ -79,8 +79,14 @@ describe('handleRefundFailed', () => {
       first: jest.fn(async () => paymentRow),
       update: trxUpdate,
     };
+    const trxInvoicesQuery = {
+      where: jest.fn(() => trxInvoicesQuery),
+      first: jest.fn(async () => null),
+    };
     const trx = jest.fn((table) => {
       if (table === 'payments') return trxPaymentsQuery;
+      if (table === 'invoices') return trxInvoicesQuery;
+      if (table === 'notifications') return { insert: notificationInsert };
       throw new Error(`Unexpected trx table: ${table}`);
     });
 
@@ -161,6 +167,25 @@ describe('handleRefundFailed', () => {
 
     const args = trxUpdate.mock.calls[0][0];
     expect(args.refunded_surcharge_cents).toBeUndefined();
+  });
+
+  test('UNSTAMPED bounce (arrived before its creation event) records the id but never rewinds amounts', async () => {
+    // $40 already cleared and stamped; a NEW $20 refund bounces before its
+    // charge.refunded arrives. refund_amount does not include it yet —
+    // subtracting would erase the cleared $40. Only the id is recorded (so
+    // the late creation stamp gets skipped) and the operator is told.
+    paymentRow.status = 'paid';
+    paymentRow.refund_amount = '40.00';
+    paymentRow.stripe_refund_id = 're_earlier';
+    await handleRefundFailed(failedRefund({ id: 're_new', amount: 2000 }));
+
+    expect(trxUpdate).toHaveBeenCalledTimes(1);
+    const args = trxUpdate.mock.calls[0][0];
+    expect(args.refund_amount).toBeUndefined();
+    expect(args.status).toBeUndefined();
+    expect(JSON.parse(args.metadata).failed_refund_ids).toEqual(['re_new']);
+    expect(notificationInsert).toHaveBeenCalledTimes(1);
+    expect(notificationInsert.mock.calls[0][0].body).toContain('left untouched');
   });
 
   test('replay (same refund id already recorded) changes nothing and does NOT re-notify', async () => {

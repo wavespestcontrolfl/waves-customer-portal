@@ -1511,7 +1511,7 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
   // ── ACH failure handling ──
   const pmType = paymentIntent.last_payment_error?.payment_method?.type;
   if (pmType === 'us_bank_account') {
-    await handleAchFailure(paymentIntent, failureMessage);
+    await handleAchFailure(paymentIntent, failureMessage, eventId);
   }
 
   // ── Bell + push for the admin team ──
@@ -1776,6 +1776,26 @@ async function handleChargeRefunded(charge) {
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
     let result = pmt;
+    // Keep the surcharge-returned tracker in step with refunds this app did
+    // NOT issue (Stripe-dashboard partials): treat the cumulative refunded
+    // gross as proportionally split (rs = R·S/(B+S)), monotone max() so the
+    // exact tracking written by StripeService.refund is never lowered by its
+    // own webhook echo. Pre-gross-up legacy refunds get counted as containing
+    // their share too — conservative: the next in-app partial can only send
+    // LESS surcharge, never over-refund.
+    if (pmt) {
+      const trkSurcharge = Math.max(0, Number(pmt.surcharge_amount_cents) || 0);
+      const trkPaidCents = Math.round((parseFloat(pmt.amount) || 0) * 100);
+      if (trkSurcharge > 0 && trkPaidCents > 0) {
+        const proportional = Math.min(
+          trkSurcharge,
+          Math.round((Math.round(cumulativeRefundAmountDollars * 100) * trkSurcharge) / trkPaidCents),
+        );
+        if (proportional > (Number(pmt.refunded_surcharge_cents) || 0)) {
+          await trx('payments').where({ id: pmt.id }).update({ refunded_surcharge_cents: proportional });
+        }
+      }
+    }
     if (isFullRefund) {
       // Resolve the invoice from every available link (PI, metadata.invoice_id,
       // charge.payment_intent, invoices.stripe_charge_id) — a reconciled
@@ -1882,98 +1902,112 @@ async function handleRefundFailed(refund) {
   if (refundId) payment = await db('payments').where({ stripe_refund_id: refundId }).first();
   if (!payment && chargeId) payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
 
-  let reverted = false;
-  if (payment) {
-    await db.transaction(async (trx) => {
-      const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
-      if (!row) return;
-      let meta = {};
-      try {
-        meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
-      } catch { meta = {}; }
-      // Replay fence: refund.failed and charge.refund.updated both fire for
-      // one bounce (plus Stripe retries) — subtracting the failed amount
-      // more than once would erase a DIFFERENT refund's stamps.
-      const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
-      if (refundId && failedIds.includes(refundId)) return;
-      const priorRefundCents = Math.round((parseFloat(row.refund_amount) || 0) * 100);
-      const nextRefundCents = Math.max(0, priorRefundCents - failedCents);
-      const rowPaidCents = Math.round((parseFloat(row.amount) || 0) * 100);
-      const nextMeta = { ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds };
-      // Rewind the cumulative surcharge-returned tracker to match the new
-      // refunded total (rs = R·S/(B+S), the inverse of the gross-up split) —
-      // leaving it stale would make StripeService.refund treat the bounced
-      // share as already returned and under-refund the retry. min() with the
-      // current value: a bounce only ever REMOVES returned surcharge, and a
-      // legacy row whose refunds were never grossed keeps its 0.
-      const surchargeCents = Math.max(0, Number(row.surcharge_amount_cents) || 0);
-      const currentReturnedSurcharge = Math.max(0, Number(row.refunded_surcharge_cents) || 0);
-      const surchargeRewind = surchargeCents > 0 && rowPaidCents > 0 && currentReturnedSurcharge > 0
-        ? {
-            refunded_surcharge_cents: Math.min(
-              currentReturnedSurcharge,
-              Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
-            ),
-          }
-        : {};
-      await trx('payments').where({ id: row.id }).update({
-        ...surchargeRewind,
-        refund_amount: nextRefundCents / 100,
-        // 'failed' when this bounce erased the whole refund; a surviving
-        // remainder means an EARLIER partial refund did clear.
-        refund_status: nextRefundCents > 0 ? 'partial' : 'failed',
-        // A row terminalized to 'refunded' by a refund that never fully
-        // cleared is still (at least partly) collected money — anything
-        // short of the full paid amount reverts to 'paid', matching the
-        // charge.refunded handler's full-vs-partial convention (and the
-        // dashboard's full-refund exclusion).
-        ...(row.status === 'refunded' && nextRefundCents < rowPaidCents ? { status: 'paid' } : {}),
-        metadata: JSON.stringify(nextMeta),
-      });
-      reverted = true;
-    });
-  }
-
-  // Operator signal: the ledger revert above is mechanical, but the side
-  // effects of the optimistic refund are DELIBERATELY not auto-reversed —
-  // account credit restored by returnAppliedCreditOnRefund may already be
-  // spent (a mechanical claw-back could drive a balance negative), a payer
-  // statement reopened by the cascade reversal may have re-collection in
-  // flight, and the customer already got a "refund issued" email. Those need
-  // a human decision, so the notification names the exact records to
-  // reconcile. Fenced with the revert (refund.failed and charge.refund.updated
-  // both fire for one bounce — a replay that changed nothing must not
-  // re-notify).
-  if (payment && !reverted) return;
-  let sideEffectHint = '';
-  try {
-    if (payment) {
-      let pMeta = {};
-      try { pMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {}; } catch { pMeta = {}; }
-      const inv = pMeta.invoice_id
-        ? await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number')
-        : (piId ? await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number') : null);
-      if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
-      if (payment.statement_id) sideEffectHint += ` Statement S-${payment.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
-    }
-  } catch (err) {
-    logger.warn(`[stripe-webhook] refund-failed side-effect lookup failed: ${err.message}`);
-  }
-  try {
-    await db('notifications').insert({
+  // The admin notification is the ONLY durable operator signal for the side
+  // effects this handler deliberately leaves to a human (restored credit,
+  // statement cascade, deposit ledger) — Stripe will not retry an acked
+  // event, so its insert must never be swallowed. For payments-backed
+  // bounces it commits ATOMICALLY with the revert (a failure rolls both
+  // back and the 500 makes Stripe retry the whole event); for the
+  // no-payments case it throws for the same reason — nothing else was
+  // written, so the retry is a clean re-run.
+  const insertBounceNotification = async (conn, body) => {
+    await conn('notifications').insert({
       recipient_type: 'admin',
       category: 'billing',
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
-      body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). `
-        + (payment
-          ? `Payment row ${payment.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`
-          : 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.'),
+      body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
       icon: '⚠️',
       link: '/admin/invoices',
     });
-  } catch (err) {
-    logger.error(`[stripe-webhook] refund-failed notification insert failed: ${err.message}`);
+  };
+
+  if (!payment) {
+    await insertBounceNotification(db, 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.');
+    return;
   }
+
+  await db.transaction(async (trx) => {
+    const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
+    if (!row) return;
+    let meta = {};
+    try {
+      meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+    } catch { meta = {}; }
+    // Replay fence: refund.failed and charge.refund.updated both fire for
+    // one bounce (plus Stripe retries) — a bounce already recorded changed
+    // nothing, so it must neither re-subtract nor re-notify (the first run
+    // committed the notification atomically with this fence).
+    const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+    if (refundId && failedIds.includes(refundId)) return;
+    const nextMeta = { ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds };
+
+    // Only a refund that was actually STAMPED into this row may rewind the
+    // cumulative amounts. row.stripe_refund_id carries the latest stamped
+    // refund; a bounce arriving BEFORE its creation event (or for an older
+    // refund we can't attribute) is only RECORDED — subtracting it would
+    // erase EARLIER cleared refunds ($40 cleared + $20 bounced-pre-creation
+    // must not become $20). The recorded id makes handleChargeRefunded skip
+    // the late creation stamp, and the notification flags the manual case.
+    const wasStamped = !!refundId && row.stripe_refund_id === refundId;
+    if (!wasStamped) {
+      await trx('payments').where({ id: row.id }).update({ metadata: JSON.stringify(nextMeta) });
+      await insertBounceNotification(trx, `Payment row ${row.id}: the bounce arrived before (or without) its creation stamp — amounts were left untouched and the late charge.refunded event will be skipped. If this refund was already recorded under an earlier stamp, reconcile refund_amount manually.`);
+      return;
+    }
+
+    const priorRefundCents = Math.round((parseFloat(row.refund_amount) || 0) * 100);
+    const nextRefundCents = Math.max(0, priorRefundCents - failedCents);
+    const rowPaidCents = Math.round((parseFloat(row.amount) || 0) * 100);
+    // Rewind the cumulative surcharge-returned tracker to match the new
+    // refunded total (rs = R·S/(B+S), the inverse of the gross-up split) —
+    // leaving it stale would make StripeService.refund treat the bounced
+    // share as already returned and under-refund the retry. min() with the
+    // current value: a bounce only ever REMOVES returned surcharge, and a
+    // legacy row whose refunds were never grossed keeps its 0.
+    const surchargeCents = Math.max(0, Number(row.surcharge_amount_cents) || 0);
+    const currentReturnedSurcharge = Math.max(0, Number(row.refunded_surcharge_cents) || 0);
+    const surchargeRewind = surchargeCents > 0 && rowPaidCents > 0 && currentReturnedSurcharge > 0
+      ? {
+          refunded_surcharge_cents: Math.min(
+            currentReturnedSurcharge,
+            Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
+          ),
+        }
+      : {};
+    await trx('payments').where({ id: row.id }).update({
+      ...surchargeRewind,
+      refund_amount: nextRefundCents / 100,
+      // 'failed' when this bounce erased the whole refund; a surviving
+      // remainder means an EARLIER partial refund did clear.
+      refund_status: nextRefundCents > 0 ? 'partial' : 'failed',
+      // A row terminalized to 'refunded' by a refund that never fully
+      // cleared is still (at least partly) collected money — anything
+      // short of the full paid amount reverts to 'paid', matching the
+      // charge.refunded handler's full-vs-partial convention (and the
+      // dashboard's full-refund exclusion).
+      ...(row.status === 'refunded' && nextRefundCents < rowPaidCents ? { status: 'paid' } : {}),
+      metadata: JSON.stringify(nextMeta),
+    });
+
+    // Operator signal: the revert above is mechanical, but the side effects
+    // of the optimistic refund are DELIBERATELY not auto-reversed — account
+    // credit restored by returnAppliedCreditOnRefund may already be spent (a
+    // mechanical claw-back could drive a balance negative), a payer statement
+    // reopened by the cascade reversal may have re-collection in flight, and
+    // the customer already got a "refund issued" email. Name the exact
+    // records so the human reconciles specifics.
+    let sideEffectHint = '';
+    try {
+      const inv = nextMeta.invoice_id
+        ? await trx('invoices').where({ id: nextMeta.invoice_id }).first('id', 'invoice_number')
+        : (piId ? await trx('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number') : null);
+      if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
+      if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
+    } catch (err) {
+      logger.warn(`[stripe-webhook] refund-failed side-effect lookup failed: ${err.message}`);
+    }
+    await insertBounceNotification(trx, `Payment row ${row.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`);
+  });
 }
 
 /**
@@ -2152,7 +2186,7 @@ async function handlePayoutEvent(payout, eventType) {
  * 2nd fail (same invoice): switch to card, flag ACH needs_verification
  * 3rd fail (90 days): suspend ACH, switch default to card
  */
-async function handleAchFailure(paymentIntent, failureReason) {
+async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
   const piId = paymentIntent.id;
 
   try {
@@ -2186,19 +2220,33 @@ async function handleAchFailure(paymentIntent, failureReason) {
 
       try {
         // Idempotent under webhook re-runs (the file's handler contract): a
-        // retried payment_failed event for the same PI must not log a second
-        // failure — duplicate rows double-count one real failure and can
-        // escalate straight to needs_verification/suspended. Check-then-insert
-        // is race-safe here because the advisory lock serializes per customer.
+        // RETRY of the same failure event must not log a second row —
+        // duplicates double-count one real failure and can escalate straight
+        // to needs_verification/suspended. Dedupe on the EVENT identity, not
+        // the PI alone: the same invoice/PI is legitimately re-attempted
+        // (see handlePaymentIntentProcessing's same-PI reattempt note) and
+        // each real bank failure carries a distinct event id that MUST
+        // count. Check-then-insert is race-safe under the advisory lock.
+        // Legacy fallback (no eventId / pre-migration column): PI-level
+        // dedupe, the pre-existing conservative behavior.
+        // Column probe (NOT try/insert-catch: a failed statement aborts the
+        // whole Postgres transaction, poisoning the count/status queries
+        // below). columnInfo is the repo's pre-migration-tolerance pattern.
+        const achCols = await trx('ach_failure_log').columnInfo();
+        const hasEventCol = !!achCols.stripe_event_id;
+        const dedupe = { customer_id: customer.id, stripe_payment_intent_id: piId };
         const alreadyLogged = await trx('ach_failure_log')
-          .where({ customer_id: customer.id, stripe_payment_intent_id: piId })
+          .where(eventId && hasEventCol ? { ...dedupe, stripe_event_id: eventId } : dedupe)
           .first('id');
         if (!alreadyLogged) {
-          await trx('ach_failure_log').insert({
+          const insertRow = {
             customer_id: customer.id,
             stripe_payment_intent_id: piId,
             failure_reason: failureReason,
-          });
+          };
+          await trx('ach_failure_log').insert(
+            eventId && hasEventCol ? { ...insertRow, stripe_event_id: eventId } : insertRow,
+          );
         }
       } catch { /* table may not exist yet */ }
 
