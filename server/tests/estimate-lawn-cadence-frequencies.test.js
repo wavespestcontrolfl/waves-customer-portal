@@ -599,12 +599,16 @@ const sectionWith = (key, memberKeys = [key]) => ({
 });
 
 describe('buildRenderFlags — estimate-wide tier UI gate (derived from per-section)', () => {
-  test.each(['lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
+  test.each(['lawn_care', 'tree_shrub', 'mosquito'])(
     'recurring %s turns the tier UI on',
     (key) => {
       expect(buildRenderFlags({}, [sectionWith(key)], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(true);
     },
   );
+
+  test('termite-bait-only estimates keep the tier UI off (owner directive 2026-07-10: membership shows on pest/mosquito lines, not termite)', () => {
+    expect(buildRenderFlags({}, [sectionWith('termite_bait')], { qualifyingCount: 1 }).showWaveGuardTierUi).toBe(false);
+  });
 
   test('the tier badge does NOT enable pest-only setup fee / perks / add-ons', () => {
     const flags = buildRenderFlags({}, [sectionWith('lawn_care')], { qualifyingCount: 1 });
@@ -625,16 +629,17 @@ describe('buildRenderFlags — estimate-wide tier UI gate (derived from per-sect
 });
 
 describe('sectionTierEligibleFromKeys — per-section badge (single source of truth)', () => {
-  test.each(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito'])(
+  test.each(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'])(
     'a single %s section is badge-eligible',
     (key) => {
       expect(sectionTierEligibleFromKeys(true, [key])).toBe(true);
     },
   );
 
-  test('palm / rodent single sections are NOT eligible (key not in allow-list)', () => {
+  test('palm / rodent / termite single sections are NOT eligible (termite still receives the % discount but never badges — owner directive 2026-07-10)', () => {
     expect(sectionTierEligibleFromKeys(true, ['palm_injection'])).toBe(false);
     expect(sectionTierEligibleFromKeys(true, ['rodent_bait'])).toBe(false);
+    expect(sectionTierEligibleFromKeys(true, ['termite_bait'])).toBe(false);
   });
 
   test('a bundle keeps the badge iff it contains an eligible service', () => {

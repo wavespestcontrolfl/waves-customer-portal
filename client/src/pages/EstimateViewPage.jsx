@@ -2509,7 +2509,12 @@ export function ServiceSection({
         {current ? (
           <PriceCard
             frequency={current}
-            waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
+            // Every eligible section badges its own card — multi-service
+            // plans no longer hoist one plan-level badge (owner directive
+            // 2026-07-10). The server's waveGuardTierEligible flag keeps
+            // termite/palm/rodent cards badge-free.
+            waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
+            preferPerApplicationPrice={sectionSlug === 'pest_control' || sectionSlug === 'mosquito'}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -3456,19 +3461,9 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
-          {/* Multi-service plans show the WaveGuard tier ONCE, above the
-              boxes on the left — not repeated in every card. */}
-          {services.length > 1 && waveGuardTier && combinedTierEligible ? (
-            <div style={{ marginBottom: 12 }}>
-              <span style={{
-                display: 'inline-block', padding: '4px 12px',
-                background: '#EEF2FF', color: COLORS.blueDeeper,
-                borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-              }}>
-                WaveGuard {glassContent ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-              </span>
-            </div>
-          ) : null}
+          {/* The plan-level WaveGuard badge is gone (owner directive
+              2026-07-10) — the membership shows on each eligible service's
+              own card (recurring pest / mosquito) instead. */}
 
           {/* Multi-service plans stack vertically (owner directive) —
               each service keeps its own boxed price section. */}

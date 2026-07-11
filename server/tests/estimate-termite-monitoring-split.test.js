@@ -1,0 +1,156 @@
+const { buildPricingBundle } = require('../routes/estimate-public');
+
+// A pest + mosquito + termite-bait bundle in the v1 (admin) shape — Gold tier
+// (3 qualifying services → 15% off). Numbers mirror a real prod draft
+// (identity swapped): pest quarterly $110/app, mosquito monthly12 $66/mo,
+// termite Advance monitoring $35/mo flat.
+//
+// Termite bait monitoring has NO per-visit price — before this fix the split
+// validator required displayPrice × visits on every row, so any bundle with a
+// termite line collapsed into the single combined-price card: no per-service
+// sections, no mosquito program selector, and the monitoring charge was in
+// the total but rendered nowhere ("invisible line item").
+function pestMosquitoTermiteEstimate() {
+  return {
+    id: `estimate-${Math.random().toString(36).slice(2)}`,
+    status: 'draft',
+    monthly_total: 117.02,
+    annual_total: 1404.2,
+    onetime_total: 738,
+    waveguard_tier: 'Gold',
+    estimate_data: {
+      inputs: {
+        svcPest: true, svcMosquito: true, svcTermiteBait: true,
+        pestFreq: '4', mosquitoProgram: 'monthly12',
+        homeSqFt: '1998', lotSqFt: '10017', stories: '1',
+        isCommercial: 'NO', customerName: 'Termite Split',
+        address: '123 Monitoring Way, Sarasota, FL 34235',
+      },
+      result: {
+        hasRecurring: true,
+        hasOneTime: true,
+        manualDiscount: null,
+        totals: { year1: 2142.2, year2: 1404.2, year2mo: 117.02, manualDiscount: null },
+        oneTime: {
+          items: [
+            {
+              name: 'Advance Installation', price: 639,
+              detail: '23 stations · 223 linear ft perimeter',
+              service: 'termite_bait_installation',
+            },
+          ],
+          total: 738,
+          membershipFee: 99,
+        },
+        recurring: {
+          tier: 'Gold',
+          waveGuardTier: 'Gold',
+          discount: 0.15,
+          serviceCount: 3,
+          monthlyTotal: 117.02,
+          grandTotal: 117.02,
+          annualBeforeDiscount: 1652,
+          annualAfterDiscount: 1404.2,
+          services: [
+            {
+              name: 'Pest Control', service: 'pest_control', mo: 36.67, monthly: 36.67,
+              perTreatment: 110, visitsPerYear: 4,
+            },
+            {
+              name: 'Mosquito', service: 'mosquito', mo: 66, monthly: 66,
+              displayName: 'Monthly Mosquito Program (12 visits)',
+              perTreatment: 66, visitsPerYear: 12,
+            },
+            // Flat monthly monitoring — deliberately NO perTreatment/visits.
+            {
+              name: 'Termite Bait', service: 'termite_bait', mo: 35, monthly: 35,
+            },
+          ],
+        },
+        results: {
+          pestTiers: [
+            { label: 'Quarterly', mo: 36.67, pa: 110, ann: 440, apps: 4, init: 99, floorMo: 26.33, floorPa: 79, floorAnn: 316, recommended: true },
+            { label: 'Bi-Monthly', mo: 46.75, pa: 93.5, ann: 561, apps: 6, init: 99, floorMo: 33.57, floorPa: 67.15, floorAnn: 402.9 },
+            { label: 'Monthly', mo: 77, pa: 77, ann: 924, apps: 12, init: 99, floorMo: 55.3, floorPa: 55.3, floorAnn: 663.6 },
+          ],
+          mq: [
+            { n: 'Seasonal Mosquito Program (9 visits)', v: 9, mo: 54.75, pv: 73, ann: 657, recommended: true, selected: false },
+            { n: 'Monthly Mosquito Program (12 visits)', v: 12, mo: 66, pv: 66, ann: 792, recommended: false, selected: true },
+          ],
+          tmBait: {
+            system: 'advance', selectedSystem: 'advance', ai: 639, bmo: 35, pmo: 65,
+            sta: 23, perim: 223, monitoringTier: 'basic', quoteRequired: false,
+            requiresMeasurement: false,
+          },
+        },
+      },
+    },
+  };
+}
+
+describe('termite-bait bundles split into per-service sections (buildPricingBundle e2e)', () => {
+  test('pest + mosquito + termite splits, with the monitoring charge as its own visible section', async () => {
+    const bundle = await buildPricingBundle(pestMosquitoTermiteEstimate());
+    const keys = bundle.services.map((s) => s.key);
+    expect(keys).toContain('pest_control');
+    expect(keys).toContain('mosquito');
+    expect(keys).toContain('termite_bait');
+    expect(bundle.services).toHaveLength(3);
+
+    // Pest keeps its cadence ladder with NET per-application pricing
+    // (110 → 93.50 at Gold 15%).
+    const pest = bundle.services.find((s) => s.key === 'pest_control');
+    expect(pest.frequencies.map((f) => f.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
+    expect(pest.frequencies[0].perTreatment).toBeCloseTo(93.5, 2);
+    expect(pest.frequencies[0].perVisit).toBeCloseTo(110, 2);
+    expect(pest.waveGuardTierEligible).toBe(true);
+    // Setup fee stays on the pest section only.
+    expect(pest.setupFee).toBeTruthy();
+
+    // Mosquito gets its own program ladder (seasonal9 / monthly12), defaulting
+    // to the stored selection, with net per-application prices (66 → 56.10).
+    const mosquito = bundle.services.find((s) => s.key === 'mosquito');
+    expect(mosquito.frequencies.map((f) => f.key)).toEqual(['seasonal9', 'monthly12']);
+    expect(mosquito.defaultFrequencyKey).toBe('monthly12');
+    const monthly12 = mosquito.frequencies.find((f) => f.key === 'monthly12');
+    expect(monthly12.perTreatment).toBeCloseTo(56.1, 2);
+    const seasonal9 = mosquito.frequencies.find((f) => f.key === 'seasonal9');
+    expect(seasonal9.perTreatment).toBeCloseTo(62.05, 2);
+    expect(mosquito.waveGuardTierEligible).toBe(true);
+    expect(mosquito.setupFee).toBeNull();
+
+    // Termite monitoring renders as a flat-monthly section: $35 base →
+    // $29.75 net of the Gold 15%, no per-visit price, no membership badge.
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite.label).toBe('Termite Bait Monitoring');
+    expect(termite.frequencies).toHaveLength(1);
+    expect(termite.frequencies[0].monthly).toBeCloseTo(29.75, 2);
+    expect(termite.frequencies[0].monthlyBase).toBeCloseTo(35, 2);
+    expect(termite.frequencies[0].perTreatment).toBeNull();
+    expect(termite.waveGuardTierEligible).toBe(false);
+    expect(termite.setupFee).toBeNull();
+  });
+
+  test('mosquito is a combo axis and the default combo reproduces the stored total', async () => {
+    const bundle = await buildPricingBundle(pestMosquitoTermiteEstimate());
+    // 3 pest cadences × 2 mosquito programs.
+    expect(bundle.serviceCadenceCombos).toHaveLength(6);
+    const defaultCombo = bundle.serviceCadenceCombos.find(
+      (c) => c.key === 'mosquito:monthly12|pest_control:quarterly',
+    );
+    // 31.17 pest + 56.10 mosquito + 29.75 termite monitoring = 117.02
+    expect(defaultCombo.monthly).toBeCloseTo(117.02, 2);
+    // Swapping mosquito to seasonal re-prices through the same path:
+    // 31.17 + 46.54 + 29.75 = 107.46.
+    const seasonalCombo = bundle.serviceCadenceCombos.find(
+      (c) => c.key === 'mosquito:seasonal9|pest_control:quarterly',
+    );
+    expect(seasonalCombo.monthly).toBeCloseTo(107.46, 2);
+    // Every combo carries the termite monitoring monthly on its rows so the
+    // split view can always account for the full charge.
+    const termiteRow = (defaultCombo.perServiceTreatments || []).find((r) => r.service === 'termite_bait');
+    expect(termiteRow).toBeTruthy();
+    expect(termiteRow.monthly).toBeCloseTo(29.75, 2);
+    expect(termiteRow.monthlyBase).toBeCloseTo(35, 2);
+  });
+});

@@ -9295,12 +9295,19 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
       const displayPrice = Number.isFinite(netPerTreatment) && netPerTreatment > 0
         ? Math.round(netPerTreatment * 100) / 100
         : (Number.isFinite(pa) && pa > 0 ? Math.round(pa * 100) / 100 : null);
+      // Same monthly ride-along as shapeFromV1: flat-monthly services
+      // (termite bait monitoring) have no per-visit price, and without a
+      // monthly the row can't be split into its own section or displayed.
+      const baseMonthly = firstPositiveNumber(li.monthly, li.mo, li.annual ? li.annual / 12 : null);
+      const netMonthly = netAnnual ? Math.round((netAnnual / 12) * 100) / 100 : null;
       return {
         service: li.service,
         label: li.displayName || li.name || labelForRecurring(li.service),
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        monthlyBase: baseMonthly ? Math.round(baseMonthly * 100) / 100 : null,
+        monthly: netMonthly,
         estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
         // Carry the per-service cadence (foam has its own, e.g. bimonthly) so a
         // mixed plan whose top-level frequency is the generic quarterly ladder
@@ -12767,8 +12774,15 @@ function frequencyServiceRowsMonthlyTotal(frequency = {}, keys = []) {
     if (!row) return null;
     const visitsPerYear = firstPositiveNumber(row.visitsPerYear, row.visits, row.frequency);
     const displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, row.perVisit);
-    if (visitsPerYear == null || displayPrice == null) return null;
-    return sum + ((displayPrice * visitsPerYear) / 12);
+    if (visitsPerYear != null && displayPrice != null) {
+      return sum + ((displayPrice * visitsPerYear) / 12);
+    }
+    // Flat-monthly rows (termite bait monitoring) have no per-visit price;
+    // their discounted monthly is the row's whole contribution. Without this
+    // a bundle containing one could never split into per-service sections.
+    const monthly = firstPositiveNumber(row.monthly);
+    if (monthly != null) return sum + monthly;
+    return null;
   }, 0);
   return total == null ? null : roundMonthly(total);
 }
@@ -12822,12 +12836,15 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
   );
   const displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, recurringService.perTreatment, recurringService.perVisit);
   const anchorPrice = firstPositiveNumber(row.perTreatment, row.perVisit, recurringService.perTreatment, recurringService.perVisit);
+  // Flat-monthly rows (termite bait monitoring) carry monthly/monthlyBase
+  // instead of per-visit pricing — build the section entry from those so the
+  // service still gets its own card in a split bundle.
   const monthly = displayPrice && visitsPerYear
     ? roundMonthly((displayPrice * visitsPerYear) / 12)
-    : null;
+    : firstPositiveNumber(row.monthly) || null;
   const monthlyBase = anchorPrice && visitsPerYear
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
-    : monthly;
+    : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -12893,16 +12910,27 @@ function sectionFrequenciesForRecurringService(key, recurringService = {}, baseF
       .filter(Boolean);
     if (pestFrequencies.length) return pestFrequencies;
   } else {
+    // Flat-monthly rows (termite bait monitoring) have no per-visit price and
+    // don't vary with the pest cadence — one monthly-billed 'recurring' entry,
+    // never the mirrored pest-keyed ladder (which would render a disabled
+    // fake selector and re-express the flat monthly as a per-interval price).
+    const isFlatMonthlyRow = (row) => !(
+      firstPositiveNumber(row?.displayPrice, row?.perTreatment, row?.perVisit)
+      && firstPositiveNumber(row?.visitsPerYear, row?.visits, row?.frequency)
+    );
     const rowFrequencies = baseFrequencies
       .map((frequency) => {
         const row = treatmentRowForServiceFrequency(frequency, key);
         return row ? frequencyFromTreatmentRow(frequency, key, row, recurringService, {
           allowAddOns: false,
-          useBaseFrequencyKey: preserveSelectableKeys,
+          useBaseFrequencyKey: preserveSelectableKeys && !isFlatMonthlyRow(row),
         }) : null;
       })
       .filter(Boolean);
-    if (rowFrequencies.length) return preserveSelectableKeys ? rowFrequencies : [rowFrequencies[0]];
+    if (rowFrequencies.length) {
+      const selectable = preserveSelectableKeys && rowFrequencies[0].key !== 'recurring';
+      return selectable ? rowFrequencies : [rowFrequencies[0]];
+    }
   }
 
   const fallback = frequencyFromRecurringService(recurringService, key, recurringDiscount);
@@ -13211,7 +13239,17 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         return buildServiceSection({
           key,
           category,
-          label: recurringService.displayName || recurringServiceDisplayName(key) || serviceLabelForCategory(category),
+          // Display-only: the recurring termite line is the monitoring plan —
+          // "Termite Bait" alone reads like a duplicate of the one-time
+          // "Advance Installation" item. Sections with their own selectable
+          // ladder use the generic service name — a stored displayName like
+          // "Monthly Mosquito Program (12 visits)" contradicts the header the
+          // moment the customer picks the other program. Stored row names are
+          // untouched.
+          label: key === 'termite_bait'
+            ? 'Termite Bait Monitoring'
+            : ((ownLadder && ownLadder.length > 1 ? recurringServiceDisplayName(key) : null)
+              || recurringService.displayName || recurringServiceDisplayName(key) || serviceLabelForCategory(category)),
           isRecurring: true,
           isPest: key === 'pest_control',
           frequencies: sectionFrequencies,
@@ -13338,7 +13376,10 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 // pest. Per owner decision. Matched on the service key (palm_injection's section
 // category aliases to 'tree_shrub' but its key stays 'palm_injection', so palm
 // and rodent are simply absent from this allow-list).
-const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
+// termite_bait still RECEIVES the WaveGuard % discount but does not display
+// the membership badge (owner directive 2026-07-10: the WaveGuard membership
+// shows on recurring pest and mosquito only).
+const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
 
 // A recurring section shows the tier badge iff it represents AT LEAST ONE
 // eligible service. memberKeys = the service keys the section covers ([key] for
@@ -13826,12 +13867,20 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
           displayPrice = Math.max(displayPrice, roundMonthly((minMonthly * 12) / visits));
         }
       }
+      // Monthly figures ride along on every row so flat-monthly services
+      // (termite bait monitoring) stay representable: they have no per-visit
+      // price, and without a monthly the row is invisible to the split
+      // validator and the customer-facing per-service list.
+      const rawMonthly = Number(svc?.mo ?? svc?.monthly);
+      const hasMonthly = Number.isFinite(rawMonthly) && rawMonthly > 0;
       perServiceTreatments.push({
         service: svc?.service || (svc?.name || '').toLowerCase().replace(/\s+/g, '_'),
         label: svc?.displayName || recurringServiceDisplayName(recurringServiceKey(svc)) || svc?.name || 'Service',
         perTreatment: Number.isFinite(pa) && pa > 0 ? pa : null,
         displayPrice,
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
+        monthlyBase: hasMonthly ? rawMonthly : null,
+        monthly: hasMonthly ? roundMonthly(discountMonthly(rawMonthly, svc)) : null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(svc),
       });
     });

@@ -54,6 +54,12 @@ const SERVICE_INCLUSIONS = {
 };
 
 
+// Row-level WaveGuard tags mirror the server's TIER_BADGE_ELIGIBLE_KEYS:
+// termite bait monitoring still receives the % discount but never displays
+// the membership tag (owner directive 2026-07-10 — pest/mosquito lines only;
+// lawn and tree keep their existing tags).
+const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
+
 function normalizedTier(value) {
   const raw = String(value || '').replace(/^WaveGuard\s+/i, '');
   return ['Bronze', 'Silver', 'Gold', 'Platinum'].find((tier) => tier.toLowerCase() === raw.toLowerCase()) || raw;
@@ -158,7 +164,7 @@ function RowInclusions({ items, collapsible = false }) {
   );
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false }) {
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -233,11 +239,55 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     : 0;
   // Per-application treatment rows expose EXACT per-visit prices, which would
   // contradict the "confirmed on site" range — so drop them while ranging.
+  // Flat-monthly rows (termite bait monitoring) have no per-visit price but
+  // carry a discounted monthly — keep them so a charged service is never an
+  // invisible line item.
   const treatmentRows = !showLowConfidenceRange && Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments
-      .map((row) => ({ ...row, displayPrice: Number(row.displayPrice ?? row.perTreatment) }))
-      .filter((row) => Number.isFinite(row.displayPrice) && row.displayPrice > 0)
+      .map((row) => ({
+        ...row,
+        displayPrice: Number(row.displayPrice ?? row.perTreatment),
+        monthlyPrice: Number(row.monthly),
+      }))
+      .filter((row) => (Number.isFinite(row.displayPrice) && row.displayPrice > 0)
+        || (Number.isFinite(row.monthlyPrice) && row.monthlyPrice > 0))
     : [];
+
+  // Per-application headline (owner directive 2026-07-10): pest and mosquito
+  // cards lead with the price per application, not the per-interval rate
+  // ("$93.50 / application" instead of "$351.06/quarter"). Only when ONE
+  // unambiguous net per-application price exists: the single visit-bearing
+  // treatment row's net displayPrice, or — with no rows (split-section
+  // entries) — the frequency's own net perTreatment. frequency.perTreatment
+  // is skipped when rows are present because unsplit entries alias it to the
+  // PRE-discount pest perVisit.
+  const perAppNet = (() => {
+    if (!preferPerApplicationPrice || quoteRequired || showLowConfidenceRange) return null;
+    if (treatmentRows.length === 1) {
+      const row = treatmentRows[0];
+      return Number(row.displayPrice) > 0 && Number(row.visitsPerYear) > 0 ? round2(row.displayPrice) : null;
+    }
+    if (treatmentRows.length === 0) {
+      const pt = Number(frequency.perTreatment);
+      return pt > 0 && Number.isFinite(visitsPerYear) && visitsPerYear > 0 ? round2(pt) : null;
+    }
+    return null;
+  })();
+  const perAppAnchor = perAppNet != null
+    ? (Number(frequency.perVisit) > 0
+      ? round2(frequency.perVisit)
+      : (Number(frequency.monthlyBase) > 0 && visitsPerYear > 0
+        ? round2((Number(frequency.monthlyBase) * 12) / visitsPerYear)
+        : 0))
+    : 0;
+  const perAppSavings = perAppNet != null && perAppAnchor - perAppNet >= SAVINGS_ROUNDING_NOISE
+    ? round2(perAppAnchor - perAppNet)
+    : 0;
+  // Seasonal-style programs bill a flat monthly that differs from the per-app
+  // figure (9 visits spread over 12 payments) — say so under the headline so
+  // the number the card leads with never contradicts the charge.
+  const showBilledMonthlyNote = perAppNet != null && billingKey === 'monthly'
+    && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
 
   return (
     <div style={{
@@ -245,7 +295,18 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       marginBottom: 8,
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-        {showSavings && savings > 0 && !showLowConfidenceRange ? (
+        {perAppNet != null && showSavings && perAppSavings > 0 ? (
+          <span style={{
+            fontSize: 15,
+            color: '#64748B',
+            textDecoration: 'line-through',
+            lineHeight: 1,
+            fontVariantNumeric: 'tabular-nums',
+          }}>
+            {fmtMoney(perAppAnchor)} / application
+          </span>
+        ) : null}
+        {perAppNet == null && showSavings && savings > 0 && !showLowConfidenceRange ? (
           <span style={{
             fontSize: 15,
             color: '#64748B',
@@ -269,10 +330,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           ? 'Quote required'
           : showLowConfidenceRange
           ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
-          : fmtMoney(cadencePrice)}
+          : fmtMoney(perAppNet != null ? perAppNet : cadencePrice)}
         </span>
         {!quoteRequired ? (
-          <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>{periodLabel}</span>
+          <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>
+            {perAppNet != null ? '/ application' : periodLabel}
+          </span>
         ) : null}
         {waveGuardTier ? (
           <span style={{
@@ -294,6 +357,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
           <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
           {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
+        </div>
+      ) : null}
+
+      {showBilledMonthlyNote ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
+          Billed {fmtMoney(cadencePrice)}/mo, spread across the year
         </div>
       ) : null}
 
@@ -379,13 +448,19 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                     information. */}
                 {glass && treatmentRows.length === 1 ? null : (
                   <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-                    {fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span>
+                    {row.displayPrice > 0
+                      ? <>{fmtMoney(row.displayPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ application</span></>
+                      : <>{fmtMoney(row.monthlyPrice)} <span style={{ color: W.textCaption, fontWeight: 500 }}>/ month</span></>}
                   </div>
                 )}
               </div>
               <div style={{ marginTop: 4, fontSize: 12, color: W.textCaption, lineHeight: 1.35 }}>
-                {Number(row.visitsPerYear) > 0 ? `${row.visitsPerYear} applications/year` : 'Service applications/year'}
-                {waveGuardTier ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`) : ''}
+                {Number(row.visitsPerYear) > 0
+                  ? `${row.visitsPerYear} applications/year`
+                  : (row.displayPrice > 0 ? 'Service applications/year' : 'Billed monthly')}
+                {waveGuardTier && ROW_TIER_TAG_SERVICES.has(serviceKey(row))
+                  ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`)
+                  : ''}
               </div>
               <RowInclusions
                 // Glass classifies via glassServiceSlug, not serviceKey():
