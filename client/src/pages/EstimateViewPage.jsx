@@ -1950,13 +1950,26 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     </div>
   );
 
+  // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
+  // pre-credit per-service cards minus the net the accept payload charges.
+  // Deriving it as a difference (rather than reading a credit object) is correct
+  // for every cadence, cap, and discount type by construction, and guarantees the
+  // on-screen subtotal − credit = net reconciles. `preCreditMonthly` is that
+  // per-service sum. Both branches below use this so a ranged plan doesn't show a
+  // stale default-cadence credit either.
+  const subtotalMonthly = round2(Number(preCreditMonthly));
+  const creditFromDiff = subtotalMonthly > 0 && subtotalMonthly > netMonthly
+    ? round2(subtotalMonthly - netMonthly)
+    : null;
+
   // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
   // range, not one exact number — but the credit is applied by accept regardless,
   // so keep it visible as a credit-only line rather than printing an exact
-  // subtotal/net the rest of the page deliberately avoids.
+  // subtotal/net the rest of the page deliberately avoids. Prefer the selected
+  // cadence's difference; fall back to the default credit when there's no sum.
   const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
   if (lowConfidencePct > 0) {
-    const rangedCredit = manualDiscountMonthlyAmount(manual);
+    const rangedCredit = creditFromDiff ?? manualDiscountMonthlyAmount(manual);
     if (!(rangedCredit > 0)) return null;
     return (
       <section style={estimateCard()}>
@@ -1968,16 +1981,9 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     );
   }
 
-  // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
-  // pre-credit per-service cards minus the net the accept payload charges.
-  // Deriving it as a difference (rather than reading a credit object) is correct
-  // for every cadence, cap, and discount type by construction, and guarantees the
-  // on-screen subtotal − credit = net reconciles. `preCreditMonthly` is that
-  // per-service sum; without it there is nothing reliable to itemize against.
-  const subtotalMonthly = round2(Number(preCreditMonthly));
-  if (!(subtotalMonthly > 0)) return null;
-  const creditMonthly = round2(subtotalMonthly - netMonthly);
-  if (!(creditMonthly > 0)) return null;
+  // Exact case needs the per-service sum to itemize against.
+  if (!(creditFromDiff > 0)) return null;
+  const creditMonthly = creditFromDiff;
   const selectedAnnual = Number(selectedFrequency?.annual ?? combined.annualSubtotal);
   const netAnnual = selectedAnnual > 0 ? selectedAnnual : round2(netMonthly * 12);
   return (

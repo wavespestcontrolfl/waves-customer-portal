@@ -822,6 +822,17 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text2).not.toContain('Your price');
   });
 
+  it('ranged credit uses the selected-cadence difference, not the stale default', () => {
+    // Selected cadence caps the credit (net $111.50 vs $112.08 sum → $0.58), so
+    // even the ranged credit-only line shows $0.58, never the default $2.08.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 111.50, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+  });
+
   it('suppresses for a quote-required selection (page hides exact dollars)', () => {
     const { container } = render(
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} preCreditMonthly={84.08} />,
