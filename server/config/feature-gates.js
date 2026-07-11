@@ -472,6 +472,15 @@ const gates = {
   // trigger has been verified with run history and idempotency checks.
   emailTemplateAutomations: isProd ? process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS === 'true' : true,
 
+  // Treatment Automation Enroll — first-time treatment bookings auto-enroll
+  // into the matching Automations-tab sequence (bed_bug only for now; the
+  // per-pest map in appointment-tagger.js controls which pests are wired, so
+  // flipping this gate never silently enables an unwired pest). Off by
+  // default in prod: enabling it emails customers, and the bed_bug automation
+  // step-0 copy currently overlaps the transactional prep guide — reconcile
+  // the two before flipping. Kill = unset.
+  treatmentAutomationEnroll: isProd ? process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true' : true,
+
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,
   // content_queue). Off means no routes, no cron, no UI. Sub-flags for
