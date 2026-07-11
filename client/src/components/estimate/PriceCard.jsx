@@ -278,9 +278,24 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ? round2((Number(frequency.monthlyBase) * 12) / visitsPerYear)
         : 0))
     : 0;
-  const perAppSavings = perAppNet != null && perAppAnchor - perAppNet >= SAVINGS_ROUNDING_NOISE
-    ? round2(perAppAnchor - perAppNet)
+  // Mirror of manualDiscountPerInterval for the per-application headline:
+  // the net per-app figure already reflects a manual promo (the ladder
+  // builders subtract it), and the promo renders as its own labeled row
+  // below — subtract its per-application slice from the anchor gap so the
+  // promo is never double-reported as anchor savings.
+  const manualDiscountPerApplication = (() => {
+    if (perAppNet == null) return 0;
+    const md = frequency.manualDiscount;
+    if (!md || !(Number(md.amount) > 0)) return 0;
+    const recurringAnnual = Number(md.recurringAmount ?? md.amount);
+    const visits = Number(visitsPerYear);
+    if (!(recurringAnnual > 0) || !(visits > 0)) return 0;
+    return round2(recurringAnnual / visits);
+  })();
+  const perAppSavingsRaw = perAppNet != null
+    ? round2(perAppAnchor - perAppNet - manualDiscountPerApplication)
     : 0;
+  const perAppSavings = perAppSavingsRaw >= SAVINGS_ROUNDING_NOISE ? perAppSavingsRaw : 0;
   // Programs billed monthly whose flat monthly differs from the per-app figure
   // (mosquito seasonal: 9 visits spread over 12 payments; termite monitoring:
   // quarterly checks billed monthly) — say so under the headline so the number

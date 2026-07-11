@@ -305,6 +305,25 @@ finding and warns on P1. Reviewers must return JSON matching
   with metadata-pinned purpose/estimate id, NO money captured at booking —
   the saved card is charged on completion and a flat no-show fee only;
   dark behind ONE_TIME_CARD_HOLD).
+  `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
+  per-service details-packet PDF for the estimate view's "full details"
+  buttons; dark behind GATE_SERVICE_DETAILS_PDF — 404 when off; estimate
+  token format gate, generic 404, isEstimateCustomerViewable gate identical
+  to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
+  draft can never produce a customer-facing document), serviceKey must be
+  BOTH a known guide key and a recurring service actually on this estimate,
+  60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
+  service guide plus PUBLIC product-registry fields only — active
+  ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
+  dilution, or inventory data).
+  `/api/estimates/:token/service-details/send` (write; emails or texts that
+  same packet to the contact info ALREADY ON the estimate — the destination
+  is NEVER caller-supplied (body carries only `service` + `channel`), so
+  the token cannot be used to spray documents at arbitrary addresses; same
+  gate-404 + token format gate + customer-viewable + service-on-estimate
+  checks as the GET, 6 req/hour limit, email sends idempotent per
+  estimate+service+day, suppression-blocked addresses return 409 with no
+  send, generic errors — no PII in responses or logs).
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired

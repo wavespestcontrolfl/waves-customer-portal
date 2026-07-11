@@ -1,4 +1,8 @@
-const { buildPricingBundle } = require('../routes/estimate-public');
+const {
+  buildPricingBundle,
+  pricingBundleHasStaleTermiteRow,
+  pricingBundleMissingRequiredSetupFee,
+} = require('../routes/estimate-public');
 
 // A pest + mosquito + termite-bait bundle in the v1 (admin) shape — Gold tier
 // (3 qualifying services → 15% off). Numbers mirror a real prod draft
@@ -157,5 +161,101 @@ describe('termite-bait bundles split into per-service sections (buildPricingBund
     expect(termiteRow).toBeTruthy();
     expect(termiteRow.monthly).toBeCloseTo(29.75, 2);
     expect(termiteRow.monthlyBase).toBeCloseTo(35, 2);
+  });
+});
+
+describe('stale-snapshot bypass guards', () => {
+  // Snapshots frozen before the split: the termite row has neither a
+  // per-visit price nor `monthly`, so the fast path would keep serving the
+  // legacy combined card with the monitoring charge invisible.
+  test('a pre-split send snapshot recomputes instead of fast-pathing', async () => {
+    const estimate = pestMosquitoTermiteEstimate();
+    estimate.estimate_data.sendSnapshot = {
+      pricingBundle: {
+        source: 'send_snapshot',
+        frequencies: [{
+          key: 'recurring',
+          monthly: 117.02,
+          annual: 1404.2,
+          perServiceTreatments: [
+            { service: 'pest_control', displayPrice: 93.5, visitsPerYear: 4 },
+            { service: 'mosquito', displayPrice: 56.1, visitsPerYear: 12 },
+            // Pre-split shape: flat-monthly monitoring with NO monthly stamp.
+            { service: 'termite_bait', name: 'Termite Bait' },
+          ],
+        }],
+      },
+    };
+    const bundle = await buildPricingBundle(estimate);
+    expect(bundle.snapshotHit).not.toBe(true);
+    // The recompute splits into per-service sections with the monitoring
+    // charge visible, exactly like a fresh build.
+    expect(bundle.services.map((s) => s.key)).toContain('termite_bait');
+    const termite = bundle.services.find((s) => s.key === 'termite_bait');
+    expect(termite.frequencies[0].monthly).toBeCloseTo(29.75, 2);
+  });
+
+  test('pricingBundleHasStaleTermiteRow flags only monthly-less, visitless termite rows', () => {
+    const stale = {
+      frequencies: [{ perServiceTreatments: [{ service: 'termite_bait' }] }],
+    };
+    expect(pricingBundleHasStaleTermiteRow(stale)).toBe(true);
+    const monthlyStamped = {
+      frequencies: [{ perServiceTreatments: [{ service: 'termite_bait', monthly: 29.75 }] }],
+    };
+    expect(pricingBundleHasStaleTermiteRow(monthlyStamped)).toBe(false);
+    const perVisitPriced = {
+      frequencies: [{ perServiceTreatments: [{ service: 'termite_bait', displayPrice: 89.25, visitsPerYear: 4 }] }],
+    };
+    expect(pricingBundleHasStaleTermiteRow(perVisitPriced)).toBe(false);
+    // Sections and combos are traversed too.
+    const staleInService = {
+      services: [{ frequencies: [{ perServiceTreatments: [{ service: 'termite_bait' }] }] }],
+    };
+    expect(pricingBundleHasStaleTermiteRow(staleInService)).toBe(true);
+    expect(pricingBundleHasStaleTermiteRow({ frequencies: [] })).toBe(false);
+  });
+
+  // Solo pest / solo mosquito plans snapshotted before the 2026-07-10 fee
+  // rule show no $99 WaveGuard setup but the accept path invoices it — the
+  // guard forces those bundles off the fast paths so the page and the
+  // invoice always agree.
+  const soloMosquitoEstData = () => ({
+    result: {
+      recurring: {
+        services: [{ name: 'Mosquito', service: 'mosquito', mo: 66, monthly: 66, perTreatment: 66, visitsPerYear: 12 }],
+      },
+    },
+  });
+
+  test('pricingBundleMissingRequiredSetupFee: qualifying snapshot without the fee recomputes', () => {
+    const feeLess = { frequencies: [{ key: 'monthly12', monthly: 66 }] };
+    expect(pricingBundleMissingRequiredSetupFee(feeLess, soloMosquitoEstData())).toBe(true);
+  });
+
+  test('pricingBundleMissingRequiredSetupFee: fee already present keeps the fast path', () => {
+    const withFee = {
+      frequencies: [{ key: 'monthly12', monthly: 66 }],
+      firstVisitFees: [{ service: 'waveguard_setup', amount: 99, waivedWithPrepay: true }],
+    };
+    expect(pricingBundleMissingRequiredSetupFee(withFee, soloMosquitoEstData())).toBe(false);
+    const withBreakdownRow = {
+      frequencies: [{ key: 'monthly12', monthly: 66 }],
+      oneTimeBreakdown: { items: [{ service: 'waveguard_setup', amount: 99 }], total: 99 },
+    };
+    expect(pricingBundleMissingRequiredSetupFee(withBreakdownRow, soloMosquitoEstData())).toBe(false);
+  });
+
+  test('pricingBundleMissingRequiredSetupFee: existing-customer waiver and bundles never trip it', () => {
+    const feeLess = { frequencies: [{ key: 'monthly12', monthly: 66 }] };
+    const existingCustomer = {
+      ...soloMosquitoEstData(),
+      membershipSnapshot: { isExistingCustomer: true },
+    };
+    // Waived outright — no fee will be invoiced, snapshot is honest as-is.
+    expect(pricingBundleMissingRequiredSetupFee(feeLess, existingCustomer)).toBe(false);
+    // Multi-service bundles carry no setup fee under the 2026-07-10 rule.
+    const bundleMix = pestMosquitoTermiteEstimate().estimate_data;
+    expect(pricingBundleMissingRequiredSetupFee(feeLess, bundleMix)).toBe(false);
   });
 });

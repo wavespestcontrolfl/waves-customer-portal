@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -238,6 +238,32 @@ describe('OneTimeBreakdownCard', () => {
     // Both the row amount and the one-time total render plain $99 — no asterisk.
     expect(screen.getAllByText('$99').length).toBe(2);
     expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
+  });
+
+  it('excludes serviceless embedded rows by identity key so they never total twice', () => {
+    // Older termite install rows carry no `service` — they normalize into the
+    // termite section by LABEL and render embedded there. The standalone card
+    // must drop them via oneTimeRowIdentityKey, not a truthy `service` match.
+    const legacyInstall = { label: 'Advance Installation', amount: 639, detail: '23 stations' };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [legacyInstall] }}
+        excludeServices={[oneTimeRowIdentityKey(legacyInstall)]}
+      />,
+    );
+    // Nothing left to show — the card renders null instead of re-totaling.
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('still excludes service-keyed embedded rows passed as identity keys', () => {
+    const keyedRow = { service: 'termite_bait_installation', label: 'Advance Installation', amount: 639 };
+    const { container } = render(
+      <OneTimeBreakdownCard
+        breakdown={{ total: 639, items: [keyedRow] }}
+        excludeServices={[oneTimeRowIdentityKey(keyedRow)]}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

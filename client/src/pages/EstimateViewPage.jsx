@@ -1535,10 +1535,25 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
+// Stable identity for a one-time breakdown row. Older rows (e.g. termite
+// "Advance Installation") carry no `service` key — they normalize into their
+// service section by LABEL — so the exclusion handshake between the embedded
+// per-service rows and the standalone card below must be able to key on
+// label+amount, never on a truthy `service` alone (a serviceless row that
+// renders embedded would otherwise total again in this card).
+export function oneTimeRowIdentityKey(item = {}) {
+  if (item?.service) return `svc:${item.service}`;
+  const label = String(item?.label || item?.name || item?.displayName || '').trim().toLowerCase();
+  const amount = Number(item?.amount ?? item?.price);
+  return `row:${label}|${Number.isFinite(amount) ? amount : ''}`;
+}
+
 export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+  // excludeServices accepts plain service keys (setup-fee callers) and
+  // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((item) => !excluded.has(item?.service));
+    .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
@@ -2630,7 +2645,13 @@ export function ServiceSection({
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
 
-  const showTierBadge = !!waveGuardTier && section?.waveGuardTierEligible !== false;
+  // The synthetic unsplittable multi-service section (key 'bundle') keeps
+  // waveGuardTierEligible=true whenever ANY member service is eligible, but
+  // badging it would resurrect the deleted plan-level badge on the whole
+  // "Recurring services" card (owner directive: recurring pest + mosquito
+  // lines badge individually ONLY) — real per-service sections only.
+  const sectionTierEligible = section?.waveGuardTierEligible !== false && section?.key !== 'bundle';
+  const showTierBadge = !!waveGuardTier && sectionTierEligible;
   return (
     <section>
       {/* Frequency choice + price live in ONE shadow-box card, same
@@ -2700,8 +2721,9 @@ export function ServiceSection({
             // Every eligible section badges its own card — multi-service
             // plans no longer hoist one plan-level badge (owner directive
             // 2026-07-10). The server's waveGuardTierEligible flag keeps
-            // palm/rodent cards badge-free.
-            waveGuardTier={section?.waveGuardTierEligible !== false ? waveGuardTier : null}
+            // palm/rodent cards badge-free, and the synthetic 'bundle'
+            // fallback section never badges (see sectionTierEligible).
+            waveGuardTier={sectionTierEligible ? waveGuardTier : null}
             // The card corner carries the badge now — PriceCard keeps the
             // tier only for its per-row service tags.
             showTierBadge={false}
@@ -2726,7 +2748,11 @@ export function ServiceSection({
         {serviceDetailsRequest ? (
           <ServiceDetailsRequestRow
             token={serviceDetailsRequest.token}
-            serviceKey={sectionSlug}
+            // RAW section key, not the glass slug: the slug normalizes
+            // commercial keys (commercial_mosquito → mosquito) into buttons
+            // whose POST the server rejects — it checks the estimate's
+            // canonical recurring keys. Unsupported keys hide the row.
+            serviceKey={section.key}
             customerEmail={serviceDetailsRequest.customerEmail}
             customerPhone={serviceDetailsRequest.customerPhone}
             // Only the submit-phase lock disables the request — the
@@ -3768,9 +3794,16 @@ export default function EstimateViewPage() {
                 ...(pricing.firstVisitFees || [])
                   .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
                   .map((fee) => fee.service),
+                // Identity keys, not bare service strings — embedded rows
+                // without a `service` (label-normalized termite installs)
+                // must still be excluded or they'd total twice. Mirror
+                // SectionOneTimeBlock's quote-required filter: rows it
+                // refuses to render never actually embed, so excluding them
+                // here would make the required work vanish from the page
+                // entirely instead of showing its "Quote Required" row.
                 ...services.flatMap((s) => (s?.oneTimeContribution?.items || [])
-                  .map((item) => item?.service)
-                  .filter(Boolean)),
+                  .filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+                  .map((item) => oneTimeRowIdentityKey(item))),
               ]}
               prepayWaivedServices={prepayWaivedServices}
             />

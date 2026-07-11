@@ -114,6 +114,10 @@ describe('public estimate one-time breakdown', () => {
             frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
             waveGuardTier: 'Silver',
             anchorOneTimePrice: 250,
+            // Solo-pest snapshots carry the $99 WaveGuard setup — without it
+            // the missing-fee guard (codex rd2 P1) correctly forces a
+            // recompute instead of fast-pathing.
+            firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }],
             source: 'send_snapshot_fixture',
           },
         },

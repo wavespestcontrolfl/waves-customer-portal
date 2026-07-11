@@ -13589,15 +13589,20 @@ function normalizeBreakdownItemLabel(item = {}) {
 // every bundle path returns through has to drop it too. Display-only
 // alignment: estimate-converter's shouldIncludeWaveGuardSetupFeeForRecurring
 // already refuses to charge the fee for these mixes.
-function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
+// Recurring services list from estimate data (shared by the stale-fee strip
+// below and the missing-fee snapshot guard in buildPricingBundle).
+function estimateDataRecurringServices(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : null);
-  const recurringServices = Array.isArray(result?.recurring?.services)
+  return Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
+}
+
+function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const membershipFeeMixApplies = require('../services/estimate-converter')
-    .recurringMixHasMembershipFeeService(recurringServices);
+    .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
   if (membershipFeeMixApplies) return payload;
 
   let next = payload;
@@ -13979,6 +13984,26 @@ function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
     || hasLawnTreatmentRow(c?.perServiceTreatments));
 }
 
+// Snapshots frozen BEFORE the termite-monitoring split carry termite_bait
+// treatment rows with neither a per-visit price (displayPrice × visits) nor
+// the flat `monthly` the splitter reads — exactly the shape whose bundle
+// collapses to the legacy combined card and hides the charged monitoring
+// line (the bug this PR fixes). Those snapshots must not fast-path: they
+// recompute through shapeFromV1/shapeFrequencyEntry, which stamp `monthly`
+// on flat-monthly rows. Traversal mirrors pricingBundleViolatesLawnPolicy.
+function pricingBundleHasStaleTermiteRow(bundle = {}) {
+  const rowStale = (rows) => Array.isArray(rows) && rows.some((r) => recurringServiceKey(r) === 'termite_bait'
+    && !(Number(r?.monthly) > 0)
+    && !(Number(r?.displayPrice ?? r?.perTreatment) > 0 && Number(r?.visitsPerYear ?? r?.visits) > 0));
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  for (const s of (Array.isArray(bundle.services) ? bundle.services : [])) {
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  if (frequencyRows.some((f) => rowStale(f?.perServiceTreatments))) return true;
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => rowStale(c?.perServiceTreatments));
+}
+
 function pricingBundleViolatesLawnPolicy(bundle = {}) {
   const minMonthly = lawnProgramMinimumMonthly();
   const belowFloor = (monthly) => minMonthly > 0
@@ -14016,6 +14041,35 @@ function pricingBundleViolatesLawnPolicy(bundle = {}) {
   const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
   return combos.some((c) => (c?.selection && isRetiredLawnTierKey(c.selection.lawn_care))
     || lawnTreatmentRowViolates(c?.perServiceTreatments));
+}
+
+// The inverse of stripStaleWaveGuardSetupFromBundle: a snapshot / cached
+// bundle frozen BEFORE the 2026-07-10 fee rule for a mix that now carries
+// the $99 WaveGuard setup (solo pest / solo mosquito recurring, no
+// existing-customer waiver) shows NO setup fee, but the accept path
+// (shouldIncludeWaveGuardSetupFeeForRecurring) invoices it — an outstanding
+// link must never bill a fee the page never showed. Such bundles bypass the
+// fast paths and recompute through the fresh builders, which synthesize the
+// fee card. The prepay-eligibility gate mirrors the fresh v1 build's add
+// condition exactly, so the bypass only fires when the rebuild will actually
+// attach the fee (otherwise it would recompute every request for nothing).
+function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
+  // Quote-required snapshots never self-serve accept (the acceptance
+  // contract routes them to "Call Waves", so no setup invoice can fire) and
+  // a recompute would wipe the manually-quoted rows — leave them alone.
+  const bundleFrequencies = Array.isArray(bundle.frequencies) ? bundle.frequencies : [];
+  if (bundleFrequencies.some((f) => f?.quoteRequired === true || f?.kind === 'quote_required')) return false;
+  const isSetupRow = (row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {});
+  if (Array.isArray(bundle.firstVisitFees)
+    && bundle.firstVisitFees.some((fee) => fee?.service === 'waveguard_setup')) return false;
+  if (Array.isArray(bundle.oneTimeBreakdown?.items)
+    && bundle.oneTimeBreakdown.items.some(isSetupRow)) return false;
+  if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return false;
+  if (!annualPrepayEligibleForEstimateData(estData)) return false;
+  return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
+    recurringServices: estimateDataRecurringServices(estData),
+    estimateData: estData,
+  });
 }
 
 function invalidateSendSnapshotPricingBundle(estData = {}) {
@@ -14108,6 +14162,11 @@ async function buildPricingBundle(estimate) {
     // not fast-path just because its lawn slice is unitemized).
     && !pricingBundleViolatesLawnPolicy(snapshotBundle)
     && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // Pre-split termite snapshots (no monthly on the flat-monthly row) and
+    // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
+    // path will invoice) recompute instead of fast-pathing.
+    && !pricingBundleHasStaleTermiteRow(snapshotBundle)
+    && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
@@ -14117,7 +14176,10 @@ async function buildPricingBundle(estimate) {
   }
 
   const cached = getEstimatePricingCache(estimate);
-  if (cached) {
+  // Same missing-fee guard as the snapshot fast path: a cached bundle built
+  // before the fee rule (or restored oddly) must not serve a first-visit
+  // total the converter won't bill.
+  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estimate, estData);
   }
 
@@ -14410,6 +14472,12 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
 // premature customer communication).
 const serviceDetailsGateOn = () => process.env.GATE_SERVICE_DETAILS_PDF === 'true';
 
+// Estimate token format gate (same pattern as estimate-slots-public.js):
+// legacy admin slug tokens (nameSlug-8hex) OR the 64-hex format. Rejecting
+// malformed tokens before the DB read keeps this surface probe-resistant,
+// matching the public-route contract in AGENTS.md.
+const SERVICE_DETAILS_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
 const serviceDetailsSendLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 6,
@@ -14432,6 +14500,9 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
     if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
@@ -14453,7 +14524,11 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
 router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
     if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
@@ -15062,5 +15137,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
+module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;
+module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
