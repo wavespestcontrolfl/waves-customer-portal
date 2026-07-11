@@ -1628,31 +1628,49 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
-          // A decision-linked scheduled reply must still be anchored to the
-          // NEWEST inbound when it FIRES — the send-time staleness check ran
-          // at enqueue, potentially hours ago. Stale → block this queued row,
-          // retire the claimed decision, and reopen parked siblings (each one
-          // re-verifies at its own send).
+          // A decision-linked scheduled reply must clear TWO fire-time
+          // re-checks (the send-time checks ran at enqueue, potentially hours
+          // ago, and pre-rollout cards never saw the price rule at all):
+          //   (a) its anchoring inbound is still the newest on the thread;
+          //   (b) non-human-authored agent text carries no price quote.
+          // Either failure → block this queued row, retire the claimed
+          // decision, reopen parked siblings — in ONE thread-locked
+          // transaction over FRESHLY read metadata: the cancel route can
+          // transfer parked ids onto this row after our claim, and those must
+          // reopen here, not sit invisible until orphan recovery.
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
-            if (await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id })) {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                status: 'blocked',
-                updated_at: new Date(),
-                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'stale_agent_decision')"),
-              });
-              await suggest.supersedeStaleDecision({
-                decisionId: claimMeta.agent_decision_id,
-                fromStatus: 'scheduled',
-                note: 'A newer customer message arrived before this scheduled reply fired — review the thread.',
-              });
-              if (Array.isArray(claimMeta.parked_decision_ids) && claimMeta.parked_decision_ids.length) {
-                await suggest.reopenScheduledSuggestions({
-                  decisionIds: claimMeta.parked_decision_ids,
-                  reason: 'The scheduled reply ahead of this suggestion went stale — review the thread.',
+            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id });
+            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
+            if (anchorStale || pricedAgentText) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+              const freshMeta = await readFreshMeta();
+              const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
+              await db.transaction(async (trx) => {
+                await suggest.lockSuggestThread(trx, threadKey);
+                await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
                 });
-              }
-              logger.warn(`[scheduled-sms] ${msg.id} blocked: linked agent decision anchored to a superseded inbound`);
+                await suggest.supersedeStaleDecision({
+                  decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
+                  fromStatus: 'scheduled',
+                  note: anchorStale
+                    ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
+                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                  dbi: trx,
+                });
+                const parked = Array.isArray(freshMeta.parked_decision_ids) ? freshMeta.parked_decision_ids : [];
+                if (parked.length) {
+                  await suggest.reopenScheduledSuggestions({
+                    decisionIds: parked,
+                    reason: 'The scheduled reply ahead of this suggestion did not go out — review the thread.',
+                    dbi: trx,
+                  });
+                }
+              });
+              logger.warn(`[scheduled-sms] ${msg.id} blocked (${blockedReason}): linked agent decision retired, parked suggestions reopened`);
               continue;
             }
           }

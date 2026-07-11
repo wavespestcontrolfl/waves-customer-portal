@@ -67,7 +67,7 @@ function hasRedactionPlaceholder(text) {
 // total"). False positives are acceptable — they fail toward human review,
 // never toward a customer send.
 const PRICE_NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
-const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|\\w*cient[oa]s|quinient[oa]s|mil|pocos)';
+const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[\\wáéíóú]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|\\w*cient[oa]s|quinient[oa]s|mil|pocos)';
 const PRICE_EN_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|a|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
 const PRICE_ES_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${PRICE_NUM_WORD_ES})*)`;
 // The context branches use a STRICT amount (no bare "a") — "the price is a
@@ -77,11 +77,12 @@ const PRICE_EN_AMOUNT_STRICT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD}(?:[-
 const PRICE_WORD_EN = '(?:total|price|cost|costs|fee|charge|charges|quote|estimate|balance)';
 const PRICE_WORD_ES = '(?:precio|costo|total|tarifa|saldo)';
 const PRICE_QUOTE_RE = new RegExp(
-  '\\$\\s*\\d' // $45, $ 1,200.50
+  '\\$\\s*\\.?\\d' // $45, $ 1,200.50, $.99
   + '|\\bUSD\\s*\\d' // USD 50
   + '|\\b\\d[\\d,]*(?:\\.\\d+)?\\s*USD\\b' // 45 USD (reversed)
-  + `|\\b${PRICE_EN_AMOUNT}[-\\s]+(?:dollars?|bucks?)\\b` // 45 dollars, a 50-dollar credit, four hundred bucks
-  + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, doscientos dólares
+  + `|\\b${PRICE_EN_AMOUNT}[-\\s]+(?:dollars?|bucks?|cents?)\\b` // 45 dollars, a 50-dollar credit, 99 cents
+  + `|${PRICE_EN_AMOUNT}\\s*¢` // 99¢
+  + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?|centavos?)\\b` // 45 dólares, doscientos dólares, noventa centavos
   + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
   + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b` // 45 al mes
   // Explicit price GRAMMAR around strong price nouns, both directions and
@@ -623,11 +624,11 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
 }
 
 /** Cancel/failure path: the customer was never answered — the cards return. */
-async function reopenScheduledSuggestions({ decisionIds, reason }) {
+async function reopenScheduledSuggestions({ decisionIds, reason, dbi = db }) {
   const ids = (Array.isArray(decisionIds) ? decisionIds : [decisionIds]).filter(Boolean);
   if (!ids.length) return 0;
   try {
-    return await db('agent_decisions')
+    return await dbi('agent_decisions')
       .whereIn('id', ids)
       .where({ status: 'scheduled' })
       .update({

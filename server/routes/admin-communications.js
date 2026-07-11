@@ -106,6 +106,20 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
     const customerMatches = !trustedCustomerId || decision?.customer_id === trustedCustomerId;
     if (!(decision?.id && customerMatches && decisionPhoneMatches)) return null;
 
+    // House rule at the send boundary too: a card whose AGENT text quotes a
+    // price (drafted before the delivery guards rolled out, or by an old pod
+    // mid-deploy) is refused and retired. The operator can still type a
+    // price manually — that's a human decision with no agent linkage.
+    const suggestMode = require('../services/sms-suggest-mode');
+    if (suggestMode.hasPriceQuote(decision.suggested_message)) {
+      logger.info(`[agent-review] decision ${decision.id} quotes a price — refusing send and retiring the card`);
+      await suggestMode.supersedeStaleDecision({
+        decisionId: decision.id,
+        note: 'This draft quoted a price — house rule: no prices in SMS. Write the reply manually if needed.',
+      });
+      return null;
+    }
+
     // STALENESS: a card is only sendable while its anchoring inbound is
     // still the newest customer message on the thread. Drafting lanes that
     // never publish (scheduling, escalation, withheld/priced drafts, LLM

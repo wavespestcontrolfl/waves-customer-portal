@@ -67,6 +67,14 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('serían doscientos dólares')).toBe(true);
   });
 
+  test('detects leading-decimal, cents, and Unicode Spanish forms (Codex P1 r5)', () => {
+    expect(hasPriceQuote('just $.99 today')).toBe(true);
+    expect(hasPriceQuote('that is 99 cents')).toBe(true);
+    expect(hasPriceQuote('only 99¢')).toBe(true);
+    expect(hasPriceQuote('veintidós dólares')).toBe(true);
+    expect(hasPriceQuote('noventa centavos')).toBe(true);
+  });
+
   test('detects price grammar around price nouns, both directions and languages (Codex P1 r3+r4)', () => {
     expect(hasPriceQuote('The price is 415')).toBe(true);
     expect(hasPriceQuote('The estimate is 415.75')).toBe(true);
