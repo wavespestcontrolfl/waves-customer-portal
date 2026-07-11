@@ -308,6 +308,15 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
+  // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
+  // it texts ADAM_PHONE, never a customer — but the owner paused health
+  // notifications 2026-07-11, so it fails CLOSED in every environment until
+  // explicitly re-enabled with GATE_CHURN_ALERT_SMS=true. Retention outreach
+  // drafts still queue as pending_approval either way; only the owner-alert
+  // SMS is gated.
+  churnAlertSms: process.env.GATE_CHURN_ALERT_SMS === 'true',
+
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
   // ~1h recovery SMS + ~24h email. A customer-facing auto-send, so it FAILS CLOSED
   // (explicit opt-in in EVERY environment) per the house rule — a preview/dev env
