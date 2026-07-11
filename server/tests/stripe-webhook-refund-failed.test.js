@@ -47,7 +47,9 @@ const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-we
 describe('handleRefundFailed', () => {
   let paymentRow;
   let trxUpdate;
+  let trxInvoices;
   let notificationInsert;
+  let paymentsFirst;
 
   const failedRefund = (over = {}) => ({
     id: 're_fail',
@@ -79,10 +81,12 @@ describe('handleRefundFailed', () => {
       first: jest.fn(async () => paymentRow),
       update: trxUpdate,
     };
-    const trxInvoicesQuery = {
-      where: jest.fn(() => trxInvoicesQuery),
+    trxInvoices = {
+      where: jest.fn(() => trxInvoices),
       first: jest.fn(async () => null),
+      update: jest.fn().mockResolvedValue(1),
     };
+    const trxInvoicesQuery = trxInvoices;
     const trx = jest.fn((table) => {
       if (table === 'payments') return trxPaymentsQuery;
       if (table === 'invoices') return trxInvoicesQuery;
@@ -90,9 +94,10 @@ describe('handleRefundFailed', () => {
       throw new Error(`Unexpected trx table: ${table}`);
     });
 
+    paymentsFirst = jest.fn(async () => paymentRow);
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
-      first: jest.fn(async () => paymentRow),
+      first: paymentsFirst,
     };
     db.mockImplementation((table) => {
       if (table === 'payments') return paymentsQuery;
@@ -108,7 +113,12 @@ describe('handleRefundFailed', () => {
     expect(trxUpdate).toHaveBeenCalledTimes(1);
     const args = trxUpdate.mock.calls[0][0];
     expect(args.refund_amount).toBe(0);
-    expect(args.refund_status).toBe('failed');
+    // Fully-bounced refund = NO refund activity remains: refund_status must
+    // clear (consumers treat any non-null value as refund activity — the
+    // Refund button hides, prepay reconciliation skips) and the dangling
+    // stripe_refund_id goes with it. Metadata keeps the durable record.
+    expect(args.refund_status).toBeNull();
+    expect(args.stripe_refund_id).toBeNull();
     expect(args.status).toBe('paid');
     expect(JSON.parse(args.metadata).failed_refund_ids).toEqual(['re_fail']);
 
@@ -167,6 +177,31 @@ describe('handleRefundFailed', () => {
 
     const args = trxUpdate.mock.calls[0][0];
     expect(args.refunded_surcharge_cents).toBeUndefined();
+  });
+
+  test('full-refund bounce restores a terminalized invoice back to paid', async () => {
+    // returnAppliedCreditOnRefund terminalized the invoice to 'refunded' at
+    // creation time; Stripe kept the money, so 'refunded' is now false on
+    // every surface. Status-only restore; credit stays a human decision.
+    trxInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'refunded' });
+    await handleRefundFailed(failedRefund());
+
+    expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
+    expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0001 was restored to paid');
+  });
+
+  test('falls back to the PI lookup for ACH rows with no charge/refund id yet', async () => {
+    // payment_intent.processing rows are keyed by PI only — the bounce must
+    // still find them or it takes the notify-only path and the late
+    // charge.refunded stamps the failed refund as successful.
+    paymentsFirst
+      .mockResolvedValueOnce(undefined) // by stripe_refund_id
+      .mockResolvedValueOnce(undefined) // by stripe_charge_id
+      .mockResolvedValueOnce(paymentRow); // by stripe_payment_intent_id
+    await handleRefundFailed(failedRefund());
+
+    expect(trxUpdate).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(trxUpdate.mock.calls[0][0].metadata).failed_refund_ids).toEqual(['re_fail']);
   });
 
   test('UNSTAMPED bounce (arrived before its creation event) records the id but never rewinds amounts', async () => {

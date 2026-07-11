@@ -1901,6 +1901,11 @@ async function handleRefundFailed(refund) {
   let payment = null;
   if (refundId) payment = await db('payments').where({ stripe_refund_id: refundId }).first();
   if (!payment && chargeId) payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+  // ACH rows created by payment_intent.processing may not carry a charge id
+  // yet — without the PI fallback an early bounce would take the notify-only
+  // path, never record failed_refund_ids, and the late charge.refunded would
+  // stamp the failed refund as successful.
+  if (!payment && piId) payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
 
   // The admin notification is the ONLY durable operator signal for the side
   // effects this handler deliberately leaves to a human (restored credit,
@@ -1977,9 +1982,14 @@ async function handleRefundFailed(refund) {
     await trx('payments').where({ id: row.id }).update({
       ...surchargeRewind,
       refund_amount: nextRefundCents / 100,
-      // 'failed' when this bounce erased the whole refund; a surviving
-      // remainder means an EARLIER partial refund did clear.
-      refund_status: nextRefundCents > 0 ? 'partial' : 'failed',
+      // A surviving remainder means an EARLIER partial did clear; when the
+      // bounce erased the whole refund, CLEAR the status — consumers treat
+      // any non-null refund_status as refund activity (Customer360 hides the
+      // Refund button on !!refund_status; prepay reconciliation skips rows
+      // with one), and a fully-bounced refund must leave the row refundable.
+      // failed_refund_ids in metadata stays as the durable record.
+      refund_status: nextRefundCents > 0 ? 'partial' : null,
+      ...(nextRefundCents === 0 ? { stripe_refund_id: null } : {}),
       // A row terminalized to 'refunded' by a refund that never fully
       // cleared is still (at least partly) collected money — anything
       // short of the full paid amount reverts to 'paid', matching the
@@ -1989,23 +1999,37 @@ async function handleRefundFailed(refund) {
       metadata: JSON.stringify(nextMeta),
     });
 
-    // Operator signal: the revert above is mechanical, but the side effects
-    // of the optimistic refund are DELIBERATELY not auto-reversed — account
-    // credit restored by returnAppliedCreditOnRefund may already be spent (a
-    // mechanical claw-back could drive a balance negative), a payer statement
-    // reopened by the cascade reversal may have re-collection in flight, and
-    // the customer already got a "refund issued" email. Name the exact
-    // records so the human reconciles specifics.
-    let sideEffectHint = '';
+    // Restore the linked invoice: a full refund terminalized it to
+    // 'refunded' (returnAppliedCreditOnRefund) — with the money kept by
+    // Stripe that status is now false on every customer/admin surface.
+    // Status-only and mechanical (collected money is a fact); the CREDIT
+    // side of that settle stays a human decision below.
+    let invoiceRestored = null;
+    let inv = null;
     try {
-      const inv = nextMeta.invoice_id
-        ? await trx('invoices').where({ id: nextMeta.invoice_id }).first('id', 'invoice_number')
-        : (piId ? await trx('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number') : null);
-      if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
-      if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
+      inv = nextMeta.invoice_id
+        ? await trx('invoices').where({ id: nextMeta.invoice_id }).first('id', 'invoice_number', 'status')
+        : (piId ? await trx('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number', 'status') : null);
+      if (inv && String(inv.status).toLowerCase() === 'refunded' && nextRefundCents < rowPaidCents) {
+        await trx('invoices').where({ id: inv.id, status: 'refunded' }).update({ status: 'paid', updated_at: new Date() });
+        invoiceRestored = inv.invoice_number || inv.id;
+      }
     } catch (err) {
-      logger.warn(`[stripe-webhook] refund-failed side-effect lookup failed: ${err.message}`);
+      logger.warn(`[stripe-webhook] refund-failed invoice restore/lookup failed: ${err.message}`);
     }
+
+    // Operator signal: the reverts above are mechanical, but the remaining
+    // side effects of the optimistic refund are DELIBERATELY not
+    // auto-reversed — account credit restored by returnAppliedCreditOnRefund
+    // may already be spent (a mechanical claw-back could drive a balance
+    // negative), a payer statement reopened by the cascade reversal may have
+    // re-collection in flight, and the customer already got a "refund
+    // issued" email. Name the exact records so the human reconciles
+    // specifics.
+    let sideEffectHint = '';
+    if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
+    else if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
+    if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
     await insertBounceNotification(trx, `Payment row ${row.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`);
   });
 }
