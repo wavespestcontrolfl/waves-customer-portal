@@ -1087,7 +1087,9 @@ const SERVICE_COPY = {
       'What about active termites?',
     ],
     priceWording: {
-      dayLine: "That's about {amount}/day for this plan.",
+      // Owner copy 2026-07-10 (investment framing) — not the generic
+      // "for this plan" line.
+      dayLine: "That's about {amount}/day for year-round peace of mind.",
     },
   },
   foam_recurring: {
@@ -3629,7 +3631,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
               payAfterTitle: 'Pay per application',
               payAfterBody: 'Approve now; after you confirm, we send the setup + first application invoice so you can pay before service.',
               noPaymentCopy: 'No payment is charged on this page. Your first service visit will be billed after completion.',
-              bookingTitle: 'Find a date & time that works for you',
+              bookingTitle: 'Search by date or time — no calling, no hold music, no back-and-forth',
               bookingSubhead: 'These are the soonest open service windows we can offer. Nearby route days are marked when a tech is already close by.',
               payPrefHeading: 'Choose how you want to pay',
               payPrefCardTitle: 'Pay per application',
@@ -3875,15 +3877,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>−${fmtMoney(recurringDisplayManualDiscount)} / ${escapeHtml(recurringPricePeriodWord)}</strong></div>`
     : '';
 
-  // WaveGuard Membership setup ($99). Applies ONLY to mixes with recurring Pest
-  // (owner directive 2026-07-10); mosquito, lawn, termite-bait, rodent-bait,
-  // tree & shrub, and palm carry no setup fee (they get a 5% annual-prepay
-  // discount instead). A mix containing recurring pest always charges the
-  // setup — the 5% never stacks on top.
+  // WaveGuard Membership setup ($99). Applies ONLY to single-service recurring
+  // plans — recurring pest only, or recurring mosquito only (owner directive
+  // 2026-07-10 evening). Bundles and every other solo service carry no setup
+  // fee (they get the annual-prepay % discount instead); where the fee applies
+  // the % never stacks on top. estimate-converter's
+  // recurringMixHasMembershipFeeService is the single source of this rule.
   // Older v1 estimates may not have oneTime.membershipFee cached, so fall back
   // to the pricing constant when a qualifying recurring line is present.
   const explicitMembershipFee = Number(estResult?.oneTime?.membershipFee || 0);
-  const hasWaveGuardMembership = !!pestRecurring;
+  const hasWaveGuardMembership = require('../services/estimate-converter')
+    .recurringMixHasMembershipFeeService(recurring);
   const membershipFee = hasWaveGuardMembership
     ? (explicitMembershipFee > 0 ? explicitMembershipFee : Number(PEST.initialFee || 99))
     : 0;
@@ -4311,7 +4315,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       : (hasOnlyTermiteBaitServices ? TERMITE_BAIT_PERKS : PERKS)))
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
-  const reviewFallbacks = LOCATIONS.slice(0, 3).map((l) => ({
+  // All four GBP profiles (owner directive 2026-07-10 — was the first three).
+  const reviewFallbacks = LOCATIONS.map((l) => ({
     reviewerName: `Waves ${l.name}`,
     text: `Read current Google reviews for our ${l.name} location.`,
     location: l.name,
@@ -9808,16 +9813,18 @@ function normalizeOneTimeBreakdown(estData) {
   addRows(oneTime?.items);
   if (nestedOneTime && nestedOneTime !== oneTime) addRows(nestedOneTime.items);
   const membershipFee = Number(oneTime?.membershipFee ?? nestedOneTime?.membershipFee);
-  // WaveGuard setup fee only applies when recurring pest control is part of the
-  // estimate (owner directive 2026-07-10). Mosquito / lawn / termite-bait /
-  // rodent-bait / T&S / palm never carry it, even if a stale membershipFee was
-  // cached in oneTime.
+  // WaveGuard setup fee only applies to single-service recurring plans —
+  // recurring pest only or recurring mosquito only (owner directive
+  // 2026-07-10 evening; estimate-converter's recurringMixHasMembershipFeeService
+  // is the single source of the rule). Bundles and every other mix never
+  // carry it, even if a stale membershipFee was cached in oneTime.
   const recurringServicesForFee = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
-  const hasRecurringPest = recurringServicesForFee.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
+  const membershipFeeMixApplies = require('../services/estimate-converter')
+    .recurringMixHasMembershipFeeService(recurringServicesForFee);
   const hasExplicitWaveGuardSetup = rows.some((row) => row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row));
-  if (Number.isFinite(membershipFee) && membershipFee > 0 && hasRecurringPest && !hasExplicitWaveGuardSetup) {
+  if (Number.isFinite(membershipFee) && membershipFee > 0 && membershipFeeMixApplies && !hasExplicitWaveGuardSetup) {
     addRows([{
       service: 'waveguard_setup',
       name: 'WaveGuard setup',
@@ -9895,12 +9902,12 @@ function normalizeOneTimeBreakdown(estData) {
 
   // An explicit WaveGuard setup row saved in the estimate's one-time items
   // bypasses the synthesized-fee guard above — drop it for the same
-  // no-recurring-pest mixes so a lawn-only or mosquito-only estimate never
-  // shows the $99 membership setup. estimate-converter's
+  // non-qualifying mixes (bundles, lawn-only, …) so they never show the $99
+  // membership setup. estimate-converter's
   // shouldIncludeWaveGuardSetupFeeForRecurring already refuses to CHARGE it
   // for these mixes, so this keeps the page consistent with the invoice.
   let suppressedExplicitSetupTotal = 0;
-  if (!hasRecurringPest) {
+  if (!membershipFeeMixApplies) {
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       const row = rows[i];
       if (row.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row)) {
@@ -9922,7 +9929,7 @@ function normalizeOneTimeBreakdown(estData) {
     ? suppressedExplicitSetupTotal
     : (Number.isFinite(membershipFee)
       && membershipFee > 0
-      && !hasRecurringPest
+      && !membershipFeeMixApplies
       ? membershipFee
       : 0);
   const explicitTotal = Number.isFinite(rawExplicitTotal)
@@ -12834,7 +12841,7 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     recurringService.visits,
     recurringService.frequency,
   );
-  const displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, recurringService.perTreatment, recurringService.perVisit);
+  let displayPrice = firstPositiveNumber(row.displayPrice, row.perTreatment, recurringService.perTreatment, recurringService.perVisit);
   const anchorPrice = firstPositiveNumber(row.perTreatment, row.perVisit, recurringService.perTreatment, recurringService.perVisit);
   // Flat-monthly rows (termite bait monitoring) carry monthly/monthlyBase
   // instead of per-visit pricing — build the section entry from those so the
@@ -12846,6 +12853,17 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
+  // Termite bait monitoring bills a flat monthly but stations are checked
+  // quarterly (owner directive 2026-07-10) — surface per-check pricing so the
+  // card leads with the price per station check like every other service
+  // ($29.75/mo → $89.25/check, 4 checks/yr). Display-only: the recurring row
+  // and billing stay monthly (the card notes "Billed $X/mo").
+  let effectiveVisits = visitsPerYear;
+  if (key === 'termite_bait' && !(displayPrice && visitsPerYear) && monthly != null) {
+    const TERMITE_CHECKS_PER_YEAR = 4;
+    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
+  }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
   const fallbackLabel = recurringService.tierLabel
@@ -12863,7 +12881,7 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     annual: monthly != null ? roundMonthly(monthly * 12) : null,
     perTreatment: displayPrice || null,
     perVisit: key === 'pest_control' ? (anchorPrice || null) : null,
-    visitsPerYear: visitsPerYear || null,
+    visitsPerYear: effectiveVisits || null,
     included: includedRowsForServiceFrequency(baseFrequency, key, recurringService),
     addOns: allowAddOns && Array.isArray(baseFrequency.addOns) ? baseFrequency.addOns : [],
     quoteRequired: false,
@@ -13206,7 +13224,10 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
       isRecurring: true,
       isPest: key === 'pest_control',
       frequencies,
-      setupFee: key === 'pest_control' ? waveGuardSetupFee : null,
+      // Solo pest AND solo mosquito carry the $99 membership setup (owner
+      // directive 2026-07-10 evening); the fee only exists on the payload
+      // when the mix qualifies, so attach whenever it was pushed.
+      setupFee: (key === 'pest_control' || key === 'mosquito') ? waveGuardSetupFee : null,
       oneTimeBreakdown,
       quoteRequired: payload.quoteRequired === true,
     })];
@@ -13376,10 +13397,10 @@ function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, servi
 // pest. Per owner decision. Matched on the service key (palm_injection's section
 // category aliases to 'tree_shrub' but its key stays 'palm_injection', so palm
 // and rodent are simply absent from this allow-list).
-// termite_bait still RECEIVES the WaveGuard % discount but does not display
-// the membership badge (owner directive 2026-07-10: the WaveGuard membership
-// shows on recurring pest and mosquito only).
-const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
+// Termite bait monitoring is part of the WaveGuard recurring plan (owner
+// confirmation 2026-07-10 evening — reverses the earlier same-day removal),
+// so its section badges like pest/mosquito.
+const TIER_BADGE_ELIGIBLE_KEYS = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
 
 // A recurring section shows the tier badge iff it represents AT LEAST ONE
 // eligible service. memberKeys = the service keys the section covers ([key] for
@@ -13411,6 +13432,9 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
     showOneTimePestAddOns: false && hasPestOneTime,
+    // Per-service "email/text me the full details PDF" buttons (dark until
+    // the owner approves the packet copy — GATE_SERVICE_DETAILS_PDF).
+    showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF === 'true',
   };
 }
 
@@ -13555,10 +13579,13 @@ function normalizeBreakdownItemLabel(item = {}) {
 }
 
 // Strip a stale WaveGuard setup fee from a pricing bundle whose recurring mix
-// has no pest/mosquito — the only mixes that carry the $99 membership setup.
+// doesn't carry the $99 membership setup — solo pest / solo mosquito plans
+// only (owner directive 2026-07-10 evening; the converter's
+// recurringMixHasMembershipFeeService is the single source of the rule).
 // normalizeOneTimeBreakdown already suppresses the fee when it builds a fresh
 // breakdown, but send-snapshot and cached bundles were frozen with the fee
-// baked into oneTimeBreakdown/firstVisitFees at send time, so the chokepoint
+// baked into oneTimeBreakdown/firstVisitFees at send time (multi-service
+// bundles carried it under the pre-2026-07-10 rules), so the chokepoint
 // every bundle path returns through has to drop it too. Display-only
 // alignment: estimate-converter's shouldIncludeWaveGuardSetupFeeForRecurring
 // already refuses to charge the fee for these mixes.
@@ -13569,8 +13596,9 @@ function stripStaleWaveGuardSetupFromBundle(payload = {}, estData = {}) {
   const recurringServices = Array.isArray(result?.recurring?.services)
     ? result.recurring.services
     : (Array.isArray(result?.results?.recurring?.services) ? result.results.recurring.services : []);
-  const hasRecurringPestForSetup = recurringServices.some((s) => /pest/i.test(String(s?.name || s?.service || '')));
-  if (hasRecurringPestForSetup) return payload;
+  const membershipFeeMixApplies = require('../services/estimate-converter')
+    .recurringMixHasMembershipFeeService(recurringServices);
+  if (membershipFeeMixApplies) return payload;
 
   let next = payload;
   const breakdown = payload.oneTimeBreakdown;
@@ -14136,10 +14164,14 @@ async function buildPricingBundle(estimate) {
     // pest carries a roach type) is NOT waivable — it covers the heavier
     // visit-1 cost regardless of customer churn.
     const firstVisitFees = [];
-    // The WaveGuard setup fee only applies to recurring-pest mixes (owner
-    // directive 2026-07-10) — every other recurring service is prepay-eligible
-    // too but carries no setup fee.
-    if (annualPrepayEligible && hasPest) {
+    // The WaveGuard setup fee only applies to single-service recurring plans —
+    // recurring pest only or recurring mosquito only (owner directive
+    // 2026-07-10 evening; estimate-converter's recurringMixHasMembershipFeeService
+    // is the single source). Bundles and every other recurring service are
+    // prepay-eligible too but carry no setup fee.
+    const membershipFeeMixApplies = require('../services/estimate-converter')
+      .recurringMixHasMembershipFeeService(v1.services);
+    if (annualPrepayEligible && membershipFeeMixApplies) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
@@ -14157,17 +14189,28 @@ async function buildPricingBundle(estimate) {
       });
     }
 
-    // If the estimate has no recurring pest, the cached oneTime.total may
-    // still include a stale $99 WaveGuard membership fee. The display
-    // suppresses that fee for non-pest estimates; strip it from the anchor
-    // price too so resolveAcceptOneTimeTotal doesn't end up charging it.
+    // Reconcile the anchor one-time price with the fee rule. The cached
+    // oneTime.total reflects estimate-creation logic (fee baked in when
+    // recurring pest was present): (a) mixes the fee no longer applies to
+    // (bundles, lawn-only, …) strip the stale fee so resolveAcceptOneTimeTotal
+    // never charges it; (b) a solo-mosquito plan created without the fee adds
+    // it, so the anchor matches the fee card the page shows (converter charges
+    // the same $99 at conversion). The add is gated like the card push —
+    // no fee card shown (not prepay-eligible), no silent charge.
     const rawV1OneTimeTotal = v1.oneTimeTotal || Number(estimate.onetime_total || 0) || null;
     const choiceOneTimePrice = (estimate.show_one_time_option || estimate.showOneTimeOption)
       ? oneTimeChoiceAmountForEstimate(estimate, estData, { frequencies, oneTimeBreakdown: storedOneTimeBreakdown })
       : null;
-    const anchorOneTimePrice = choiceOneTimePrice ?? ((!hasPest && rawV1OneTimeTotal && v1.membershipFee > 0)
-      ? Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100)
-      : rawV1OneTimeTotal);
+    const anchorOneTimePrice = choiceOneTimePrice ?? (() => {
+      if (!membershipFeeMixApplies && rawV1OneTimeTotal && v1.membershipFee > 0) {
+        return Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100);
+      }
+      if (membershipFeeMixApplies && annualPrepayEligible && !(v1.membershipFee > 0)) {
+        const fee = Number(PEST.initialFee || 99) || 99;
+        return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
+      }
+      return rawV1OneTimeTotal;
+    })();
 
     // Per-service cadence combinations (bundles): lets the customer pick each
     // service's cadence independently. Each combo is priced through shapeFromV1
@@ -14355,6 +14398,123 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
     generateEstimateProposalPDF(estimate, res);
+  } catch (err) { next(err); }
+});
+
+// ── Per-service "full details" packet (GATE_SERVICE_DETAILS_PDF, dark) ──────
+// GET streams the packet PDF; POST sends it to the contact info ALREADY ON
+// the estimate (email attachment or SMS link) — the destination is never
+// caller-supplied, so the token can't be used to spray documents at
+// arbitrary addresses. Both 404 unless the estimate is customer-viewable
+// (drafts stay dark even for staff: a send from a draft would be a
+// premature customer communication).
+const serviceDetailsGateOn = () => process.env.GATE_SERVICE_DETAILS_PDF === 'true';
+
+const serviceDetailsSendLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 6,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// The packet only exists for services actually ON this estimate.
+function estimateRecurringKeysForDetails(estimate) {
+  const estData = parseEstimateDataSafe(estimate);
+  const estResult = estData?.result || estData?.engineResult || estData || {};
+  return new Set(
+    recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
+  );
+}
+
+router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const serviceKey = String(req.params.serviceKey || '');
+    const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
+    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const content = await buildServiceDetailsContent(serviceKey, estimate);
+    const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
+    const buffer = await renderServiceDetailsPdf(content);
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="Waves_${serviceKey}_details.pdf"`);
+    res.send(buffer);
+  } catch (err) { next(err); }
+});
+
+router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    if (!serviceDetailsGateOn()) return res.status(404).json({ error: 'Not found' });
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const serviceKey = String(req.body?.service || '');
+    const channel = String(req.body?.channel || '');
+    if (!['email', 'sms'].includes(channel)) {
+      return res.status(400).json({ error: 'channel must be email or sms' });
+    }
+    const { serviceDetailsAvailable, buildServiceDetailsContent, SERVICE_DETAILS_COPY } = require('../services/estimate-service-details');
+    if (!serviceDetailsAvailable(serviceKey) || !estimateRecurringKeysForDetails(estimate).has(serviceKey)) {
+      return res.status(400).json({ error: 'Unknown service for this estimate' });
+    }
+
+    const firstName = String(estimate.customer_name || '').trim().split(/\s+/)[0] || 'there';
+    const serviceTitle = SERVICE_DETAILS_COPY[serviceKey].title.replace(/ — Service Details$/, '');
+    // Same canonical host every other estimate link uses
+    // (admin-estimate-persistence.estimateViewUrl).
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+
+    if (channel === 'email') {
+      if (!estimate.customer_email) return res.status(400).json({ error: 'No email on this estimate' });
+      const content = await buildServiceDetailsContent(serviceKey, estimate);
+      const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
+      const buffer = await renderServiceDetailsPdf(content);
+      const EmailTemplateLibrary = require('../services/email-template-library');
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: 'estimate.service_details',
+        to: estimate.customer_email,
+        payload: {
+          first_name: firstName,
+          service_name: serviceTitle,
+          estimate_url: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+        },
+        recipientType: estimate.customer_id ? 'customer' : 'lead',
+        recipientId: estimate.customer_id || null,
+        triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
+        // One send per estimate+service+day — the button is customer-initiated
+        // but a retap shouldn't stack identical emails.
+        idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+        categories: ['estimate_service_details'],
+        attachments: [{
+          filename: `Waves_${serviceTitle.replace(/[^A-Za-z0-9]+/g, '_')}_Details.pdf`,
+          content: buffer.toString('base64'),
+          type: 'application/pdf',
+        }],
+      });
+      if (result.blocked) return res.status(409).json({ ok: false, error: 'Email is unavailable for this address — text yourself the link instead.' });
+      if (!result.sent) return res.status(502).json({ ok: false, error: 'Email could not be sent right now.' });
+      return res.json({ ok: true, channel: 'email' });
+    }
+
+    if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on this estimate' });
+    const TwilioService = require('../services/twilio');
+    const smsResult = await TwilioService.sendSMS(
+      estimate.customer_phone,
+      `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+      { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
+    );
+    if (!smsResult?.success) return res.status(502).json({ ok: false, error: 'Text could not be sent right now.' });
+    return res.json({ ok: true, channel: 'sms' });
   } catch (err) { next(err); }
 });
 

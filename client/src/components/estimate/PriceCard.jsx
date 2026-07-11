@@ -3,7 +3,7 @@ import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
 import { glassCopyActive, glassRowInclusions, glassServiceSlug, glassTierDisplay } from '../../lib/estimate-glass-copy';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import { fmtMoney, fmtMoneySigned } from '../../lib/money';
-import { W, PRICE_FONT } from './tokens';
+import { W, PRICE_FONT, waveGuardChipStyle } from './tokens';
 
 /**
  * Primary price display. Pest frequencies bill by the selected cadence;
@@ -54,11 +54,9 @@ const SERVICE_INCLUSIONS = {
 };
 
 
-// Row-level WaveGuard tags mirror the server's TIER_BADGE_ELIGIBLE_KEYS:
-// termite bait monitoring still receives the % discount but never displays
-// the membership tag (owner directive 2026-07-10 — pest/mosquito lines only;
-// lawn and tree keep their existing tags).
-const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'mosquito']);
+// Row-level WaveGuard tags mirror the server's TIER_BADGE_ELIGIBLE_KEYS —
+// palm/rodent lines never tag (they're outside the WaveGuard plan).
+const ROW_TIER_TAG_SERVICES = new Set(['pest_control', 'lawn_care', 'tree_shrub', 'termite_bait', 'mosquito']);
 
 function normalizedTier(value) {
   const raw = String(value || '').replace(/^WaveGuard\s+/i, '');
@@ -164,7 +162,7 @@ function RowInclusions({ items, collapsible = false }) {
   );
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false }) {
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -283,10 +281,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const perAppSavings = perAppNet != null && perAppAnchor - perAppNet >= SAVINGS_ROUNDING_NOISE
     ? round2(perAppAnchor - perAppNet)
     : 0;
-  // Seasonal-style programs bill a flat monthly that differs from the per-app
-  // figure (9 visits spread over 12 payments) — say so under the headline so
-  // the number the card leads with never contradicts the charge.
-  const showBilledMonthlyNote = perAppNet != null && billingKey === 'monthly'
+  // Programs billed monthly whose flat monthly differs from the per-app figure
+  // (mosquito seasonal: 9 visits spread over 12 payments; termite monitoring:
+  // quarterly checks billed monthly) — say so under the headline so the number
+  // the card leads with never contradicts the charge.
+  const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
     && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
 
   return (
@@ -303,7 +302,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             lineHeight: 1,
             fontVariantNumeric: 'tabular-nums',
           }}>
-            {fmtMoney(perAppAnchor)} / application
+            {fmtMoney(perAppAnchor)} / {perApplicationNoun}
           </span>
         ) : null}
         {perAppNet == null && showSavings && savings > 0 && !showLowConfidenceRange ? (
@@ -334,15 +333,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </span>
         {!quoteRequired ? (
           <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>
-            {perAppNet != null ? '/ application' : periodLabel}
+            {perAppNet != null ? `/ ${perApplicationNoun}` : periodLabel}
           </span>
         ) : null}
-        {waveGuardTier ? (
+        {/* showTierBadge=false when the parent card pins the badge to its
+            top-right corner (owner directive 2026-07-10); the tier prop still
+            drives the per-row service tags below. */}
+        {waveGuardTier && showTierBadge ? (
           <span style={{
             display: 'inline-block',
             padding: '4px 12px',
-            background: W.badgeWash,
-            color: W.blueDeeper,
+            ...waveGuardChipStyle(waveGuardTier),
             borderRadius: 6,
             fontSize: 14,
             fontWeight: 700,
@@ -356,7 +357,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       {showVisitsLine ? (
         <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
           <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
-          {visitsPerYear} application{visitsPerYear === 1 ? '' : 's'} per year included
+          {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year included
         </div>
       ) : null}
 

@@ -104,8 +104,9 @@ describe('termite-bait bundles split into per-service sections (buildPricingBund
     expect(pest.frequencies[0].perTreatment).toBeCloseTo(93.5, 2);
     expect(pest.frequencies[0].perVisit).toBeCloseTo(110, 2);
     expect(pest.waveGuardTierEligible).toBe(true);
-    // Setup fee stays on the pest section only.
-    expect(pest.setupFee).toBeTruthy();
+    // The $99 WaveGuard setup applies to solo pest / solo mosquito plans only
+    // (owner directive 2026-07-10 evening) — this bundle carries NO setup fee.
+    expect(pest.setupFee).toBeNull();
 
     // Mosquito gets its own program ladder (seasonal9 / monthly12), defaulting
     // to the stored selection, with net per-application prices (66 → 56.10).
@@ -120,14 +121,18 @@ describe('termite-bait bundles split into per-service sections (buildPricingBund
     expect(mosquito.setupFee).toBeNull();
 
     // Termite monitoring renders as a flat-monthly section: $35 base →
-    // $29.75 net of the Gold 15%, no per-visit price, no membership badge.
+    // $29.75 net of the Gold 15%. Stations are checked quarterly (owner
+    // directive 2026-07-10) so the entry carries per-check display pricing
+    // (29.75×12/4 = $89.25/check, 4 checks/yr) while billing stays monthly.
+    // It's part of the WaveGuard recurring plan → badge-eligible.
     const termite = bundle.services.find((s) => s.key === 'termite_bait');
     expect(termite.label).toBe('Termite Bait Monitoring');
     expect(termite.frequencies).toHaveLength(1);
     expect(termite.frequencies[0].monthly).toBeCloseTo(29.75, 2);
     expect(termite.frequencies[0].monthlyBase).toBeCloseTo(35, 2);
-    expect(termite.frequencies[0].perTreatment).toBeNull();
-    expect(termite.waveGuardTierEligible).toBe(false);
+    expect(termite.frequencies[0].perTreatment).toBeCloseTo(89.25, 2);
+    expect(termite.frequencies[0].visitsPerYear).toBe(4);
+    expect(termite.waveGuardTierEligible).toBe(true);
     expect(termite.setupFee).toBeNull();
   });
 

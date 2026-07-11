@@ -471,7 +471,7 @@ export default function SlotPicker({
         lineHeight: 1.2,
         margin: '0 0 8px',
       }}>
-        {glassHeading || 'Find a date & time that works for you'}
+        {glassHeading || 'Search by date or time \u2014 no calling, no hold music, no back-and-forth'}
       </h2>
       <div style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.5, marginBottom: 16 }}>
         {glass

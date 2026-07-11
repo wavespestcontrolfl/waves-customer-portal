@@ -663,7 +663,9 @@ describe('public estimate one-time breakdown', () => {
       label: 'Pest Control',
       isPest: true,
       isRecurring: true,
-      setupFee: expect.objectContaining({ service: 'waveguard_setup', amount: 99 }),
+      // Multi-service bundles carry NO WaveGuard setup (owner directive
+      // 2026-07-10 evening: solo pest / solo mosquito only).
+      setupFee: null,
     }));
     expect(payload.services[0].frequencies[0]).toEqual(expect.objectContaining({
       key: 'quarterly',
@@ -1963,10 +1965,10 @@ describe('public estimate one-time breakdown', () => {
       }),
     ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
-      // The WaveGuard setup fee is recurring-pest only (owner directive
-      // 2026-07-10) — mosquito counts toward the tier but never carries the
-      // fee, and the pest-specific add-on gates stay off.
-      showWaveGuardSetupFee: false,
+      // Solo recurring mosquito DOES carry the $99 WaveGuard setup (owner
+      // directive 2026-07-10 evening — solo pest / solo mosquito only); the
+      // pest-specific add-on gates stay off.
+      showWaveGuardSetupFee: true,
       showPestRecurringAddOns: false,
       showOneTimePestAddOns: false,
     }));
@@ -5874,8 +5876,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="219.6">$219.60</strong></div>');
-    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="99">$318.60</strong></div>');
-    expect(html).toContain('setup plus the first application totaling <span data-standard-invoice-copy-total data-standard-setup-due="99">$318.60</span>');
+    // Multi-service bundles carry NO WaveGuard setup (owner directive
+    // 2026-07-10 evening: the fee is solo-pest/solo-mosquito only), so the
+    // invoice total is the first visit alone.
+    expect(html).toContain('<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="0">$219.60</strong></div>');
+    expect(html).not.toContain('data-standard-setup-due="99"');
     expect(html).not.toContain('data-first-visit-copy-total');
     expect(html).toContain("document.querySelectorAll('[data-standard-invoice-total]')");
     expect(html).toContain("document.querySelectorAll('[data-standard-invoice-copy-total]')");

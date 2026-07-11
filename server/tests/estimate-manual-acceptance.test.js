@@ -2,6 +2,13 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-converter', () => ({
   convertEstimate: jest.fn(),
+  // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
+  // so estimate-public's breakdown/fee gates work under this module mock.
+  recurringMixHasMembershipFeeService: (services = []) => {
+    const keys = Array.from(new Set((Array.isArray(services) ? services : [])
+      .map((s) => s && s.service).filter(Boolean)));
+    return keys.length === 1 && ['pest_control', 'mosquito'].includes(keys[0]);
+  },
   resolveAnnualPrepayInvoiceTotal: jest.fn(() => ({ amount: 627, discount: 33, rate: 0.05 })),
   // Real-enough commercial helpers for the taxed invoiceTotal path: key from
   // the row's service field, flat base rate, and a blended rate equal to the
