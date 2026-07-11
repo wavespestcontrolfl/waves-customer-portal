@@ -5,18 +5,22 @@
 function parseLooseJson(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const clean = text.replace(/```json|```/g, '').trim();
-  const candidates = [clean];
-  const match = clean.match(/\{[\s\S]*\}/);
-  if (match && match[0] !== clean) candidates.push(match[0]);
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    } catch {
-      // try the next candidate
-    }
+  const asObject = (value) =>
+    value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  try {
+    // Valid JSON that isn't an object (array, scalar) is a contract
+    // violation, not prose to dig through — return null, don't fish inside.
+    return asObject(JSON.parse(clean));
+  } catch {
+    // Not valid JSON as a whole — recover the outermost {...} from prose.
   }
-  return null;
+  const match = clean.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return asObject(JSON.parse(match[0]));
+  } catch {
+    return null;
+  }
 }
 
 module.exports = { parseLooseJson };
