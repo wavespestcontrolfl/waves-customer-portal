@@ -2900,7 +2900,22 @@ export function ServiceSection({
             // The card corner carries the badge now — PriceCard keeps the
             // tier only for its per-row service tags.
             showTierBadge={false}
-            preferPerApplicationPrice={['pest_control', 'mosquito', 'termite_bait'].includes(sectionSlug)}
+            // Every recurring service bills per application (owner directive
+            // 2026-07-11) — all real service cards lead with the
+            // per-application price, not just pest/mosquito/termite. PriceCard
+            // still falls back to the cadence rate when no unambiguous
+            // per-application price exists (multi-row bundles, flat-monthly
+            // monitoring, ranged or quote-required pricing).
+            //
+            // The synthetic unsplittable 'bundle' section is excluded: it
+            // carries the combined recurring total, but a legacy bundle can
+            // itemize only ONE member service as a treatment row (an
+            // unitemized lawn slice — see server buildServiceSection key
+            // 'bundle'). PriceCard would then read that lone row as the whole
+            // bundle's per-application headline and understate the plan vs the
+            // cadence total accept/billing charges, so the bundle card keeps
+            // its combined /mo total.
+            preferPerApplicationPrice={section.key !== 'bundle'}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor

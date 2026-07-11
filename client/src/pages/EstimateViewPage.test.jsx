@@ -140,6 +140,99 @@ describe('ServiceSection', () => {
     expect(screen.queryByText('/bi-monthly')).not.toBeInTheDocument();
   });
 
+  it('leads with the per-application price on a lawn section (every service bills per application)', () => {
+    // Shaped like a server lawn-ladder entry: monthlyBase is the pre-discount
+    // anchor, perTreatment/displayPrice the net per-application price.
+    render(
+      <ServiceSection
+        section={{
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          frequencies: [{
+            key: 'premium',
+            label: 'Monthly',
+            serviceCategory: 'lawn_care',
+            monthlyBase: 79,
+            monthly: 71.1,
+            annual: 853.2,
+            perTreatment: 71.1,
+            visitsPerYear: 12,
+            billingFrequencyKey: 'monthly',
+            included: [{ key: 'lawn_care_premium', label: 'Monthly lawn care program' }],
+            perServiceTreatments: [{
+              service: 'lawn_care',
+              label: 'Lawn Care',
+              perTreatment: 71.1,
+              displayPrice: 71.1,
+              visitsPerYear: 12,
+            }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="premium"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Net per-application headline with the struck pre-discount anchor —
+    // never a /mo rate. (The treatment row restates the price, hence AllBy.)
+    expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('$79 / application')).toBeInTheDocument();
+    expect(screen.queryByText('/mo')).not.toBeInTheDocument();
+    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+  });
+
+  it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
+    // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
+    // itemizes only the pest slice as a treatment row. The card must lead with
+    // the combined recurring total ($130/mo), NOT the lone pest per-application
+    // price ($94) — accept/billing charges the bundle total.
+    render(
+      <ServiceSection
+        section={{
+          key: 'bundle',
+          label: 'Recurring services',
+          isRecurring: true,
+          isPest: true,
+          memberKeys: ['pest_control', 'lawn_care'],
+          frequencies: [{
+            key: 'monthly',
+            label: 'Monthly',
+            monthly: 130,
+            annual: 1560,
+            perServiceTreatments: [{
+              service: 'pest_control',
+              label: 'Pest Control',
+              perTreatment: 94,
+              displayPrice: 94,
+              visitsPerYear: 6,
+            }],
+            included: [{ key: 'bundle', label: 'Recurring services' }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="monthly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Combined cadence total leads with a standalone "/mo" suffix. Were the
+    // bundle wrongly treated per-application, the headline would be the lone
+    // pest price ("/ application" suffix) plus a "Billed $130/mo, spread across
+    // the year" note — so the note's absence is the real discriminator.
+    expect(screen.getByText('$130')).toBeInTheDocument();
+    expect(screen.getByText('/mo')).toBeInTheDocument();
+    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
+  });
+
   it('shows the selected quote-required frequency reason', () => {
     render(
       <ServiceSection
