@@ -5050,17 +5050,32 @@ router.put('/:id/status', async (req, res, next) => {
             .whereNull('deleted_at')
             .orderBy('created_at', 'desc')
             .limit(2)
-            .select('id');
+            .select('id', 'status');
           if (activeLeads.length === 1) {
+            // Preserve a promised-quote follow-up: if the lead is mid-estimate,
+            // claim it but keep it OPEN (mirrors the insert path's
+            // keepOpenForQuote) so the booking doesn't hide an owed quote.
+            const keepOpenForQuote = /estimate|quote/i.test(String(activeLeads[0].status || ''));
             await CallProc.convertCallLeadOnPhoneBooking(db, {
               leadId: activeLeads[0].id,
               customerId: svc.customer_id,
               scheduledServiceId: svc.id,
               callSid: null,
+              keepOpenForQuote,
             });
-            logger.info(`[admin-schedule] Converted lead ${activeLeads[0].id} for confirmed outbound-review booking ${svc.id}`);
+            logger.info(`[admin-schedule] Converted lead ${activeLeads[0].id} (keepOpenForQuote=${keepOpenForQuote}) for confirmed outbound-review booking ${svc.id}`);
           }
         } catch (e) { logger.error(`[admin-schedule] outbound-review lead conversion failed for ${svc.id}: ${e.message}`); }
+        // Resolve the outbound_booking_review Needs-Review card now that the
+        // office confirmed — otherwise it lingers in the queue as already-handled.
+        try {
+          if (svc.source_call_log_id) {
+            await db('triage_items')
+              .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
+              .whereIn('status', ['open', 'in_progress'])
+              .update({ status: 'resolved', updated_at: db.fn.now() });
+          }
+        } catch (e) { logger.error(`[admin-schedule] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
       }
     }
 

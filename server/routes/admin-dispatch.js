@@ -6682,6 +6682,23 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
 
+    // A pending outbound-callback booking must be office-CONFIRMED before it can
+    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
+    // without the confirmation hook's reminder/lead/triage side effects. Confirm
+    // it first, then reschedule.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
+        .first('source_action', 'status', 'customer_confirmed');
+      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.
     // allowLive: the anchor may be en_route / on_site (rain mid-visit,

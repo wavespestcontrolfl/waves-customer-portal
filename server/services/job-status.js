@@ -305,8 +305,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // confirms it — en_route fires the customer tracking SMS, completed mints an
     // invoice, etc. Guarded HERE (the one shared status writer) so EVERY caller
     // — dispatch, tech-track, admin-schedule — is covered, not just some routes.
-    // Only 'confirmed' / 'cancelled' are allowed out of the pending review state.
-    if (!['confirmed', 'cancelled'].includes(toStatus)) {
+    // Only 'confirmed' / 'cancelled' / 'skipped' are allowed out of the pending
+    // review state — confirm approves it, cancel/skip reject it (the dispatch
+    // Skip action). Any other (en_route/on_site/completed/etc.) is blocked.
+    if (!['confirmed', 'cancelled', 'skipped'].includes(toStatus)) {
       const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
       const guardRow = await t('scheduled_services')
         .where({ id: jobId })
