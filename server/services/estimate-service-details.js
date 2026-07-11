@@ -102,8 +102,8 @@ const SERVICE_DETAILS_COPY = {
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
-        { file: 'product-taurus-sc.png', caption: 'Taurus SC® — non-repellent insecticide (fipronil)' },
-        { file: 'product-talstar-p.png', caption: 'Talstar® P — residual insecticide (bifenthrin)' },
+        { file: 'product-taurus-sc.png', product: 'Taurus', caption: 'Taurus SC® — non-repellent insecticide (fipronil)' },
+        { file: 'product-talstar-p.png', product: 'Talstar', caption: 'Talstar® P — residual insecticide (bifenthrin)' },
         { file: 'product-surfactant.png', caption: 'Non-ionic surfactant — helps treatments spread & stick' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection and the label, and your service report names the exact products applied at your home.',
@@ -172,9 +172,9 @@ const SERVICE_DETAILS_COPY = {
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
-        { file: 'product-scion.png', caption: 'Scion® — residual insecticide' },
-        { file: 'product-bifen-it.png', caption: 'Bifen® I/T — bifenthrin insecticide' },
-        { file: 'product-tekko-pro.png', caption: 'Tekko® Pro — insect growth regulator' },
+        { file: 'product-scion.png', product: 'Scion', caption: 'Scion® — residual insecticide' },
+        { file: 'product-bifen-it.png', product: 'Bifen', caption: 'Bifen® I/T — bifenthrin insecticide' },
+        { file: 'product-tekko-pro.png', product: 'Tekko', caption: 'Tekko® Pro — insect growth regulator' },
       ],
       note: 'Stylized product illustrations — product selection follows the inspection, the season, and the label, and your service report names the exact products applied at your home.',
     },
@@ -251,7 +251,7 @@ const SERVICE_DETAILS_COPY = {
     productImages: {
       heading: 'The system going into the ground',
       images: [
-        { file: 'product-trelona-station.png', caption: 'Trelona® ATBS in-ground bait station with bait cartridge' },
+        { file: 'product-trelona-station.png', product: 'Trelona', caption: 'Trelona® ATBS in-ground bait station with bait cartridge' },
       ],
       note: 'Stylized illustration — your installation report maps the actual numbered stations at your home, and each station sits below grade with a locked lid.',
     },
@@ -526,8 +526,8 @@ const SERVICE_DETAILS_COPY = {
       heading: 'A few of the products doing the work',
       images: [
         { file: 'product-lesco-fertilizer-bag.png', caption: 'LESCO® professional turf fertilizer' },
-        { file: 'product-celsius-wg.png', caption: 'Celsius® WG — post-emergent herbicide' },
-        { file: 'product-arena-50-wdg.png', caption: 'Arena® 50 WDG — turf insecticide' },
+        { file: 'product-celsius-wg.png', product: 'Celsius', caption: 'Celsius® WG — post-emergent herbicide' },
+        { file: 'product-arena-50-wdg.png', product: 'Arena', caption: 'Arena® 50 WDG — turf insecticide' },
         { file: 'product-lesco-am-micros.png', caption: 'LESCO® Chelated AM + Micros — summer iron & micronutrients' },
       ],
       note: 'Stylized product illustrations — product selection follows your turf, the season, and the label, and your service report names the exact products applied at your home.',
@@ -562,8 +562,8 @@ const SERVICE_DETAILS_COPY = {
     productImages: {
       heading: 'A few of the products doing the work',
       images: [
-        { file: 'product-dominion-2l.png', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
-        { file: 'product-suffoil-x.png', caption: 'SuffOil-X® — horticultural spray oil' },
+        { file: 'product-dominion-2l.png', product: 'Dominion', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
+        { file: 'product-suffoil-x.png', product: 'SuffOil', caption: 'SuffOil-X® — horticultural spray oil' },
       ],
       note: 'Stylized product illustrations — product selection follows the plant, the diagnosis, and the label, and your service report names the exact products applied at your home.',
     },
@@ -792,7 +792,21 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
       heading: COMPLIANCE_SECTION.heading,
       bullets: [...COMPLIANCE_SECTION.bullets, ...(copy.complianceExtras || [])],
     },
-    productImages: copy.productImages || null,
+    // Product-image callouts obey the SAME public-registry chokepoint as the
+    // product list below them: an image that names a specific pesticide
+    // product (its `product` key) renders only when that product is present
+    // in the fetched public-approved registry rows — so a name the owner
+    // hasn't approved for the public registry can't leak through a caption.
+    // Generic imagery (no `product` key: the surfactant, fertilizer bags)
+    // always renders.
+    productImages: (() => {
+      if (!copy.productImages) return null;
+      const registryNames = products
+        .map((p) => `${p.name || ''} ${p.common_name || ''}`.toLowerCase());
+      const images = (copy.productImages.images || []).filter((img) => !img.product
+        || registryNames.some((n) => n.includes(String(img.product).toLowerCase())));
+      return images.length ? { ...copy.productImages, images } : null;
+    })(),
     systemBox: copy.systemBox || null,
     responsibilities: copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
