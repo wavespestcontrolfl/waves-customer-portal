@@ -1399,6 +1399,52 @@ async function pendingDepositCredit(estimateId, trx = db) {
   };
 }
 
+// Customer-scoped variant for flows that mint an invoice OFF the estimate
+// path (Customer 360 / AnnualPrepayLauncher manual annual-prepay invoice):
+// walk the customer's estimates with received deposit rows (oldest row
+// first) and return the first estimate whose AGGREGATE unapplied balance is
+// positive, in the same shape as pendingDepositCredit PLUS the owning
+// estimateId — consumption is per-estimate, so the caller passes that id to
+// consumeDepositCredit. The balance check is estimate-level on purpose
+// (pendingDepositCredit sums every open row): gating on any single row
+// would let an exhausted older row hide a later open/restored row on the
+// same estimate (Codex P2). Oldest-first mirrors consumeDepositCredit's
+// FIFO allocation, so a credit restored by voiding a prior prepay invoice
+// is re-applied before any newer deposit. One estimate per call: a single
+// invoice consumes from a single estimate's ledger, keeping the credit line
+// dollar-for-dollar traceable to one estimate's deposits.
+async function pendingDepositCreditForCustomer(customerId, trx = db) {
+  if (!customerId) return null;
+  const rows = await trx('estimate_deposits as d')
+    .join('estimates as e', 'd.estimate_id', 'e.id')
+    .where('e.customer_id', customerId)
+    .where('d.status', 'received')
+    .orderBy('d.created_at', 'asc')
+    .select('d.estimate_id', 'd.amount', 'd.credited_amount', 'd.refunded_amount', 'e.estimate_slug');
+  // FIFO by each estimate's first genuinely OPEN row (Codex round-3): skip
+  // exhausted rows entirely so an estimate can't jump the queue on the
+  // strength of an early fully-consumed/refunded row while an older still-open
+  // row on another estimate waits behind it. The first estimate reached
+  // through an open row owns the oldest open credit; pendingDepositCredit then
+  // sums that estimate's full open balance for the amount actually consumed.
+  const seen = new Set();
+  for (const row of rows) {
+    const availableCents = Math.round(Number(row.amount || 0) * 100)
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - Math.round(Number(row.refunded_amount || 0) * 100);
+    if (availableCents <= 0) continue;
+    const estimateId = row.estimate_id;
+    if (!estimateId || seen.has(estimateId)) continue;
+    seen.add(estimateId);
+    const credit = await pendingDepositCredit(estimateId, trx);
+    // estimateSlug rides along so preview UIs can NAME the estimate whose
+    // deposit is being applied — cross-estimate application must be a
+    // visible operator choice, never a silent server pick.
+    if (credit) return { ...credit, estimateId, estimateSlug: row.estimate_slug || null };
+  }
+  return null;
+}
+
 // Allocate an applied credit against received rows (oldest first), tracking
 // per-row credited_amount in integer cents. A row flips to 'credited' (and
 // is stamped with the invoice) only when fully consumed; a partially
@@ -1635,6 +1681,7 @@ module.exports = {
   handleDepositIntentSucceeded,
   isDepositEnforced,
   pendingDepositCredit,
+  pendingDepositCreditForCustomer,
   refundUnconsumedDeposits,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
