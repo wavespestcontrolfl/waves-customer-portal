@@ -788,6 +788,15 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).not.toContain('$82');
   });
 
+  it('suppresses cadence-dependent credits (percentage / floor-capped) that would go stale', () => {
+    // The net tracks the selected cadence but the credit is read from the default
+    // payload — a % or floor-capped credit varies by cadence, so it must not print.
+    const pct = { ...combined, manualDiscount: { label: 'Promo', type: 'PERCENT', value: 10, amount: 90, recurringAmount: 90, monthlyAmount: 7.5 } };
+    expect(render(<PlanTotalSummary combined={pct} />).container).toBeEmptyDOMElement();
+    const capped = { ...combined, manualDiscount: { ...combined.manualDiscount, capped: true, capReason: 'lawn_program_minimum' } };
+    expect(render(<PlanTotalSummary combined={capped} />).container).toBeEmptyDOMElement();
+  });
+
   it('renders nothing for a ranged low-confidence plan (no exact net)', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
     const { container } = render(<PlanTotalSummary combined={ranged} />);

@@ -1929,6 +1929,14 @@ export function PlanTotalSummary({ combined, selectedFrequency = null }) {
     ? combined.manualDiscount
     : null;
   if (!manual) return null;
+  // The net follows the selected cadence, but the credit is read from the
+  // default combined payload — so only itemize when the credit is
+  // cadence-invariant: an uncapped fixed-dollar credit (e.g. the Referral
+  // Credit) is the same $/mo at every cadence, so net + credit stays exact when
+  // the customer changes a pest/lawn cadence. A percentage or floor-capped
+  // credit changes with cadence and would show a stale amount here — suppress it
+  // (the per-service cards + sticky bar still carry the plan).
+  if (!(manual.type === 'FIXED' && manual.capped !== true)) return null;
   // Track the SELECTED cadence/combo — changing a pest/lawn cadence updates the
   // combined frequency (and the sticky bar + accept payload), so the net here
   // must follow it, not the frozen default-cadence subtotal. Falls back to the

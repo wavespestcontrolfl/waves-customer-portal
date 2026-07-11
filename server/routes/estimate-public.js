@@ -13023,12 +13023,25 @@ function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
   // row-sum exceeds monthly by the credit and a splittable multi-service plan
   // collapses into the single combined-price bundle card, which drops every
   // per-service WaveGuard badge (issue: referral hid the tier on pest+lawn).
+  // Mirror the client's manualDiscountMonthlyAmount slice ordering: prefer the
+  // authoritative recurring-only slice (recurringAmount) over monthlyAmount,
+  // which on some snapshot/cache rows was derived from the FULL credit (incl. a
+  // one-time slice) and would add back too much here — over-inflating
+  // preManualMonthly and wrongly rejecting a splittable plan back into the
+  // badge-free bundle card.
   const md = frequency?.manualDiscount;
-  const manualMonthly = md
-    ? Math.max(0, Number(md.monthlyAmount)
-      || roundMonthly((Number(md.recurringAmount ?? md.amount) || 0) / 12)
-      || 0)
-    : 0;
+  let manualMonthly = 0;
+  if (md) {
+    const recurring = Number(md.recurringAmount);
+    if (Number.isFinite(recurring)) {
+      manualMonthly = recurring > 0 ? roundMonthly(recurring / 12) : 0;
+    } else if (Number.isFinite(Number(md.monthlyAmount)) && Number(md.monthlyAmount) > 0) {
+      manualMonthly = roundMonthly(Number(md.monthlyAmount));
+    } else {
+      const amount = Number(md.amount);
+      manualMonthly = Number.isFinite(amount) && amount > 0 ? roundMonthly(amount / 12) : 0;
+    }
+  }
   const preManualMonthly = roundMonthly(monthly + manualMonthly);
   // Compare in integer cents: the intended tolerance is one cent, but a raw
   // float compare (|84.08 - 84.07| <= 0.01) evaluates 0.010000000000005 > 0.01
