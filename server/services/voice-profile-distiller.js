@@ -33,6 +33,11 @@ const logger = require('./logger');
 
 const SCHEMA_VERSION = 'voice-profile.v1';
 
+// Known-bad outcome exclusion (optedOut / complaintWithin7d) — shared by the
+// corpus fetch AND every "is there new corpus?" check, so an excluded row can
+// never count as a reason to re-distill or replace an exception.
+const USABLE_CORPUS_SQL = "COALESCE((outcome->>'optedOut')::boolean, false) = false AND COALESCE((outcome->>'complaintWithin7d')::boolean, false) = false";
+
 // Corpus sampling caps — the DEEP tier has a large context, but transcripts
 // are long; cap per-row and per-source so a runaway corpus can't blow the
 // call. Newest rows win (they reflect the current team).
@@ -139,23 +144,91 @@ function styleOnlyFlags(profileText) {
 }
 
 /**
- * Weekly distillation run. Fail-closed skips (in order): gate handled by the
- * caller; a pending profile awaiting review; empty corpus; no corpus rows
- * newer than the last non-rejected profile (nothing new to learn).
+ * Exception-based auto-approval (owner directive 2026-07-11: hands-off —
+ * "train on the data as it happens"; and the standing house rule from the
+ * agronomic brain: green auto / exceptions parked, never approve-everything
+ * flows). A profile auto-applies ONLY when every deterministic check is
+ * green; anything ambiguous parks as pending + bell, exactly the old flow.
+ * The only consumer is the owner-activation-gated phone agent, and its
+ * consumption-side sanitizer still runs on whatever is approved.
+ */
+const POLICY_CLAIM_RE = /\b(?:no|without)\s+(?:contracts?|commitments?|obligations?)\b|\bcancel\s+(?:any\s*time|whenever)\b|\bfree\s+(?:re-?services?|re-?treatments?|estimates?|inspections?|quotes?|visits?)\b|\bmonth-to-month\b|\bno\s+hidden\s+fees?\b/i;
+const DAY_WORDS = '(?:mon|tues?|wednes|thurs?|fri|satur|sun)days?';
+const AVAIL_WORDS = '(?:available|availability|appointments?|open|slots?)';
+const PROFILE_SCHEDULE_CLAIM_RE = new RegExp(
+  `\\b${DAY_WORDS}\\b[^.\\n]{0,40}\\b${AVAIL_WORDS}\\b` // "Saturday appointments are available"
+  + `|\\b${AVAIL_WORDS}\\b[^.\\n]{0,40}\\b${DAY_WORDS}\\b`
+  + '|\\b(?:open|close[sd]?)\\s+(?:at|until|from|by)\\b' // "open until 5pm"
+  + '|\\b\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b[^.\\n]{0,20}\\b(?:to|until|through)\\b[^.\\n]{0,20}\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b' // "9am to 5pm"
+  // Product/treatment claims in ANY voice the distiller plausibly writes in:
+  // first person ("we spray Termidor"), third person ("They use Termidor"),
+  // or company subject ("Waves applies Talstar", "the team treats with…").
+  + '|\\b(?:we|they|adam|waves|the\\s+(?:team|tech(?:nician)?s?|company|crew))\\s+(?:uses?|sprays?|appl(?:y|ies)|treats?\\s+with)\\s+\\w+',
+  'i',
+);
+
+function evaluateAutoApproval({ profileText, stats, flags } = {}) {
+  const reasons = [];
+  const text = String(profileText || '');
+  if ((flags || []).length) reasons.push(`style-only flags: ${flags.join(', ')}`);
+  if (text.trim().length < 200) reasons.push('profile suspiciously short');
+  // The consumption sanitizer must be a NO-OP on a green profile — a profile
+  // that needs lines stripped is exactly the exception a human should read.
+  // Lazy require: relay-conversation imports our MAX_PROFILE_CHARS.
+  const { PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE } = require('./voice-agent/relay-conversation');
+  const offending = text.split('\n').filter((l) => PROFILE_INJECTION_LINE_RE.test(l) || PROFILE_FACTUAL_LINE_RE.test(l)).length;
+  if (offending) reasons.push(`${offending} line(s) would be stripped at consumption`);
+  // Schedule/availability/product claims are FACTS the style prompt forbids
+  // but the price/guarantee sanitizer can't see ("Saturday appointments are
+  // usually available", "open until 5pm", "we spray Termidor"). Any hit
+  // parks for a human — over-parking is the safe direction.
+  const factualClaims = text.split('\n').filter((l) => PROFILE_SCHEDULE_CLAIM_RE.test(l) || POLICY_CLAIM_RE.test(l)).length;
+  if (factualClaims) reasons.push(`${factualClaims} schedule/availability/product/policy claim line(s)`);
+  if (/<<<|>>>/.test(text)) reasons.push('contains frame delimiters');
+  if (!stats || !Number(stats.transcripts)) reasons.push('no call-transcript evidence in this distillation');
+  return { approve: reasons.length === 0, reasons };
+}
+
+/**
+ * Daily distillation run (after the nightly corpus miner). Fail-closed skips
+ * (in order): gate handled by the caller; empty corpus; no corpus rows newer
+ * than the last non-rejected profile (nothing new to learn — idle days cost
+ * nothing). A pending EXCEPTION from a prior run does NOT wedge the
+ * pipeline: if new corpus accrued since it parked, it is superseded and a
+ * fresh distillation takes its place (which may well come out green).
  */
 async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
-  const pending = await dbi('voice_profiles').where({ status: 'pending' }).first('id');
+  const pending = await dbi('voice_profiles').where({ status: 'pending' }).first('id', 'created_at');
   if (pending) {
-    logger.info('[voice-profile] pending profile awaiting review — skipping run');
-    return { skipped: 'pending_review' };
+    const newSincePending = await dbi('voice_corpus_examples')
+      .where('created_at', '>', pending.created_at)
+      .whereRaw(USABLE_CORPUS_SQL)
+      .count('* as count')
+      .first();
+    if ((Number(newSincePending?.count) || 0) === 0) {
+      logger.info('[voice-profile] pending exception awaiting review and no new corpus — skipping run');
+      return { skipped: 'pending_review' };
+    }
+    // New corpus accrued: distill fresh, but supersede the old exception only
+    // AFTER the replacement is safely inserted (below) — an LLM timeout here
+    // must not vanish the only reviewable row from the Agents surface.
+    logger.info('[voice-profile] unreviewed pending exception + new corpus — distilling a replacement');
   }
 
+  // Watermark = the latest EFFECTIVE timestamp across every distillation
+  // attempt of ANY status, where effective = GREATEST(created_at,
+  // reviewed_at). Rejected and REVOKED rows count on purpose, and a revoke
+  // anchors at the REVOKE time — otherwise corpus mined between a profile's
+  // creation and its revoke would read as "new" the next morning and
+  // re-approve a replacement, silently undoing the kill switch. Only corpus
+  // collected AFTER the last human/auto decision restarts distillation.
   const lastProfile = await dbi('voice_profiles')
-    .whereNot('status', 'rejected')
-    .orderBy('created_at', 'desc')
-    .first('created_at');
+    .select(dbi.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+    .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+    .first();
   const newCorpus = await dbi('voice_corpus_examples')
-    .modify((q) => { if (lastProfile?.created_at) q.where('created_at', '>', lastProfile.created_at); })
+    .modify((q) => { if (lastProfile?.watermark) q.where('created_at', '>', lastProfile.watermark); })
+    .whereRaw(USABLE_CORPUS_SQL)
     .count('* as count')
     .first();
   const newRows = Number(newCorpus?.count) || 0;
@@ -175,7 +248,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   // can avoid distilling the voice that made a customer opt out or complain.
   // NULL/absent outcomes count as fine (most rows predate some outcome
   // fields); the exclusion is SQL-side so the per-source caps apply AFTER it.
-  const negativeOutcome = "COALESCE((outcome->>'optedOut')::boolean, false) = false AND COALESCE((outcome->>'complaintWithin7d')::boolean, false) = false";
+  const negativeOutcome = USABLE_CORPUS_SQL;
   const bySource = (source, limit) => dbi('voice_corpus_examples')
     .where({ source })
     .whereRaw(negativeOutcome)
@@ -199,6 +272,8 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     logger.info('[voice-profile] corpus is empty — skipping run');
     return { skipped: 'empty_corpus' };
   }
+
+  const runStartWatermark = lastProfile?.watermark ? String(lastProfile.watermark) : null;
 
   const { system, user, stats } = buildDistillationPrompt(rows);
 
@@ -229,20 +304,78 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     })
     .returning(['id', 'version']);
 
+  // Exception-based review: green auto-applies (audit-logged, no bell —
+  // nothing for a human to do); anything else parks + bells, the old flow.
+  const verdict = evaluateAutoApproval({ profileText, stats, flags });
+  // A human decision landing WHILE the LLM ran (Adam revoking the live
+  // profile mid-run is the case that matters) moves the review watermark —
+  // auto-approving over it would override a kill switch pressed seconds
+  // ago. Any movement → park as an exception instead. This check MUST run
+  // before the pending-row supersede below: that stamp is self-authored and
+  // would read as a phantom mid-run decision, parking every green
+  // replacement in the pending-exception + new-corpus path.
+  if (verdict.approve) {
+    const wmNow = await dbi('voice_profiles')
+      .select(dbi.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+      .whereNot('id', row.id)
+      .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+      .first();
+    const wmNowStr = wmNow?.watermark ? String(wmNow.watermark) : null;
+    if (wmNowStr !== runStartWatermark) {
+      verdict.approve = false;
+      verdict.reasons.push('a review decision landed while this run was distilling');
+    }
+  }
+
+  // The old pending exception is superseded AFTER the auto-approval attempt:
+  // that stamp is self-authored, and writing it first would poison the
+  // in-transaction watermark re-check below exactly like the pre-check above.
+  // status:'pending' guard: if a human already resolved that row mid-run,
+  // their decision stands and the supersede is a no-op.
+  const supersedeOldPending = async () => {
+    if (!pending) return;
+    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
+      status: 'superseded',
+      reviewed_by: 'auto:distiller',
+      reviewed_at: dbi.fn.now(),
+    });
+  };
+  if (verdict.approve) {
+    const applied = await reviewVoiceProfile({
+      id: row.id,
+      action: 'approve',
+      reviewedBy: 'auto:distiller',
+      audit: { adminUserId: null, source: 'auto_distiller' },
+      dbi,
+      // Closes the snapshot→commit race: reviewVoiceProfile re-checks this
+      // watermark INSIDE its transaction, serialized against human reviews.
+      expectedWatermark: runStartWatermark,
+    });
+    if (applied.ok) {
+      await supersedeOldPending();
+      logger.info(`[voice-profile] v${row.version} distilled + AUTO-APPROVED (green: ${stats.transcripts} transcripts, ${stats.smsPairs} sms pairs) — live for the phone agent`);
+      return { id: row.id, version: row.version, autoApproved: true, flags, ...stats };
+    }
+    verdict.approve = false;
+    verdict.reasons.push(`auto-approval did not apply (${applied.error})`);
+    logger.warn(`[voice-profile] v${row.version} auto-approval did not apply (${applied.error}) — left pending`);
+  }
+  await supersedeOldPending();
+
   try {
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'agents',
-      `Voice profile v${row.version} ready for review`,
-      `Distilled from ${stats.transcripts} call transcripts + ${stats.smsPairs} SMS replies.${flags.length ? ` Flagged: ${flags.join(', ')}.` : ''} Review it in Agents → Shadow Drafts.`,
+      `Voice profile v${row.version} needs review (exception)`,
+      `Distilled from ${stats.transcripts} call transcripts + ${stats.smsPairs} SMS replies. Held because: ${verdict.reasons.join('; ')}. Review it in Agents → Shadow Drafts.`,
       { link: '/admin/agents' }
     );
   } catch (err) {
     logger.warn(`[voice-profile] bell notification failed: ${err.message}`);
   }
 
-  logger.info(`[voice-profile] v${row.version} distilled (${stats.transcripts} transcripts, ${stats.smsPairs} sms pairs)${flags.length ? ` FLAGS=${flags.join(',')}` : ''} — parked for approval`);
-  return { id: row.id, version: row.version, flags, ...stats };
+  logger.info(`[voice-profile] v${row.version} distilled — EXCEPTION, parked for review (${verdict.reasons.join('; ')})`);
+  return { id: row.id, version: row.version, autoApproved: false, exceptionReasons: verdict.reasons, flags, ...stats };
 }
 
 /** Latest approved profile text, or null. The ONLY thing consumers may read. */
@@ -255,24 +388,51 @@ async function getApprovedVoiceProfile({ dbi = db } = {}) {
 }
 
 /**
- * One-click review. Only a PENDING profile is reviewable (409-shaped result
- * otherwise). Approving supersedes any previously approved profile so exactly
- * one is ever live (also enforced by the voice_profiles_one_approved partial
- * unique index — a concurrent double-approve fails at commit, not silently).
+ * One-click review. approve/reject act on a PENDING profile; revoke acts on
+ * the APPROVED one — that's the operator kill switch now that green profiles
+ * auto-apply: revoke → rejected → getApprovedVoiceProfile returns null → the
+ * phone agent is back on its base prompt, no deploy. Wrong-state calls get a
+ * 409-shaped result. Approving supersedes any previously approved profile so
+ * exactly one is ever live (also enforced by the voice_profiles_one_approved
+ * partial unique index — a concurrent double-approve fails at commit).
  *
  * The activity_log audit row commits IN THE SAME TRANSACTION as the status
  * flip: a profile must never go live with the audit insert failed behind it
- * (pass `audit: { adminUserId }` — the caller owns the actor identity).
+ * (pass `audit: { adminUserId, source? }` — the caller owns actor identity).
+ *
+ * `expectedWatermark` (auto-distiller only): the review watermark the caller
+ * snapshotted at run start. When passed, the approval aborts 409 unless the
+ * watermark — recomputed INSIDE this transaction, behind the advisory lock
+ * every review takes — still matches, so a human approve/revoke committing
+ * between the caller's snapshot and this commit can never be silently
+ * overridden. Human calls omit it and are unaffected.
  */
-async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = {}) {
-  if (!['approve', 'reject'].includes(action)) {
-    return { ok: false, status: 400, error: 'action must be approve or reject' };
+const REVIEW_LOCK_KEY = 20260711; // voice_profiles review domain, one lock for all decisions
+async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db, expectedWatermark } = {}) {
+  if (!['approve', 'reject', 'revoke'].includes(action)) {
+    return { ok: false, status: 400, error: 'action must be approve, reject, or revoke' };
   }
   return dbi.transaction(async (trx) => {
+    // Serialize ALL review decisions (transaction-scoped, auto-released):
+    // without this, the watermark re-check below could pass while a human
+    // decision sits uncommitted in a parallel transaction.
+    await trx.raw('SELECT pg_advisory_xact_lock(?)', [REVIEW_LOCK_KEY]);
     const row = await trx('voice_profiles').where({ id }).forUpdate().first('id', 'status', 'version');
     if (!row) return { ok: false, status: 404, error: 'profile not found' };
-    if (row.status !== 'pending') {
-      return { ok: false, status: 409, error: `profile is ${row.status}, not pending` };
+    const requiredStatus = action === 'revoke' ? 'approved' : 'pending';
+    if (row.status !== requiredStatus) {
+      return { ok: false, status: 409, error: `profile is ${row.status}, not ${requiredStatus}` };
+    }
+    if (expectedWatermark !== undefined) {
+      const wm = await trx('voice_profiles')
+        .select(trx.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+        .whereNot('id', id)
+        .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+        .first();
+      const wmStr = wm?.watermark ? String(wm.watermark) : null;
+      if (wmStr !== expectedWatermark) {
+        return { ok: false, status: 409, error: 'a review decision landed during distillation' };
+      }
     }
     if (action === 'approve') {
       await trx('voice_profiles').where({ status: 'approved' }).update({ status: 'superseded' });
@@ -287,11 +447,27 @@ async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = 
       await trx('activity_log').insert({
         admin_user_id: audit.adminUserId || null,
         action: 'voice_profile_reviewed',
-        description: `Voice profile v${row.version} ${finalStatus}`,
-        metadata: JSON.stringify({ source: 'agents_hub', profile_id: id, action }),
+        description: `Voice profile v${row.version} ${action === 'revoke' ? 'revoked (back to base voice)' : finalStatus}`,
+        metadata: JSON.stringify({ source: audit.source || 'agents_hub', profile_id: id, action }),
       });
     }
     return { ok: true, version: row.version, status: finalStatus };
+  }).then((result) => {
+    // The phone agent caches the approved profile (10-min TTL). A successful
+    // approve/revoke must take effect on the NEXT call, not the next TTL
+    // lapse — revoke is the kill switch. Lazy require (module cycle) and
+    // fail-soft: a cache miss self-heals at the TTL anyway.
+    if (result?.ok && action !== 'reject') {
+      // approve/revoke change what the phone agent should read; rejecting an
+      // unrelated pending exception does NOT — clearing the cache there would
+      // needlessly bounce live calls to the base prompt for a refresh beat.
+      try {
+        require('./voice-agent/relay-conversation').invalidateVoiceProfileCache();
+      } catch (err) {
+        logger.warn(`[voice-profile] cache invalidation failed (TTL will self-heal): ${err.message}`);
+      }
+    }
+    return result;
   });
 }
 
@@ -303,6 +479,7 @@ module.exports = {
   sanitizeCorpusText,
   buildDistillationPrompt,
   styleOnlyFlags,
+  evaluateAutoApproval,
   distillVoiceProfile,
   getApprovedVoiceProfile,
   reviewVoiceProfile,
