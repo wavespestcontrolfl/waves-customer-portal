@@ -83,13 +83,7 @@ function ContactRow() {
   return (
     <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
       <a href={WAVES_SUPPORT_SMS_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Text us</a>
-      <a
-        href={WAVES_SUPPORT_PHONE_TEL}
-        data-glass-accent=""
-        style={{ ...PRIMARY_CTA, flex: 1 }}
-      >
-        Call {WAVES_SUPPORT_PHONE_DISPLAY}
-      </a>
+      <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Call us</a>
     </div>
   );
 }
