@@ -64,6 +64,7 @@ describe('handleRefundFailed', () => {
     paymentRow = {
       id: 'pay-1',
       status: 'refunded',
+      amount: '102.90',
       refund_amount: '102.90',
       stripe_refund_id: 're_fail',
       stripe_charge_id: 'ch_1',
@@ -121,6 +122,45 @@ describe('handleRefundFailed', () => {
     expect(args.refund_amount).toBe(26.45);
     expect(args.refund_status).toBe('partial');
     expect(args.status).toBeUndefined();
+  });
+
+  test('bounce of the FINAL partial reverts a refunded row to paid even with a surviving remainder', async () => {
+    // Two partials summed to full ($102.90 = refunded); the second ($51.45)
+    // bounces. The remainder ($51.45) survives, but the row is no longer
+    // fully refunded — leaving status='refunded' would keep it inside the
+    // dashboard's full-refund exclusion while half the money is collected.
+    paymentRow.status = 'refunded';
+    paymentRow.refund_amount = '102.90';
+    await handleRefundFailed(failedRefund({ amount: 5145 }));
+
+    const args = trxUpdate.mock.calls[0][0];
+    expect(args.refund_amount).toBe(51.45);
+    expect(args.refund_status).toBe('partial');
+    expect(args.status).toBe('paid');
+  });
+
+  test('rewinds the refunded-surcharge tracker so a retry re-sends the full share', async () => {
+    // Surcharged payment fully refunded (tracker 290¢), then the grossed
+    // $51.45 partial bounces → tracker must shrink to the share of what
+    // actually cleared (round(5145×290/10290) = 145¢), or the retry would
+    // read the bounced share as already returned and under-refund.
+    paymentRow.status = 'refunded';
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.refund_amount = '102.90';
+    paymentRow.metadata = JSON.stringify({ refunded_surcharge_cents: 290 });
+    await handleRefundFailed(failedRefund({ amount: 5145 }));
+
+    const args = trxUpdate.mock.calls[0][0];
+    expect(JSON.parse(args.metadata).refunded_surcharge_cents).toBe(145);
+  });
+
+  test('never invents a tracker on legacy rows that had none', async () => {
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.metadata = null;
+    await handleRefundFailed(failedRefund({ amount: 5145 }));
+
+    const args = trxUpdate.mock.calls[0][0];
+    expect(JSON.parse(args.metadata).refunded_surcharge_cents).toBeUndefined();
   });
 
   test('replay (same refund id already recorded) changes nothing and does NOT re-notify', async () => {

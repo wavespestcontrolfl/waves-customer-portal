@@ -1548,10 +1548,15 @@ const StripeService = {
     // pending_refund_request, so fall back to it.
     const isReplay = !!(meta.pending_refund_key
       && (meta.pending_refund_base ?? meta.pending_refund_request) === enteredTag);
-    if (isReplay && grossCents !== null && Number.isFinite(Number(meta.pending_refund_gross))) {
-      // Resend the ORIGINAL grossed amount verbatim — recomputing it against
-      // live state could shift after a webhook repair and wedge the key.
-      grossCents = Number(meta.pending_refund_gross);
+    if (isReplay && grossCents !== null) {
+      // Resend the ORIGINAL amount verbatim — Stripe rejects a reused key
+      // whose parameters differ, and a definitive rejection would clear the
+      // marker and open the door to a double refund. New-style markers froze
+      // the grossed amount; LEGACY (pre-gross-up) markers sent exactly the
+      // entered amount, so replay that — never a freshly computed gross.
+      grossCents = Number.isFinite(Number(meta.pending_refund_gross))
+        ? Number(meta.pending_refund_gross)
+        : requestCents;
     }
     const requestTag = isReplay
       ? meta.pending_refund_request

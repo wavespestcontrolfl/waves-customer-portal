@@ -788,6 +788,9 @@ async function getCashFlow(startDate, endDate) {
         .first()
         .catch(() => ({ total: '0' })),
       db('stripe_payouts')
+        // Same status='paid' rule as the daily rows above — summary totals
+        // and the daily breakdown must reconcile.
+        .where({ status: 'paid' })
         .whereBetween('arrival_date', [startDate, endDate + 'T23:59:59'])
         .select(db.raw("COALESCE(SUM(amount)::text, '0') as total, COUNT(*)::int as count"))
         .first()

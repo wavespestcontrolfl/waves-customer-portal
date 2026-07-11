@@ -564,10 +564,12 @@ router.post(
           await handleRefundFailed(event.data.object);
           break;
 
+        case 'refund.updated':
         case 'charge.refund.updated': {
-          // Fires on refund status/metadata changes; the money-relevant
-          // transition is a post-creation bounce. Everything else is noise —
-          // charge.refunded already recorded the creation.
+          // Both names fire on refund status/metadata changes (refund.updated
+          // is the modern event, charge.refund.updated the legacy alias); the
+          // money-relevant transition is a post-creation bounce. Everything
+          // else is noise — charge.refunded already recorded the creation.
           const refundObj = event.data.object;
           if (['failed', 'canceled'].includes(refundObj?.status)) {
             await handleRefundFailed(refundObj);
@@ -1876,15 +1878,31 @@ async function handleRefundFailed(refund) {
       if (refundId && failedIds.includes(refundId)) return;
       const priorRefundCents = Math.round((parseFloat(row.refund_amount) || 0) * 100);
       const nextRefundCents = Math.max(0, priorRefundCents - failedCents);
+      const rowPaidCents = Math.round((parseFloat(row.amount) || 0) * 100);
+      const nextMeta = { ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds };
+      // Rewind the cumulative surcharge-returned tracker to match the new
+      // refunded total (rs = R·S/(B+S), the inverse of the gross-up split) —
+      // leaving it stale would make StripeService.refund treat the bounced
+      // share as already returned and under-refund the retry.
+      const surchargeCents = Math.max(0, Math.round(parseFloat(row.card_surcharge || 0) * 100));
+      if (surchargeCents > 0 && rowPaidCents > 0 && nextMeta.refunded_surcharge_cents !== undefined) {
+        nextMeta.refunded_surcharge_cents = Math.min(
+          surchargeCents,
+          Math.round((nextRefundCents * surchargeCents) / rowPaidCents),
+        );
+      }
       await trx('payments').where({ id: row.id }).update({
         refund_amount: nextRefundCents / 100,
         // 'failed' when this bounce erased the whole refund; a surviving
         // remainder means an EARLIER partial refund did clear.
         refund_status: nextRefundCents > 0 ? 'partial' : 'failed',
-        // A row terminalized to 'refunded' by a refund that never cleared is
-        // still collected money.
-        ...(row.status === 'refunded' && nextRefundCents === 0 ? { status: 'paid' } : {}),
-        metadata: JSON.stringify({ ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds }),
+        // A row terminalized to 'refunded' by a refund that never fully
+        // cleared is still (at least partly) collected money — anything
+        // short of the full paid amount reverts to 'paid', matching the
+        // charge.refunded handler's full-vs-partial convention (and the
+        // dashboard's full-refund exclusion).
+        ...(row.status === 'refunded' && nextRefundCents < rowPaidCents ? { status: 'paid' } : {}),
+        metadata: JSON.stringify(nextMeta),
       });
       reverted = true;
     });

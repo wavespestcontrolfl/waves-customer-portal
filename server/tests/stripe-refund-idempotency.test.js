@@ -480,6 +480,27 @@ describe('StripeService.refund', () => {
     expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(4290);
   });
 
+  test('LEGACY marker replay on a surcharged payment resends the ORIGINAL ungrossed amount', async () => {
+    // A pending marker written before the gross-up shipped has no
+    // pending_refund_gross — its original Stripe request was the entered
+    // amount exactly. Recomputing a grossed amount against the stored key
+    // would hit Stripe's changed-params idempotency rejection, clear the
+    // marker, and open a double-refund window.
+    paymentRow.amount = '102.90';
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_4000_0',
+      pending_refund_request: '4000',
+      pending_refund_at: new Date().toISOString(),
+    });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 40 });
+
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(4000);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_4000_0');
+  });
+
   test('replay of a grossed attempt matches on the ENTERED base and resends the stored gross', async () => {
     paymentRow.amount = '102.90';
     paymentRow.card_surcharge = '2.90';
