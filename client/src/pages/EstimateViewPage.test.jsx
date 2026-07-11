@@ -966,6 +966,55 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('ranged plan with no per-service sum prices the fallback from planDiscount when row objects are absent', () => {
+    // Gate passes via planDiscount (combo overlay dropped row-level fields);
+    // the credit-only line must price from the same evidence, not vanish.
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged no-sum fallback: the suppressed flag still vetoes a planDiscount', () => {
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('a base-row credit capped smaller does not shadow a planDiscount that comps the combo to $0', () => {
+    // The base row still carries a small capped object, but the selected combo
+    // is fully comped by the plan credit — corroboration takes the largest
+    // candidate, so "Your price $0" renders.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 0,
+          annual: 0,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', amount: 18, recurringAmount: 18, monthlyAmount: 1.50, capped: true },
+        }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Your price');
+    expect(text).toMatch(/[−-]\$84\.08/);
+  });
+
   it('corroborates a $0 net against the planDiscount when row-level objects are absent', () => {
     // Comped via a combo selection: no row-level discount object survives the
     // overlay, but the payload-level credit covers the whole subtotal.

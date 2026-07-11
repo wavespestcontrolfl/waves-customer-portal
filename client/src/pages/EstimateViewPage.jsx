@@ -1983,11 +1983,17 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   const creditFromDiff = hasServiceSum && subtotalMonthly > netMonthly
     ? round2(subtotalMonthly - netMonthly)
     : null;
-  // A $0 net renders only when the plan credit corroborates covering the whole
+  // A $0 net renders only when a plan credit corroborates covering the whole
   // subtotal (1-cent tolerance, same as the split reconciliation): a legacy
   // payload with a zeroed/missing subtotal and an ordinary credit must not
-  // render as "fully comped".
-  if (netMonthly === 0 && manualDiscountMonthlyAmount(manual || planDiscount) < subtotalMonthly - 0.011) return null;
+  // render as "fully comped". Corroborate against the LARGEST candidate — a
+  // row-level object capped for the BASE cadence must not shadow a payload
+  // planDiscount that fully comps the selected combo.
+  const corroboratingCreditMonthly = Math.max(
+    manualDiscountMonthlyAmount(manual),
+    manualDiscountMonthlyAmount(planDiscount),
+  );
+  if (netMonthly === 0 && corroboratingCreditMonthly < subtotalMonthly - 0.011) return null;
 
   // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
   // range, not one exact number — but the credit is applied by accept regardless,
@@ -2002,7 +2008,10 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   if (lowConfidencePct > 0) {
     const rangedCredit = hasServiceSum
       ? creditFromDiff
-      : (selectedFrequency?.manualDiscountSuppressed === true ? null : manualDiscountMonthlyAmount(manual));
+      // Row object first (selection-specific, possibly capped), else the
+      // payload planDiscount — the same evidence the render gate accepts, so
+      // gating in via planDiscount alone can still price this line.
+      : (selectedFrequency?.manualDiscountSuppressed === true ? null : manualDiscountMonthlyAmount(manual || planDiscount));
     if (!(rangedCredit > 0)) return null;
     return (
       <section style={estimateCard()}>
