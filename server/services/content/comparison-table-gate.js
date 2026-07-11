@@ -95,15 +95,53 @@ const ACTIVE_DISPARAGEMENT_SRC = [
 ].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
+// Common intervening adverbs for active-predicate shapes ("<subject> routinely
+// rips off homeowners").
+const ACTIVE_ADVERBS = '(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}';
+
 // The full disparagement vocabulary DIRECTED at a provider noun — the
 // PROVIDER_DISPARAGEMENT_RE shapes (adjacent / linking-verb) but with every
 // DISPARAGEMENT_RE term, not just NEG_ADJ: "overpriced pest control services",
-// "pest control companies that are scams". Used by the table path's PROSE
-// scan, where a bare disparagement token is no longer enough (see evaluate).
+// "pest control companies that are scams". The third arm covers ACTIVE
+// predicates with the provider noun as subject ("pest control companies scam
+// customers", "providers charge hidden fees") — the linking-verb shape misses
+// transitive verbs (Codex on #2633). Used by the table path's PROSE scan,
+// where a bare disparagement token is no longer enough (see evaluate).
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
   `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,2}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
 ].join('|'), 'i');
+
+// Disparagement DIRECTED at the own brand ("Waves is dishonest", "Waves
+// charges hidden fees") — deliberately TIGHTER than the generic-name shapes:
+// our own writer legitimately puts pest vocabulary near "Waves" ("Waves keeps
+// shady, damp corners treated"), so the linking-verb arm allows only a short
+// determiner/adverb gap instead of a 60-char window (Codex P2 on #2633).
+const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
+  // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
+  // adding NEG_ADJ here would newly block prose like "waves of termites are
+  // terrible" — "waves" the noun is unavoidable in pest copy.
+  `\\bwaves\\b(?:'s)?(?:\\s+\\w+){0,2}\\s+(?:is|are|was|were|seems?|remains?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
+  `\\bwaves\\b(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+].join('|'), 'i');
+
+// Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
+// declared place-winner ("#1 in Venice"), a first-person subject ("We are
+// #1"), or ranked/rated framing ("rated #1"). Everything here declares a
+// winner regardless of context, so it scans whole-text like SELF_RANKING_RE
+// (Codex on #2633: "We are #1 in Venice" must not need a nearby brand token).
+const NUMERIC_ONE_ALT = '(?:#\\s?1|no\\.?\\s?1|number one)';
+const NUMERIC_SELF_RANKING_RE = new RegExp([
+  `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
+  `\\bwe(?:'re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\b(?:ranked|rated|voted)\\s+${NUMERIC_ONE_ALT}`,
+].join('|'), 'i');
+
+// Linking/behavioral verbs that tie a subject name to a following negative
+// term (shared by the table-less directed scans).
+const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seems?|looks?|sounds?|remains?|stays?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?|tend';
 
 // Numeric self-ranking ("#1", "No. 1", "number one") split out of the
 // context-free ranking set: in educational pest prose these are overwhelmingly
@@ -180,6 +218,24 @@ function legalEntityRe(flags) { return new RegExp(LEGAL_ENTITY_NAME_SRC, flags);
 const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
 const OWN_BRAND_RE = /\bwaves\b/i;
 
+// Case-insensitive provider-name detection for PROSE (see the comment block
+// in evaluateProse for the exclusion rationale) — module scope so the table
+// path's target-scoped tone scans use the SAME name inventory as the
+// table-less directed scans (Codex on #2633: lowercase "acme pest solutions
+// is dishonest" must stay a detectable target on both paths).
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
+const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b)[a-z][a-z0-9&'.\\-]*`;
+const CI_PROVIDER_NAME_RE = new RegExp(`\\b(${CI_TOKEN}(?:\\s+(?:${CI_TOKEN}|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`, 'gi');
+const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
+const splitAtNegativity = (name) => {
+  const inner = new RegExp(NEG_INSIDE_RE_SRC, 'gi');
+  const nm = String(name).trim();
+  let cut = -1;
+  let mm;
+  while ((mm = inner.exec(nm)) !== null) cut = mm.index + mm[0].length;
+  return cut >= 0 ? nm.slice(cut).trim() : nm;
+};
+
 // ── HEADER-ONLY business-shape detectors (classifyOption) ──────────────────
 // A table option header is a short label, not prose. Rule (Codex rounds 2–6
 // converged here): any header CONTAINING a provider-suffix phrase ("Pest
@@ -225,6 +281,35 @@ function isTitleCasedPhrase(header) {
   return words.slice(1).every((w) => /^[A-Z0-9]/.test(w));
 }
 const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
+
+// Business-shaped PROSE mentions that only the header detectors recognize —
+// bare or less-common suffixes the prose name regex misses ("Bug Busters",
+// "Acme Rodent Removal"). Proximity-TARGET collection only (Codex on #2633),
+// so it must not turn section headings into "businesses":
+//  - a generic category phrase in ANY casing is skipped (unlike
+//    classifyOption, no Title-Case tightening — "Professional Mosquito
+//    Control" in prose is a heading, not a name);
+//  - with no non-generic lead token, only PERSONIFIED suffixes count
+//    ("Bug Busters", "Mosquito Squad" read as names; bare "Termite
+//    Prevention"/"Rodent Removal" read as headings).
+const PROSE_HEADER_SHAPE_RE = new RegExp(
+  `\\b((?:[A-Z][A-Za-z0-9&'.\\-]*\\s+){0,3})(${HEADER_BUSINESS_SUFFIX_RE.source})`, 'g',
+);
+const PERSONIFIED_SUFFIX_RE = /\b(?:Busters?|Squad|Patrol|Brigade|Pros?|Experts?|Specialists?|Defenders?|Exterminators?)\s*$/;
+const GENERIC_LEAD_SET = new Set(GENERIC_LEAD_EXCLUSIONS.split('|').map((w) => w.toLowerCase()));
+function collectHeaderShapedProseTargets(text) {
+  const out = new Set();
+  for (const m of String(text || '').matchAll(PROSE_HEADER_SHAPE_RE)) {
+    const nm = splitAtNegativity(`${m[1]}${m[2]}`);
+    if (!nm || OWN_BRAND_RE.test(nm)) continue;
+    if (HEADER_CATEGORY_FORM_RE.test(nm)) continue;
+    const leadTokens = String(m[1]).split(/\s+/).filter(Boolean);
+    const hasNonGenericLead = leadTokens.some((t) => !GENERIC_LEAD_SET.has(t.toLowerCase()));
+    if (!hasNonGenericLead && !PERSONIFIED_SUFFIX_RE.test(m[2])) continue;
+    out.add(nm);
+  }
+  return out;
+}
 
 // Cell value affirms the row criterion → the CLAIM is the row label (so an
 // uncurated row label like "Free termite inspections | Free" is validated, not
@@ -485,18 +570,6 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // ("dishonest acme pest solutions") — captures are SPLIT at their last
   // interior negativity token so the adjective sits back OUTSIDE the name
   // where the neg-before-name directed check sees it.
-  const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
-  const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b)[a-z][a-z0-9&'.\\-]*`;
-  const CI_PROVIDER_NAME_RE = new RegExp(`\\b(${CI_TOKEN}(?:\\s+(?:${CI_TOKEN}|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`, 'gi');
-  const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
-  const splitAtNegativity = (name) => {
-    const inner = new RegExp(NEG_INSIDE_RE_SRC, 'gi');
-    const nm = String(name).trim();
-    let cut = -1;
-    let mm;
-    while ((mm = inner.exec(nm)) !== null) cut = mm.index + mm[0].length;
-    return cut >= 0 ? nm.slice(cut).trim() : nm;
-  };
   for (const m of nameScanText.matchAll(CI_PROVIDER_NAME_RE)) {
     const nm = splitAtNegativity(m[1]);
     if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
@@ -548,7 +621,6 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // Name-as-subject: "<Name> [word word] is/never/keeps … <negative>" —
     // within the same sentence, a linking/behavioral verb between the name
     // and the negative term ties the negativity to the business.
-    const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seems?|looks?|sounds?|remains?|stays?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?|tend';
     const directedP0 = new RegExp(
       `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
     );
@@ -687,6 +759,21 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // A detected business name within PROVIDER_NEGATIVE_PROXIMITY of a prose
   // match — same window idiom as the competitor scans below.
   const targetNames = [...known, ...unknown, ...unclassified];
+  // Names only the looser detectors see — case-insensitive provider names
+  // ("acme pest solutions") and header-shaped names ("Bug Busters") — stayed
+  // disparageable under the old whole-text scan and must remain so (Codex on
+  // #2633). They get the DIRECTED grammar (same shapes as the table-less
+  // path), NOT bare proximity: the CI pass picks up incidental mid-sentence
+  // service mentions ("… meals, and Termite Prevention starts at the slab")
+  // that proximity would turn into phantom disparagement targets. They do
+  // NOT feed the unclassified-option findings.
+  const extraProseNames = new Set();
+  for (const m of proseNameText.matchAll(CI_PROVIDER_NAME_RE)) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) extraProseNames.add(nm);
+  }
+  for (const nm of collectHeaderShapedProseTargets(proseNameText)) extraProseNames.add(nm);
+  for (const nm of targetNames) extraProseNames.delete(nm);
   const nearBusinessName = (idx, len, { includeOwnBrand = false } = {}) => {
     const window = proseNameText
       .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
@@ -707,12 +794,30 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // block the bare vocabulary still blocks unconditionally (per-table scan
   // below) — table cells are provider/option context by construction, and
   // category-table strictness is asserted by existing tests.
-  let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE) || scanText.match(DIRECTED_DISPARAGEMENT_RE);
+  let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE)
+    || scanText.match(DIRECTED_DISPARAGEMENT_RE)
+    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
   if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
     while ((dm = bareDispRe.exec(proseText)) !== null) {
       if (nearBusinessName(dm.index, dm[0].length)) { disp = dm; break; }
+    }
+  }
+  if (!disp) {
+    // Directed grammar for the looser name classes (see extraProseNames):
+    // name-as-subject before a negative, negative immediately modifying the
+    // name, or an active disparaging predicate — the same three shapes the
+    // table-less path uses for generic business names.
+    for (const name of extraProseNames) {
+      const escaped = escapeForNameRe(name);
+      const directedP0 = new RegExp(
+        `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+      );
+      const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
+      const activeP0 = new RegExp(`${escaped}(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
+      const dm = proseNameText.match(directedP0) || proseNameText.match(negBeforeName) || proseNameText.match(activeP0);
+      if (dm) { disp = dm; break; }
     }
   }
   if (disp) {
@@ -726,6 +831,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // "#1 hidden breeding site" is educational idiom, not a declared winner
   // (PROD 2026-07-11 false positives).
   let rank = scanText.match(SELF_RANKING_RE)
+    || scanText.match(NUMERIC_SELF_RANKING_RE)
     || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
   if (!rank) {

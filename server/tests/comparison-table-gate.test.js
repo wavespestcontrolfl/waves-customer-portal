@@ -1001,6 +1001,56 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
     expect(r.pass).toBe(true);
   });
+
+  // ── Codex round-1 findings on the target-scoped scans (#2633) ──
+
+  test('Codex r1: lowercase provider disparagement stays blocked on the table path', () => {
+    const r = gate.evaluate({ body: `acme pest solutions is dishonest about pricing.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r1: self-referential numeric ranking needs no nearby brand token', () => {
+    for (const prose of [
+      'We are #1 in Venice for a reason.',
+      "We're #1!",
+      'Rated #1 by local homeowners.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r1: active disparaging predicates after provider nouns stay blocked', () => {
+    for (const prose of [
+      'Some pest control companies scam customers in Venice.',
+      'Pest control providers charge hidden fees.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r1: header-shaped business names in prose are disparagement targets', () => {
+    const r = gate.evaluate({ body: `Bug Busters is shady about billing.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r1: Title-case category headings near pest vocabulary stay clean', () => {
+    const body = `Professional Mosquito Control\n\nAdult mosquitoes rest in shady foliage between blood meals, and Termite Prevention starts at the slab.\n\n${CATEGORY_TABLE}`;
+    const r = gate.evaluate({ body }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('Codex r1 (P2): own-brand disparagement blocks; own brand near pest vocabulary does not', () => {
+    for (const prose of ['Waves is dishonest.', 'Waves charges hidden fees on renewals.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const ok = gate.evaluate({ body: `Waves keeps shady, damp corners of the lanai treated year-round.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
 });
 
 describe('top-level title/meta in comparison scans (Codex round 10)', () => {
