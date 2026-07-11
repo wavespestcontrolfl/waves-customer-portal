@@ -1602,6 +1602,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state

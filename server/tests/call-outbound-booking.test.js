@@ -11,9 +11,13 @@ const {
 } = require('../services/call-booking-source-actions');
 
 describe('outbound review booking — shared source-action markers', () => {
-  test('the outbound-review marker is a distinct, stable string', () => {
-    expect(CALL_OUTBOUND_REVIEW_SOURCE_ACTION).toBe('ai_call_pipeline_outbound_review');
+  test('the outbound-review marker is a distinct, stable string that fits source_action', () => {
+    expect(CALL_OUTBOUND_REVIEW_SOURCE_ACTION).toBe('ai_call_outbound_review');
     expect(CALL_OUTBOUND_REVIEW_SOURCE_ACTION).not.toBe(CALL_FOLLOWUP_SOURCE_ACTION);
+    // scheduled_services.source_action is varchar(30) — the marker MUST fit or
+    // the pending-booking insert fails (value too long).
+    expect(CALL_OUTBOUND_REVIEW_SOURCE_ACTION.length).toBeLessThanOrEqual(30);
+    expect(CALL_FOLLOWUP_SOURCE_ACTION.length).toBeLessThanOrEqual(30);
   });
 
   test('dispatch-owned pending set covers BOTH the follow-up and outbound-review markers', () => {

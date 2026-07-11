@@ -5824,9 +5824,10 @@ const CallRecordingProcessor = {
                   customer_confirmed: !outboundReviewBooking,
                   ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
                   notes: [
-                    outboundReviewBooking
-                      ? 'Booked via outbound callback — CONFIRM with customer before dispatch.'
-                      : 'Booked via phone call.',
+                    // Customer-visible (GET /api/schedule returns notes verbatim):
+                    // keep it customer-safe. The office review cue lives in
+                    // internal_notes below.
+                    'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
                     priceInfo.price != null
@@ -5839,6 +5840,9 @@ const CallRecordingProcessor = {
                   // so the catalog-vs-quote review cue lives in internal_notes
                   // (surfaced in the dispatch JobDrawer), never in notes.
                   internal_notes: [
+                    outboundReviewBooking
+                      ? 'Outbound callback — CONFIRM with customer before dispatch (pending review).'
+                      : null,
                     (priceInfo.source === 'transcript'
                       && callBookingCatalogRow
                       && Number(callBookingCatalogRow.base_price) > 0
