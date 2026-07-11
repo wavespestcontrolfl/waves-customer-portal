@@ -60,15 +60,19 @@ function getAppShot(name) {
   return buf;
 }
 
-// Product imagery (client/public/product-images) — stylized studio renders
+// Product imagery (server/assets/product-images) — stylized studio renders
 // of the program's flagship products, generated in-house (no manufacturer
-// photography). Optional and cached like the app shots.
+// photography). Deliberately OUTSIDE client/public: the express.static
+// mount there would expose product renders (and their name-bearing
+// filenames) regardless of GATE_SERVICE_DETAILS_PDF or the public-registry
+// approval the captions are filtered by — these assets only leave the
+// server inside the gated PDF. Optional and cached like the app shots.
 function getProductShot(name) {
   const key = `product-images/${name}`;
   if (shotCache.has(key)) return shotCache.get(key) || null;
   let buf = null;
   try {
-    buf = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'client', 'public', 'product-images', name));
+    buf = fs.readFileSync(path.join(__dirname, '..', '..', 'assets', 'product-images', name));
   } catch { /* asset optional */ }
   shotCache.set(key, buf);
   return buf;
