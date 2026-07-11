@@ -641,6 +641,11 @@ const UNIQUE_COLLISION_HANDLERS = {
 const POLYMORPHIC_CUSTOMER_POINTERS = [
   { table: 'notifications', typeColumn: 'recipient_type', idColumn: 'recipient_id' },
   { table: 'email_messages', typeColumn: 'recipient_type', idColumn: 'recipient_id' },
+  // Pending data-hygiene proposals resolve their target through BOTH pairs
+  // (apply reads resource_id AND scope_id) — left behind, they 404/stale or
+  // act on the retired profile instead of following the merged account.
+  { table: 'data_hygiene_proposals', typeColumn: 'scope_type', idColumn: 'scope_id' },
+  { table: 'data_hygiene_proposals', typeColumn: 'resource_type', idColumn: 'resource_id' },
 ];
 
 let fkColumnsCache = null;
@@ -724,17 +729,24 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // a Stripe profile but the saved cards agree on one, derive it (same
     // spirit as the loser-only-profile transfer below).
     let derivedStripeCustomerId = null;
-    const loserPmStripeIds = [...new Set((await trx('payment_methods')
-      .where({ customer_id: loserId })
+    const pmStripeIdsFor = async (customerId) => [...new Set((await trx('payment_methods')
+      .where({ customer_id: customerId })
       .whereNotNull('stripe_customer_id')
       .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
+    // The survivor ends with ONE Stripe profile (its own, or the loser's via
+    // the transfer below) and EVERY saved card on EITHER side must live on
+    // it — including the winner's own cards when its customer row hasn't
+    // named a profile yet (backfilling the loser's would strand them).
+    const loserPmStripeIds = await pmStripeIdsFor(loserId);
+    const winnerPmStripeIds = await pmStripeIdsFor(winnerId);
+    const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
     const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
-    const foreignPmStripe = loserPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
+    const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
     if (foreignPmStripe.length) {
-      if (!effectiveWinnerStripe && loserPmStripeIds.length === 1) {
-        derivedStripeCustomerId = loserPmStripeIds[0];
+      if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
+        derivedStripeCustomerId = allPmStripeIds[0];
       } else {
-        throw new Error("executeMerge: the duplicate's saved cards belong to a different Stripe profile — resolve in Stripe first");
+        throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
       }
     }
     // Two DIFFERENT third-party payer defaults is a human billing decision,
@@ -1046,6 +1058,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const backfills = {};
     for (const field of BACKFILL_FIELDS) {
       if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
+    }
+    // An address backfills as a TUPLE: a winner with no street but a stale
+    // city/ZIP absorbing the loser's real service address must not mint a
+    // mixed address (dispatch and report fallbacks read these columns
+    // together). When the street comes from the loser, the whole tuple does.
+    if (backfills.address_line1) {
+      backfills.address_line2 = loser.address_line2 || null;
+      backfills.city = loser.city || null;
+      backfills.state = loser.state || null;
+      backfills.zip = loser.zip || null;
     }
     // A loser-only Stripe profile must move with its payment methods: the
     // repointed payment_methods rows live on THAT Stripe customer, and a

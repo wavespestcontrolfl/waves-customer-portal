@@ -1183,6 +1183,111 @@ describe('executeMerge', () => {
     expect(result.repointed['customers.notes_appended']).toBe('crm_notes, technician_notes');
   });
 
+  it("refuses when the WINNER's own cards sit on a foreign profile the backfill would strand", async () => {
+    // Winner row unnamed, its cards on cus_X; loser transfers cus_B — the
+    // backfill would repoint the survivor to cus_B and strand the X cards.
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: null };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: 'cus_b' };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers' && q.called('forUpdate')) return [winner, loser];
+      if (table === 'payment_methods' && q.called('select')) {
+        const w = q.args('where')[0];
+        return w.customer_id === WINNER ? [{ stripe_customer_id: 'cus_x' }] : [];
+      }
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/different Stripe profile/);
+  });
+
+  it('derivation considers BOTH sides: agreeing cards derive, disagreeing cards refuse', async () => {
+    const mk = (winnerPm, loserPm) => {
+      const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: null };
+      const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: null };
+      const { trx } = buildTrx({ winner, loser, fkRows: [] });
+      const baseImpl = trx.getMockImplementation();
+      trx.mockImplementation((table) => {
+        if (table === 'payment_methods') {
+          return makeChain(table, (q) => {
+            if (q.called('select')) {
+              const w = q.args('where')[0];
+              const ids = w.customer_id === WINNER ? winnerPm : loserPm;
+              return ids.map((id) => ({ stripe_customer_id: id }));
+            }
+            if (q.called('first')) return null;
+            if (q.called('update')) return 1;
+            return [];
+          });
+        }
+        return baseImpl(table);
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      return dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    };
+    // Both sides' cards agree → derive.
+    const agreed = await mk(['cus_same'], ['cus_same']);
+    expect(agreed.backfills.stripe_customer_id).toBe('cus_same');
+    // Sides disagree → refuse.
+    await expect(mk(['cus_x'], ['cus_y'])).rejects.toThrow(/different Stripe profile/);
+  });
+
+  it('backfills the address as a whole tuple — never the loser street with winner stale city', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      address_line1: null, address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      address_line1: '100 Main St', address_line2: 'Apt 2', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills).toMatchObject({
+      address_line1: '100 Main St',
+      address_line2: 'Apt 2',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34205',
+    });
+  });
+
+  it('repoints customer-typed data-hygiene proposal scopes and resources', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: null, phone: '9995550003' };
+    const state = { hygiene: [] };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'data_hygiene_proposals' && q.called('update')) {
+        state.hygiene.push([q.args('where')[0], q.args('update')[0]]);
+        return 1;
+      }
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.hygiene).toEqual(expect.arrayContaining([
+      [{ scope_type: 'customer', scope_id: LOSER }, { scope_id: WINNER }],
+      [{ resource_type: 'customer', resource_id: LOSER }, { resource_id: WINNER }],
+    ]));
+    expect(result.repointed['data_hygiene_proposals.scope_id']).toBe(1);
+    expect(result.repointed['data_hygiene_proposals.resource_id']).toBe(1);
+  });
+
   it('refuses matching per-application modes with different fees', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'per_application', per_application_fee: '65.00' },
