@@ -35,7 +35,9 @@ const { markEstimateManuallyAccepted } = require('../services/estimate-manual-ac
 const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
+  estimateReviseBlock,
   estimateViewUrl,
+  reviseAdminEstimate,
 } = require('../services/admin-estimate-persistence');
 const {
   inferEstimateServiceInterest,
@@ -471,6 +473,85 @@ router.post('/', async (req, res, next) => {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
   }
+});
+
+// PUT /api/admin/estimates/:id — revise an existing estimate in place. Same
+// body + server-authoritative pricing pipeline as create, but the row keeps
+// its id/token/status/expiry/linkage so the link the customer already has
+// starts showing the updated quote. Blocked once the estimate leaves the
+// editable window (accepted/declined/expired/sending/price-locked/archived)
+// and for commercial proposals (their editor is PUT /:id/proposal).
+router.put('/:id', async (req, res, next) => {
+  try {
+    // dryRun runs every guard + the full pricing pipeline without writing, so
+    // the builder can confirm a server reprice with the operator BEFORE the
+    // edit publishes to the customer's live link.
+    const dryRun = req.body?.dryRun === true;
+    const { estimate } = await reviseAdminEstimate({
+      estimateId: req.params.id,
+      body: req.body,
+      technicianId: req.technicianId,
+      technician: req.technician,
+      dryRun,
+    });
+    if (!dryRun) {
+      logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+    }
+    res.json({
+      dryRun: dryRun || undefined,
+      id: estimate.id,
+      token: estimate.token,
+      viewUrl: estimateViewUrl(estimate.token),
+      status: estimate.status,
+      monthlyTotal: estimate.monthly_total != null ? Number(estimate.monthly_total) : null,
+      annualTotal: estimate.annual_total != null ? Number(estimate.annual_total) : null,
+      onetimeTotal: estimate.onetime_total != null ? Number(estimate.onetime_total) : null,
+      pricingAuthority: estimate.pricing_authority || null,
+      pricingDrift: estimate.pricing_drift || null,
+    });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /api/admin/estimates/:id/edit-source — everything the estimate builder
+// needs to reopen an existing estimate for in-place editing: the saved builder
+// inputs + engine profile (when the estimate was authored in the builder), the
+// live contact columns, and the same editability verdict the revise write
+// enforces. `inputs` is null for rows created outside the builder (lead
+// auto-send / agent drafts) — the client falls back to contact-only seeding.
+router.get('/:id/edit-source', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const estData = parseEstimateData(estimate.estimate_data) || {};
+    const block = estimateReviseBlock(estimate, estData);
+    const inputs = estData.inputs && typeof estData.inputs === 'object' && !Array.isArray(estData.inputs)
+      ? estData.inputs
+      : null;
+    const engineProfile = estData.engineRequest?.profile && typeof estData.engineRequest.profile === 'object'
+      ? estData.engineRequest.profile
+      : null;
+    res.json({
+      id: estimate.id,
+      status: estimate.status,
+      editable: !block,
+      blockReason: block ? block.message : null,
+      customerId: estimate.customer_id,
+      customerName: estimate.customer_name,
+      customerPhone: estimate.customer_phone,
+      customerEmail: estimate.customer_email,
+      address: estimate.address,
+      notes: estimate.notes,
+      serviceInterest: estimate.service_interest,
+      showOneTimeOption: !!estimate.show_one_time_option,
+      billByInvoice: !!estimate.bill_by_invoice,
+      satelliteUrl: estimate.satellite_url,
+      inputs,
+      engineProfile,
+    });
+  } catch (err) { next(err); }
 });
 
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
