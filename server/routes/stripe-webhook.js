@@ -1635,6 +1635,21 @@ async function resolveRefundedInvoiceId(trx, { pmt, charge, chargeId }) {
   return null;
 }
 
+// Durable record of WHICH refunds were counted into a payments row's
+// refund_amount — stripe_refund_id alone only remembers the newest stamp, so
+// a bounce of an OLDER stamped partial would otherwise be unattributable
+// (handleRefundFailed can only rewind refunds it can attribute).
+function metadataWithStampedRefund(rawMeta, refundId) {
+  let meta = {};
+  try {
+    meta = rawMeta ? (typeof rawMeta === 'string' ? JSON.parse(rawMeta) : rawMeta) : {};
+  } catch { meta = {}; }
+  if (!refundId) return meta;
+  const stamped = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+  if (stamped.includes(refundId)) return meta;
+  return { ...meta, stamped_refund_ids: [...stamped, refundId] };
+}
+
 /**
  * charge.refunded — Update refund status on payments table
  */
@@ -1671,7 +1686,13 @@ async function handleChargeRefunded(charge) {
   // kept. Events for OTHER refunds on the same charge carry different ids
   // and proceed normally.
   if (refundId) {
-    const bounceCheck = await db('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+    // Same lookup ladder as handleRefundFailed — a processing-stage ACH row
+    // may be keyed by PI only, and the fence must cover every row that
+    // handler can mark.
+    let bounceCheck = await db('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+    if (!bounceCheck && charge.payment_intent) {
+      bounceCheck = await db('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('metadata');
+    }
     if (bounceCheck) {
       let bounceMeta = {};
       try {
@@ -1707,6 +1728,7 @@ async function handleChargeRefunded(charge) {
             refund_amount: cumulativeRefundAmountDollars,
             refund_status: isFullRefund ? 'full' : 'partial',
             stripe_refund_id: refundId,
+            metadata: JSON.stringify(metadataWithStampedRefund(rowInLock.metadata, refundId)),
           });
           if (isFullRefund) await reverseStatementCascadeForDispute(stmtByPi.id, charge.payment_intent, 'charge.refunded (full)', { database: trx });
         } else if (isFullRefund) {
@@ -1718,7 +1740,7 @@ async function handleChargeRefunded(charge) {
             payment_date: etDateString(), amount: (charge.amount || refundAmountCents) / 100,
             status: 'refunded', refund_amount: cumulativeRefundAmountDollars, refund_status: 'full', stripe_refund_id: refundId,
             description: `Payer statement S-${stmtByPi.id} fully refunded`,
-            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund' }),
+            metadata: JSON.stringify({ statement_id: stmtByPi.id, payer_id: stmtByPi.payer_id, source: 'statement_refund', ...(refundId ? { stamped_refund_ids: [refundId] } : {}) }),
           });
         } else {
           // Partial refund pre-settlement: the eventual succeeded will settle the
@@ -1750,6 +1772,7 @@ async function handleChargeRefunded(charge) {
         refund_amount: cumulativeRefundAmountDollars,
         refund_status: isFullRefund ? 'full' : 'partial',
         stripe_refund_id: refundId,
+        metadata: JSON.stringify(metadataWithStampedRefund(preRefundRow.metadata, refundId)),
       });
       if (isFullRefund) {
         await reverseStatementCascadeForDispute(preRefundRow.statement_id, preRefundRow.stripe_payment_intent_id, `charge.refunded (full $${cumulativeRefundAmountDollars.toFixed(2)})`, { database: trx });
@@ -1776,6 +1799,14 @@ async function handleChargeRefunded(charge) {
       });
     const pmt = await trx('payments').where({ stripe_charge_id: chargeId }).first();
     let result = pmt;
+    // Record this refund id as STAMPED (see metadataWithStampedRefund) so a
+    // later bounce of it stays attributable even after newer stamps
+    // overwrite stripe_refund_id.
+    if (pmt && refundId) {
+      await trx('payments').where({ id: pmt.id }).update({
+        metadata: JSON.stringify(metadataWithStampedRefund(pmt.metadata, refundId)),
+      });
+    }
     // Keep the surcharge-returned tracker in step with refunds this app did
     // NOT issue (Stripe-dashboard partials): treat the cumulative refunded
     // gross as proportionally split (rs = R·S/(B+S)), monotone max() so the
@@ -1826,7 +1857,7 @@ async function handleChargeRefunded(charge) {
             refund_status: 'full',
             stripe_refund_id: refundId,
             description: `Invoice ${inv?.invoice_number || invId} fully refunded`,
-            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund' }),
+            metadata: JSON.stringify({ invoice_id: invId, source: 'invoice_refund', ...(refundId ? { stamped_refund_ids: [refundId] } : {}) }),
           }).returning('*');
           result = marker;
         }
@@ -1931,6 +1962,30 @@ async function handleRefundFailed(refund) {
     return;
   }
 
+  // Pre-resolve the linked invoice (+ any prepay term the optimistic refund
+  // cancelled) READ-ONLY before the transaction: a failed lookup (e.g. a
+  // pre-migration table) inside the trx would poison it and wedge the event
+  // in a retry loop; out here it just degrades the notification detail.
+  let linkedInvoice = null;
+  let cancelledPrepayTermId = null;
+  try {
+    let pMeta = {};
+    try {
+      pMeta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+    } catch { pMeta = {}; }
+    linkedInvoice = pMeta.invoice_id
+      ? await db('invoices').where({ id: pMeta.invoice_id }).first('id', 'invoice_number', 'status')
+      : (piId ? await db('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number', 'status') : null);
+    if (linkedInvoice) {
+      cancelledPrepayTermId = (await db('annual_prepay_terms')
+        .where({ prepay_invoice_id: linkedInvoice.id, status: 'cancelled' })
+        .first('id'))?.id || null;
+    }
+  } catch (err) {
+    logger.warn(`[stripe-webhook] refund-failed invoice/term lookup failed: ${err.message}`);
+  }
+
+  let restoredInvoiceId = null;
   await db.transaction(async (trx) => {
     const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
     if (!row) return;
@@ -1944,16 +1999,28 @@ async function handleRefundFailed(refund) {
     // committed the notification atomically with this fence).
     const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
     if (refundId && failedIds.includes(refundId)) return;
-    const nextMeta = { ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds };
+    const stampedIds = Array.isArray(meta.stamped_refund_ids) ? meta.stamped_refund_ids : [];
+    const nextMeta = {
+      ...meta,
+      failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds,
+      // A bounced refund is no longer counted in refund_amount — drop it
+      // from the stamped record too.
+      ...(refundId && stampedIds.includes(refundId)
+        ? { stamped_refund_ids: stampedIds.filter((id) => id !== refundId) }
+        : {}),
+    };
 
     // Only a refund that was actually STAMPED into this row may rewind the
-    // cumulative amounts. row.stripe_refund_id carries the latest stamped
-    // refund; a bounce arriving BEFORE its creation event (or for an older
-    // refund we can't attribute) is only RECORDED — subtracting it would
-    // erase EARLIER cleared refunds ($40 cleared + $20 bounced-pre-creation
-    // must not become $20). The recorded id makes handleChargeRefunded skip
-    // the late creation stamp, and the notification flags the manual case.
-    const wasStamped = !!refundId && row.stripe_refund_id === refundId;
+    // cumulative amounts. stamped_refund_ids records EVERY refund whose
+    // amount entered refund_amount (stripe_refund_id alone only remembers
+    // the newest — a $40 partial overwritten by a later $20 stamp must still
+    // be rewindable when the $40 bounces); the stripe_refund_id check keeps
+    // legacy rows stamped before that record existed working. A bounce we
+    // can't attribute is only RECORDED — subtracting it would erase EARLIER
+    // cleared refunds. The recorded id makes handleChargeRefunded skip the
+    // late creation stamp, and the notification flags the manual case.
+    const wasStamped = !!refundId
+      && (row.stripe_refund_id === refundId || stampedIds.includes(refundId));
     if (!wasStamped) {
       await trx('payments').where({ id: row.id }).update({ metadata: JSON.stringify(nextMeta) });
       await insertBounceNotification(trx, `Payment row ${row.id}: the bounce arrived before (or without) its creation stamp — amounts were left untouched and the late charge.refunded event will be skipped. If this refund was already recorded under an earlier stamp, reconcile refund_amount manually.`);
@@ -2003,19 +2070,17 @@ async function handleRefundFailed(refund) {
     // 'refunded' (returnAppliedCreditOnRefund) — with the money kept by
     // Stripe that status is now false on every customer/admin surface.
     // Status-only and mechanical (collected money is a fact); the CREDIT
-    // side of that settle stays a human decision below.
+    // side of that settle stays a human decision below. Conditional WHERE
+    // makes the pre-trx status read race-safe.
     let invoiceRestored = null;
-    let inv = null;
-    try {
-      inv = nextMeta.invoice_id
-        ? await trx('invoices').where({ id: nextMeta.invoice_id }).first('id', 'invoice_number', 'status')
-        : (piId ? await trx('invoices').where({ stripe_payment_intent_id: piId }).first('id', 'invoice_number', 'status') : null);
-      if (inv && String(inv.status).toLowerCase() === 'refunded' && nextRefundCents < rowPaidCents) {
-        await trx('invoices').where({ id: inv.id, status: 'refunded' }).update({ status: 'paid', updated_at: new Date() });
-        invoiceRestored = inv.invoice_number || inv.id;
+    if (linkedInvoice && String(linkedInvoice.status).toLowerCase() === 'refunded' && nextRefundCents < rowPaidCents) {
+      const flipped = await trx('invoices')
+        .where({ id: linkedInvoice.id, status: 'refunded' })
+        .update({ status: 'paid', updated_at: new Date() });
+      if (flipped > 0) {
+        invoiceRestored = linkedInvoice.invoice_number || linkedInvoice.id;
+        restoredInvoiceId = linkedInvoice.id;
       }
-    } catch (err) {
-      logger.warn(`[stripe-webhook] refund-failed invoice restore/lookup failed: ${err.message}`);
     }
 
     // Operator signal: the reverts above are mechanical, but the remaining
@@ -2028,10 +2093,24 @@ async function handleRefundFailed(refund) {
     // specifics.
     let sideEffectHint = '';
     if (invoiceRestored) sideEffectHint += ` Invoice ${invoiceRestored} was restored to paid; verify its restored account credit (may need to be re-applied/clawed back).`;
-    else if (inv) sideEffectHint += ` Check invoice ${inv.invoice_number || inv.id}: restored account credit may need to be re-applied/clawed back.`;
+    else if (linkedInvoice) sideEffectHint += ` Check invoice ${linkedInvoice.invoice_number || linkedInvoice.id}: restored account credit may need to be re-applied/clawed back.`;
+    if (cancelledPrepayTermId) sideEffectHint += ` Annual-prepay term ${cancelledPrepayTermId} was CANCELLED by the refund — the paid-sync is re-run, but refund-cancelled terms are not auto-revived (revival is dispute-marker-gated); if coverage stays cancelled, reactivate it manually.`;
     if (row.statement_id) sideEffectHint += ` Statement S-${row.statement_id} was reversed to owed at refund time — reconcile before it re-collects.`;
     await insertBounceNotification(trx, `Payment row ${row.id} was reverted to collected — a refund-issued email already went out to the customer.${sideEffectHint}`);
   });
+
+  // Post-commit: re-run the annual-prepay paid sync for a restored invoice —
+  // no payment_intent.succeeded will ever fire for a bounce, so nothing else
+  // re-syncs coverage. For a payment_pending term this reactivates it through
+  // the sanctioned state machine; a refund-cancelled term stays cancelled
+  // (revival is deliberately dispute-marker-gated — see the notification).
+  if (restoredInvoiceId) {
+    try {
+      await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredInvoiceId);
+    } catch (err) {
+      logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
+    }
+  }
 }
 
 /**

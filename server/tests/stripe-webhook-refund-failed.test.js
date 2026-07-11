@@ -40,8 +40,10 @@ jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
 jest.mock('../services/receipt-delivery-queue', () => ({}));
+jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 
 const db = require('../models/db');
+const AnnualPrepay = require('../services/annual-prepay-renewals');
 const { _handleRefundFailed: handleRefundFailed } = require('../routes/stripe-webhook');
 
 describe('handleRefundFailed', () => {
@@ -50,6 +52,8 @@ describe('handleRefundFailed', () => {
   let trxInvoices;
   let notificationInsert;
   let paymentsFirst;
+  let dbInvoices;
+  let dbPrepayTerms;
 
   const failedRefund = (over = {}) => ({
     id: 're_fail',
@@ -99,8 +103,18 @@ describe('handleRefundFailed', () => {
       where: jest.fn(() => paymentsQuery),
       first: paymentsFirst,
     };
+    dbInvoices = {
+      where: jest.fn(() => dbInvoices),
+      first: jest.fn(async () => null),
+    };
+    dbPrepayTerms = {
+      where: jest.fn(() => dbPrepayTerms),
+      first: jest.fn(async () => null),
+    };
     db.mockImplementation((table) => {
       if (table === 'payments') return paymentsQuery;
+      if (table === 'invoices') return dbInvoices;
+      if (table === 'annual_prepay_terms') return dbPrepayTerms;
       if (table === 'notifications') return { insert: notificationInsert };
       throw new Error(`Unexpected db table: ${table}`);
     });
@@ -179,15 +193,46 @@ describe('handleRefundFailed', () => {
     expect(args.refunded_surcharge_cents).toBeUndefined();
   });
 
-  test('full-refund bounce restores a terminalized invoice back to paid', async () => {
+  test('full-refund bounce restores a terminalized invoice back to paid and re-runs the prepay sync', async () => {
     // returnAppliedCreditOnRefund terminalized the invoice to 'refunded' at
     // creation time; Stripe kept the money, so 'refunded' is now false on
     // every surface. Status-only restore; credit stays a human decision.
-    trxInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'refunded' });
+    dbInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'refunded' });
     await handleRefundFailed(failedRefund());
 
     expect(trxInvoices.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paid' }));
     expect(notificationInsert.mock.calls[0][0].body).toContain('WPC-2026-0001 was restored to paid');
+    // No payment_intent.succeeded ever fires for a bounce — the handler is
+    // the only place coverage can re-sync.
+    expect(AnnualPrepay.syncTermForInvoicePayment).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('names a refund-cancelled prepay term in the alert (revival is dispute-marker-gated)', async () => {
+    dbInvoices.first.mockResolvedValue({ id: 'inv-1', invoice_number: 'WPC-2026-0001', status: 'refunded' });
+    dbPrepayTerms.first.mockResolvedValue({ id: 'term-9' });
+    await handleRefundFailed(failedRefund());
+
+    const body = notificationInsert.mock.calls[0][0].body;
+    expect(body).toContain('term term-9 was CANCELLED');
+    expect(body).toContain('reactivate it manually');
+  });
+
+  test('rewinds an OLDER stamped partial via stamped_refund_ids after a newer stamp overwrote stripe_refund_id', async () => {
+    // $40 (re_1) and $20 (re_2) both cleared and stamped; stripe_refund_id
+    // now points at re_2. When re_1 bounces it must still be attributable —
+    // and it leaves the stamped record, keeping re_2 rewindable later.
+    paymentRow.status = 'paid';
+    paymentRow.refund_amount = '60.00';
+    paymentRow.stripe_refund_id = 're_2';
+    paymentRow.metadata = JSON.stringify({ stamped_refund_ids: ['re_1', 're_2'] });
+    await handleRefundFailed(failedRefund({ id: 're_1', amount: 4000 }));
+
+    const args = trxUpdate.mock.calls[0][0];
+    expect(args.refund_amount).toBe(20);
+    expect(args.refund_status).toBe('partial');
+    const meta = JSON.parse(args.metadata);
+    expect(meta.failed_refund_ids).toEqual(['re_1']);
+    expect(meta.stamped_refund_ids).toEqual(['re_2']);
   });
 
   test('falls back to the PI lookup for ACH rows with no charge/refund id yet', async () => {
