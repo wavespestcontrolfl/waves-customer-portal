@@ -2194,16 +2194,37 @@ const StripeService = {
     // A stale id can be a legitimate lost-response recovery: a prior
     // /update-amount took the replacement path (fresh PI minted, invoice
     // repointed) but the response never reached the client, so its network
-    // retry still carries the dead PI's id. Never touch the caller-supplied
-    // PI on a mismatch — retarget the tender lock to the invoice's CURRENT
-    // PI and return it as `replaced` with its clientSecret so the pay page
-    // re-mounts Elements instead of stranding the session.
+    // retry still carries the dead PI's id. Recover ONLY for that exact
+    // replay: the stale id must be the PI the current one replaced (lineage
+    // stamped by replaceInvoicePaymentIntentForTender) AND the requested
+    // tender must equal the current PI's lock. Any other mismatch — e.g. an
+    // out-of-order older sync from a dead Elements mount switching tenders —
+    // rejects as before, so a late request can never flip
+    // payment_method_types under a pending confirm/finalize. The
+    // caller-supplied PI is never updated on a mismatch.
     const retargeted = String(invoice.stripe_payment_intent_id) !== String(paymentIntentId);
     const effectivePaymentIntentId = String(invoice.stripe_payment_intent_id);
     if (retargeted) {
+      const requestedType = isCardMethodType(methodCategory || 'card') ? 'card' : 'us_bank_account';
+      let currentIntent = null;
+      try {
+        currentIntent = await stripe.paymentIntents.retrieve(effectivePaymentIntentId);
+      } catch (retrieveErr) {
+        logger.warn(
+          `[stripe] Could not retrieve current PI ${effectivePaymentIntentId} while vetting a stale `
+          + `update-amount id for invoice ${invoiceId}: ${retrieveErr.message}`,
+        );
+      }
+      const lineageMatch = currentIntent?.metadata?.replaced_from === String(paymentIntentId);
+      const tenderMatch = Array.isArray(currentIntent?.payment_method_types)
+        && currentIntent.payment_method_types.length === 1
+        && currentIntent.payment_method_types[0] === requestedType;
+      if (!lineageMatch || !tenderMatch) {
+        throw new Error('PaymentIntent does not belong to this invoice');
+      }
       logger.warn(
-        `[stripe] update-amount got stale PI ${paymentIntentId} for invoice ${invoiceId}; `
-        + `retargeting to current PI ${effectivePaymentIntentId}`,
+        `[stripe] update-amount replaying a lost replacement response: stale PI ${paymentIntentId} `
+        + `→ current PI ${effectivePaymentIntentId} (invoice ${invoiceId})`,
       );
     }
 
@@ -2340,7 +2361,11 @@ const StripeService = {
       amount: baseCents,
       currency: 'usd',
       description: `Invoice ${invoice.invoice_number} — ${invoice.title || 'Waves Pest Control'}`,
-      metadata,
+      // replaced_from stamps one generation of lineage so update-amount can
+      // recognize a lost-response replay of THIS replacement (client retries
+      // still carrying the canceled PI's id) without opening a blanket
+      // stale-id retarget.
+      metadata: { ...metadata, replaced_from: String(oldPaymentIntentId) },
       payment_method_types: paymentMethodTypes,
     };
     if (customer) {

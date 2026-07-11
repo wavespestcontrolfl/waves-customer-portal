@@ -549,13 +549,19 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
   });
 
-  test('a stale PI id retargets to the invoice\'s CURRENT PI and returns it as replaced (lost-response retry recovery)', async () => {
+  test('a stale id that IS the replaced lineage with a matching tender replays onto the CURRENT PI (lost-response retry recovery)', async () => {
     // A prior /update-amount can take the replacement path (fresh PI minted,
     // invoice repointed) with the response lost in transit — the client's
     // network retry then still carries the dead PI's id. The caller-supplied
     // stale PI must never be updated; the tender lock applies to the invoice's
     // current PI, returned with replaced+clientSecret so Elements re-mounts.
     invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
     stripeClient.paymentIntents.update.mockImplementation(async (id, params) => ({
       id,
       client_secret: `cs_${id}`,
@@ -578,6 +584,48 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       replaced: true,
       clientSecret: 'cs_pi_current',
     });
+  });
+
+  test('a stale lineage id with a DIFFERENT tender is rejected — a late out-of-order sync must never flip the current lock', async () => {
+    // Codex P1 on the blanket retarget: an older overlapped /update-amount
+    // (e.g. an abandoned ACH toggle from a dead Elements mount) still carrying
+    // the canceled id must NOT rewrite payment_method_types under a pending
+    // card confirm/finalize.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'us_bank_account'),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a stale id with no replacement lineage is rejected (fail-closed, includes retrieve failure)', async () => {
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: {},
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_never_ours', 'card'),
+    ).rejects.toThrow(/does not belong/);
+
+    // Retrieve failure = lineage unverifiable = reject, never retarget blind.
+    stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('network blip'));
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_never_ours', 'card'),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
   });
 
   test('a matching PI id does NOT report replaced (no spurious Elements re-mount)', async () => {
@@ -618,7 +666,13 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
       expect.objectContaining({
         amount: 7500,
         payment_method_types: ['card'],
-        metadata: expect.objectContaining({ selected_method_category: 'card', card_surcharge: '0' }),
+        metadata: expect.objectContaining({
+          selected_method_category: 'card',
+          card_surcharge: '0',
+          // Lineage stamp — update-amount uses it to recognize a lost-response
+          // replay of this replacement (retry still carrying the canceled id).
+          replaced_from: 'pi_invoice',
+        }),
       }),
       expect.objectContaining({ idempotencyKey: expect.stringContaining('invoice_pi_replace_') }),
     );
