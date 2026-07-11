@@ -13016,11 +13016,38 @@ function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
   if (!Number.isFinite(monthly)) return false;
   const rowsMonthly = frequencyServiceRowsMonthlyTotal(frequency, keys);
   if (rowsMonthly == null) return false;
+  // The per-service treatment rows are WaveGuard-net but PRE manual/referral
+  // discount: a plan-level credit (e.g. Referral Credit) is applied on top of
+  // the combined price, not baked into each service row. frequency.monthly is
+  // net of that credit, so add it back before reconciling — otherwise the
+  // row-sum exceeds monthly by the credit and a splittable multi-service plan
+  // collapses into the single combined-price bundle card, which drops every
+  // per-service WaveGuard badge (issue: referral hid the tier on pest+lawn).
+  // Mirror the client's manualDiscountMonthlyAmount slice ordering: prefer the
+  // authoritative recurring-only slice (recurringAmount) over monthlyAmount,
+  // which on some snapshot/cache rows was derived from the FULL credit (incl. a
+  // one-time slice) and would add back too much here — over-inflating
+  // preManualMonthly and wrongly rejecting a splittable plan back into the
+  // badge-free bundle card.
+  const md = frequency?.manualDiscount;
+  let manualMonthly = 0;
+  if (md) {
+    const recurring = Number(md.recurringAmount);
+    if (Number.isFinite(recurring)) {
+      manualMonthly = recurring > 0 ? roundMonthly(recurring / 12) : 0;
+    } else if (Number.isFinite(Number(md.monthlyAmount)) && Number(md.monthlyAmount) > 0) {
+      manualMonthly = roundMonthly(Number(md.monthlyAmount));
+    } else {
+      const amount = Number(md.amount);
+      manualMonthly = Number.isFinite(amount) && amount > 0 ? roundMonthly(amount / 12) : 0;
+    }
+  }
+  const preManualMonthly = roundMonthly(monthly + manualMonthly);
   // Compare in integer cents: the intended tolerance is one cent, but a raw
   // float compare (|84.08 - 84.07| <= 0.01) evaluates 0.010000000000005 > 0.01
   // and rejected legitimate 1-cent rounding-path drift, collapsing splittable
   // pest+lawn bundles into the single combined-price card.
-  return Math.abs(Math.round(roundMonthly(monthly) * 100) - Math.round(rowsMonthly * 100)) <= 1;
+  return Math.abs(Math.round(preManualMonthly * 100) - Math.round(rowsMonthly * 100)) <= 1;
 }
 
 function canSplitRecurringSelectableLadder(frequencies = [], recurringKeys = []) {

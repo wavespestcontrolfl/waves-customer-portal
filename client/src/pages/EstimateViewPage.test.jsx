@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -740,6 +740,294 @@ describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTE
     render(<CombinedRecurringPriceCard combined={withoutRaw} selectedFrequency={{ key: 'alt', monthly: 600 }} />);
     // stamped 0.8 against $600 → ±$96 → $504–$696
     expect(screen.getByText(/\$504–\$696/)).toBeInTheDocument();
+  });
+});
+
+describe('PlanTotalSummary — plan-level referral credit + net', () => {
+  const combined = {
+    monthlySubtotal: 82,
+    annualSubtotal: 984,
+    waveGuardTierLabel: 'Silver',
+    manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+  };
+
+  it('itemizes subtotal → credit → net as the per-service-sum minus the net', () => {
+    // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82/mo →
+    // the credit shown is the exact difference ($2.08), and subtotal−credit=net.
+    const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
+    const text = container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$84.08');
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
+    expect(text).toContain('Your price');
+    expect(text).toContain('$82');
+    expect(text).toContain('$984 / year');
+  });
+
+  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+    const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders nothing without a combined payload', () => {
+    const { container } = render(<PlanTotalSummary combined={null} preCreditMonthly={84.08} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('tracks the SELECTED cadence — subtotal and net both follow the selection', () => {
+    // Switched to a pricier cadence: per-service sum $112.08, net $110/mo. The
+    // credit is the difference ($2.08) and everything follows the selection.
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
+    );
+    const text = container.textContent;
+    expect(text).toContain('$112.08');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$110');
+    expect(text).toContain('$1,320 / year');
+    expect(text).not.toContain('$82');
+  });
+
+  it('shows the ACTUAL (capped) credit by construction, not a stale default amount', () => {
+    // The selected cadence caps the credit so the net is higher ($83.50, only
+    // $0.58 off the $84.08 sum). The difference shows the real $0.58 — never the
+    // default $2.08 — so the on-screen math always reconciles.
+    const text = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 83.50, annual: 1002 }} preCreditMonthly={84.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$83.50');
+  });
+
+  it('renders nothing when the per-service sum is missing or does not exceed the net', () => {
+    // No reliable pre-credit basis → nothing to itemize (not ranged/quote-required).
+    expect(render(<PlanTotalSummary combined={combined} />).container).toBeEmptyDOMElement();
+    expect(render(<PlanTotalSummary combined={combined} preCreditMonthly={82} />).container).toBeEmptyDOMElement();
+  });
+
+  it('on a ranged low-confidence plan keeps the credit visible but no exact net', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(<PlanTotalSummary combined={ranged} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('Referral Credit'); // credit stays visible…
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Your price'); // …but no exact subtotal/net
+    expect(text).not.toContain('Plan subtotal');
+    // Same when the range rides on the selected frequency.
+    const text2 = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    ).container.textContent;
+    expect(text2).toContain('Referral Credit');
+    expect(text2).not.toContain('Your price');
+  });
+
+  it('ranged credit uses the selected-cadence difference, not the stale default', () => {
+    // Selected cadence caps the credit (net $111.50 vs $112.08 sum → $0.58), so
+    // even the ranged credit-only line shows $0.58, never the default $2.08.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 111.50, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+  });
+
+  it('suppresses for a quote-required selection (page hides exact dollars)', () => {
+    const { container } = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} preCreditMonthly={84.08} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders the summary for a fully-comped plan — subtotal → credit → Your price $0', () => {
+    // The credit covers the whole plan: net is $0 but the story (what it would
+    // have cost and why it's free) matters most here, so the block still renders.
+    const comped = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      waveGuardTierLabel: 'Silver',
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 },
+    };
+    const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$84.08');
+    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toContain('Your price');
+    expect(text).toContain('$0');
+  });
+
+  it('does not treat a zeroed/missing subtotal as a full comp when the credit cannot cover it', () => {
+    // Legacy payloads can stamp monthlySubtotal 0 when no total resolved; a
+    // $2.08 credit obviously doesn't comp an $84.08 plan, so nothing renders.
+    const broken = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+    };
+    expect(render(<PlanTotalSummary combined={broken} preCreditMonthly={84.08} />).container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan: no fallback credit when the sum exists but the selected cadence has no reduction', () => {
+    // The selected cadence fully caps/suppresses the credit (net equals the
+    // per-service sum). Falling back to the default $2.08 would advertise a
+    // credit accept won't apply, so nothing renders.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 112.08, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan with no per-service sum still falls back to the plan credit amount', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged plan with no per-service sum: no fallback when the selected row suppresses the credit', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders from the SELECTED row's credit when the default cadence suppresses it", () => {
+    // The server nulls combined.manualDiscount when the DEFAULT cadence
+    // floor-suppresses the credit — but the selected cadence still carries it,
+    // and its reduction is real, so the summary must not vanish.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 110,
+          annual: 1320,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+        }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$112.08');
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$110');
+  });
+
+  it('gates in on the suppressed flag when a combo-selected credit is live (combo rows carry no discount fields)', () => {
+    // Default cadence suppresses the credit (combined.manualDiscount nulled) and
+    // the base row carries only manualDiscountSuppressed — but the selected
+    // COMBO's net still applies the credit. The overlay keeps the base row's
+    // flag, which proves the plan has a credit; the diff prices it.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320, manualDiscountSuppressed: true }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Discount');
+    expect(text).toContain('$110');
+  });
+
+  it('uses the payload-level planDiscount for the gate and label when row fields are unavailable', () => {
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }}
+        preCreditMonthly={112.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$110');
+  });
+
+  it('never conjures a discount line from reconciliation drift on a creditless plan', () => {
+    // Positive subtotal−net difference but NO credit signal anywhere (no live
+    // object, no suppressed flag, no planDiscount) → nothing renders.
+    const { container } = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 82, annual: 984 }}
+        preCreditMonthly={84.08}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan with no per-service sum prices the fallback from planDiscount when row objects are absent', () => {
+    // Gate passes via planDiscount (combo overlay dropped row-level fields);
+    // the credit-only line must price from the same evidence, not vanish.
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const text = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged no-sum fallback: the suppressed flag still vetoes a planDiscount', () => {
+    const ranged = { monthlySubtotal: 82, annualSubtotal: 984, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary
+        combined={ranged}
+        selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('a base-row credit capped smaller does not shadow a planDiscount that comps the combo to $0', () => {
+    // The base row still carries a small capped object, but the selected combo
+    // is fully comped by the plan credit — corroboration takes the largest
+    // candidate, so "Your price $0" renders.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 0,
+          annual: 0,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', amount: 18, recurringAmount: 18, monthlyAmount: 1.50, capped: true },
+        }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Your price');
+    expect(text).toMatch(/[−-]\$84\.08/);
+  });
+
+  it('corroborates a $0 net against the planDiscount when row-level objects are absent', () => {
+    // Comped via a combo selection: no row-level discount object survives the
+    // overlay, but the payload-level credit covers the whole subtotal.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 0, annual: 0, manualDiscountSuppressed: true }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Your price');
+    expect(text).toMatch(/[−-]\$84\.08/);
   });
 });
 

@@ -1910,6 +1910,144 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
+// Plan-level discount summary for a multi-service plan carrying a plan-wide
+// credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
+// price PRE credit — the credit is applied to the combined plan, not baked into
+// each row — so this is the one place the customer sees list subtotal → credit →
+// the net they actually pay. Renders ONLY when there's a credit to itemize: the
+// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
+// a no-credit multi-service plan stays summary-free and unchanged.
+export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
+  if (!combined) return null;
+  // The live discount object (selected row first — the server nulls
+  // combined.manualDiscount whenever the DEFAULT cadence floor-suppresses the
+  // credit — else the default payload's) prices the ranged fallback and
+  // corroborates $0 nets; the itemized amounts come from the selected-cadence
+  // difference below.
+  const liveDiscount = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
+  const manual = liveDiscount(selectedFrequency?.manualDiscount) || liveDiscount(combined.manualDiscount);
+  // Render gate: ANY evidence the plan carries a manual credit. Combo rows drop
+  // the discount fields and the combinedFrequency overlay keeps only the base
+  // row's, so a credit that's suppressed on the default/base row but live in
+  // the selected combo's net must gate in via the row's suppressed flag or the
+  // payload-level planDiscount — its amount then comes from the diff. A
+  // creditless plan carries none of these signals, so reconciliation drift can
+  // never conjure a discount line out of nothing.
+  const planHasCredit = Boolean(manual)
+    || Boolean(selectedFrequency?.manualDiscount)
+    || selectedFrequency?.manualDiscountSuppressed === true
+    || Boolean(combined.manualDiscount)
+    || Boolean(planDiscount);
+  if (!planHasCredit) return null;
+  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
+  // Quote-required selection: the rest of the estimate hides exact dollars for a
+  // quote-required row, so there's no exact subtotal/net to itemize here either.
+  if (selectedFrequency?.quoteRequired === true) return null;
+
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  // A $0 net is real — a credit can fully comp the plan, and that's exactly when
+  // the subtotal → credit → "Your price $0" story matters — so only a
+  // negative/non-finite net bails. A zero net must additionally be corroborated
+  // by the credit itself before rendering (below).
+  const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
+  if (!Number.isFinite(netMonthly) || netMonthly < 0) return null;
+
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
+  const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
+  const creditBox = (amount) => (
+    <div style={{
+      ...row,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: `1px solid ${W.greenLight}`,
+      background: W.successWash,
+      color: W.green,
+      fontWeight: 800,
+      fontSize: 16,
+    }}>
+      <span>{creditLabel}</span>
+      <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+    </div>
+  );
+
+  // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
+  // pre-credit per-service cards minus the net the accept payload charges.
+  // Deriving it as a difference (rather than reading a credit object) is correct
+  // for every cadence, cap, and discount type by construction, and guarantees the
+  // on-screen subtotal − credit = net reconciles. `preCreditMonthly` is that
+  // per-service sum. Both branches below use this so a ranged plan doesn't show a
+  // stale default-cadence credit either.
+  const subtotalMonthly = round2(Number(preCreditMonthly));
+  const hasServiceSum = subtotalMonthly > 0;
+  const creditFromDiff = hasServiceSum && subtotalMonthly > netMonthly
+    ? round2(subtotalMonthly - netMonthly)
+    : null;
+  // A $0 net renders only when a plan credit corroborates covering the whole
+  // subtotal (1-cent tolerance, same as the split reconciliation): a legacy
+  // payload with a zeroed/missing subtotal and an ordinary credit must not
+  // render as "fully comped". Corroborate against the LARGEST candidate — a
+  // row-level object capped for the BASE cadence must not shadow a payload
+  // planDiscount that fully comps the selected combo.
+  const corroboratingCreditMonthly = Math.max(
+    manualDiscountMonthlyAmount(manual),
+    manualDiscountMonthlyAmount(planDiscount),
+  );
+  if (netMonthly === 0 && corroboratingCreditMonthly < subtotalMonthly - 0.011) return null;
+
+  // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
+  // range, not one exact number — but the credit is applied by accept regardless,
+  // so keep it visible as a credit-only line rather than printing an exact
+  // subtotal/net the rest of the page deliberately avoids. Prefer the selected
+  // cadence's difference. Fall back to the plan credit's own amount ONLY when
+  // the per-service sum is genuinely unavailable — with a sum in hand, a zero
+  // difference means the selected cadence caps/suppresses the credit away, and
+  // the fallback would advertise a credit accept won't apply. Same when the
+  // selected row itself marks the credit suppressed.
+  const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
+  if (lowConfidencePct > 0) {
+    const rangedCredit = hasServiceSum
+      ? creditFromDiff
+      // Row object first (selection-specific, possibly capped), else the
+      // payload planDiscount — the same evidence the render gate accepts, so
+      // gating in via planDiscount alone can still price this line.
+      : (selectedFrequency?.manualDiscountSuppressed === true ? null : manualDiscountMonthlyAmount(manual || planDiscount));
+    if (!(rangedCredit > 0)) return null;
+    return (
+      <section style={estimateCard()}>
+        {creditBox(rangedCredit)}
+        <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+          Applied to your plan — we confirm your exact price with a quick site visit.
+        </div>
+      </section>
+    );
+  }
+
+  // Exact case needs the per-service sum to itemize against.
+  if (!(creditFromDiff > 0)) return null;
+  const creditMonthly = creditFromDiff;
+  const selectedAnnual = Number(selectedFrequency?.annual ?? combined.annualSubtotal);
+  const netAnnual = selectedAnnual > 0 ? selectedAnnual : round2(netMonthly * 12);
+  return (
+    <section style={estimateCard()}>
+      <div style={{ ...row, fontSize: 16, color: ESTIMATE_BODY }}>
+        <span>Plan subtotal</span>
+        <span style={num}>{fmtMoney(subtotalMonthly)}{per('/mo')}</span>
+      </div>
+      <div style={{ marginTop: 12 }}>{creditBox(creditMonthly)}</div>
+      <div style={{ ...row, marginTop: 14, paddingTop: 16, borderTop: `1px solid ${W.borderCool}` }}>
+        <span style={{ fontSize: 18, fontWeight: 800, color: ESTIMATE_TEXT }}>Your price</span>
+        <span style={{ ...num, fontSize: 28, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1 }}>
+          {fmtMoney(netMonthly)}<span style={{ color: ESTIMATE_MUTED, fontSize: 16, fontWeight: 500 }}> /mo</span>
+        </span>
+      </div>
+      <div style={{ ...num, textAlign: 'right', marginTop: 6, fontSize: 14, color: ESTIMATE_MUTED }}>
+        {fmtMoney(netAnnual)} / year
+      </div>
+    </section>
+  );
+}
+
 function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
@@ -3995,7 +4133,32 @@ export default function EstimateViewPage() {
 
           {/* The combined "Recurring total" card was removed (owner directive
               2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. */}
+              the bundle's monthly price. It returns ONLY to itemize a plan-wide
+              credit (e.g. Referral Credit) and show the net: the per-service
+              cards are pre-credit, so without this the credit + final price
+              would never appear on a split multi-service plan. Renders nothing
+              when there's no credit, so no-credit bundles stay unchanged. */}
+          {services.length > 1 ? (
+            <PlanTotalSummary
+              combined={pricing.combinedRecurring}
+              selectedFrequency={combinedFrequency}
+              // Payload-level plan credit: gate/label evidence for selections
+              // whose row-level discount fields are unavailable (combo overlays
+              // keep only the base row's) — survives unless EVERY priced
+              // frequency suppresses the credit.
+              planDiscount={pricing.manualDiscount || null}
+              // Sum of the per-service cards at their SELECTED cadence — these are
+              // pre-credit (WaveGuard-net), so subtotal − net = the actual credit.
+              // Mirrors each ServiceSection's frequency resolution.
+              preCreditMonthly={services.reduce((sum, s) => {
+                if (!s?.isRecurring) return sum;
+                const freqs = Array.isArray(s.frequencies) ? s.frequencies : [];
+                const cur = freqs.find((f) => f.key === selected[s.key]) || freqs[0] || null;
+                const m = Number(cur?.monthly);
+                return sum + (Number.isFinite(m) ? m : 0);
+              }, 0)}
+            />
+          ) : null}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (
