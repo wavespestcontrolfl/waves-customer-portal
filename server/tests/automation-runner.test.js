@@ -74,19 +74,23 @@ describe('automation runner rendering', () => {
     expect(rendered.text).toBe('Hi Taylor, your estimate is ready.');
   });
 
-  test('renders newsletter automation content with newsletter chrome and unsubscribe text', () => {
+  test('renders marketing automation content with service chrome but keeps the unsubscribe footer', () => {
     const rendered = renderAutomationStepContent({
       template: { asm_group: 'newsletter' },
-      htmlBody: '<p>Hi {{first_name}}, here is the newsletter.</p>',
-      textBody: 'Hi {{first_name}}, here is the newsletter.',
+      htmlBody: '<p>Hi {{first_name}}, thanks for your interest in Waves.</p>',
+      textBody: 'Hi {{first_name}}, thanks for your interest in Waves.',
       customer: { first_name: 'Taylor', email: 'taylor@example.com' },
       asmGroupId: 101,
     });
 
-    expect(rendered.html).toContain('The Waves Newsletter');
+    // Newsletter chrome is reserved for actual newsletter sends — marketing
+    // drips (new_lead/cold_lead/referral_nudge) wear the service shell.
+    expect(rendered.html).not.toContain('The Waves Newsletter');
     expect(rendered.html).toContain('Hi Taylor');
+    // Still a commercial email on the marketing ASM group: the visible
+    // unsubscribe link must survive the wrapper swap.
     expect(rendered.html).toContain('<%asm_group_unsubscribe_raw_url%>');
-    expect(rendered.text).toContain('Hi Taylor, here is the newsletter.');
+    expect(rendered.text).toContain('Hi Taylor, thanks for your interest in Waves.');
     expect(rendered.text).toContain('Unsubscribe: <%asm_group_unsubscribe_raw_url%>');
   });
 });
