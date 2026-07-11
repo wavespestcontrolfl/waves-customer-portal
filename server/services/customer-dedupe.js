@@ -192,6 +192,10 @@ async function batchAutoBlockers(database, losers) {
     // to the wrong cadence. Review-queue only; the manual path transfers or
     // refuses inside executeMerge.
     if (loser.billing_mode) byId.get(loser.id).push('billing_mode');
+    // A priced row (admin-set monthly_rate on a lead) carries accepted
+    // billing terms the backfill deliberately does not copy — losing them
+    // before the first invoice exists is unrecoverable. Review queue.
+    if (Number(loser.monthly_rate) > 0) byId.get(loser.id).push('monthly_rate');
     // A live-stage row (any stage whereLiveCustomer treats as a real
     // customer — active, won, or at-risk) is never a disposable shell:
     // retiring it would drop account state (stage/tier/rate) the merge
@@ -277,7 +281,7 @@ async function findDuplicateGroups(database = db) {
     .whereRaw("COALESCE(phone, '') <> ''")
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1',
       'address_line2', 'city', 'zip', 'stripe_customer_id', 'password_hash',
-      'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode');
+      'pipeline_stage', 'lead_source', 'created_at', 'payer_id', 'billing_mode', 'monthly_rate');
   const byPhone = new Map();
   for (const row of rows) {
     const p10 = phone10(row.phone);
@@ -713,6 +717,26 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       && winner.stripe_customer_id !== loser.stripe_customer_id) {
       throw new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first');
     }
+    // Saved cards live on a specific STRIPE customer: charge paths attach
+    // PaymentIntents to ensureStripeCustomer(winner), so a moved method
+    // attached elsewhere would strand and autopay/card-on-file charges fail.
+    // Validate before the sweep moves them; when neither customer row names
+    // a Stripe profile but the saved cards agree on one, derive it (same
+    // spirit as the loser-only-profile transfer below).
+    let derivedStripeCustomerId = null;
+    const loserPmStripeIds = [...new Set((await trx('payment_methods')
+      .where({ customer_id: loserId })
+      .whereNotNull('stripe_customer_id')
+      .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
+    const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
+    const foreignPmStripe = loserPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
+    if (foreignPmStripe.length) {
+      if (!effectiveWinnerStripe && loserPmStripeIds.length === 1) {
+        derivedStripeCustomerId = loserPmStripeIds[0];
+      } else {
+        throw new Error("executeMerge: the duplicate's saved cards belong to a different Stripe profile — resolve in Stripe first");
+      }
+    }
     // Two DIFFERENT third-party payer defaults is a human billing decision,
     // exactly like both-have-Stripe: refuse. (A loser-only payer transfers
     // with the backfills below — invoice precedence is
@@ -943,6 +967,26 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       }
     }
 
+    // Operator context (CRM + technician notes) must survive the retire:
+    // APPEND the loser's notes onto the winner — both sides can hold real
+    // context, fill-if-empty would drop one, and the merge journal is not an
+    // operator surface.
+    const noteAppends = {};
+    for (const col of ['crm_notes', 'technician_notes']) {
+      const loserVal = String(loser[col] || '').trim();
+      if (!loserVal) continue;
+      const winnerVal = String(winner[col] || '').trim();
+      if (winnerVal.includes(loserVal)) continue;
+      noteAppends[col] = winnerVal
+        ? `${winnerVal}\n\n[From merged duplicate ${String(loserId).slice(0, 8)}]: ${loserVal}`
+        : loserVal;
+    }
+    if (Object.keys(noteAppends).length) {
+      await trx('customers').where({ id: winnerId })
+        .update({ ...noteAppends, updated_at: trx.fn.now() });
+      repointed['customers.notes_appended'] = Object.keys(noteAppends).join(', ');
+    }
+
     // Autopay consent is most-restrictive, like notification_prefs: an
     // explicit opt-out or live pause on EITHER row survives the merge — the
     // monthly cron must never charge a customer whose retired row said stop.
@@ -1007,8 +1051,8 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // repointed payment_methods rows live on THAT Stripe customer, and a
     // later ensureStripeCustomer(winner) would mint a fresh profile and
     // strand every saved card. (Both-have-Stripe was refused above.)
-    if (!winner.stripe_customer_id && loser.stripe_customer_id) {
-      backfills.stripe_customer_id = loser.stripe_customer_id;
+    if (!winner.stripe_customer_id && (loser.stripe_customer_id || derivedStripeCustomerId)) {
+      backfills.stripe_customer_id = loser.stripe_customer_id || derivedStripeCustomerId;
     }
     // A loser-only third-party payer default transfers the same way —
     // without it the merged account self-pays and bills the homeowner

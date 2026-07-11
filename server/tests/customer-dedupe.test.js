@@ -23,7 +23,7 @@ const {
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
     'ignore', 'returning', 'first', 'increment',
   ];
@@ -598,6 +598,7 @@ describe('executeMerge', () => {
           const whereArg = q.args('where')?.[0];
           if (payload.referred_by_customer_id === null && whereArg?.referred_by_customer_id) return 0;
           if (payload.deleted_at) { state.retired = payload; return 1; }
+          if (payload.crm_notes || payload.technician_notes) { state.notesAppended = payload; return 1; }
           state.backfilled = payload;
           return 1;
         }
@@ -1114,6 +1115,74 @@ describe('executeMerge', () => {
     expect(state.retired.is_primary_profile).toBe(false);
   });
 
+  it('refuses when the loser saved cards belong to a foreign Stripe profile', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: 'cus_winner' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers' && q.called('forUpdate')) return [winner, loser];
+      if (table === 'payment_methods' && q.called('select')) return [{ stripe_customer_id: 'cus_other' }];
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+      .rejects.toThrow(/different Stripe profile/);
+  });
+
+  it('derives the Stripe customer from the moved cards when neither row names one', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: null };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: null };
+    const { trx } = buildTrx({ winner, loser, fkRows: [] });
+    // Override payment_methods: the saved cards agree on one Stripe customer.
+    const baseImpl = trx.getMockImplementation();
+    trx.mockImplementation((table) => {
+      if (table === 'payment_methods') {
+        return makeChain(table, (q) => {
+          if (q.called('select')) return [{ stripe_customer_id: 'cus_derived' }];
+          if (q.called('first')) return null;
+          if (q.called('update')) return 1;
+          return [];
+        });
+      }
+      return baseImpl(table);
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.stripe_customer_id).toBe('cus_derived');
+  });
+
+  it('auto mode refuses a priced lead row — monthly_rate is accepted billing terms', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', monthly_rate: '89.00' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', mode: 'auto' }))
+      .rejects.toThrow(/not a shell \(monthly_rate\)/);
+  });
+
+  it('appends loser notes onto the winner instead of dropping them', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      crm_notes: 'Winner context.', technician_notes: null,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      crm_notes: 'Gate code 4482, beware of dog.', technician_notes: 'Use side gate.',
+    };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.notesAppended.crm_notes).toBe(
+      `Winner context.\n\n[From merged duplicate ${LOSER.slice(0, 8)}]: Gate code 4482, beware of dog.`,
+    );
+    expect(state.notesAppended.technician_notes).toBe('Use side gate.');
+    expect(result.repointed['customers.notes_appended']).toBe('crm_notes, technician_notes');
+  });
+
   it('refuses matching per-application modes with different fees', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', billing_mode: 'per_application', per_application_fee: '65.00' },
@@ -1157,7 +1226,11 @@ describe('executeMerge', () => {
       if (table === 'customer_merge_journal') return [{ id: 'j1' }];
       if (table === 'payment_methods') {
         if (q.called('first')) return { id: 'pm-winner-default' };
-        if (q.called('select')) return [{ id: 'pm-loser-1' }, { id: 'pm-loser-2' }];
+        if (q.called('select')) {
+          return q.args('select')[0] === 'stripe_customer_id'
+            ? [{ stripe_customer_id: 'cus_shared' }] // cards live on the shared profile
+            : [{ id: 'pm-loser-1' }, { id: 'pm-loser-2' }];
+        }
         if (q.called('update') && q.called('whereIn')) {
           state.demoted = { ids: q.args('whereIn')[1], payload: q.args('update')[0] };
           return 2;

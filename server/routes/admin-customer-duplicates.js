@@ -67,6 +67,13 @@ async function handleMerge(req, res, { linkAsProperty }) {
     if (candidate.tier === 'red') {
       return res.status(409).json({ error: 'This pair looks like two different people and cannot be merged from the queue' });
     }
+    // A positive address reason means the duplicate carries a DIFFERENT (or
+    // incomparable) service address — a plain merge would retire its only
+    // copy (the backfill never overwrites the winner's street). Force the
+    // link-as-property path so the address survives as a property row.
+    if (!linkAsProperty && candidate.reasons.some((r) => r.startsWith('address_'))) {
+      return res.status(409).json({ error: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost" });
+    }
     const result = await executeMerge({
       winnerId,
       loserId,
@@ -101,7 +108,7 @@ async function handleMerge(req, res, { linkAsProperty }) {
     logger.error(`[admin-customer-duplicates] merge failed: ${err.message}`);
     // "refresh the queue" covers the executor's under-lock rechecks (phone no
     // longer shared, pair now red) — stale-queue races are conflicts, not 500s.
-    const conflict = /Stripe profiles|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
+    const conflict = /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
 }

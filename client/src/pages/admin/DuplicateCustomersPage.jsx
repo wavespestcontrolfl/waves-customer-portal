@@ -197,7 +197,10 @@ export default function DuplicateCustomersPage() {
                         </div>
                       </div>
                       <div className={cn("flex shrink-0 flex-wrap items-center gap-2")}>
-                        {tier !== "red" && (
+                        {/* Address-conflict candidates must go through
+                            "Merge + keep address" — the server 409s a plain
+                            merge so the second service address isn't lost. */}
+                        {tier !== "red" && !addressConflict && (
                           <Button
                             size="sm"
                             variant="secondary"
