@@ -365,6 +365,20 @@ finding and warns on P1. Reviewers must return JSON matching
   32-hex claim token. The full report payload never leaves the server before
   claim. Prospect free-text note is stored for admin view only — never fed to
   models or customer copy. Privacy headers on all responses.)
+  `/api/card/:token` (read-only digital business card payload; 64-hex
+  `customer_cards.share_token` format gate, generic 404 for unknown/malformed
+  tokens and archived/merged customers, 60 req/min per-IP read limit on top of
+  the global /api limiter, `Cache-Control: private, no-store`; payload is a
+  strict whitelist — customer FIRST NAME + member-since year +
+  has_left_google_review flag only, tech name + presigned photo, office
+  phone, the tracked /l review short-link, and the customer's referral link
+  (share never exposes the card token) — no address, email, or phone PII;
+  the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
+  headers via sensitive-spa-headers.js),
+  `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
+  token gate + archived-customer 404 + rate limit + `no-store`; contents are
+  COMPANY-ONLY — tech name/title, office line, company email/site/address,
+  license line — never customer data).
   `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
   the full report — same gate-404 + honeypot + privacy headers, 10 req/min
   limit, UUID + 32-hex claim-token format gates with generic 404 so tokens

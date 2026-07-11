@@ -11,6 +11,7 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const CardService = require('../services/customer-card');
@@ -21,6 +22,16 @@ const {
 } = require('../constants/business');
 
 const TOKEN_RE = /^[a-f0-9]{64}$/;
+
+// Per-route read limit on top of the global /api limiter — same bar as the
+// sibling public token routes (prep, lawn-diagnostic).
+router.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+}));
 
 router.get('/:token', async (req, res, next) => {
   try {

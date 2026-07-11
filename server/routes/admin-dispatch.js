@@ -5152,10 +5152,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Internal-only completion profiles (e.g. Waves Assessment) suppress all
     // customer comms/public tokens above, so they must not mint a
     // customer-facing card either (Codex P1 on PR #2588). Non-performed
-    // outcomes (inspection_only / customer_declined) also skip: no service
-    // was delivered, and minting would tie the lifetime card to the wrong
-    // first visit/tech (Codex P2 #2588 r2; 'incomplete' returned earlier).
-    const cardMintOutcomePerformed = !['inspection_only', 'customer_declined'].includes(visitOutcome);
+    // outcomes also skip: no service was delivered, and minting would tie
+    // the lifetime card to the wrong first visit/tech. 'incomplete' does NOT
+    // return early in this handler — it records the alert and continues — so
+    // it belongs here too, matching the referral-credit non-performed guard
+    // (Codex P2 #2588 r2 + r5).
+    const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
     if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
       try {
         const CustomerCardService = require('../services/customer-card');
