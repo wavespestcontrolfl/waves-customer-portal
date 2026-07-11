@@ -344,7 +344,11 @@ router.get('/export', async (req, res) => {
     const rangeStart = start_date || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`;
     const rangeEnd = end_date || todayStr;
 
-    let query = db('stripe_payouts');
+    // Exports feed the accounting books: only payouts that actually reached
+    // the bank belong in them (failed/canceled rows keep their arrival dates
+    // and would sit beside their replacement payout, so OFX LEDGERBAL never
+    // reconciles). Mirrors the /stats status filter.
+    let query = db('stripe_payouts').where({ status: 'paid' });
     query = applyBusinessDateRange(query, 'arrival_date', start_date, end_date);
     const payouts = await query.orderBy('arrival_date', 'desc');
 

@@ -560,6 +560,23 @@ router.post(
           await handleChargeRefunded(event.data.object);
           break;
 
+        case 'refund.failed':
+          await handleRefundFailed(event.data.object);
+          break;
+
+        case 'charge.refund.updated': {
+          // Fires on refund status/metadata changes; the money-relevant
+          // transition is a post-creation bounce. Everything else is noise —
+          // charge.refunded already recorded the creation.
+          const refundObj = event.data.object;
+          if (['failed', 'canceled'].includes(refundObj?.status)) {
+            await handleRefundFailed(refundObj);
+          } else {
+            logger.info(`[stripe-webhook] refund ${refundObj?.id || '(unknown)'} updated → ${refundObj?.status} (no action)`);
+          }
+          break;
+        }
+
         case 'charge.dispute.created':
           await handleDisputeCreated(event.data.object);
           break;
@@ -1821,6 +1838,84 @@ async function handleChargeRefunded(charge) {
 }
 
 /**
+ * refund.failed / charge.refund.updated(status=failed|canceled) — a refund we
+ * already recorded bounced after creation. charge.refunded fires when the
+ * refund is CREATED, before ACH refunds actually clear, so the books
+ * optimistically show the money returned (payments row stamped, credit
+ * restored, refund email sent). When the bank later rejects it, Stripe keeps
+ * the money and nothing corrected the ledger — this handler reverts the
+ * payments stamps and raises an operator signal for the parts that need a
+ * human (restored account credit, the already-sent refund email, deposit
+ * ledger flips).
+ */
+async function handleRefundFailed(refund) {
+  const refundId = refund?.id || null;
+  const chargeId = refund?.charge || null;
+  const piId = refund?.payment_intent || null;
+  const failedCents = Number(refund?.amount) || 0;
+  const failedDollars = failedCents / 100;
+  logger.warn(`[stripe-webhook] Refund ${refundId} FAILED (charge ${chargeId}): ${refund?.failure_reason || refund?.status || 'no reason given'}`);
+
+  let payment = null;
+  if (refundId) payment = await db('payments').where({ stripe_refund_id: refundId }).first();
+  if (!payment && chargeId) payment = await db('payments').where({ stripe_charge_id: chargeId }).first();
+
+  let reverted = false;
+  if (payment) {
+    await db.transaction(async (trx) => {
+      const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
+      if (!row) return;
+      let meta = {};
+      try {
+        meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
+      } catch { meta = {}; }
+      // Replay fence: refund.failed and charge.refund.updated both fire for
+      // one bounce (plus Stripe retries) — subtracting the failed amount
+      // more than once would erase a DIFFERENT refund's stamps.
+      const failedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
+      if (refundId && failedIds.includes(refundId)) return;
+      const priorRefundCents = Math.round((parseFloat(row.refund_amount) || 0) * 100);
+      const nextRefundCents = Math.max(0, priorRefundCents - failedCents);
+      await trx('payments').where({ id: row.id }).update({
+        refund_amount: nextRefundCents / 100,
+        // 'failed' when this bounce erased the whole refund; a surviving
+        // remainder means an EARLIER partial refund did clear.
+        refund_status: nextRefundCents > 0 ? 'partial' : 'failed',
+        // A row terminalized to 'refunded' by a refund that never cleared is
+        // still collected money.
+        ...(row.status === 'refunded' && nextRefundCents === 0 ? { status: 'paid' } : {}),
+        metadata: JSON.stringify({ ...meta, failed_refund_ids: refundId ? [...failedIds, refundId] : failedIds }),
+      });
+      reverted = true;
+    });
+  }
+
+  // Operator signal: the ledger revert above is mechanical, but the side
+  // effects of the optimistic refund are not — account credit restored by
+  // returnAppliedCreditOnRefund is spendable, the customer already got a
+  // "refund issued" email, and estimate-deposit refunds flip the deposit
+  // ledger with no payments row at all. Those need a human decision. Fenced
+  // with the revert (refund.failed and charge.refund.updated both fire for
+  // one bounce — a replay that changed nothing must not re-notify).
+  if (payment && !reverted) return;
+  try {
+    await db('notifications').insert({
+      recipient_type: 'admin',
+      category: 'billing',
+      title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
+      body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). `
+        + (payment
+          ? `Payment row ${payment.id} was reverted to collected — verify any restored account credit and follow up with the customer (a refund-issued email already went out).`
+          : 'No payments row matched — if this was an estimate-deposit refund, the deposit ledger may need a manual flip.'),
+      icon: '⚠️',
+      link: '/admin/invoices',
+    });
+  } catch (err) {
+    logger.error(`[stripe-webhook] refund-failed notification insert failed: ${err.message}`);
+  }
+}
+
+/**
  * payment_method.detached — Remove from our DB
  */
 async function handlePaymentMethodDetached(paymentMethod) {
@@ -2029,11 +2124,21 @@ async function handleAchFailure(paymentIntent, failureReason) {
       );
 
       try {
-        await trx('ach_failure_log').insert({
-          customer_id: customer.id,
-          stripe_payment_intent_id: piId,
-          failure_reason: failureReason,
-        });
+        // Idempotent under webhook re-runs (the file's handler contract): a
+        // retried payment_failed event for the same PI must not log a second
+        // failure — duplicate rows double-count one real failure and can
+        // escalate straight to needs_verification/suspended. Check-then-insert
+        // is race-safe here because the advisory lock serializes per customer.
+        const alreadyLogged = await trx('ach_failure_log')
+          .where({ customer_id: customer.id, stripe_payment_intent_id: piId })
+          .first('id');
+        if (!alreadyLogged) {
+          await trx('ach_failure_log').insert({
+            customer_id: customer.id,
+            stripe_payment_intent_id: piId,
+            failure_reason: failureReason,
+          });
+        }
       } catch { /* table may not exist yet */ }
 
       // Count is now guaranteed to include the just-inserted row because
@@ -3064,3 +3169,5 @@ async function handleSetupIntentFailed(setupIntent) {
 }
 
 module.exports = router;
+// Exposed for unit tests.
+module.exports._handleRefundFailed = handleRefundFailed;

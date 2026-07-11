@@ -2912,6 +2912,50 @@ const InvoiceService = {
       // drafts too, and there is no reversal primitive to mirror — reconciling
       // would have to reverse + re-record across multiple create paths. Revisit
       // if discount reporting needs to be exact to the penny on edited drafts.
+    } else if (updates.tax_rate !== undefined) {
+      // A tax_rate-only body used to write the rate column with tax_amount /
+      // total left stale — an invoice reading "Tax (0.00%) $7.00" beside the
+      // old total. No shipped caller sends tax_rate without line_items, so
+      // this is API hardening: recompute totals against the EXISTING line
+      // items so the stored money always matches the stored rate. Same
+      // ledger-backed edit-locks as a line-item retotal — a recompute moves
+      // invoice.total, which deposit-credit and applied-credit ledgers are
+      // balanced against dollar-for-dollar.
+      const invoice = existing;
+      const hasDepositCreditLine = (items) => {
+        try {
+          const arr = typeof items === "string" ? JSON.parse(items) : items;
+          return Array.isArray(arr) && arr.some((i) => i?.category === "deposit_credit");
+        } catch {
+          return false;
+        }
+      };
+      if (hasDepositCreditLine(invoice.line_items)) {
+        throw new Error(
+          "This invoice carries an estimate deposit credit — void it (the deposit returns to the customer's ledger) and create a replacement instead of changing the tax rate",
+        );
+      }
+      if (parseFloat(invoice.credit_applied || 0) > 0) {
+        throw new Error(
+          "This invoice has account credit applied (prepaid) — reverse the applied credit before changing the tax rate",
+        );
+      }
+      const existingLineItems =
+        typeof invoice.line_items === "string"
+          ? JSON.parse(invoice.line_items)
+          : invoice.line_items || [];
+      const customer = await db("customers")
+        .where({ id: invoice.customer_id })
+        .first();
+      Object.assign(
+        data,
+        await calculateUpdateFinancials({
+          lineItems: existingLineItems,
+          customer,
+          invoice,
+          taxRate: updates.tax_rate,
+        }),
+      );
     }
 
     // Apply the editability predicates ATOMICALLY on the write so a worker

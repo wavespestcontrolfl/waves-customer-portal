@@ -424,4 +424,80 @@ describe('StripeService.refund', () => {
       .rejects.toThrow(/Could not verify the earlier refund attempt/);
     expect(stripeClient.refunds.create).not.toHaveBeenCalled();
   });
+
+  // ── Prorated surcharge gross-up (card-brand rule) ─────────────────────
+  // The operator enters BASE dollars; the Stripe refund adds the prorated
+  // share of the recorded card_surcharge via computeRefundSurcharge (the one
+  // surcharge authority), tracked cumulatively in metadata so successive
+  // partials sum to the exact surcharge with no drift.
+
+  test('partial refund on a surcharged payment grosses up by the prorated share', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.card_surcharge = '2.90';
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    // base 10000¢, surcharge 290¢ → $50 base refunds round(5000×290/10000)=145¢ share.
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(5145);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_5145_0');
+
+    const pendingMeta = JSON.parse(updatePayments.mock.calls[0][0].metadata);
+    expect(pendingMeta.pending_refund_base).toBe('5000');
+    expect(pendingMeta.pending_refund_gross).toBe(5145);
+
+    const finalArgs = updatePayments.mock.calls[1][0];
+    expect(finalArgs.refund_amount).toBe(51.45);
+    expect(JSON.parse(finalArgs.metadata).refunded_surcharge_cents).toBe(145);
+  });
+
+  test('second partial completes the surcharge exactly and flips to refunded', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.refund_amount = '51.45';
+    paymentRow.metadata = JSON.stringify({ refunded_surcharge_cents: 145 });
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    // Remaining surcharge = 290−145 = 145¢ → 5000+145; series totals 10290¢ = paid.
+    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(5145);
+    const finalArgs = updatePayments.mock.calls[1][0];
+    expect(finalArgs.status).toBe('refunded');
+    expect(finalArgs.refund_amount).toBe(102.9);
+    expect(JSON.parse(finalArgs.metadata).refunded_surcharge_cents).toBe(290);
+  });
+
+  test('gross-up is capped at the remaining balance (never over-refunds)', async () => {
+    // A prior $60 refund recorded with no surcharge tracking (legacy):
+    // remaining = 10290−6000 = 4290¢; $42 base + full remaining share (290¢)
+    // would be 4490¢ → capped to 4290¢.
+    paymentRow.amount = '102.90';
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.refund_amount = '60.00';
+    const StripeService = loadService();
+    await StripeService.refund('pay-1', { amount: 42 });
+
+    expect(stripeClient.refunds.create.mock.calls[0][0].amount).toBe(4290);
+  });
+
+  test('replay of a grossed attempt matches on the ENTERED base and resends the stored gross', async () => {
+    paymentRow.amount = '102.90';
+    paymentRow.card_surcharge = '2.90';
+    paymentRow.metadata = JSON.stringify({
+      pending_refund_key: 'refund_pay_pay-1_5145_0',
+      pending_refund_request: '5145',
+      pending_refund_base: '5000',
+      pending_refund_gross: 5145,
+      pending_refund_at: new Date().toISOString(),
+    });
+    const StripeService = loadService();
+    // Operator retries by re-entering the same $50 they typed the first time.
+    await StripeService.refund('pay-1', { amount: 50 });
+
+    const [params, opts] = stripeClient.refunds.create.mock.calls[0];
+    expect(params.amount).toBe(5145);
+    expect(opts.idempotencyKey).toBe('refund_pay_pay-1_5145_0');
+    // No pending re-persist — the only update is the final record+clear.
+    expect(updatePayments).toHaveBeenCalledTimes(1);
+  });
 });

@@ -997,6 +997,13 @@ const StripeService = {
   async chargeMonthly(customerId, idempotencyKey = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
+    // NULL/0 monthly_rate = unpriced (manual quote pending), not "charge
+    // nothing": the cron already filters monthly_rate > 0, so this guards
+    // direct callers from minting a $0/NaN PaymentIntent off an unpriced
+    // customer (NULL-not-$0 rule).
+    if (!(Number(customer.monthly_rate) > 0)) {
+      throw new Error(`Customer ${customerId} has no positive monthly_rate — refusing autopay charge`);
+    }
 
     // The "WaveGuard Monthly" marker is load-bearing: billing-cron identifies
     // monthly autopay rows by a `%WaveGuard Monthly%` LIKE match for its
@@ -1494,7 +1501,10 @@ const StripeService = {
     const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
     const remainingCents = paidCents - priorCents;
     const requestCents = amount ? Math.round(amount * 100) : null;
-    const requestTag = requestCents === null ? 'rest' : String(requestCents);
+    // Tag of what the OPERATOR entered (base dollars) — replay detection keys
+    // on this, so a retry of the same entered amount replays the original
+    // attempt even though the amount actually sent to Stripe is grossed up.
+    const enteredTag = requestCents === null ? 'rest' : String(requestCents);
 
     // Persist the attempt key BEFORE calling Stripe. The retry contract
     // ("re-running the same refund is safe") must hold even when the
@@ -1508,7 +1518,44 @@ const StripeService = {
     try {
       meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
     } catch { meta = {}; }
-    const isReplay = !!(meta.pending_refund_key && meta.pending_refund_request === requestTag);
+
+    // Card-brand rule: a partial refund must return the prorated share of the
+    // recorded card surcharge, not just the entered base dollars — the
+    // surcharge was collected on the refunded portion too. All math comes
+    // from the one authority (computeRefundSurcharge in stripe-pricing);
+    // meta.refunded_surcharge_cents tracks the cumulative returned share so
+    // successive partials prorate without drift. Full ("rest") refunds already
+    // return everything and skip this.
+    const surchargeCents = Math.max(0, Math.round(parseFloat(payment.card_surcharge || 0) * 100));
+    const alreadyRefundedSurchargeCents = Math.min(surchargeCents, Math.max(0, Number(meta.refunded_surcharge_cents) || 0));
+    const surchargeShareCents = requestCents !== null && surchargeCents > 0
+      ? computeRefundSurcharge({
+          refundBaseCents: requestCents,
+          originalBaseCents: Math.max(0, paidCents - surchargeCents),
+          originalSurchargeCents: surchargeCents,
+          totalRefundedBaseCents: Math.max(0, priorCents - alreadyRefundedSurchargeCents),
+          alreadyRefundedSurchargeCents,
+        })
+      : 0;
+    // Never push the grossed amount past the remaining balance — near the end
+    // of a heavily-refunded payment the cap eats into the share, not the base.
+    let grossCents = requestCents === null
+      ? null
+      : Math.min(requestCents + surchargeShareCents, Math.max(requestCents, remainingCents));
+
+    // Replay detection keys on the ENTERED amount (pending_refund_base);
+    // legacy markers predate the gross-up and stored the entered amount in
+    // pending_refund_request, so fall back to it.
+    const isReplay = !!(meta.pending_refund_key
+      && (meta.pending_refund_base ?? meta.pending_refund_request) === enteredTag);
+    if (isReplay && grossCents !== null && Number.isFinite(Number(meta.pending_refund_gross))) {
+      // Resend the ORIGINAL grossed amount verbatim — recomputing it against
+      // live state could shift after a webhook repair and wedge the key.
+      grossCents = Number(meta.pending_refund_gross);
+    }
+    const requestTag = isReplay
+      ? meta.pending_refund_request
+      : (grossCents === null ? 'rest' : String(grossCents));
     if (meta.pending_refund_key && !isReplay) {
       throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
     }
@@ -1530,7 +1577,17 @@ const StripeService = {
     const persistPendingAttempt = async () => {
       idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
       await db('payments').where({ id: paymentId }).update({
-        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_reason: attemptReason, pending_refund_at: new Date().toISOString() }),
+        metadata: JSON.stringify({
+          ...meta,
+          pending_refund_key: idempotencyKey,
+          pending_refund_request: requestTag,
+          // Entered base + frozen grossed amount: replays match on the base
+          // and resend the gross verbatim (see gross-up block above).
+          pending_refund_base: enteredTag,
+          ...(grossCents !== null ? { pending_refund_gross: grossCents } : {}),
+          pending_refund_reason: attemptReason,
+          pending_refund_at: new Date().toISOString(),
+        }),
       });
     };
 
@@ -1571,8 +1628,13 @@ const StripeService = {
         // remainder never sent. An unparseable key can't be reconciled —
         // no adoption; the fresh 'rest' attempt below is still safe because
         // Stripe computes the remainder from its own ledger.
-        let expectedCents = requestCents;
-        if (requestCents === null) {
+        // Prefer the frozen grossed amount — that is what the original
+        // attempt actually sent to Stripe (legacy markers have no gross and
+        // fall back to the entered amount, which WAS what they sent).
+        let expectedCents = Number.isFinite(Number(meta.pending_refund_gross))
+          ? Number(meta.pending_refund_gross)
+          : requestCents;
+        if (expectedCents === null) {
           const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
           expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
             ? paidCents - keyPriorCents
@@ -1596,6 +1658,8 @@ const StripeService = {
     const clearedMeta = { ...meta };
     delete clearedMeta.pending_refund_key;
     delete clearedMeta.pending_refund_request;
+    delete clearedMeta.pending_refund_base;
+    delete clearedMeta.pending_refund_gross;
     delete clearedMeta.pending_refund_reason;
     delete clearedMeta.pending_refund_at;
 
@@ -1606,8 +1670,10 @@ const StripeService = {
           payment_intent: payment.stripe_payment_intent_id,
           reason: replayReason || attemptReason,
         };
-        if (requestCents !== null) {
-          refundParams.amount = requestCents;
+        if (grossCents !== null) {
+          // Entered base + prorated surcharge share (capped at the remaining
+          // balance) — see the gross-up block above.
+          refundParams.amount = grossCents;
         }
         refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
@@ -1655,6 +1721,19 @@ const StripeService = {
       logger.warn(`[stripe] refund cumulative lookup failed for payment ${paymentId} (falling back to local accumulation): ${chargeErr.message}`);
     }
     const isFullRefund = totalRefundedCents >= paidCents;
+
+    // Cumulative surcharge-returned tracker — the NEXT partial prorates from
+    // this. The share actually sent this attempt = Stripe's refund amount
+    // minus the entered base (0 on legacy/no-surcharge attempts); a full
+    // refund returns the whole surcharge by definition.
+    if (surchargeCents > 0) {
+      clearedMeta.refunded_surcharge_cents = isFullRefund
+        ? surchargeCents
+        : Math.min(
+            surchargeCents,
+            alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
+          );
+    }
 
     try {
       await db('payments')

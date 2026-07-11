@@ -4019,6 +4019,10 @@ function BillingTab({ customer }) {
   const amountDue = Number(autopayState === 'active'
     ? (autopay?.next_charge_amount ?? (nonMonthlyBilling ? 0 : autopay?.monthly_rate) ?? 0)
     : (nextCharge?.amount ?? balance?.currentBalance ?? customer?.monthlyRate ?? 0));
+  // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
+  // charge — the server sends next_charge_amount/date as null and the cron
+  // will not charge, so "Next charge $0.00" would be false.
+  const autopayMonthlyUnpriced = autopayState === 'active' && !nonMonthlyBilling && !(amountDue > 0);
   const autopayBaseAmount = Number(autopay?.next_charge_base_amount ?? 0);
   const autopaySurcharge = Number(autopay?.next_charge_surcharge_amount ?? 0);
   const dueDate = autopayState === 'active'
@@ -4083,14 +4087,18 @@ function BillingTab({ customer }) {
         ? 'Auto Pay is on — charged per visit'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
-          : daysUntilDue === 0
-            ? 'Auto Pay is processing today'
-            : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+          : autopayMonthlyUnpriced
+            ? 'Auto Pay is on — rate being finalized'
+            : daysUntilDue === 0
+              ? 'Auto Pay is processing today'
+              : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
       detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
         : annualPrepayBilling
           ? 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.'
-          : daysUntilDue === 0
+          : autopayMonthlyUnpriced
+            ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
+            : daysUntilDue === 0
           ? `Amount: ${money(amountDue)}`
           : autopaySurcharge > 0
             ? `${money(autopayBaseAmount)} + ${money(autopaySurcharge)} credit card surcharge`

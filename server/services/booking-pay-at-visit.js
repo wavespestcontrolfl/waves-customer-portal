@@ -75,26 +75,39 @@ function pickRecurringService(services) {
   return { svc, visits };
 }
 
-// Per-visit NET amount = estimate-level net recurring annual ÷ cadence, cents
-// preserved. Uses the authoritative estimate total, not line fields. Requires
-// the estimate's cadence to equal the booking's series cadence (bookingVisits):
-// annual_total is priced for the quote's cadence, so dividing it by a different
-// number of visits (e.g. a monthly quote's annual over a quarterly series) would
-// mis-bill → fail closed on any mismatch.
+// Per-visit NET amounts = estimate-level net recurring annual ÷ cadence,
+// ANCHORED so the series sums to the quoted annual exactly (same penny-drift
+// class the annual-total anchor fixed on the prepay leg): follow-up visits get
+// the floored quotient and the FIRST visit absorbs the remainder cents, so a
+// rounded quotient stamped across all visits can never over-/under-bill the
+// year. Uses the authoritative estimate total, not line fields. Requires the
+// estimate's cadence to equal the booking's series cadence (bookingVisits):
+// annual_total is priced for the quote's cadence, so dividing it by a
+// different number of visits (e.g. a monthly quote's annual over a quarterly
+// series) would mis-bill → fail closed on any mismatch.
 function perVisitAmountForEstimate(estimate, picked, bookingVisits) {
   if (!(bookingVisits > 0) || picked.visits !== bookingVisits) return null;
   const netAnnual = Number(estimate.annual_total) > 0
     ? Number(estimate.annual_total)
     : (Number(estimate.monthly_total) > 0 ? Number(estimate.monthly_total) * 12 : 0);
   if (!(netAnnual > 0)) return null;
-  const perVisit = Math.round((netAnnual / bookingVisits) * 100) / 100;
-  return perVisit > 0 ? perVisit : null;
+  const annualCents = Math.round(netAnnual * 100);
+  const followUpCents = Math.floor(annualCents / bookingVisits);
+  const firstVisitCents = annualCents - followUpCents * (bookingVisits - 1);
+  if (!(followUpCents > 0) || !(firstVisitCents > 0)) return null;
+  return {
+    firstVisitAmount: firstVisitCents / 100,
+    followUpAmount: followUpCents / 100,
+  };
 }
 
 // Exposed for tests: net per-application amount for an estimate at a cadence.
+// Returns the follow-up (series) amount — the even quotient every visit after
+// the remainder-absorbing first one bills.
 function derivePerApplicationAmount(estimate, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
-  return picked ? perVisitAmountForEstimate(estimate, picked, bookingVisits) : null;
+  const perVisit = picked ? perVisitAmountForEstimate(estimate, picked, bookingVisits) : null;
+  return perVisit ? perVisit.followUpAmount : null;
 }
 
 function serviceKeyOf(svc) {
@@ -104,7 +117,9 @@ function serviceKeyOf(svc) {
 
 // Price from a single estimate, only when its recurring service matches the
 // booked service key AND cadence, and it carries no supplemental program.
-// Returns { amount, sourceEstimateId, serviceKey } or null.
+// Returns { amount, followUpAmount, sourceEstimateId, serviceKey } or null —
+// `amount` is the FIRST (parent) visit's remainder-absorbing price,
+// `followUpAmount` the even price every seeded follow-up bills.
 function priceFromEstimate(estimate, serviceKey, bookingVisits) {
   const picked = pickRecurringService(recurringServicesFromEstimate(estimate));
   if (!picked) return null;
@@ -112,8 +127,15 @@ function priceFromEstimate(estimate, serviceKey, bookingVisits) {
   // annual_total (the amount basis) would also cover any supplemental recurring
   // program, so pricing a single service off it would overbill → fail closed.
   if (hasSupplementalRecurring(estimate)) return null;
-  const amount = perVisitAmountForEstimate(estimate, picked, bookingVisits);
-  return amount ? { amount, sourceEstimateId: estimate.id || null, serviceKey } : null;
+  const perVisit = perVisitAmountForEstimate(estimate, picked, bookingVisits);
+  return perVisit
+    ? {
+        amount: perVisit.firstVisitAmount,
+        followUpAmount: perVisit.followUpAmount,
+        sourceEstimateId: estimate.id || null,
+        serviceKey,
+      }
+    : null;
 }
 
 // Resolve a per-application price from the estimate the booking is LINKED to

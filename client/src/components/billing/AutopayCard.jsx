@@ -242,6 +242,10 @@ export default function AutopayCard({ onStateChange }) {
   const annualPrepayBilling = data.billing_mode === 'annual_prepay';
   const nonMonthlyBilling = perApplicationBilling || annualPrepayBilling;
   const nextChargeAmount = Number(next_charge_amount ?? (nonMonthlyBilling ? 0 : monthly_rate) ?? 0);
+  // NULL monthly_rate = unpriced (manual quote pending), never a real $0.00
+  // charge — the server sends next_charge_amount/date as null and the cron
+  // will not charge, so promising "Next charge: $0.00" would be false.
+  const monthlyUnpriced = !nonMonthlyBilling && !(nextChargeAmount > 0);
   // Surcharge disclosure lives here now that the healthy-state banner above is
   // hidden — this card is the only place an active autopay customer sees the
   // base + credit-card-surcharge breakdown before the charge runs.
@@ -422,7 +426,9 @@ export default function AutopayCard({ onStateChange }) {
                 ? 'Auto Pay is on — your saved payment method is charged after each visit.'
                 : annualPrepayBilling
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
-                  : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
+                  : monthlyUnpriced
+                    ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
+                    : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
                 : 'Auto Pay is off. Charges will not run automatically.'}
