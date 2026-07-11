@@ -174,14 +174,36 @@ describe('schema validation', () => {
       // which under CALL_EXTRACTION_V2_DRIVES_ROUTING fail-closed the entire
       // call to triage BEFORE the repair path ever saw the address. The
       // model-output schema accepts it as-heard; normalizeCaller nulls what
-      // it can't validate, so the persisted schema (still format:"email")
-      // stays strict.
+      // it can't validate — demoting the capture to the server-derived
+      // email_raw so the gated repair / read-back path still sees it — and
+      // the persisted schema (still format:"email" on `email`) stays strict.
       const data = validModelOutput();
       data.caller.email = 'brandon@gmail';
       const { valid } = validateModelOutput(data);
       expect(valid).toBe(true);
       const normalized = normalizeExtractionV2(data);
       expect(normalized.caller.email).toBeNull();
+      expect(normalized.caller.email_raw).toBe('brandon@gmail');
+      // Persisted validation runs after finalizeV2Extraction injects the
+      // server-owned meta — mirror that so this asserts the email_raw shape,
+      // not a missing-meta artifact of the fixture.
+      normalized.meta = {
+        ...normalized.meta,
+        call_id: '550e8400-e29b-41d4-a716-446655440000',
+        schema_version: SCHEMA_VERSION,
+        extracted_at: '2026-07-11T00:00:00.000Z',
+        extraction_model: 'test-model',
+      };
+      const persisted = validatePersisted(normalized);
+      expect(persisted.errors).toBeNull();
+      expect(persisted.valid).toBe(true);
+    });
+
+    test('caller.email_raw is server-owned — model output carrying it is rejected', () => {
+      const data = validModelOutput();
+      data.caller.email_raw = 'brandon@gmail';
+      const { valid } = validateModelOutput(data);
+      expect(valid).toBe(false);
     });
 
     test('scheduling.status=confirmed is valid', () => {
@@ -368,11 +390,22 @@ describe('normalize extraction v2', () => {
     expect(cleanValidEmail(null)).toBeNull();
   });
 
-  test('normalizeCaller rejects a URL-shaped caller email (transcript garble)', () => {
+  test('normalizeCaller rejects a URL-shaped caller email (transcript garble) but keeps it in email_raw', () => {
     const extraction = validModelOutput();
     extraction.caller.email = 'www.cw63@gmail.com';
     const result = normalizeExtractionV2(extraction);
     expect(result.caller.email).toBeNull();
+    // Preserved for the read-back card; deriveEmailReview classifies a garble
+    // email_invalid and never repairs it into an adoptable address.
+    expect(result.caller.email_raw).toBe('www.cw63@gmail.com');
+  });
+
+  test('a valid caller email leaves email_raw null', () => {
+    const extraction = validModelOutput();
+    extraction.caller.email = 'MARIA@GMAIL.COM';
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.email).toBe('maria@gmail.com');
+    expect(result.caller.email_raw).toBeNull();
   });
 
   test('normalizeExtractionV2 handles full extraction', () => {

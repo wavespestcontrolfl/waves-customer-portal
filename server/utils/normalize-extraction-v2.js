@@ -50,6 +50,7 @@ function normalizeCaller(caller) {
   // caller's customer/lead writes or first-touch sends.
   const { looksGarbledTranscriptEmail } = require('./intake-normalize');
   const validEmail = cleanValidEmail(caller.email);
+  const usableEmail = validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null;
   return {
     ...caller,
     name_full: cleanText(caller.name_full),
@@ -58,7 +59,15 @@ function normalizeCaller(caller) {
     organization_name: cleanText(caller.organization_name),
     phone_e164: normalizePhone(caller.phone_e164),
     phone_raw_spoken: cleanText(caller.phone_raw_spoken),
-    email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
+    email: usableEmail,
+    // Server-derived, mirrors the V1 normalizer's email/email_raw split: an
+    // as-heard capture the validation rejected ("brandon@gmail", a garbled
+    // URL-shape) survives here — never in `email`, which write paths store —
+    // so the processor can carry it into the legacy email_raw channel where
+    // deriveEmailReview repairs (ownership-gated) or flags it for read-back.
+    // Without this, a V2-driven call whose V1 extraction returned null would
+    // silently lose the only captured address.
+    email_raw: usableEmail ? null : (cleanText(caller.email) || null),
   };
 }
 
