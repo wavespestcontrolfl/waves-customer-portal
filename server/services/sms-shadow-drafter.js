@@ -666,6 +666,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       }
     }
 
+    // A draft that stayed shadow on a suggest/auto-send thread still means
+    // the conversation MOVED: older pending cards were drafted against a
+    // stale context, and only publishSuggestion's supersede step normally
+    // retires them. Run that step standalone so a withheld draft (price,
+    // placeholder, unconverged) can't leave a stale card one click from
+    // sending. Idempotent; fail-soft inside.
+    if (row?.id && deliveredAs === SHADOW_STATUS && smsLogId
+        && (deliveryMode === 'suggest' || deliveryMode === suggestMode.AUTO_SEND_MODE)) {
+      await suggestMode.supersedeStaleSuggestions({ customerId: customer?.id || null, smsLogId });
+    }
+
     logger.info(
       `[sms-shadow] draft stored: customer=${customer?.id || 'unknown'} intent=${intentName} status=${deliveredAs} passes=${passes} converged=${converged} actions=${parsed.intended_actions.map((a) => a.type).join(',') || 'none'} ms=${Date.now() - startedAt}`
     );

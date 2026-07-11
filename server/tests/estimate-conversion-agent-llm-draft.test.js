@@ -233,6 +233,25 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(payload.suggested_message).not.toContain('$415.75');
   });
 
+  test('a priced TEMPLATE echo also stores NULL — the fallback lane is guarded too (Codex P1)', async () => {
+    seedActiveSchedulingThread();
+    // LLM path unavailable → deterministic template, which echoes raw
+    // inbound text — including the customer's own "$50".
+    generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'Can we do Tuesday for $50',
+      smsLogId: 'sms-in-8',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.model).toBe('deterministic_rules');
+    expect(payload.suggested_message).toBeNull();
+  });
+
   test('empty reply (no reply warranted) stores NULL, not the template', async () => {
     seedActiveSchedulingThread();
     generateGroundedDraft.mockResolvedValue({

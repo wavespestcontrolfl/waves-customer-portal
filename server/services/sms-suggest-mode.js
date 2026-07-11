@@ -55,24 +55,32 @@ function hasRedactionPlaceholder(text) {
 // in the facts). Deterministic and verifier-independent like the placeholder
 // guard: a draft carrying price talk stays shadow / never auto-sends.
 //
-// Pattern mirrors the Ask Waves price scrub (ask-waves-intake PRICE_TALK_RE
-// — keep the two in sync): dollar figures ($45), digits OR spelled-out
-// amounts + dollar/buck in singular or plural ("a 50 dollar credit", "four
-// hundred dollars", "a hundred bucks"), Spanish currency ("45 dólares"), and
-// per-cadence rates without a currency word ("45/mo", "forty five per
-// visit"). False positives are acceptable — they fail toward human review,
+// Pattern is a SUPERSET of the Ask Waves price scrub (ask-waves-intake
+// PRICE_TALK_RE — that one is the floor; changes there should be folded in
+// here): dollar figures ($45), digits OR spelled-out amounts + dollar/buck
+// in singular/plural/hyphenated forms ("a 50-dollar credit", "four hundred
+// dollars", "a hundred bucks"), USD on either side ("USD 50", "45 USD"),
+// Spanish currency incl. hundreds ("doscientos dólares"), per-cadence rates
+// without a currency word ("45/mo", "forty five per visit"), and bare
+// cents-bearing amounts next to price-context words ("the total comes to
+// 415.75"). False positives are acceptable — they fail toward human review,
 // never toward a customer send.
 const PRICE_NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
-const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
+const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|\\w*cient[oa]s|quinient[oa]s|mil|pocos)';
 const PRICE_EN_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|a|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
 const PRICE_ES_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${PRICE_NUM_WORD_ES})*)`;
 const PRICE_QUOTE_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 1,200.50
   + '|\\bUSD\\s*\\d' // USD 50
-  + `|\\b${PRICE_EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, a 50 dollar credit, four hundred bucks
-  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares
+  + '|\\b\\d[\\d,]*(?:\\.\\d+)?\\s*USD\\b' // 45 USD (reversed)
+  + `|\\b${PRICE_EN_AMOUNT}[-\\s]+(?:dollars?|bucks?)\\b` // 45 dollars, a 50-dollar credit, four hundred bucks
+  + `|\\b${PRICE_ES_AMOUNT}[-\\s]+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, doscientos dólares
   + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
-  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes
+  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b` // 45 al mes
+  // Bare amount WITH CENTS near a price-context word ("total comes to
+  // 415.75"). Cents are required on purpose: without them, invoice numbers
+  // ("invoice #04395") and quantities ("total of 3 visits") false-positive.
+  + '|\\b(?:total|price|cost|costs|fee|charge|charges|quote|quoted|balance|owed?|owes|payment|pay)\\b[^\\n]{0,30}?\\b\\d[\\d,]*\\.\\d{2}\\b',
   'i',
 );
 function hasPriceQuote(text) {
@@ -301,6 +309,59 @@ function splitPendingSuggestions(pending, inboundAt) {
     return Number.isFinite(t) && t > anchor;
   });
   return { newerExists, supersede: newerExists ? [] : (pending || []) };
+}
+
+/**
+ * Withhold-path companion to publishSuggestion: when a NEWER inbound's draft
+ * is withheld (price guard, leaked placeholder, unconverged verify), the
+ * thread's older pending cards were drafted against a conversation that has
+ * since moved on — leaving them actionable invites a stale staff send. Runs
+ * the same lock, thread scope, and ordering rule as publishSuggestion, and
+ * ONLY the supersede step (no insert). Idempotent — safe to call even when
+ * publishSuggestion already ran or nothing is pending. Fail-soft: an error
+ * leaves cards in place (the expiry sweep and staff-send ignore sweep still
+ * cover them) and never breaks the webhook.
+ */
+async function supersedeStaleSuggestions({ customerId, smsLogId } = {}) {
+  if (!smsLogId) return 0;
+  try {
+    return await db.transaction(async (trx) => {
+      const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone');
+      if (!inbound?.created_at) return 0;
+      const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
+      await lockSuggestThread(trx, threadLast10 || customerId);
+
+      const pending = await trx('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+        .where(function pendingThreadScope() {
+          if (threadLast10) {
+            this.whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [threadLast10]);
+          } else {
+            this.where('ad.customer_id', customerId);
+          }
+        })
+        .select('ad.id', 'ad.entity_id', 's.created_at as inbound_at');
+
+      const { newerExists, supersede } = splitPendingSuggestions(pending, inbound.created_at);
+      if (newerExists || !supersede.length) return 0;
+
+      const changed = await trx('agent_decisions')
+        .whereIn('id', supersede.map((r) => r.id))
+        .where({ status: 'pending_review' })
+        .update({
+          status: 'superseded',
+          correction_note: 'A newer inbound arrived; its draft was withheld — review the thread before replying.',
+          updated_at: new Date(),
+        })
+        .returning(['id', 'entity_id']);
+      await revertDraftsToShadow(trx, changed.map((r) => r.entity_id));
+      return changed.length;
+    });
+  } catch (err) {
+    logger.warn(`[sms-suggest] stale-suggestion sweep failed: ${err.message}`);
+    return 0;
+  }
 }
 
 /**
@@ -693,6 +754,7 @@ module.exports = {
   isEscalationIntent,
   hasRedactionPlaceholder,
   hasPriceQuote,
+  supersedeStaleSuggestions,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,

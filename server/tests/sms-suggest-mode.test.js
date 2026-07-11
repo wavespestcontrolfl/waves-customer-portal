@@ -60,6 +60,13 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('son 45 al mes')).toBe(true);
   });
 
+  test('detects reversed USD, hyphenated, contextual bare, and Spanish-hundreds forms (Codex P1)', () => {
+    expect(hasPriceQuote('that will be 45 USD')).toBe(true);
+    expect(hasPriceQuote('we can apply a 50-dollar credit')).toBe(true);
+    expect(hasPriceQuote('The total comes to 415.75')).toBe(true);
+    expect(hasPriceQuote('serían doscientos dólares')).toBe(true);
+  });
+
   test('price-free replies pass, including numbers that are not money', () => {
     expect(hasPriceQuote('Your next service is Tuesday between 1:00 PM and 3:00 PM.')).toBe(false);
     expect(hasPriceQuote('We treated 2 ant mounds near the lanai.')).toBe(false);

@@ -676,6 +676,15 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
     }
 
     const llmDraft = await generateLlmReviewDraft({ customer, body, decision });
+    // The house no-price rule applies to WHATEVER text lands in the composer
+    // card — the deterministic scheduling templates echo raw inbound text, so
+    // a customer's own "Tuesday for $50 works" would flow into the draft
+    // whenever the LLM path is rejected or unavailable. NULL = the agent
+    // offers no draft; the human writes the reply.
+    const reviewDraftText = llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage;
+    const reviewSuggestedMessage = reviewDraftText && require('./sms-suggest-mode').hasPriceQuote(reviewDraftText)
+      ? null
+      : reviewDraftText;
 
     const entityType = estimate ? 'estimate' : lead ? 'lead' : customer ? 'customer' : 'sms';
     const entityId = estimate?.id || lead?.id || customer?.id || null;
@@ -714,7 +723,7 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
       auto_actions_allowed: JSON.stringify(decision.autoActionsAllowed),
       blocked_actions: JSON.stringify(decision.blockedActions),
       safety_flags: JSON.stringify(decision.safetyFlags),
-      suggested_message: llmDraft ? (llmDraft.reply || null) : decision.suggestedMessage,
+      suggested_message: reviewSuggestedMessage,
       reasoning_summary: decision.reasoningSummary,
       model: llmDraft ? llmDraft.model : 'deterministic_rules',
       prompt_version: llmDraft ? llmDraft.promptVersion : null,
