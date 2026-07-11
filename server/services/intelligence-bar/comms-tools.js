@@ -811,6 +811,30 @@ async function getTodaysActivity() {
 
 const ARRANGER_RELATIONSHIPS = ['real_estate_agent', 'lender', 'property_manager'];
 
+// FULL phrases (no truncated stems — 'compan\\y' never matches 'company').
+const ARRANGER_PHRASE_RE = /\b(realtor|real estate agent|buyer'?s agent|seller'?s agent|lender|loan officer|title company|closing coordinator|property manager|property management)\b/i;
+
+// Legacy rows predate schema 1.7.0, when arranger callers were forced into
+// relationship "other" — infer the enum from the summary phrasing so the
+// relationship filter can still find pre-1.7.0 partners.
+function inferArrangerRelationship(text) {
+  const t = String(text || '');
+  if (/\b(realtor|real estate agent|buyer'?s agent|seller'?s agent)\b/i.test(t)) return 'real_estate_agent';
+  if (/\b(lender|loan officer|title company|closing coordinator)\b/i.test(t)) return 'lender';
+  if (/\b(property manager|property management)\b/i.test(t)) return 'property_manager';
+  return null;
+}
+
+// ai_extraction / ai_extraction_enriched are TEXT columns with legacy
+// malformed values on old rows — a SQL ::jsonb cast anywhere in the query
+// makes ONE bad row throw the whole tool. All JSON parsing happens here,
+// per-row, fail-open.
+function safeJson(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function phoneKeyExpr(col) {
   return `RIGHT(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 10)`;
 }
@@ -820,31 +844,29 @@ async function listCallPartners(input = {}) {
   const limit = Math.min(Number(input.limit) || 25, 100);
   const relationship = ARRANGER_RELATIONSHIPS.includes(input.relationship) ? input.relationship : null;
 
+  // Cheap SQL predicates only — no ::jsonb casts (legacy malformed rows would
+  // throw the whole query). Arranger detection + JSON parsing happen in JS.
   const rows = await db('call_log')
     .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
     .where('direction', 'inbound')
     .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
-    .whereRaw(`(
-      (ai_extraction_enriched::jsonb -> 'caller' ->> 'relationship_to_property') IN ('real_estate_agent','lender','property_manager')
-      OR NULLIF(TRIM(ai_extraction_enriched::jsonb -> 'caller' ->> 'organization_name'), '') IS NOT NULL
-      OR call_summary ~* '\\y(realtor|real estate agent|buyer.s agent|lender|loan officer|title compan|closing coordinat|property manag)\\y'
-    )`)
-    .select(
-      db.raw(`${phoneKeyExpr('from_phone')} AS phone_key`),
-      'from_phone',
-      'created_at',
-      'call_summary',
-      db.raw("ai_extraction_enriched::jsonb -> 'caller' ->> 'name_full' AS caller_name"),
-      db.raw("ai_extraction_enriched::jsonb -> 'caller' ->> 'organization_name' AS organization"),
-      db.raw("ai_extraction_enriched::jsonb -> 'caller' ->> 'relationship_to_property' AS relationship"),
-      db.raw("(COALESCE(call_summary, '') ~* '\\y(wdo|wood.destroying|termite (letter|inspection))\\y') AS wdo_related"),
-    )
+    .whereNotNull('ai_extraction_enriched')
+    .select('from_phone', 'created_at', 'call_summary', 'ai_extraction_enriched')
     .orderBy('created_at', 'desc')
     .limit(2000);
 
+  const WDO_RE = /\b(wdo|wood[- ]destroying|termite (letter|inspection))\b/i;
   const partners = new Map();
   for (const r of rows) {
-    let p = partners.get(r.phone_key);
+    const caller = safeJson(r.ai_extraction_enriched)?.caller || {};
+    const rel = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
+      ? caller.relationship_to_property : null;
+    const org = String(caller.organization_name || '').trim() || null;
+    const summary = String(r.call_summary || '');
+    const isArranger = !!rel || !!org || ARRANGER_PHRASE_RE.test(summary);
+    if (!isArranger) continue;
+    const key = String(r.from_phone || '').replace(/\D/g, '').slice(-10);
+    let p = partners.get(key);
     if (!p) {
       p = {
         phone: r.from_phone,
@@ -855,17 +877,20 @@ async function listCallPartners(input = {}) {
         wdo_calls: 0,
         first_call: r.created_at,
         last_call: r.created_at,
-        latest_summary: String(r.call_summary || '').slice(0, 200) || null,
+        latest_summary: summary.slice(0, 200) || null,
       };
-      partners.set(r.phone_key, p);
+      partners.set(key, p);
     }
     p.calls += 1;
-    if (r.wdo_related) p.wdo_calls += 1;
+    if (WDO_RE.test(summary)) p.wdo_calls += 1;
     if (r.created_at < p.first_call) p.first_call = r.created_at;
     // Rows arrive newest-first: keep the first non-null identity fields.
-    if (!p.name && r.caller_name) p.name = r.caller_name;
-    if (!p.organization && r.organization) p.organization = r.organization;
-    if (!p.relationship && ARRANGER_RELATIONSHIPS.includes(r.relationship)) p.relationship = r.relationship;
+    if (!p.name && caller.name_full) p.name = caller.name_full;
+    if (!p.organization && org) p.organization = org;
+    if (!p.relationship && rel) p.relationship = rel;
+    // Legacy fallback: infer the enum from phrasing so pre-1.7.0 partners
+    // survive the relationship filter below.
+    if (!p.relationship) p.relationship = inferArrangerRelationship(summary);
   }
 
   let list = [...partners.values()];
@@ -885,15 +910,12 @@ async function getPartnerCallHistory(input = {}) {
   if (digits.length < 10) return { error: 'phone must contain at least 10 digits' };
   const limit = Math.min(Number(input.limit) || 20, 100);
 
+  // Both directions: an inbound partner call lands in from_phone, staff
+  // calling the partner back lands in to_phone. No ::jsonb casts (legacy
+  // malformed rows would throw the whole tool) — JSON parses per-row in JS.
   const rows = await db('call_log')
-    .whereRaw(`${phoneKeyExpr('from_phone')} = ?`, [digits])
-    .select(
-      'id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition',
-      db.raw("ai_extraction_enriched::jsonb -> 'caller' ->> 'name_full' AS caller_name"),
-      db.raw("ai_extraction_enriched::jsonb -> 'caller' ->> 'organization_name' AS organization"),
-      db.raw("ai_extraction::jsonb ->> 'requested_service' AS requested_service"),
-      db.raw("ai_extraction::jsonb -> 'secondary_contact' AS secondary_contact"),
-    )
+    .whereRaw(`(${phoneKeyExpr('from_phone')} = ? OR ${phoneKeyExpr('to_phone')} = ?)`, [digits, digits])
+    .select('id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition', 'ai_extraction')
     .orderBy('created_at', 'desc')
     .limit(limit);
 
@@ -901,7 +923,8 @@ async function getPartnerCallHistory(input = {}) {
     phone: input.phone,
     call_count: rows.length,
     calls: rows.map((r) => {
-      const sc = r.secondary_contact && typeof r.secondary_contact === 'object' ? r.secondary_contact : null;
+      const v1 = safeJson(r.ai_extraction) || {};
+      const sc = v1.secondary_contact && typeof v1.secondary_contact === 'object' ? v1.secondary_contact : null;
       const scName = sc ? [sc.first_name, sc.last_name].filter(Boolean).join(' ') : null;
       return {
         id: r.id,
@@ -909,7 +932,7 @@ async function getPartnerCallHistory(input = {}) {
         direction: r.direction,
         duration_seconds: r.duration_seconds,
         summary: String(r.call_summary || '').slice(0, 300) || null,
-        requested_service: r.requested_service || null,
+        requested_service: v1.requested_service || null,
         other_party: scName ? `${scName}${sc.role ? ` (${sc.role})` : ''}` : null,
         disposition: r.disposition || null,
       };

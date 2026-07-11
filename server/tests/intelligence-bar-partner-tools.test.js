@@ -14,7 +14,7 @@ const { UI_GATED_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/writ
 
 function rowsChain(rows) {
   const q = {};
-  ['where', 'whereRaw', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereRaw', 'whereNotNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.limit = jest.fn(async () => rows);
   return q;
 }
@@ -36,20 +36,20 @@ describe('registration', () => {
 });
 
 describe('list_call_partners aggregation', () => {
+  const enriched = (caller) => JSON.stringify({ caller });
   const mkRow = (over = {}) => ({
-    phone_key: '4074933469', from_phone: '+14074933469',
+    from_phone: '+14074933469',
     created_at: '2026-07-08T21:38:00.000Z',
     call_summary: 'Realtor Melissa called to urgently schedule a WDO inspection.',
-    caller_name: 'Melissa', organization: 'Coldwell Banker',
-    relationship: 'real_estate_agent', wdo_related: true,
+    ai_extraction_enriched: enriched({ name_full: 'Melissa', organization_name: 'Coldwell Banker', relationship_to_property: 'real_estate_agent' }),
     ...over,
   });
 
   test('groups by phone, counts calls + WDO calls, keeps newest identity', async () => {
     db.mockImplementation(() => rowsChain([
       mkRow({ created_at: '2026-07-08T21:38:00.000Z' }),
-      mkRow({ created_at: '2026-07-01T10:00:00.000Z', caller_name: null, wdo_related: false }),
-      mkRow({ phone_key: '8777175476', from_phone: '+18777175476', caller_name: 'Robert', organization: 'New Day USA', relationship: 'lender' }),
+      mkRow({ created_at: '2026-07-01T10:00:00.000Z', call_summary: 'Realtor follow-up about the estimate.', ai_extraction_enriched: enriched({ relationship_to_property: 'real_estate_agent' }) }),
+      mkRow({ from_phone: '+18777175476', ai_extraction_enriched: enriched({ name_full: 'Robert', organization_name: 'New Day USA', relationship_to_property: 'lender' }) }),
     ]));
     const res = await executeCommsTool('list_call_partners', {});
     expect(res.partner_count).toBe(2);
@@ -65,10 +65,25 @@ describe('list_call_partners aggregation', () => {
   test('relationship filter narrows to one arranger type', async () => {
     db.mockImplementation(() => rowsChain([
       mkRow(),
-      mkRow({ phone_key: '8777175476', from_phone: '+18777175476', relationship: 'lender' }),
+      mkRow({ from_phone: '+18777175476', ai_extraction_enriched: enriched({ relationship_to_property: 'lender' }) }),
     ]));
     const res = await executeCommsTool('list_call_partners', { relationship: 'lender' });
     expect(res.partners).toHaveLength(1);
+    expect(res.partners[0].relationship).toBe('lender');
+  });
+
+  test('legacy rows: malformed JSON never throws, full arranger phrases match, relationship is inferred', async () => {
+    db.mockImplementation(() => rowsChain([
+      // Malformed legacy extraction — must be skipped gracefully, not throw.
+      mkRow({ from_phone: '+19410000001', call_summary: 'General pest quote.', ai_extraction_enriched: '{truncated' }),
+      // Pre-1.7.0 row: relationship forced to "other", summary carries the
+      // FULL phrase "title company" (a truncated stem would miss this).
+      mkRow({ from_phone: '+19410000002', call_summary: 'The title company called to order a WDO clearance letter before closing.', ai_extraction_enriched: enriched({ relationship_to_property: 'other' }) }),
+    ]));
+    const res = await executeCommsTool('list_call_partners', { relationship: 'lender' });
+    expect(res.error).toBeUndefined();
+    expect(res.partners).toHaveLength(1);
+    expect(res.partners[0].phone).toBe('+19410000002');
     expect(res.partners[0].relationship).toBe('lender');
   });
 });
@@ -79,17 +94,34 @@ describe('get_partner_call_history', () => {
     expect(res.error).toMatch(/10 digits/);
   });
 
-  test('maps calls with the captured other party', async () => {
-    db.mockImplementation(() => rowsChain([{
-      id: 'c1', created_at: '2026-07-08T21:38:00.000Z', direction: 'inbound',
-      duration_seconds: 180, call_summary: 'WDO booking', disposition: null,
-      caller_name: 'Melissa', organization: 'Coldwell Banker',
-      requested_service: 'WDO inspection',
-      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', role: 'home_buyer' },
-    }]));
+  test('maps calls (both directions) with the captured other party; malformed extraction is fail-open', async () => {
+    let capturedWhereRaw = null;
+    db.mockImplementation(() => {
+      const q = {};
+      ['where', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.whereRaw = jest.fn((sql, bindings) => { capturedWhereRaw = { sql, bindings }; return q; });
+      q.limit = jest.fn(async () => [
+        {
+          id: 'c1', created_at: '2026-07-08T21:38:00.000Z', direction: 'inbound',
+          duration_seconds: 180, call_summary: 'WDO booking', disposition: null,
+          ai_extraction: JSON.stringify({ requested_service: 'WDO inspection', secondary_contact: { first_name: 'Joseph', last_name: 'Haught', role: 'home_buyer' } }),
+        },
+        // Staff called the partner back — outbound leg must appear too.
+        { id: 'c2', created_at: '2026-07-09T10:00:00.000Z', direction: 'outbound', duration_seconds: 60, call_summary: 'Callback about scheduling', disposition: null, ai_extraction: '{broken' },
+      ]);
+      return q;
+    });
     const res = await executeCommsTool('get_partner_call_history', { phone: '+1 (407) 493-3469' });
-    expect(res.call_count).toBe(1);
-    expect(res.calls[0].other_party).toBe('Joseph Haught (home_buyer)');
-    expect(res.calls[0].requested_service).toBe('WDO inspection');
+    expect(res.call_count).toBe(2);
+    const inbound = res.calls.find((c) => c.id === 'c1');
+    expect(inbound.other_party).toBe('Joseph Haught (home_buyer)');
+    expect(inbound.requested_service).toBe('WDO inspection');
+    // Malformed legacy extraction fails open per-row, not per-tool.
+    const outbound = res.calls.find((c) => c.id === 'c2');
+    expect(outbound.requested_service).toBeNull();
+    // Both phone columns are matched.
+    expect(capturedWhereRaw.sql).toContain('from_phone');
+    expect(capturedWhereRaw.sql).toContain('to_phone');
+    expect(capturedWhereRaw.bindings).toEqual(['4074933469', '4074933469']);
   });
 });

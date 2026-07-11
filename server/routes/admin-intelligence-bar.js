@@ -96,6 +96,8 @@ const PII_TOOL_NAMES = new Set([
   'get_conversation_thread',
   'search_messages',
   'get_call_log',
+  'list_call_partners',
+  'get_partner_call_history',
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
