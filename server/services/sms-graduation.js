@@ -72,10 +72,13 @@ const asPct = (x) => `${Math.round(x * 100)}%`;
  * evidence. Default = the drafter's CURRENT PROMPT_VERSION only, so the rates
  * measure the drafter that would actually be doing the suggesting/sending.
  * Overrides via GRAD_COHORT_VERSIONS:
- *   - comma-separated list (e.g. 'house_voice_v7') UNIONS with the current
- *     version — it widens, never replaces, so a stale env value left over
- *     from before a prompt bump can never exclude the running drafter's own
- *     evidence and gate promotion purely on superseded data;
+ *   - a comma-separated list POOLS prior versions with the current one (e.g.
+ *     'house_voice_v8,house_voice_v7' after a wording-only bump) — but ONLY
+ *     when the list itself names the current version. A list that omits it
+ *     predates the running prompt (a stale env value from before a bump) and
+ *     is discarded entirely: honoring it would either exclude the running
+ *     drafter's own evidence or let a superseded version's clean record
+ *     qualify a brand-new prompt with zero observations of its own;
  *   - 'all_live' restores the pre-cohort all-time behavior (no version
  *     filter; backfill stays excluded regardless).
  * Returns an array of versions, or null meaning "no version filter".
@@ -87,7 +90,12 @@ function resolveCohortVersions({ raw = process.env.GRAD_COHORT_VERSIONS, current
   // module — a top-level require would be circular.
   const current = currentVersion || require('./sms-shadow-drafter').PROMPT_VERSION;
   if (!trimmed) return [current];
-  return [...new Set([current, ...trimmed.split(',').map((v) => v.trim()).filter(Boolean)])];
+  const versions = [...new Set(trimmed.split(',').map((v) => v.trim()).filter(Boolean))];
+  if (!versions.includes(current)) {
+    if (versions.length) logger.warn(`[sms-graduation] GRAD_COHORT_VERSIONS (${trimmed}) omits the live drafter version ${current} — treating it as stale and using the current version only`);
+    return [current];
+  }
+  return versions;
 }
 
 /**
