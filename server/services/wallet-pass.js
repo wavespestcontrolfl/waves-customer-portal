@@ -166,6 +166,21 @@ function buildPassJson({
           value: WAVES_WEBSITE_URL,
           attributedValue: `<a href="${WAVES_WEBSITE_URL}">wavespestcontrol.com</a>`,
         },
+        // Socials — back fields are the only place the pass format allows
+        // links. Two primaries here; the full row lives on the card page.
+        // URLs mirror the canonical list in client BrandFooter.jsx.
+        {
+          key: 'instagram',
+          label: 'INSTAGRAM',
+          value: 'https://instagram.com/wavespestcontrol',
+          attributedValue: '<a href="https://instagram.com/wavespestcontrol">@wavespestcontrol</a>',
+        },
+        {
+          key: 'facebook',
+          label: 'FACEBOOK',
+          value: 'https://facebook.com/wavespestcontrol',
+          attributedValue: '<a href="https://facebook.com/wavespestcontrol">facebook.com/wavespestcontrol</a>',
+        },
         {
           key: 'license',
           label: 'LICENSED & INSURED',

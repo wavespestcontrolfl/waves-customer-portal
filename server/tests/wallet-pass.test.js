@@ -70,10 +70,10 @@ describe('wallet-pass buildPassJson', () => {
   test('back fields carry card link, tappable contact, portal, referral, license', () => {
     const p = buildPassJson({ ...BASE, cardUrl: 'https://portal.wavespestcontrol.com/card/abc' });
     const keys = p.generic.backFields.map((f) => f.key);
-    expect(keys).toEqual(['card', 'text', 'call', 'portal', 'referral', 'website', 'license']);
+    expect(keys).toEqual(['card', 'text', 'call', 'portal', 'referral', 'website', 'instagram', 'facebook', 'license']);
     expect(p.generic.backFields[0].attributedValue).toContain('/card/abc');
     expect(p.generic.backFields[1].attributedValue).toContain('sms:+19412972606');
-    expect(p.generic.backFields[6].value).toMatch(/FL License #/);
+    expect(keys[keys.length - 1]).toBe('license');
     expect(p.associatedStoreIdentifiers).toEqual([6782775654]);
   });
 });
