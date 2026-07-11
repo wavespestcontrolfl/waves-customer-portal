@@ -210,6 +210,11 @@ const READ_ONLY = [
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
   'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
+  'get_sentry_top_issues', 'get_sentry_new_issues', 'get_sentry_issue_detail',
+  'get_cloudflare_zones', 'get_cloudflare_pages_builds', 'get_cloudflare_edge_errors',
+  'get_twilio_alerts', 'get_twilio_failed_messages',
+  'get_stripe_webhook_endpoints', 'get_stripe_webhook_failures',
+  'get_recent_merged_prs', 'get_commit_info',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
