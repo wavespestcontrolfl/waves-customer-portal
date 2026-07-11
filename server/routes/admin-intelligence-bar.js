@@ -30,6 +30,7 @@ const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/
 const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
+const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -74,6 +75,7 @@ const LEADS_TOOL_NAMES = new Set(LEADS_TOOLS.map(t => t.name));
 const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
+const OPS_TOOL_NAMES = new Set(OPS_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
 
 // Base toolset for every admin context: core customer/schedule/revenue tools
@@ -102,6 +104,9 @@ const PII_TOOL_NAMES = new Set([
   'draft_sms_reply',
   'draft_sms',
   'get_stock_movements',
+  // Railway runtime logs can echo customer identifiers from app logging —
+  // redact like any other PII-bearing tool result.
+  'get_railway_logs',
 ]);
 
 function isNonAdminDashboardRequest(req) {
@@ -354,7 +359,13 @@ ANALYSIS STYLE:
 - Flag anything that's significantly better or worse than expected
 - Be opinionated: "This is strong" or "This needs attention" — the operator wants your read, not just data
 - When showing revenue, always include both the dollar amount and the trend direction
-- Round to whole dollars for readability ($1,234 not $1,234.56)`,
+- Round to whole dollars for readability ($1,234 not $1,234.56)
+
+INFRASTRUCTURE (Railway):
+The portal runs on Railway. You have READ-ONLY infrastructure tools: get_railway_status (per-service deploy status), get_railway_deployments (recent deploys), get_railway_logs (runtime logs — filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+- Combine infra with business data when useful ("did we miss calls while the server was erroring?")
+- If a tool reports Railway access is not configured, tell the operator to add the RAILWAY_TOKEN service variable in the Railway dashboard
+- You CANNOT restart, redeploy, or change configuration — never claim otherwise. Point the operator to the Railway dashboard for any change.`,
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
@@ -744,7 +755,7 @@ function getToolsForContext(context) {
     return [...BASE_TOOLS, ...SCHEDULE_TOOLS];
   }
   if (context === 'dashboard') {
-    return [...BASE_TOOLS, ...DASHBOARD_TOOLS];
+    return [...BASE_TOOLS, ...DASHBOARD_TOOLS, ...OPS_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
     return [...BASE_TOOLS, ...SEO_QUERY_TOOLS];
@@ -814,6 +825,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (DASHBOARD_TOOL_NAMES.has(toolName)) {
     return executeDashboardTool(toolName, input);
+  }
+  if (OPS_TOOL_NAMES.has(toolName)) {
+    return executeOpsTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
@@ -995,7 +1009,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         let circuitOpen = false;
         let errorMessage = null;
         const toolStartedAt = Date.now();
-        if (DASHBOARD_TOOL_NAMES.has(toolUse.name) && isNonAdminDashboardRequest(req)) {
+        if ((DASHBOARD_TOOL_NAMES.has(toolUse.name) || OPS_TOOL_NAMES.has(toolUse.name)) && isNonAdminDashboardRequest(req)) {
           result = { error: 'Admin access required for dashboard intelligence' };
           failed = true;
           errorMessage = result.error;
@@ -1148,7 +1162,7 @@ router.post('/execute', async (req, res, next) => {
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
-    if (DASHBOARD_TOOL_NAMES.has(action) && isNonAdminDashboardRequest(req)) {
+    if ((DASHBOARD_TOOL_NAMES.has(action) || OPS_TOOL_NAMES.has(action)) && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard actions' });
     }
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
@@ -1320,6 +1334,7 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'churn', group: 'Metrics', label: 'Churn Check', prompt: 'Any churn this month? Who did we lose and what was the revenue impact?' },
     { id: 'lead_sources', group: 'Ops', label: 'Lead Sources', prompt: 'Where are new customers coming from? Which source converts best?' },
     { id: 'balances', group: 'Ops', label: 'Outstanding Balances', prompt: "What's outstanding? Show me the aging breakdown and top debtors" },
+    { id: 'infra_check', group: 'Ops', label: 'Infra Check', prompt: 'Check Railway: latest deploy status for each service, and any error logs in the last hour.' },
   ];
 
   const seoActions = [
