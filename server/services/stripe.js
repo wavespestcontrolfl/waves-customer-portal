@@ -2191,17 +2191,27 @@ const StripeService = {
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
+    // Never save a third-party payer's card onto the homeowner account (see
+    // createInvoicePaymentIntent) — the AP user can toggle this after the
+    // Element loads, so guard the update path too.
+    const saveCard = !!opts.saveCard && !invoice.payer_id;
+
     // A stale id can be a legitimate lost-response recovery: a prior
     // /update-amount took the replacement path (fresh PI minted, invoice
     // repointed) but the response never reached the client, so its network
     // retry still carries the dead PI's id. Recover ONLY for that exact
-    // replay: the stale id must be the PI the current one replaced (lineage
-    // stamped by replaceInvoicePaymentIntentForTender) AND the requested
-    // tender must equal the current PI's lock. Any other mismatch — e.g. an
-    // out-of-order older sync from a dead Elements mount switching tenders —
-    // rejects as before, so a late request can never flip
-    // payment_method_types under a pending confirm/finalize. The
-    // caller-supplied PI is never updated on a mismatch.
+    // replay, all three required:
+    //  - lineage: the stale id is the PI the current one replaced (stamped
+    //    by replaceInvoicePaymentIntentForTender, one generation);
+    //  - tender: the request matches the current PI's lock, so a replay can
+    //    re-apply payment_method_types but never flip it under a pending
+    //    confirm/finalize;
+    //  - save-card: the request matches the current PI's save_card_opt_in,
+    //    so a late replay can never clear a newer opt-in's
+    //    setup_future_usage (consent silently lost).
+    // Any other mismatch — e.g. an out-of-order older sync from a dead
+    // Elements mount — rejects as before. The caller-supplied PI is never
+    // updated on a mismatch.
     const retargeted = String(invoice.stripe_payment_intent_id) !== String(paymentIntentId);
     const effectivePaymentIntentId = String(invoice.stripe_payment_intent_id);
     if (retargeted) {
@@ -2219,7 +2229,8 @@ const StripeService = {
       const tenderMatch = Array.isArray(currentIntent?.payment_method_types)
         && currentIntent.payment_method_types.length === 1
         && currentIntent.payment_method_types[0] === requestedType;
-      if (!lineageMatch || !tenderMatch) {
+      const saveCardMatch = (currentIntent?.metadata?.save_card_opt_in === 'true') === saveCard;
+      if (!lineageMatch || !tenderMatch || !saveCardMatch) {
         throw new Error('PaymentIntent does not belong to this invoice');
       }
       logger.warn(
@@ -2227,11 +2238,6 @@ const StripeService = {
         + `→ current PI ${effectivePaymentIntentId} (invoice ${invoiceId})`,
       );
     }
-
-    // Never save a third-party payer's card onto the homeowner account (see
-    // createInvoicePaymentIntent) — the AP user can toggle this after the
-    // Element loads, so guard the update path too.
-    const saveCard = !!opts.saveCard && !invoice.payer_id;
     const selectedMethodCategory = methodCategory || 'card';
     // Charge base = amount due (total − applied account credit), not raw total.
     const base = invoiceAmountDue(invoice);
@@ -2280,6 +2286,20 @@ const StripeService = {
     try {
       const paymentIntent = await stripe.paymentIntents.update(effectivePaymentIntentId, updateParams);
       logger.info(`[stripe] PI ${effectivePaymentIntentId} updated → base=$${base} surcharge=0 total=$${base} (method=${selectedMethodCategory})`);
+      if (retargeted) {
+        // A newer tender switch can repoint the invoice between the lineage
+        // vetting above and this update settling. Re-read before handing the
+        // client a secret: returning an orphaned PI would let a charge
+        // succeed that /confirm then rejects (invoice bound elsewhere).
+        const freshInvoice = await db('invoices').where({ id: invoiceId }).first();
+        if (!freshInvoice
+          || String(freshInvoice.stripe_payment_intent_id || '') !== effectivePaymentIntentId) {
+          const raceErr = new Error('Payment session changed. Please refresh the invoice and try again.');
+          raceErr.statusCode = 409;
+          raceErr.sessionChanged = true;
+          throw raceErr;
+        }
+      }
       return {
         paymentIntentId: paymentIntent.id,
         base,
@@ -2290,6 +2310,9 @@ const StripeService = {
         ...(retargeted ? { replaced: true, clientSecret: paymentIntent.client_secret } : {}),
       };
     } catch (err) {
+      // The retarget recheck's session-changed 409 must reach the route
+      // as-is, not wrapped as a generic update failure.
+      if (err && err.sessionChanged) throw err;
       // A prior confirm attempt (e.g. an abandoned ACH entry) can leave an
       // incompatible PaymentMethod attached to the PI, so narrowing
       // payment_method_types to the newly selected tender is rejected. Recover

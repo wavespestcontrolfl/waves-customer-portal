@@ -586,6 +586,53 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
     });
   });
 
+  test('a replay whose save-card state differs from the current PI is rejected — a late replay must not clear a newer opt-in', async () => {
+    // Codex P1: the save-card checkbox stays enabled while a sync retries. If
+    // the customer opts in after the original saveCard=false request went out,
+    // a late accepted replay would clear setup_future_usage/save_card_opt_in
+    // on the current PI — silently dropping consent/enrollment.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced', save_card_opt_in: 'true' },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card', { saveCard: false }),
+    ).rejects.toThrow(/does not belong/);
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+
+  test('a retargeted update 409s when the invoice was repointed again before the response (never hand back an orphaned PI)', async () => {
+    // Codex P1: a newer tender switch can repoint the invoice between the
+    // lineage vetting and the Stripe update settling. Returning the old PI's
+    // clientSecret would remount the customer on an orphaned PI whose charge
+    // /confirm later rejects. The post-update recheck must 409 instead.
+    invoiceRow.stripe_payment_intent_id = 'pi_current';
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_current',
+      status: 'requires_payment_method',
+      payment_method_types: ['card'],
+      metadata: { replaced_from: 'pi_dead_replaced' },
+    });
+    stripeClient.paymentIntents.update.mockImplementation(async (id, params) => {
+      // Simulate the overlapping newer sync repointing the invoice mid-update.
+      invoiceRow.stripe_payment_intent_id = 'pi_even_newer';
+      return { id, client_secret: `cs_${id}`, ...params };
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(
+      StripeService.updateInvoicePaymentIntentMethod(invoiceRow.id, 'pi_dead_replaced', 'card'),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining('Payment session changed'),
+    });
+  });
+
   test('a stale lineage id with a DIFFERENT tender is rejected — a late out-of-order sync must never flip the current lock', async () => {
     // Codex P1 on the blanket retarget: an older overlapped /update-amount
     // (e.g. an abandoned ACH toggle from a dead Elements mount) still carrying
