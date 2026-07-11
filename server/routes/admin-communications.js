@@ -564,6 +564,46 @@ router.post('/sms', async (req, res, next) => {
   }
 });
 
+// POST /api/admin/communications/send-prep — manual prep-guide send for a
+// customer picked by name ("Send flea prep" button). Smart channel: emails the
+// formatted prep guide (plus the companion text) when the customer has an email
+// on file, otherwise sends the self-contained prep text. Flea only for now —
+// the allow-list is the one place to enable another pest.
+const MANUAL_PREP_ALLOWED_TYPES = new Set(['flea']);
+
+function manualPrepMessage(result) {
+  if (!result.ok) {
+    switch (result.reason) {
+      case 'customer_not_found': return 'That customer could not be found.';
+      case 'no_email_or_phone': return 'This customer has no email or phone number on file, so there was nothing to send.';
+      case 'unsupported_pest_type': return 'That prep type is not available yet.';
+      default: return "Couldn't send the prep — check the customer's contact info and try again.";
+    }
+  }
+  const parts = [];
+  if (result.emailSent) parts.push(`emailed to ${result.emailAddress}`);
+  if (result.smsSent) parts.push(`texted to ${result.phone}`);
+  return `${result.label} prep ${parts.join(' and ')}.`;
+}
+
+router.post('/send-prep', async (req, res, next) => {
+  try {
+    const { customerId, pestType = 'flea' } = req.body || {};
+    if (!customerId) return res.status(400).json({ error: 'customerId required' });
+    if (!MANUAL_PREP_ALLOWED_TYPES.has(pestType)) {
+      return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
+    }
+    const { sendPrepToCustomer } = require('../services/prep-guide-sender');
+    const result = await sendPrepToCustomer({ customerId, pestType, actorId: req.technicianId || null });
+    const message = manualPrepMessage(result);
+    if (!result.ok) {
+      const status = result.reason === 'customer_not_found' ? 404 : 400;
+      return res.status(status).json({ error: message, result });
+    }
+    res.json({ success: true, message, result });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/communications/call — initiate an outbound call via Twilio
 router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;

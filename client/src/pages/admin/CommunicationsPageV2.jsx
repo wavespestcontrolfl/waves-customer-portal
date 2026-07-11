@@ -62,6 +62,7 @@ import React, {
 } from "react";
 import {
   Bell,
+  BookOpen,
   Bot,
   FileText,
   Headphones,
@@ -85,7 +86,17 @@ import CallRoutingSettingsV2 from "../../components/admin/CallRoutingSettingsV2"
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Badge, Button, Card, cn } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
+  cn,
+} from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -2282,10 +2293,176 @@ function SmsTab() {
 
 // ── Page ──────────────────────────────────────────────────────
 
+// Search a customer by name and send them the flea prep guide. Smart channel:
+// the server emails the formatted guide when the customer has an email on file,
+// otherwise it texts the self-contained prep. Flea only for now.
+function FleaPrepDialog({ open, onClose }) {
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    if (!open) {
+      setSearch("");
+      setResults([]);
+      setSelected(null);
+      setSending(false);
+      setResult(null);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (selected) return undefined;
+    const q = search.trim();
+    if (q.length < 2) {
+      setResults([]);
+      return undefined;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const t = setTimeout(async () => {
+      try {
+        const data = await adminFetch(
+          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setResults(data?.customers || []);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search, selected]);
+
+  const handleSend = async () => {
+    if (!selected || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const data = await adminFetch("/admin/communications/send-prep", {
+        method: "POST",
+        body: JSON.stringify({ customerId: selected.id, pestType: "flea" }),
+      });
+      setResult({ ok: true, text: data?.message || "Flea prep sent." });
+    } catch (e) {
+      setResult({ ok: false, text: e.message || "Couldn't send the prep." });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} size="md">
+      <DialogHeader>
+        <DialogTitle>Send flea prep</DialogTitle>
+      </DialogHeader>
+      <DialogBody>
+        <p className="text-13 text-zinc-600 mb-3">
+          Search a customer by name. We'll email the flea prep guide if they
+          have an email on file, otherwise we'll text it.
+        </p>
+        {selected ? (
+          <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+            <div className="min-w-0">
+              <div className="text-14 font-medium text-zinc-900 truncate">
+                {getCustomerOptionName(selected)}
+              </div>
+              <div className="text-12 text-zinc-500 truncate">
+                {selected.email || "No email on file"}
+                {selected.phone ? ` · ${selected.phone}` : ""}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setSelected(null);
+                setResult(null);
+              }}
+            >
+              Change
+            </Button>
+          </div>
+        ) : (
+          <>
+            <input
+              type="text"
+              autoFocus
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search customer by name…"
+              className="w-full h-10 px-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 u-focus-ring"
+            />
+            {searching && (
+              <div className="text-12 text-zinc-500 mt-2">Searching…</div>
+            )}
+            {!searching &&
+              search.trim().length >= 2 &&
+              results.length === 0 && (
+                <div className="text-12 text-zinc-500 mt-2">
+                  No customers found.
+                </div>
+              )}
+            {results.length > 0 && (
+              <div className="mt-2 border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
+                {results.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => {
+                      setSelected(c);
+                      setResults([]);
+                    }}
+                    className="w-full text-left px-3 py-2 hover:bg-zinc-50"
+                  >
+                    <div className="text-13 font-medium text-zinc-900">
+                      {getCustomerOptionName(c)}
+                    </div>
+                    <div className="text-12 text-zinc-500">
+                      {c.email || "No email"}
+                      {c.phone ? ` · ${c.phone}` : ""}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+        {result && (
+          <div
+            className={cn(
+              "mt-3 text-12",
+              result.ok ? "text-zinc-900" : "text-alert-fg",
+            )}
+          >
+            {result.text}
+          </div>
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={onClose}>
+          Close
+        </Button>
+        <Button onClick={handleSend} disabled={!selected || sending}>
+          {sending ? "Sending…" : "Send flea prep"}
+        </Button>
+      </DialogFooter>
+    </Dialog>
+  );
+}
+
 export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
+  const [fleaPrepOpen, setFleaPrepOpen] = useState(false);
   const tabs = TABS;
 
   useEffect(() => {
@@ -2316,11 +2493,24 @@ export default function CommunicationsPageV2() {
       <AdminCommandHeader
         title="Communications"
         icon={MessageSquare}
+        actions={[
+          {
+            key: "flea-prep",
+            label: "Send flea prep",
+            icon: BookOpen,
+            variant: "secondary",
+            onClick: () => setFleaPrepOpen(true),
+          },
+        ]}
         sections={tabs}
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Communications section"
         navGridClassName="grid-cols-2 md:grid-cols-7"
+      />
+      <FleaPrepDialog
+        open={fleaPrepOpen}
+        onClose={() => setFleaPrepOpen(false)}
       />
       {tab === "events" && <NotificationEventsTabV2 />}
       {tab === "sms" && <SmsTab />}
