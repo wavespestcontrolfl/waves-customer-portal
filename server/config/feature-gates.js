@@ -134,6 +134,15 @@ const gates = {
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
 
+  // Call re-transcription backfill (voice-corpus training) — hourly, batched
+  // upgrade of consented legacy call recordings to diarized transcripts via
+  // the same pipeline new calls use; feeds the corpus miner. DEFAULT ON per
+  // the 2026-07-11 hands-off/training directive (kill switch
+  // GATE_CALL_RETRANSCRIBE_BACKFILL=false). Self-terminating: exactly one
+  // attempt per call, no-ops once the backlog drains. No sends, no
+  // customer-visible effect; spend bounded by RETRANSCRIBE_BATCH_LIMIT.
+  callRetranscribeBackfill: process.env.GATE_CALL_RETRANSCRIBE_BACKFILL !== 'false',
+
   // Voice-Profile Distiller (brand-voice loop, Loop 2) — weekly distillation
   // of the redacted corpus into a style-only voice profile, PARKED as a
   // pending voice_profiles row for one-click approval in the Agents hub.

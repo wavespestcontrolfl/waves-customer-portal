@@ -237,7 +237,10 @@ async function mineCallTranscripts({ since, skipped }) {
 
   const calls = await db('call_log')
     .where('direction', 'inbound')
-    .where('created_at', '>=', since)
+    // Recency = the call happened in the window OR its recording was just
+    // re-transcribed by the backfill (old calls upgraded to diarized
+    // transcripts would otherwise sit forever outside the mining window).
+    .where((q) => q.where('created_at', '>=', since).orWhere('retranscribed_at', '>=', since))
     .whereNotNull('transcription')
     // NULL call_outcome must stay eligible — NOT IN evaluates UNKNOWN on
     // NULL and would drop consented calls that simply haven't been
@@ -327,6 +330,9 @@ async function mineVoiceCorpus({ sinceDays = 3 } = {}) {
 module.exports = {
   mineVoiceCorpus,
   SCHEMA_VERSION,
+  // Production contract shared with the re-transcription backfill: a
+  // transcript only enters the corpus with BOTH speaker labels present.
+  hasAgentCallerLabels,
   _test: {
     pairRepliesWithInbound,
     isMinableReply,
