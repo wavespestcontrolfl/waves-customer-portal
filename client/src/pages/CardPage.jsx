@@ -165,6 +165,7 @@ export default function CardPage() {
   const [data, setData] = useState(null);
   const [status, setStatus] = useState('loading'); // loading | ready | missing
   const [copied, setCopied] = useState(false);
+  const [photoFailed, setPhotoFailed] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -291,10 +292,15 @@ export default function CardPage() {
 
         {/* Tech identity + share/save */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 13 }}>
-          {data.tech?.photoUrl ? (
+          {data.tech?.photoUrl && !photoFailed ? (
             <img
               src={data.tech.photoUrl}
               alt={techName}
+              // no-referrer: external photo hosts (site CDN hotlink rules,
+              // presigned S3) must never see the tokenized card URL, and
+              // referer-gated hosts 403 otherwise. Initials on any failure.
+              referrerPolicy="no-referrer"
+              onError={() => setPhotoFailed(true)}
               style={{
                 flex: 'none', width: 52, height: 52, borderRadius: 999,
                 objectFit: 'cover', objectPosition: '50% 26%',
