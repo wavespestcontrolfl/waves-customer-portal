@@ -230,6 +230,14 @@ class AppointmentTagger {
       return;
     }
 
+    // Idempotency for the standalone path: onServiceScheduled can be replayed
+    // (e.g. regenerate-brief re-runs it), and unlike the companion — which the
+    // email automation dedupes on appointment_booked:<id> — the standalone SMS
+    // has no per-appointment guard. Skip if a prep SMS was already logged for
+    // this customer + pest. (The companion never reaches here on a replay: its
+    // email returns queued:false and we return above.)
+    if (smsVariant === 'standalone' && await this.hasSentPrepSms(service.customer_id, pestType)) return;
+
     const prepSMS = await this.getPrepSMS(pestType, service, smsVariant);
     if (!prepSMS) return;
 
@@ -413,6 +421,25 @@ class AppointmentTagger {
       // Fail open (treat as first-time) — a lookup hiccup must not silently
       // drop prep messaging for a genuine first treatment.
       logger.warn(`[appointment-tagger] prior-booking lookup failed for service ${service.id}: ${err.message}`);
+      return false;
+    }
+  }
+
+  // True when a prep SMS for this customer + pest was already logged — the
+  // standalone path's replay guard. Matches the interaction row written after a
+  // successful prep send below. Fails OPEN (a check hiccup must not drop a
+  // genuine first-time send); the realistic replay vector (regenerate-brief
+  // after a successful send) always has the marker, so the fail-open window is
+  // limited to the rare case where the marker write itself failed.
+  async hasSentPrepSms(customerId, pestType) {
+    if (!customerId) return false;
+    try {
+      const row = await db('customer_interactions')
+        .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
+        .first('id');
+      return !!row;
+    } catch (err) {
+      logger.warn(`[appointment-tagger] prep-SMS dedupe check failed for customer ${customerId}: ${err.message}`);
       return false;
     }
   }

@@ -69,6 +69,10 @@ describe('sendPrepToCustomer', () => {
       // Provider errors can echo the recipient address — keep them out of logs.
       suppressProviderErrorLog: true,
     });
+    // service_date is a required prep-template var — never empty, even with no
+    // upcoming visit (falls back to a non-empty placeholder).
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload.service_date)
+      .toBe('To be confirmed');
     // Companion SMS (references the emailed guide), not the standalone variant.
     expect(renderSmsTemplate).toHaveBeenCalledWith(
       'auto_flea', { first_name: 'Megan' }, expect.any(Object),

@@ -2325,6 +2325,9 @@ function FleaPrepDialog({ open, onClose }) {
       return undefined;
     }
     let cancelled = false;
+    // Drop any results from a previous query so a stale row can't be clicked
+    // and sent to the wrong customer during this query's debounce/fetch window.
+    setResults([]);
     setSearching(true);
     const t = setTimeout(async () => {
       try {

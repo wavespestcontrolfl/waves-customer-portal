@@ -61,12 +61,24 @@ function service(overrides = {}) {
 let customerRow;
 let priorBookingRow;
 let automationActiveRow;
+let priorPrepInteraction;
 
 // isPrepAutomationActive lookup (email_template_automations) — a row = active.
 function automationsQuery() {
   const q = {
     where: jest.fn(() => q),
     first: jest.fn(async () => automationActiveRow),
+  };
+  return q;
+}
+
+// customer_interactions — hasSentPrepSms dedupe lookup (.where().first()) plus
+// the post-send marker insert.
+function interactionsQuery() {
+  const q = {
+    where: jest.fn(() => q),
+    first: jest.fn(async () => priorPrepInteraction),
+    insert: jest.fn(async () => [1]),
   };
   return q;
 }
@@ -104,9 +116,10 @@ describe('appointment tagger prep email automation', () => {
     };
     priorBookingRow = null;
     automationActiveRow = { id: 'auto-1' };
+    priorPrepInteraction = null;
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
-      if (table === 'customer_interactions') return { insert: jest.fn(async () => [1]) };
+      if (table === 'customer_interactions') return interactionsQuery();
       if (table === 'email_template_automations') return automationsQuery();
       return customersQuery();
     });
@@ -310,6 +323,18 @@ describe('appointment tagger prep email automation', () => {
     // results); the phone-only fallback must respect the same pause.
     expect(executor.processTrigger).not.toHaveBeenCalled();
     expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('standalone prep SMS is not resent when one was already logged (replay safety)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    customerRow = { ...customerRow, email: '' };
+    priorPrepInteraction = { id: 'int-1' }; // a prep SMS was already logged
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null }), 'bed_bug');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('flea with no email on file renders the auto_flea_no_email variant', async () => {

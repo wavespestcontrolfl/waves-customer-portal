@@ -83,7 +83,10 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
     const portalVisitsUrl = portalUrl('/?tab=visits');
     const address = [customer.address_line1, customer.city, customer.state, customer.zip]
       .map((v) => String(v || '').trim()).filter(Boolean).join(', ');
-    const serviceDate = await nextServiceDate(customer.id, config.serviceKeyword);
+    // service_date is a REQUIRED prep-template var (PREP_REQUIRED in
+    // 20260526000014) — sendTemplate rejects an empty one. Fall back to a
+    // non-empty placeholder when the customer has no matching upcoming visit.
+    const serviceDate = (await nextServiceDate(customer.id, config.serviceKeyword)) || 'To be confirmed';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: config.emailTemplateKey,
       to: recipient.email,
