@@ -2588,6 +2588,42 @@ const SERVICE_CARD_HEADLINES = {
 // render the row (SERVICE_DETAILS_KEYS mirrors SERVICE_DETAILS_COPY).
 const SERVICE_DETAILS_KEYS = new Set(['pest_control', 'mosquito', 'termite_bait', 'lawn_care', 'tree_shrub']);
 
+// Universally-recognized icons for the details-packet actions (inline SVG,
+// currentColor — same pattern as QuestionsEscapeHatch's ChatIcon).
+function PdfDocIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <path d="M14 2v6h6" />
+      <path d="M8 13h8M8 17h5" />
+    </svg>
+  );
+}
+function EnvelopeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="2" y="4" width="20" height="16" rx="2" />
+      <path d="m22 7-10 6L2 7" />
+    </svg>
+  );
+}
+function ChatBubbleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+// Details-packet action pill — the page's gold CTA treatment (gc-section-cta)
+// with an icon, shared by the view link and the send buttons.
+const DETAILS_ACTION_STYLE = (disabled) => ({
+  display: 'inline-flex', alignItems: 'center', gap: 8,
+  padding: '10px 18px', fontSize: 14, fontWeight: 700,
+  textDecoration: 'none',
+  pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
+});
+
 function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false }) {
   const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
   if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
@@ -2627,46 +2663,39 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
           {/* Direct view — opens the same tokenized PDF the send flows
               deliver, in a new tab where the browser's own print / download
               / share (incl. the mobile share sheet) take over. Rendered
-              first so customers aren't forced through a send to read it. */}
+              first so customers aren't forced through a send to read it.
+              All three actions wear the page's gold CTA pill
+              (gc-section-cta) with a universally recognized icon (owner
+              2026-07-11). */}
           <a
+            className="gc-section-cta"
             href={`${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
             target="_blank"
             rel="noopener noreferrer"
-            style={{
-              padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
-              background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
-              textDecoration: 'none', display: 'inline-block',
-              pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
-            }}
+            style={DETAILS_ACTION_STYLE(disabled)}
           >
-            View the PDF
+            <PdfDocIcon />View the PDF
           </a>
           {customerEmail ? (
             <button
               type="button"
+              className="gc-section-cta"
               disabled={disabled || state.status === 'sending'}
               onClick={() => send('email')}
-              style={{
-                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
-                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
-                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
-              }}
+              style={DETAILS_ACTION_STYLE(disabled || state.status === 'sending')}
             >
-              {state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
+              <EnvelopeIcon />{state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
             </button>
           ) : null}
           {customerPhone ? (
             <button
               type="button"
+              className="gc-section-cta"
               disabled={disabled || state.status === 'sending'}
               onClick={() => send('sms')}
-              style={{
-                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
-                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
-                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
-              }}
+              style={DETAILS_ACTION_STYLE(disabled || state.status === 'sending')}
             >
-              {state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
+              <ChatBubbleIcon />{state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
             </button>
           ) : null}
         </div>

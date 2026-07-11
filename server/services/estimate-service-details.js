@@ -96,6 +96,18 @@ const COMPLIANCE_SECTION = {
 const SERVICE_DETAILS_COPY = {
   pest_control: {
     title: 'Pest Protection — Service Details',
+    // Stylized in-house renders (gemini-3-pro-image, 2026-07-11 — no
+    // manufacturer photography/trade dress). Owner-picked set: the plan's
+    // primary solutions + the spray adjuvant.
+    productImages: {
+      heading: 'A few of the products doing the work',
+      images: [
+        { file: 'product-taurus-sc.png', caption: 'Taurus SC® — non-repellent insecticide (fipronil)' },
+        { file: 'product-talstar-p.png', caption: 'Talstar® P — residual insecticide (bifenthrin)' },
+        { file: 'product-surfactant.png', caption: 'Non-ionic surfactant — helps treatments spread & stick' },
+      ],
+      note: 'Stylized product illustrations — product selection follows the inspection and the label, and your service report names the exact products applied at your home.',
+    },
     systemBox: {
       heading: 'Your plan at a glance',
       rows: [
@@ -157,6 +169,15 @@ const SERVICE_DETAILS_COPY = {
   },
   mosquito: {
     title: 'Mosquito Defense — Service Details',
+    productImages: {
+      heading: 'A few of the products doing the work',
+      images: [
+        { file: 'product-scion.png', caption: 'Scion® — residual insecticide' },
+        { file: 'product-bifen-it.png', caption: 'Bifen® I/T — bifenthrin insecticide' },
+        { file: 'product-tekko-pro.png', caption: 'Tekko® Pro — insect growth regulator' },
+      ],
+      note: 'Stylized product illustrations — product selection follows the inspection, the season, and the label, and your service report names the exact products applied at your home.',
+    },
     tagline: 'Targeted adult-mosquito treatment, breeding-source inspection, and documented recurring visits — a population-reduction program, honestly framed.',
     systemBox: {
       heading: 'Your plan at a glance',
@@ -227,6 +248,13 @@ const SERVICE_DETAILS_COPY = {
   },
   termite_bait: {
     title: 'Termite Defense — Service Details',
+    productImages: {
+      heading: 'The system going into the ground',
+      images: [
+        { file: 'product-trelona-station.png', caption: 'Trelona® ATBS in-ground bait station with bait cartridge' },
+      ],
+      note: 'Stylized illustration — your installation report maps the actual numbered stations at your home, and each station sits below grade with a locked lid.',
+    },
     // Review-corrected (2026-07-10, label-sourced): no "works while nobody is
     // watching" vs "only while someone is watching" contradiction.
     tagline: 'Always working between visits — professionally verified on schedule.',
@@ -528,6 +556,17 @@ const SERVICE_DETAILS_COPY = {
   // fertilization"/"season-long protection" claims.
   tree_shrub: {
     title: 'Tree & Shrub Care — Service Details',
+    // Products from the T&S protocols: Dominion 2L is the primary systemic
+    // (is_primary in the protocol usage seed); SuffOil-X is the
+    // horticultural spray oil in the T&S catalog.
+    productImages: {
+      heading: 'A few of the products doing the work',
+      images: [
+        { file: 'product-dominion-2l.png', caption: 'Dominion® 2L — systemic insecticide (imidacloprid)' },
+        { file: 'product-suffoil-x.png', caption: 'SuffOil-X® — horticultural spray oil' },
+      ],
+      note: 'Stylized product illustrations — product selection follows the plant, the diagnosis, and the label, and your service report names the exact products applied at your home.',
+    },
     tagline: 'Your ornamentals are not lawn grass — plant-specific inspection, treatment, and honest diagnosis, documented every visit.',
     systemBox: {
       heading: 'Your program at a glance',
