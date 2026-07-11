@@ -172,6 +172,12 @@ async function enrollCustomer({ templateKey, customer }) {
     next_send_at: nextSendAt,
     enrolled_at: new Date(),
     updated_at: new Date(),
+    // Refresh the denormalized contact fields on reactivation — the scheduler
+    // sends to the ROW's email, so re-enrolling a customer who changed their
+    // address must not keep queueing steps to the stale one.
+    email: normalizedEmail,
+    first_name: customer.first_name || null,
+    last_name: customer.last_name || null,
   };
   if (existing) {
     const [reactivated] = await db('automation_enrollments')

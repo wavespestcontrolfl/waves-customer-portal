@@ -180,12 +180,12 @@ export default function EmailAutomationsPanelV2() {
                       <Button
                         variant="secondary"
                         className="mr-2"
-                        disabled={!t.enabled || t.step_count === 0}
+                        disabled={!t.enabled || !t.has_local_content}
                         title={
                           !t.enabled
                             ? "Enable this automation first"
-                            : t.step_count === 0
-                              ? "Add a step first — there is nothing to send"
+                            : !t.has_local_content
+                              ? "No enabled step has content yet — there is nothing to send"
                               : undefined
                         }
                         onClick={() => setSendTemplate(t)}
@@ -268,8 +268,12 @@ function SendAutomationModal({ template, onClose, onSent }) {
     };
   }, [search, selected]);
 
+  // GET /admin/customers maps rows to camelCase (firstName/lastName); accept
+  // snake_case too so a mapper change can't blank every result row.
   const customerName = (c) =>
-    [c.first_name, c.last_name].filter(Boolean).join(" ") ||
+    [c.firstName || c.first_name, c.lastName || c.last_name]
+      .filter(Boolean)
+      .join(" ") ||
     c.email ||
     "Unnamed customer";
 
