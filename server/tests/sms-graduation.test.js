@@ -2,7 +2,7 @@
  * SMS graduation readiness engine — pure-logic coverage (no DB, no LLM).
  * Guards the Phase E gate: an intent graduates only when the data earns it.
  */
-const { evaluateRung, THRESHOLDS, LADDER } = require('../services/sms-graduation');
+const { evaluateRung, evaluateAutoSendHealth, resolveCohortVersions, THRESHOLDS, LADDER } = require('../services/sms-graduation');
 
 // Fixed thresholds so the tests don't drift with env overrides.
 const T = {
@@ -19,6 +19,37 @@ describe('ladder shape', () => {
     expect(THRESHOLDS.shadowToSuggest.maxUnsafeRate).toBeLessThanOrEqual(0.1);
     expect(THRESHOLDS.suggestToAutosend.minAcceptedRate).toBeGreaterThanOrEqual(0.8);
     expect(THRESHOLDS.suggestToAutosend.maxRecentUnsafe).toBe(0);
+  });
+});
+
+describe('judge-signal cohort (superseded prompt versions are not readiness evidence)', () => {
+  test('default cohort = the current drafter version only', () => {
+    expect(resolveCohortVersions({ raw: undefined, currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
+    expect(resolveCohortVersions({ raw: '   ', currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
+  });
+
+  test('default tracks the LIVE drafter PROMPT_VERSION (no drift between modules)', () => {
+    const { PROMPT_VERSION } = require('../services/sms-shadow-drafter');
+    expect(resolveCohortVersions({ raw: undefined })).toEqual([PROMPT_VERSION]);
+  });
+
+  test('a list naming the current version pools it with compatible priors (trimmed, empties dropped, deduped)', () => {
+    expect(resolveCohortVersions({ raw: ' house_voice_v7 , house_voice_v8 ,', currentVersion: 'house_voice_v8' }))
+      .toEqual(['house_voice_v7', 'house_voice_v8']);
+  });
+
+  test('a stale override omitting the current version is discarded — old evidence can neither exclude the running drafter nor qualify a new prompt (Codex P1 ×2)', () => {
+    expect(resolveCohortVersions({ raw: 'house_voice_v7', currentVersion: 'house_voice_v8' }))
+      .toEqual(['house_voice_v8']);
+  });
+
+  test("'all_live' restores the pre-cohort behavior (null = no version filter)", () => {
+    expect(resolveCohortVersions({ raw: 'all_live', currentVersion: 'x' })).toBeNull();
+    expect(resolveCohortVersions({ raw: 'ALL_LIVE', currentVersion: 'x' })).toBeNull();
+  });
+
+  test('a degenerate override (only commas/spaces) falls back to the current version', () => {
+    expect(resolveCohortVersions({ raw: ' , ,  ', currentVersion: 'house_voice_v8' })).toEqual(['house_voice_v8']);
   });
 });
 
@@ -134,5 +165,28 @@ describe('top of ladder', () => {
     const r = evalR({ mode: 'auto_send' });
     expect(r.nextRung).toBeNull();
     expect(r.eligible).toBe(true);
+  });
+});
+
+describe('active auto-send health (Codex P1: UI must mirror the send-time gate)', () => {
+  const good = { accepted: 90, corrected: 6, ignored: 4 };
+
+  test('an intent whose data still clears the rung reads send-ready', () => {
+    const h = evaluateAutoSendHealth({ suggest: good, judge: { recentUnsafe: 0, judged: 40 } });
+    expect(h.sendReady).toBe(true);
+    expect(h.blockers).toEqual([]);
+  });
+
+  test('a prompt bump that reset the cohort evidence reads gated, with the executor blockers', () => {
+    // Fresh version: zero cohort judged, zero cohort decided — exactly what
+    // the send-time gate sees, so the UI must show gated, not top-of-ladder.
+    const h = evaluateAutoSendHealth({ suggest: { accepted: 0, corrected: 0, ignored: 0 }, judge: { recentUnsafe: 0, judged: 0 } });
+    expect(h.sendReady).toBe(false);
+    expect(h.blockers.join(' ')).toMatch(/safety backstop/);
+  });
+
+  test('judge signal unavailable is not send-ready (fail closed)', () => {
+    const h = evaluateAutoSendHealth({ suggest: good, judge: {}, judgeAvailable: false });
+    expect(h.sendReady).toBe(false);
   });
 });

@@ -28,7 +28,6 @@ import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
 import ServiceOutlineComposerModal from "../../components/admin/ServiceOutlineComposerModal";
-import CommercialProposalModal from "../../components/estimates/CommercialProposalModal";
 import WinLossSlicesCard from "./WinLossSlicesCard";
 import PipelineAnalytics, {
   isFollowUpOverdueEstimate,
@@ -1579,7 +1578,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
   const [auditTarget, setAuditTarget] = useState(null);
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
-  const [proposalTarget, setProposalTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
 
@@ -1919,15 +1917,6 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
           estimate={outlineTarget}
           adminFetch={adminFetch}
           onClose={() => setOutlineTarget(null)}
-        />
-      )}
-
-      {proposalTarget && (
-        <CommercialProposalModal
-          estimate={proposalTarget}
-          adminFetch={adminFetch}
-          onClose={() => setProposalTarget(null)}
-          onSaved={refreshEstimates}
         />
       )}
 
@@ -2595,7 +2584,8 @@ function EstimatePipelineViewV2({ deepLinkEstimateId = null, deepLinkToken = 0 }
                               icon: <FileText size={16} strokeWidth={1.75} />,
                               title:
                                 "Build a multi-building line-item proposal PDF",
-                              onClick: () => setProposalTarget(e),
+                              onClick: () =>
+                                navigate(`/admin/estimates/${e.id}/proposal`),
                             },
                             {
                               key: "audit",

@@ -224,6 +224,7 @@ const AdminReferralsPage = lazyWithRetry(() => import('./pages/admin/ReferralsPa
 const AdminDashboardPage = lazyWithRetry(() => import('./pages/admin/DashboardPageV2'));
 const AdminEstimatePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
 const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPageV2'));
+const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
 const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimatorPage'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
@@ -240,12 +241,14 @@ const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePa
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
+const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
 const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrategyPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
 const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
+const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
@@ -378,6 +381,9 @@ export default function App() {
           {/* WavesShell wraps (owner 2026-07-06): every customer page gets
               the standard top bar + trust footer. */}
           <Route path="/rate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><RatePage /></WavesShell></Suspense>} />
+          {/* Digital business card — navy glass scene, so the fallback wash
+              matches the scene instead of the light doc wash. */}
+          <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
@@ -418,8 +424,10 @@ export default function App() {
             <Route index element={<Navigate to="dashboard" />} />
             <Route path="dashboard" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading dashboard...</div>}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading customers...</div>}><AdminCustomersPage /></Suspense>} />
+            <Route path="customers/duplicates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading duplicates...</div>}><AdminDuplicateCustomersPage /></Suspense>} />
             <Route path="pipeline" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pipeline...</div>}><AdminPipelinePage /></Suspense>} />
             <Route path="estimates" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><AdminEstimatePage /></Suspense>} />
+            <Route path="estimates/:estimateId/proposal" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading proposal...</div>}><AdminCommercialProposalPage /></Suspense>} />
             {/* /admin/dispatch is now the canonical dispatcher surface
                 — Board tab (phase 2 v1) + Schedule tab (existing
                 DispatchPageV2). /admin/schedule still works (redirects

@@ -34,7 +34,8 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { getAvailableSlots, findEstimateSlots } = require('../services/estimate-slot-availability');
+const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
+const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
 const {
   annualPrepayEligibleForEstimateData,
@@ -47,6 +48,7 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
   reconcileFrozenMembershipSnapshot,
@@ -98,6 +100,18 @@ function resolveSlotServiceMode(estimate = {}, requestedMode = '') {
   return requestedMode === 'one_time' ? 'one_time' : 'recurring';
 }
 
+// Cache/privacy parity with GET /:token/data (estimate-public.js): these
+// responses are tokenized and can carry availability tied to a customer's
+// address — no shared-browser or intermediary retention, no referrer leak of
+// the tokenized URL. Stamped before any branch so every response path
+// (including 4xx/429) carries them.
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Referrer-Policy', 'no-referrer');
+  next();
+});
+
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -116,13 +130,23 @@ router.use(rateLimit({
 // BLOCKED_STATES_FOR_SLOTS + expires_at) so the commercial manual-scheduling
 // short-circuit can't return a 200 for an accepted/declined/expired estimate.
 // Returns a sent response (caller must `return` it) or null when eligible.
-const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired']);
+// 'void' matches the services' terminal set (reserveSlot's ESTIMATE_TERMINAL
+// list) so the router and service layers reject the same states.
+const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
 function rejectIneligibleEstimate(res, estimate = {}) {
+  // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
+  // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
+  // and past-expiry estimates must not expose availability or take holds —
+  // same 404 shape /data uses. Callers must SELECT archived_at/status/
+  // expires_at for this check to see them. This check runs FIRST: an archived
+  // estimate whose status is also terminal (accepted/declined/…) must return
+  // the same generic 404 as a missing token — a 409 here would make archived
+  // tokens distinguishable from nonexistent ones.
+  if (!isEstimateCustomerViewable(estimate)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
   if (SLOT_BLOCKED_STATES.has(estimate.status)) {
     return res.status(409).json({ error: 'Estimate is no longer active' });
-  }
-  if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) {
-    return res.status(404).json({ error: 'Not found' });
   }
   return null;
 }
@@ -159,7 +183,7 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -193,12 +217,23 @@ router.get('/:token/available-slots', async (req, res) => {
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
-    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= 90) {
+    if (Number.isFinite(windowDays) && windowDays > 0 && windowDays <= MAX_SLOT_HORIZON_DAYS) {
       opts.windowDays = windowDays;
     }
     // Specific-date browse: ?date=YYYY-MM-DD pins the lookup to a single day.
+    // Horizon parity with reserveSlot (slot-reservation.js): the reserve path
+    // rejects any slot past MAX_SLOT_HORIZON_DAYS in ET, so browsing must not
+    // display far-future days whose every slot would 409 on the first tap.
+    // Same ET day-string compare, same strict `>` so the boundary day both
+    // displays and reserves. Silently substituting the default window (the
+    // windowDays treatment) would mislead here — the customer asked for a
+    // specific day — so an out-of-horizon date is a 400 like find-slots'
+    // out-of-bound query.
     const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      if (date > etDateString(addETDays(new Date(), MAX_SLOT_HORIZON_DAYS))) {
+        return res.status(400).json({ error: 'date is beyond the booking horizon' });
+      }
       opts.dateFrom = date;
       opts.dateTo = date;
     }
@@ -281,7 +316,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -369,7 +404,7 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }

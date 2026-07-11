@@ -25,6 +25,35 @@ function createDbMock(initialRows = {}) {
     return Object.entries(whereObj).every(([key, value]) => row[key] === value);
   }
 
+  // Recognized raw clauses → row predicates. Anything unrecognized keeps the
+  // historical pass-through (no filter), so unrelated raw SQL stays inert.
+  function rawFilterFor(sql, bindings = []) {
+    if (typeof sql !== 'string') return null;
+    if (sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
+      const name = String(bindings[0] || '').toLowerCase();
+      return row => String(row.reviewer_name || '').toLowerCase() === name;
+    }
+    if (sql.includes('LOWER(TRIM(first_name)) = LOWER(?) OR')) {
+      const first = String(bindings[0] || '').trim().toLowerCase();
+      const leading = String(bindings[1] || '').trim().toLowerCase();
+      return row => {
+        const fn = String(row.first_name || '').trim().toLowerCase();
+        return fn === first || fn === leading;
+      };
+    }
+    // Full-name clause BEFORE the last-name clause — the full-name SQL also
+    // ends with the last-name substring, so specificity order matters.
+    if (sql.includes("first_name || ' ' || COALESCE(last_name")) {
+      const name = String(bindings[0] || '').trim().toLowerCase();
+      return row => `${row.first_name || ''} ${row.last_name || ''}`.trim().toLowerCase() === name;
+    }
+    if (sql.includes("COALESCE(last_name, ''))) = LOWER(?)")) {
+      const last = String(bindings[0] || '').trim().toLowerCase();
+      return row => String(row.last_name || '').trim().toLowerCase() === last;
+    }
+    return null;
+  }
+
   function makeQuery(table) {
     const query = {
       _table: table,
@@ -33,7 +62,42 @@ function createDbMock(initialRows = {}) {
       _limit: null,
       _rawFilters: [],
       where(arg, value) {
-        if (arg && typeof arg === 'object') {
+        if (typeof arg === 'function') {
+          // Grouped builder — the customer name match uses
+          // .where(fn){ .where(fn){ AND raw filters } .orWhereRaw(...) }.
+          // Model it as: group passes when ANY of its OR branches passes,
+          // where each branch is the AND of its own raw filters.
+          const group = { _branches: [], _current: [] };
+          const branchApi = {
+            where(fn2, val2) {
+              if (typeof fn2 === 'function') fn2.call(branchApi);
+              else if (typeof fn2 === 'string' && arguments.length >= 2) {
+                group._current.push(row => row[fn2] === val2);
+              }
+              return branchApi;
+            },
+            whereRaw(sql, bindings) {
+              const f = rawFilterFor(sql, bindings);
+              if (f) group._current.push(f);
+              return branchApi;
+            },
+            orWhereRaw(sql, bindings) {
+              group._branches.push(group._current);
+              group._current = [];
+              const f = rawFilterFor(sql, bindings);
+              if (f) group._current.push(f);
+              return branchApi;
+            },
+            orWhereNull(column) {
+              group._branches.push(group._current);
+              group._current = [row => row[column] == null];
+              return branchApi;
+            },
+          };
+          arg.call(branchApi);
+          group._branches.push(group._current);
+          this._rawFilters.push(row => group._branches.some(branch => branch.every(f => f(row))));
+        } else if (arg && typeof arg === 'object') {
           Object.assign(this._where, arg);
         } else if (typeof arg === 'string' && arguments.length === 3) {
           const op = value;
@@ -46,15 +110,8 @@ function createDbMock(initialRows = {}) {
         return this;
       },
       whereRaw(sql, bindings = []) {
-        // Implemented for the two name-match clauses the service relies on;
-        // other raw clauses keep the historical pass-through behavior.
-        if (typeof sql === 'string' && sql.includes('LOWER(reviewer_name) = LOWER(?)')) {
-          const name = String(bindings[0] || '').toLowerCase();
-          this._rawFilters.push(row => String(row.reviewer_name || '').toLowerCase() === name);
-        } else if (typeof sql === 'string' && sql.includes("first_name || ' ' || COALESCE(last_name")) {
-          const name = String(bindings[0] || '').trim().toLowerCase();
-          this._rawFilters.push(row => `${row.first_name || ''} ${row.last_name || ''}`.trim().toLowerCase() === name);
-        }
+        const f = rawFilterFor(sql, bindings);
+        if (f) this._rawFilters.push(f);
         return this;
       },
       whereNull(column) { this._whereNull = column; return this; },
@@ -463,6 +520,116 @@ describe('Google Business review sync', () => {
     expect(customer.review_marked_at).toBeTruthy();
     // No admin "unlinked" notification when the review matched a customer.
     expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('a middle initial in the Google display name still matches the customer (prod 2026-07-10 miss)', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-fossier',
+      first_name: 'Michael',
+      last_name: 'Fossier',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-mi',
+        reviewer: { displayName: 'Michael P. Fossier' },
+        starRating: 'FIVE',
+        comment: 'Great service!',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-fossier');
+    expect(customer.has_left_google_review).toBe(true);
+    expect((db.__state.rows.notifications || []).some(n => n.category === 'review')).toBe(false);
+  });
+
+  test('a compound SURNAME still matches via the full-string arm (Codex P2: Mary Van Dyke)', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-vandyke',
+      first_name: 'Mary',
+      last_name: 'Van Dyke',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-vd',
+        reviewer: { displayName: 'Mary Van Dyke' },
+        starRating: 'FIVE',
+        comment: 'Great!',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-vandyke');
+    expect(customer.has_left_google_review).toBe(true);
+  });
+
+  test('an exact full-name row beats a looser token match instead of reading as ambiguous (Codex round-2)', async () => {
+    db.__state.rows.customers.push(
+      { id: 'cust-exact', first_name: 'Mary Ann', last_name: 'Smith', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+      // Token arm would ALSO match this row (first token "Mary", last "Smith")
+      { id: 'cust-loose', first_name: 'Mary', last_name: 'Smith', has_left_google_review: false, review_marked_at: null, deleted_at: null },
+    );
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-exact',
+        reviewer: { displayName: 'Mary Ann Smith' },
+        starRating: 'FIVE',
+        comment: 'Lovely',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-exact').has_left_google_review).toBe(true);
+    expect(db.__state.rows.customers.find(c => c.id === 'cust-loose').has_left_google_review).toBe(false);
+  });
+
+  test('a two-word first name still matches its exact display-name shape', async () => {
+    db.__state.rows.customers.push({
+      id: 'cust-maryann',
+      first_name: 'Mary Ann',
+      last_name: 'Smith',
+      has_left_google_review: false,
+      review_marked_at: null,
+      deleted_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-ma',
+        reviewer: { displayName: 'Mary Ann Smith' },
+        starRating: 'FIVE',
+        comment: 'Wonderful',
+        createTime: '2026-07-10T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const customer = db.__state.rows.customers.find(c => c.id === 'cust-maryann');
+    expect(customer.has_left_google_review).toBe(true);
   });
 
   test('notifies admin when a newly synced review cannot be matched to a customer', async () => {

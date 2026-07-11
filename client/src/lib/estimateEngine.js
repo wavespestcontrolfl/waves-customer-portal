@@ -801,6 +801,10 @@ const PRE_SLAB_JOB_CONTEXT_LABELS = {
 };
 
 const PRE_SLAB_COMPLIANCE_ADMIN_COST = 25;
+// Usage-based price step (owner decision 2026-07-10): quoted price floors at
+// the cost-plus of the slab rounded UP to the next 100 sqft. Mirrors server
+// constants preSlabTermiticide.usageStepSqFt (pricing_config kill = 0).
+const PRE_SLAB_USAGE_STEP_SQFT = 100;
 const PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT = {
   standalone: true,
   builderBatch: false,
@@ -2229,19 +2233,42 @@ export function calculateEstimate(inputs) {
     const vol = normalizePreSlabVolume(preslabVolume);
     const jobContext = normalizePreSlabJobContext(preslabJobContext, vol.key);
     const contextualMinimum = lookupPreSlabMinimum(psSqft, jobContext);
-    const productOz = psSqft / 10 * product.productOzPer10SqFt;
-    const units = Math.max(1, Math.ceil(productOz / product.containerOz));
     const chemicalCostPerOz = product.containerCost / product.containerOz;
-    const allocatedProductCost = productOz * chemicalCostPerOz;
-    const fullContainerProductCost = units * product.containerCost;
-    const lhr = Math.min(5, Math.max(1, 0.5 + psSqft / 1500));
-    const laborCost = lhr * LABOR;
     const equipCost = 15;
     const complianceAdminCost = PRE_SLAB_COMPLIANCE_ADMIN_COST;
-    const driveCost = PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] ? LABOR * DRIVE / 60 : 0;
-    const cost = allocatedProductCost + laborCost + equipCost + complianceAdminCost + driveCost;
-    const rawPrice = Math.round(cost / product.marginDivisor);
-    const priceBeforeVolumeDiscount = Math.max(rawPrice, contextualMinimum.floor);
+    // Mirrors server pricePreSlabTermiticide costPlusAt — one evaluator for
+    // the actual slab and the usage-step bucket.
+    const costPlusAt = (sqFt) => {
+      const oz = sqFt / 10 * product.productOzPer10SqFt;
+      const hrs = Math.min(5, Math.max(1, 0.5 + sqFt / 1500));
+      const drive = PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] ? LABOR * DRIVE / 60 : 0;
+      const totalCost = oz * chemicalCostPerOz + hrs * LABOR + equipCost + complianceAdminCost + drive;
+      return { oz, hrs, drive, totalCost, price: Math.round(totalCost / product.marginDivisor) };
+    };
+    const actual = costPlusAt(psSqft);
+    const productOz = actual.oz;
+    const units = Math.max(1, Math.ceil(productOz / product.containerOz));
+    const allocatedProductCost = productOz * chemicalCostPerOz;
+    const fullContainerProductCost = units * product.containerCost;
+    const lhr = actual.hrs;
+    const laborCost = lhr * LABOR;
+    const driveCost = actual.drive;
+    const cost = actual.totalCost;
+    const rawPrice = actual.price;
+    // Usage-step (owner decision 2026-07-10): list price floors at the
+    // cost-plus of the slab rounded UP to the next 100 sqft, so price climbs
+    // with product usage instead of flat-lining across the minimum buckets.
+    // Volume discount applies to the stepped price; the static contextual
+    // floor stays the absolute post-discount minimum. Server-side the step
+    // is pricing_config-driven (usage_step_sqft; 0 = kill) — this static
+    // mirror tracks the shipped default.
+    const usageStepPricedSqFt = PRE_SLAB_USAGE_STEP_SQFT > 0
+      ? Math.ceil(psSqft / PRE_SLAB_USAGE_STEP_SQFT) * PRE_SLAB_USAGE_STEP_SQFT
+      : null;
+    const usageStepPrice = usageStepPricedSqFt !== null && usageStepPricedSqFt !== psSqft
+      ? costPlusAt(usageStepPricedSqFt).price
+      : rawPrice;
+    const priceBeforeVolumeDiscount = Math.max(rawPrice, usageStepPrice, contextualMinimum.floor);
     const priceAfterVolumeDiscount = Math.max(
       Math.round(priceBeforeVolumeDiscount * vol.multiplier),
       contextualMinimum.floor,
@@ -2291,6 +2318,9 @@ export function calculateEstimate(inputs) {
       includeDriveCost: PRE_SLAB_INCLUDE_DRIVE_COST_BY_CONTEXT[jobContext] === true,
       cost: Math.round(cost * 100) / 100,
       rawPrice,
+      usageStepSqFt: PRE_SLAB_USAGE_STEP_SQFT,
+      usageStepPricedSqFt,
+      usageStepPrice,
       jobContext,
       preSlabJobContext: jobContext,
       preSlabJobContextLabel: PRE_SLAB_JOB_CONTEXT_LABELS[jobContext] || PRE_SLAB_JOB_CONTEXT_LABELS.standalone,

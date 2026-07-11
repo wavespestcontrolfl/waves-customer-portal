@@ -619,17 +619,23 @@ function isTermiteBaitOneTimeItem(item = {}) {
 }
 
 // Service-type predicate (independent of existing-customer status): the WaveGuard
-// $99 setup is a recurring-Pest membership fee ONLY (owner directive 2026-07-10).
-// Mosquito, lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
-// fee — they earn the annual-prepay discount instead. This drives the
+// $99 setup applies ONLY to single-service recurring plans — recurring pest
+// only, or recurring mosquito only (owner directive 2026-07-10 evening,
+// supersedes the same-day pest-mixes rule). Any multi-service recurring
+// bundle carries no setup fee (the bundle is the incentive), and lawn /
+// termite-bait / rodent-bait / T&S / palm solo plans never carry it — all of
+// those earn the annual-prepay % discount instead. This drives the
 // prepay-discount decision (which must not depend on the existing-customer
 // waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
 // existing-customer waiver on top for the actual setup invoice.
+const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
-  const keys = (Array.isArray(recurringServices) ? recurringServices : [])
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  return keys.includes('pest_control');
+  const keys = Array.from(new Set(
+    (Array.isArray(recurringServices) ? recurringServices : [])
+      .map(recurringServiceKey)
+      .filter(Boolean),
+  ));
+  return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
@@ -639,7 +645,7 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
-  // Pest/Mosquito mixes always charge the setup (no 5% stacking).
+  // Solo pest / solo mosquito plans charge the setup (no 5% stacking).
   return recurringMixHasMembershipFeeService(recurring);
 }
 
@@ -2050,6 +2056,7 @@ const EstimateConverter = {
     // Commercial recurring follow-ups aren't auto-scheduled yet — surface it so
     // the team sets up the schedule manually (fire-and-forget; never blocks the
     // accept). Only the initial visit was scheduled above.
+    let commercialScheduleNotification = null;
     if (hasCommercialRecurring && !suppressRecurringConversion) {
       // skipAutoSchedule (manual Mark Won) schedules NOTHING; the normal path
       // schedules only the initial visit. Reflect what actually happened so
@@ -2059,16 +2066,30 @@ const EstimateConverter = {
         ? 'No visits were auto-scheduled — set up the full commercial visit schedule (including the first visit) manually.'
         : 'Initial visit scheduled — set up the remaining recurring commercial visits manually.';
       logger.warn(`[estimate-converter] Commercial recurring estimate ${estimateId} (customer ${customerId}) accepted — ${scheduleNote} (commercial cadence auto-scheduling not yet supported).`);
-      try {
-        const NotificationService = require('./notification-service');
-        void NotificationService.notifyAdmin(
-          'estimate_converted',
-          `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
-          `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-          { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } }
-        ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
-      } catch (err) {
-        logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+      const notificationPayload = {
+        type: 'estimate_converted',
+        title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
+        body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
+        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        // In-transaction callers (public accept, manual Mark Won) dispatch this
+        // post-commit from the returned payload — notifyAdmin writes through the
+        // GLOBAL pool, so firing it here would alert staff about a commercial
+        // schedule even when the outer transaction rolls the acceptance back.
+        commercialScheduleNotification = notificationPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            notificationPayload.type,
+            notificationPayload.title,
+            notificationPayload.body,
+            notificationPayload.options
+          ).catch((err) => logger.warn(`[estimate-converter] commercial-schedule admin notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] commercial-schedule admin notify setup failed: ${err.message}`);
+        }
       }
     }
 
@@ -2125,6 +2146,10 @@ const EstimateConverter = {
       // non-member 'none'/'Commercial' tier).
       membershipEmail: commercialOnlyRecurring ? null : membershipEmail,
       welcomeSms,
+      // Non-null ONLY when opts.deferCommercialScheduleNotification asked for
+      // it (dispatched inline otherwise) — so callers can dispatch whatever
+      // comes back without double-send risk.
+      commercialScheduleNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
@@ -2175,4 +2200,5 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

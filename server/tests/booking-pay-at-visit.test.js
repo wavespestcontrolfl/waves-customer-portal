@@ -23,6 +23,13 @@ jest.mock('../services/recurring-appointment-seeder', () => ({
   },
 }));
 jest.mock('../services/estimate-converter', () => ({
+  // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
+  // so estimate-public's breakdown/fee gates work under this module mock.
+  recurringMixHasMembershipFeeService: (services = []) => {
+    const keys = Array.from(new Set((Array.isArray(services) ? services : [])
+      .map((s) => s && s.service).filter(Boolean)));
+    return keys.length === 1 && ['pest_control', 'mosquito'].includes(keys[0]);
+  },
   recurringServicesFromEstimateData: (data = {}) => (
     Array.isArray(data.services) ? data.services
       : Array.isArray(data.engineResult?.lineItems) ? data.engineResult.lineItems

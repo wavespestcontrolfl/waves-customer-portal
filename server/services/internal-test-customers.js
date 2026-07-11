@@ -6,4 +6,30 @@
 // Empty list ⇒ every exclusion is a no-op.
 const INTERNAL_TEST_CUSTOMERS = ['adam martinez'];
 
-module.exports = { INTERNAL_TEST_CUSTOMERS };
+// Internal / demo customer IDs suppressed from ADMIN NOTIFICATIONS (the bell)
+// — not from data or metrics. The App Store review demo account generates
+// real bounce alerts and junk service-request bells on every review cycle.
+const INTERNAL_TEST_CUSTOMER_IDS = [
+  '3274944a-f509-413c-9dee-a8b0cdb16493', // App Review demo (appreview+demo@wavespestcontrol.com)
+];
+
+function isInternalTestCustomerId(id) {
+  return !!id && INTERNAL_TEST_CUSTOMER_IDS.includes(String(id));
+}
+
+// Demo-account EMAILS, for alert paths that never see a customer id (e.g. the
+// blocked-operational-send alert only has the recipient address in hand).
+const INTERNAL_TEST_EMAILS = ['appreview+demo@wavespestcontrol.com'];
+
+function isInternalTestEmail(email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  return !!normalized && INTERNAL_TEST_EMAILS.includes(normalized);
+}
+
+module.exports = {
+  INTERNAL_TEST_CUSTOMERS,
+  INTERNAL_TEST_CUSTOMER_IDS,
+  INTERNAL_TEST_EMAILS,
+  isInternalTestCustomerId,
+  isInternalTestEmail,
+};

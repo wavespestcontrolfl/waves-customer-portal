@@ -12,6 +12,7 @@ const {
   EXPIRY_HOURS,
   isEscalationIntent,
   hasRedactionPlaceholder,
+  hasPriceQuote,
   suggestionEligible,
   validateModeChange,
   splitPendingSuggestions,
@@ -31,6 +32,85 @@ describe('hasRedactionPlaceholder — never deliver a copied corpus placeholder'
     expect(hasRedactionPlaceholder('')).toBe(false);
     expect(hasRedactionPlaceholder(null)).toBe(false);
     expect(hasRedactionPlaceholder('See item [1] on your invoice')).toBe(false); // unrelated brackets
+  });
+});
+
+describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
+  test('detects dollar-sign amounts in every shape the drafter has invented', () => {
+    expect(hasPriceQuote('Your total is $415.75.')).toBe(true); // the live judge catch
+    expect(hasPriceQuote('That service runs $99')).toBe(true);
+    expect(hasPriceQuote('roughly $ 1,200.50 for the year')).toBe(true);
+    expect(hasPriceQuote('USD 50 per visit')).toBe(true);
+  });
+
+  test('detects spelled-out and singular amounts (Codex P2 ×2: word-form + singular)', () => {
+    expect(hasPriceQuote('about 50 dollars per month')).toBe(true);
+    expect(hasPriceQuote('should be 2 bucks')).toBe(true);
+    expect(hasPriceQuote('that is four hundred dollars')).toBe(true);
+    expect(hasPriceQuote('roughly a hundred bucks per visit')).toBe(true);
+    expect(hasPriceQuote('we can apply a 50 dollar credit')).toBe(true);
+    expect(hasPriceQuote('there is a 1 dollar fee')).toBe(true);
+    expect(hasPriceQuote('forty-five dollars even')).toBe(true);
+  });
+
+  test('detects per-cadence rates and Spanish currency (ask-waves parity)', () => {
+    expect(hasPriceQuote('the plan runs 45/mo')).toBe(true);
+    expect(hasPriceQuote('forty five per visit')).toBe(true);
+    expect(hasPriceQuote('cuesta 45 dólares')).toBe(true);
+    expect(hasPriceQuote('son 45 al mes')).toBe(true);
+  });
+
+  test('detects reversed USD, hyphenated, contextual bare, and Spanish-hundreds forms (Codex P1)', () => {
+    expect(hasPriceQuote('that will be 45 USD')).toBe(true);
+    expect(hasPriceQuote('we can apply a 50-dollar credit')).toBe(true);
+    expect(hasPriceQuote('The total comes to 415.75')).toBe(true);
+    expect(hasPriceQuote('serían doscientos dólares')).toBe(true);
+  });
+
+  test('detects leading-decimal, cents, and Unicode Spanish forms (Codex P1 r5)', () => {
+    expect(hasPriceQuote('just $.99 today')).toBe(true);
+    expect(hasPriceQuote('that is 99 cents')).toBe(true);
+    expect(hasPriceQuote('only 99¢')).toBe(true);
+    expect(hasPriceQuote('veintidós dólares')).toBe(true);
+    expect(hasPriceQuote('noventa centavos')).toBe(true);
+  });
+
+  test('detects price grammar around price nouns, both directions and languages (Codex P1 r3+r4)', () => {
+    expect(hasPriceQuote('The price is 415')).toBe(true);
+    expect(hasPriceQuote('The estimate is 415.75')).toBe(true);
+    expect(hasPriceQuote('415.75 is the total')).toBe(true);
+    expect(hasPriceQuote('The price is fifty')).toBe(true);
+    expect(hasPriceQuote('El precio es 45')).toBe(true);
+  });
+
+  test('detects direct price verbs, both languages (Codex P1 r6)', () => {
+    expect(hasPriceQuote('The service costs 415.75')).toBe(true);
+    expect(hasPriceQuote('Your total will come to 415.75')).toBe(true);
+    expect(hasPriceQuote('Cuesta 45.50')).toBe(true);
+    expect(hasPriceQuote('cobramos 60 por visita')).toBe(true);
+    expect(hasPriceQuote('it costs nothing to reschedule')).toBe(false);
+  });
+
+  test('detects charge verbs, copula quotes, balance-due, and word-amount USD (Codex P1 r7)', () => {
+    expect(hasPriceQuote('We charge 415.75')).toBe(true);
+    expect(hasPriceQuote('That will be 415.75')).toBe(true);
+    expect(hasPriceQuote('Your balance due is 415.75')).toBe(true);
+    expect(hasPriceQuote('forty-five USD')).toBe(true);
+    expect(hasPriceQuote('that will be 3 stops before yours')).toBe(false);
+  });
+
+  test('dates, durations, and idioms near price nouns pass (connector required — Codex P1 r4)', () => {
+    expect(hasPriceQuote('Your estimate expires in 30 days')).toBe(false);
+    expect(hasPriceQuote('The quote you requested on the 15th is attached')).toBe(false);
+    expect(hasPriceQuote('the price is a bit high, I understand')).toBe(false);
+  });
+
+  test('price-free replies pass, including numbers that are not money', () => {
+    expect(hasPriceQuote('Your next service is Tuesday between 1:00 PM and 3:00 PM.')).toBe(false);
+    expect(hasPriceQuote('We treated 2 ant mounds near the lanai.')).toBe(false);
+    expect(hasPriceQuote('Invoice #04395 was emailed to you.')).toBe(false);
+    expect(hasPriceQuote('')).toBe(false);
+    expect(hasPriceQuote(null)).toBe(false);
   });
 });
 

@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const PHONE_CANDIDATE_RE = /\+?\d[\d\s().-]{6,}\d/g;
@@ -533,6 +534,16 @@ async function triggerNotification(triggerKey, payload = {}) {
     if (!trigger) {
       logger.warn(`[notification-triggers] Unknown trigger: ${triggerKey}`);
       return;
+    }
+
+    // Demo/internal test accounts must not reach admins via bell OR push —
+    // push dispatch happens below, outside NotificationService's own gate,
+    // so suppress here before either channel. sms_reply carries the customer
+    // id as threadId.
+    const demoCid = payload?.customerId || payload?.customer_id || payload?.threadId;
+    if (isInternalTestCustomerId(demoCid)) {
+      logger.info(`[notification-triggers] Suppressed '${triggerKey}' for internal test customer`);
+      return { bellWritten: false, push: null, suppressed: true };
     }
 
     const built = sanitizeBuiltNotification(trigger.build(payload));

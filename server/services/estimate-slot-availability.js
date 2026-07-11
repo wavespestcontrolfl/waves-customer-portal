@@ -30,6 +30,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -57,7 +58,16 @@ const SERVICE_LABELS = {
 };
 
 const MAX_ESTIMATE_SLOT_DURATION_MINUTES = 180;
+// Working-day start for customer-facing slots — mirrors DAY_START_HOUR (8:00)
+// in scheduling/find-time.js, which generates every route-derived offer.
+// Keep the two in sync.
+const SLOT_DAY_START_MINUTES = 8 * 60;
 const SLOT_DAY_END_MINUTES = 17 * 60;
+// Furthest-out date any offer surface produces: the public route clamps
+// ?windowDays to this and findEstimateSlots caps the AI date parse's
+// maxDaysOut to it. slot-reservation enforces the same bound on reserve so a
+// crafted slotId can't book beyond what any surface offers.
+const MAX_SLOT_HORIZON_DAYS = 90;
 
 // ---------- in-memory caches ----------
 
@@ -1106,6 +1116,27 @@ function filterPastSlotsForToday(slots, { now = new Date(), minimumLeadMinutes =
   });
 }
 
+// Sign the final customer-facing slots (booking-audit round 2): the HMAC
+// binds surface + THIS estimate + date/start/tech/duration + expiry, and the
+// sig+exp ride INSIDE the slotId (`base.exp.sig`) so every client — SlotPicker,
+// EstimateViewPage, the server-rendered estimate page — keeps sending
+// `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
+// so the constraint checks it also runs are defense-in-depth, not the gate.
+// Runs LAST (after dedupe/spread/selection, which key off the base slotId).
+function signCustomerFacingSlots(slots, estimateId) {
+  return (Array.isArray(slots) ? slots : []).map((slot) => {
+    const offer = signSlotOffer({
+      surface: 'estimate',
+      scopeId: String(estimateId),
+      date: slot.date,
+      startMinutes: timeToMinutes(slot.windowStart),
+      technicianId: slot.techId || null,
+      durationMinutes: slot.durationMinutes,
+    });
+    return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+  });
+}
+
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
   const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
@@ -1216,12 +1247,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const fallback = {
-      primary,
-      expander,
+      primary: signCustomerFacingSlots(primary, estimateId),
+      expander: signCustomerFacingSlots(expander, estimateId),
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
-        estimateAddress: estimate.address || null,
-        estimateCoords: null,
+        // Deliberately no estimateAddress / estimateCoords / coordsSource:
+        // this payload feeds the PUBLIC token-gated slot picker, which reads
+        // none of them — echoing exact lat/lng back out is a location leak.
+        // Admin diagnostics use getSlotDebug, which carries coords itself.
         firstDayAvailability: firstDayAvailability(bookable),
         windowDays: opts.windowDays,
         proximityDriveMinutes: opts.proximityDriveMinutes,
@@ -1230,7 +1263,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         serviceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
-        coordsSource: 'none',
       },
     };
     return fallback;
@@ -1285,13 +1317,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
 
   const result = {
-    primary,
-    expander,
+    // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
+    // well inside the offer TTL (see slot-offer-token.js).
+    primary: signCustomerFacingSlots(primary, estimateId),
+    expander: signCustomerFacingSlots(expander, estimateId),
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
-      estimateAddress: estimate.address || null,
-      estimateCoords: { lat: coords.lat, lng: coords.lng },
-      coordsSource: coords.source,
+      // Deliberately no estimateAddress / estimateCoords / coordsSource:
+      // this payload feeds the PUBLIC token-gated slot picker, which reads
+      // none of them — echoing exact lat/lng back out is a location leak.
+      // Admin diagnostics use getSlotDebug, which carries coords itself.
       firstDayAvailability: firstDayAvailability(bookable),
       windowDays: opts.windowDays,
       proximityDriveMinutes: opts.proximityDriveMinutes,
@@ -1323,7 +1358,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const when = await parseWhen(query, {
     now: new Date(),
     minDaysOut: 0,
-    maxDaysOut: 90,
+    maxDaysOut: MAX_SLOT_HORIZON_DAYS,
     defaultWindowDays: DEFAULT_OPTS.windowDays,
   });
 
@@ -1446,6 +1481,11 @@ module.exports = {
   getSlotDebug,
   invalidateEstimate,
   resolveEstimateSlotProfile,
+  // Business bounds shared with slot-reservation's server-side validation
+  // and the public route's windowDays clamp.
+  SLOT_DAY_START_MINUTES,
+  SLOT_DAY_END_MINUTES,
+  MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
     parseAnchorTime,
@@ -1466,6 +1506,7 @@ module.exports = {
     resolveEstimateSlotProfile,
     addMinutesToHHMM,
     slotWindowFitsDay,
+    signCustomerFacingSlots,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };

@@ -4908,6 +4908,22 @@ router.put('/:id/status', async (req, res, next) => {
       });
     }
 
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    // Only 'confirmed' / 'cancelled' are allowed until the office confirms it.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     const fromStatus = svc.status;
     if (toStatus === 'en_route') {
       const preEnRouteStatuses = new Set(['pending', 'confirmed', 'rescheduled']);
@@ -4946,6 +4962,15 @@ router.put('/:id/status', async (req, res, next) => {
         });
       });
     } catch (err) {
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        // Expected block from the shared writer's review-booking guard —
+        // conflict, not a 500 (mirrors the pre-guard above for statuses it
+        // doesn't cover, e.g. a race past it).
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -4996,6 +5021,19 @@ router.put('/:id/status', async (req, res, next) => {
           waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
         });
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
+    }
+
+    // Outbound-callback booking confirmed by the office → arm the deferred
+    // reminders, convert the originating call lead, resolve the review card.
+    // Shared hook (services/outbound-review-confirm) so the admin-dispatch
+    // status route — the other surface staff confirm from — runs the exact
+    // same side effects and the two paths can't drift.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-schedule');
+      }
     }
 
     // En-route: track-transitions flip (which fires the customer SMS

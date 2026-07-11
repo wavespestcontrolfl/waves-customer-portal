@@ -43,7 +43,9 @@
             "1.2.0",
             "1.3.0",
             "1.4.0",
-            "1.5.0"
+            "1.5.0",
+            "1.6.0",
+            "1.7.0"
           ],
           "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings) — older payloads remain valid."
         },
@@ -153,6 +155,13 @@
           ],
           "format": "email"
         },
+        "email_raw": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Server-derived by normalizeCaller (never model-written; the model-output schema rejects it): the as-heard email when validation rejected it, preserved so the gated repair / read-back path can act on it."
+        },
         "relationship_to_property": {
           "type": "string",
           "enum": [
@@ -162,6 +171,8 @@
             "property_manager",
             "hoa_board_member",
             "employee",
+            "real_estate_agent",
+            "lender",
             "other",
             "unknown"
           ]
@@ -244,6 +255,7 @@
             "home_seller",
             "tenant",
             "landlord",
+            "lender",
             "spouse_partner",
             "family_member",
             "real_estate_agent",
@@ -254,6 +266,10 @@
         },
         "wants_notifications": {
           "type": "boolean"
+        },
+        "is_billing_party": {
+          "type": "boolean",
+          "description": "The paying third party for call→payer Bill-To linkage. 1.6.0 additive; absent in older payloads."
         },
         "notes": {
           "type": [
@@ -323,6 +339,7 @@
               "home_seller",
               "tenant",
               "landlord",
+              "lender",
               "spouse_partner",
               "family_member",
               "real_estate_agent",
@@ -334,6 +351,10 @@
           "wants_notifications": {
             "type": "boolean",
             "description": "true ONLY when the caller explicitly directed notifications/confirmations/updates to THIS person."
+          },
+          "is_billing_party": {
+            "type": "boolean",
+            "description": "The paying third party for call→payer Bill-To linkage. 1.6.0 additive; absent in older payloads."
           },
           "notes": {
             "type": [

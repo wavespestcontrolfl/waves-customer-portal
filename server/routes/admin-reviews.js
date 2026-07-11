@@ -736,9 +736,37 @@ router.get('/outreach-analytics', requireAdmin, async (req, res, next) => {
   try {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
     const analytics = await ReviewService.getOutreachAnalytics({ days });
+
+    // Digital-card QR scans (short_codes kind='card') — the PASSIVE review ask
+    // that rides each customer's business card, surfaced alongside the active
+    // outreach funnel. Windowed count comes from the per-click rows (human
+    // clicks only — bots never get a short_code_clicks row).
+    let cardScans = null;
+    try {
+      const totals = await db('short_codes')
+        .where({ kind: 'card' })
+        .select(
+          db.raw('COUNT(*)::int as cards'),
+          db.raw('COALESCE(SUM(click_count), 0)::int as scans'),
+        )
+        .first();
+      const windowRow = await db('short_code_clicks')
+        .join('short_codes', 'short_code_clicks.short_code_id', 'short_codes.id')
+        .where('short_codes.kind', 'card')
+        .where('short_code_clicks.clicked_at', '>=', new Date(Date.now() - days * 24 * 3600000))
+        .count('* as count')
+        .first();
+      cardScans = {
+        cards: Number(totals?.cards || 0),
+        scans: Number(totals?.scans || 0),
+        windowScans: parseInt(windowRow?.count || 0, 10),
+        days,
+      };
+    } catch { /* short-code tables may not exist in older envs */ }
+
     // Tell the client whether automated cadences are live so it can hide the
     // Start-Cadence affordance when the gate is off (one-off sends still work).
-    res.json({ ...analytics, reviewSequencesEnabled: isEnabled('reviewSequences') });
+    res.json({ ...analytics, cardScans, reviewSequencesEnabled: isEnabled('reviewSequences') });
   } catch (err) { next(err); }
 });
 

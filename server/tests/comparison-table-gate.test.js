@@ -68,11 +68,182 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && f.severity === 'P0')).toBe(true);
   });
 
+  test('educational species-comparison headers are NOT phantom businesses (prod 2026-07 false positives)', () => {
+    const t = `<ComparisonTable
+  columns={["Feature","Real Brown Recluse","Southern House Spider (common SWFL lookalike)"]}
+  rows={[
+    { label: "Violin marking", values: ["Distinct","Faint or absent"] },
+    { label: "Eye pattern", values: ["6 eyes in pairs","8 eyes"] }
+  ]}
+  caption="How to tell a brown recluse from its most common SWFL lookalike." />`;
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: false });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('generic attribute/question headers ("Type", "Typical protection", "Kid-safe?") are not businesses', () => {
+    const t = `<ComparisonTable
+  columns={["Bait station","Type","Typical protection","Kid-safe?"]}
+  rows={[
+    { label: "Placement", values: ["Indoor","Perimeter","Locked housing"] }
+  ]}
+  caption="Choosing a bait station." />`;
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: false });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('a DIY-method header ("Bleach + Google") is not a business; a business-shaped one in the same table still is', () => {
+    const clean = `<ComparisonTable
+  columns={["Approach","Bleach + Google","Professional treatment"]}
+  rows={[{ label: "Cost", values: ["Low upfront","Quote-based"] }]}
+  caption="DIY vs professional German-roach control." />`;
+    const r1 = gate.evaluate(wrap(clean), { namedCompetitorEnabled: false });
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r1.pass).toBe(true);
+
+    const withBiz = clean.replace('Professional treatment', 'Gulf Coast Bug Busters');
+    const r2 = gate.evaluate(wrap(withBiz), { namedCompetitorEnabled: false });
+    expect(r2.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    expect(r2.pass).toBe(false);
+  });
+
   test('a web-search-style business name (industry suffix, not allowlisted) used as a column fails closed', () => {
     const t = CATEGORY_TABLE.replace('National chain', 'Acme Pest Control');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
     expect(r.pass).toBe(false);
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+  });
+
+  test('generic lawn-care CATEGORY headers are not phantom businesses (Codex round-2 P2)', () => {
+    for (const header of ['DIY lawn care', 'Professional lawn care', 'quarterly pest control']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
+  test('Title-Cased modifier-led service names read as NAMES and fail closed (Codex round-8 P1)', () => {
+    // "National Pest Control" / "May Pest Control" are company-name shapes;
+    // the category exemption requires sentence/lower casing. A Title-Cased
+    // "DIY Lawn Care" column routes to review too — cheap, reversible.
+    for (const header of ['National Pest Control', 'May Pest Control', 'DIY Lawn Care', 'Acme Rodent Removal', 'Acme Pest Treatment']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('suffix-less franchise brands are recognized via the curated signal list (Codex round-2 P1)', () => {
+    // Unambiguous brand tokens only. English-word brands ("Lawn Doctor",
+    // "Bug Out") are deliberately NOT signals in any casing — see the
+    // competitor-facts comment; they false-block title-cased headings.
+    for (const brand of ['TruGreen', 'Mosquito Joe', 'Greenix']) {
+      const t = CATEGORY_TABLE.replace('National chain', brand);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    }
+  });
+
+  test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
+    for (const body of [
+      'Why Ants Bug Out After Rain. Palmetto bugs scatter when the barrier is fresh. No table.',
+      'When to Call a Lawn Doctor: signs your turf needs a pro diagnosis. No table.',
+    ]) {
+      const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(true);
+      expect(r.findings).toHaveLength(0);
+    }
+  });
+
+  test('digit-led provider headers fail closed (Codex round-5 P2)', () => {
+    for (const header of ['360 Pest Control', '911 pest control']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('quality-adjective service names fail closed — real companies are named that way (Codex round-7 P1)', () => {
+    for (const header of ['Quality Pest Control', 'Affordable Pest Control', 'Eco Pest Control', 'Local Pest Control']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('punctuated, excluded-word-led, and bare-suffix provider headers fail closed (Codex round-6 P1s)', () => {
+    for (const header of ['A+ Pest Control', 'Acme-Pest Control', 'Spring Green Lawn Care', 'Mosquito Squad', 'Bug Busters', 'Termite Specialists']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('lowercase business-shaped headers still fail closed (Codex round-3 P1)', () => {
+    for (const header of ['acme pest control', 'acme lawn care']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('seasonal lawn-care copy is not a phantom business — headers or prose (Codex round-3 P2)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'Spring lawn care');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+
+    const prose = gate.evaluate({ body: 'Spring lawn care is unreliable without irrigation tuned first. No table here.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
+  });
+
+  test('lowercase generic phrases never match the case-sensitive brand signals (Codex round-3 P2)', () => {
+    const prose = gate.evaluate({ body: 'If turf keeps thinning, ask a lawn doctor to diagnose it, or bug out the crawl space screens. No table.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
+  });
+
+  test('geo lawn-care education in prose is not a disparaged business (Codex round-4 P2)', () => {
+    const prose = gate.evaluate({ body: 'Sarasota lawn care is unreliable without irrigation tuned first. No table here.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
+  });
+
+  test('month-led PROVIDER names in prose stay detectable (Codex round-4 P1)', () => {
+    const r = gate.evaluate({ body: 'May Pest Control is dishonest. No table here.' }, { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('lowercase legal-entity headers fail closed (Codex round-4 P2)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', "bob's bugs llc");
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+  });
+
+  test('ALL-CAPS styling of a curated case-sensitive alias is still recognized (Codex round-4 P2)', () => {
+    // "Rodent Solutions" is an allowlisted competitor detected via aliasesCS;
+    // an uppercased table heading is the same brand.
+    const t = CATEGORY_TABLE.replace('National chain', 'RODENT SOLUTIONS');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+  });
+
+  test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'Acme Lawn Care');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION' && /Acme Lawn Care/.test(f.message))).toBe(true);
   });
 
   test('finding D: a service-named business option is not swallowed by the category regex', () => {

@@ -181,6 +181,43 @@ describe('late-payment email sidecar', () => {
     }));
   });
 
+  test('renders a real date when service_date is a Date object (pg date column), never "Invalid Date"', async () => {
+    // Regression: pg returns `date` columns as JS Date objects; the old
+    // string-concat render produced "Invalid Date" and the SMS guard
+    // blocked the send (prod incident 2026-07-10).
+    const activeCustomer = customer();
+    const openInvoice = invoice({ service_date: new Date('2026-05-12T00:00:00Z') });
+
+    setDbQueues({
+      customers: [chain({ result: [activeCustomer] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: openInvoice.id, token: openInvoice.token } }),
+        chain({ first: openInvoice }),
+        chain({ first: openInvoice }),
+      ],
+      sms_log: [
+        chain({ first: { count: '0' } }),
+        chain({ first: null }),
+      ],
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'late_payment_7d',
+      expect.objectContaining({
+        service_date_clause: ' completed on May 12, 2026',
+      }),
+      expect.anything(),
+    );
+    const vars = renderSmsTemplate.mock.calls[0][1];
+    expect(JSON.stringify(vars)).not.toContain('Invalid Date');
+  });
+
   test.each([
     ['late_payment_7d', 'billing_late_payment_7_day', 7],
     ['late_payment_14d', 'billing_late_payment_14_day', 14],

@@ -19,6 +19,7 @@ const SearchConsole = require('./search-console-v2');
 const MODELS = require('../../config/models');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { publicPortalUrl } = require('../../utils/portal-url');
+const { parseLooseJson } = require('../../utils/llm-json');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -118,7 +119,9 @@ class SEOAdvisor {
 
       const response = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        max_tokens: 4000,
+        // 8000: the weekly schema has 8 array sections and a verbose week can
+        // exceed 4000, truncating the JSON mid-structure (the "Grade: ?" alerts).
+        max_tokens: 8000,
         system: `You are an SEO analyst specializing in local service businesses (pest control, lawn care) in Southwest Florida. You review Google Search Console, Google Business Profile, and web performance data weekly and provide specific, actionable SEO recommendations.
 
 BUSINESS CONTEXT:
@@ -199,11 +202,11 @@ Analyze and provide specific, prioritized recommendations.`
         }]
       });
 
-      let report;
-      try {
-        report = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-      } catch {
-        report = { raw: response.content[0].text, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse.' };
+      const rawText = response.content[0].text;
+      let report = parseLooseJson(rawText);
+      if (!report) {
+        logger.warn(`[seo-advisor] weekly report JSON parse failed (len=${String(rawText).length}); head: ${String(rawText).slice(0, 300)}`);
+        report = { raw: rawText, parse_error: true, grade: '?', overall_assessment: 'Report generated but could not parse.' };
       }
 
       report.date = etDateString();

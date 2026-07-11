@@ -533,6 +533,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
+  // rows: same phone, compatible identity, zero billing/portal artifacts);
+  // everything ambiguous stays in the /admin/customers/duplicates review
+  // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
+  // opt-in in every environment). Every merge is journaled + admin-notified.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    if (!isEnabled('customerDedupeAutoMerge')) return;
+    logger.info('Running: Customer duplicate auto-merge sweep');
+    try {
+      // runExclusive: read-then-act — an overlapping tick could pick the same
+      // loser row before the first merge soft-deletes it.
+      await runExclusive('customer-dedupe-auto-merge', async () => {
+        const { runAutoMergeSweep } = require('./customer-dedupe');
+        const result = await runAutoMergeSweep();
+        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+      });
+    } catch (err) {
+      logger.error(`Customer dedupe sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
@@ -997,6 +1020,27 @@ function initScheduledJobs() {
       await runExclusive('voice-corpus-miner', () => mineVoiceCorpus({ sinceDays: 3 }));
     } catch (err) {
       logger.error(`Voice-corpus miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 3:15AM ET — Voice-profile distiller (brand-voice loop,
+  // Loop 2). Distills the redacted corpus into a style-only voice profile,
+  // parked as a PENDING voice_profiles row for one-click approval in the
+  // Agents hub — nothing auto-applies. One DEEP call per run; skips itself
+  // when a pending profile awaits review or no new corpus accrued.
+  // =========================================================================
+  cron.schedule('15 3 * * 0', async () => {
+    if (!isEnabled('voiceProfileDistiller')) return;
+    logger.info('Running: Voice-profile distiller');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { distillVoiceProfile } = require('./voice-profile-distiller');
+      const result = await runExclusive('voice-profile-distiller', () => distillVoiceProfile());
+      if (result?.skipped) logger.info(`[voice-profile] run skipped: ${result.skipped}`);
+      else if (result?.version) logger.info(`[voice-profile] run complete: v${result.version} pending review`);
+    } catch (err) {
+      logger.error(`Voice-profile distiller failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1605,6 +1649,80 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // A decision-linked scheduled reply must clear TWO fire-time
+          // re-checks (the send-time checks ran at enqueue, potentially hours
+          // ago, and pre-rollout cards never saw the price rule at all):
+          //   (a) its anchoring inbound is still the newest on the thread;
+          //   (b) non-human-authored agent text carries no price quote.
+          // Either failure → block this queued row, retire the claimed
+          // decision, reopen parked siblings — in ONE thread-locked
+          // transaction over FRESHLY read metadata: the cancel route can
+          // transfer parked ids onto this row after our claim, and those must
+          // reopen here, not sit invisible until orphan recovery.
+          if (claimMeta.agent_decision_id) {
+            const suggest = require('./sms-suggest-mode');
+            const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
+            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
+            if (anchorStale || pricedAgentText) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+              const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
+              // Everything under the lock, metadata read THROUGH the trx
+              // AFTER acquiring it — the cancel route can transfer parked
+              // ids onto this row right up until we hold the lock. strict
+              // retirement: a failure rolls the whole cleanup back (row
+              // stays 'sending' for the recovery rail) instead of
+              // committing a blocked SMS whose decision is still claimed.
+              await db.transaction(async (trx) => {
+                await suggest.lockSuggestThread(trx, threadKey);
+                const freshRow = await trx('sms_log').where({ id: msg.id }).first('metadata');
+                let freshMeta = freshRow?.metadata;
+                if (typeof freshMeta === 'string') {
+                  try { freshMeta = JSON.parse(freshMeta); } catch { freshMeta = {}; }
+                }
+                freshMeta = freshMeta || {};
+                await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                });
+                await suggest.supersedeStaleDecision({
+                  decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
+                  fromStatus: 'scheduled',
+                  note: anchorStale
+                    ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
+                    : 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.',
+                  dbi: trx,
+                  strict: true,
+                });
+                // Reopen only siblings whose OWN anchor is still current —
+                // a card parked before the newer inbound is just as stale
+                // as the one we retired, and reopening it would resurface a
+                // stale actionable card beside the fresh one.
+                const parked = Array.isArray(freshMeta.parked_decision_ids) ? freshMeta.parked_decision_ids : [];
+                for (const parkedId of parked) {
+                  const parkedStale = await suggest.suggestionAnchorIsStale({ decisionId: parkedId, dbi: trx, excludeSmsLogId: msg.id });
+                  if (parkedStale) {
+                    await suggest.supersedeStaleDecision({
+                      decisionId: parkedId,
+                      fromStatus: 'scheduled',
+                      note: 'A newer customer message arrived while this suggestion was parked — review the thread.',
+                      dbi: trx,
+                      strict: true,
+                    });
+                  } else {
+                    await suggest.reopenScheduledSuggestions({
+                      decisionIds: [parkedId],
+                      reason: 'The scheduled reply ahead of this suggestion did not go out — review the thread.',
+                      dbi: trx,
+                    });
+                  }
+                }
+              });
+              logger.warn(`[scheduled-sms] ${msg.id} blocked (${blockedReason}): linked agent decision retired, parked suggestions rechecked`);
+              continue;
+            }
+          }
+
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
           if (!toPhone) {
             // Refresh-required row whose current customer phone can't be
@@ -3693,6 +3811,27 @@ function initScheduledJobs() {
       await runUnassignedOverdueCheck();
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // Call-ingest completeness watchdog — every 30 min, diff Twilio's own call
+  // ledger against call_log and ring an admin bell for any answered inbound
+  // call the pipeline never received (webhook outage / misrouted number).
+  // Born from the 2026-07 reconciliation that found 391 Feb–Mar calls (and
+  // 11 later stragglers, incl. real booked jobs) silently never ingested.
+  // Dark behind GATE_CALL_INGEST_WATCHDOG; read-only against Twilio.
+  // See server/services/call-ingest-watchdog.js.
+  // =========================================================================
+  cron.schedule('7,37 * * * *', async () => {
+    try {
+      const { runCallIngestWatchdog } = require('./call-ingest-watchdog');
+      const result = await runCallIngestWatchdog();
+      if (!result.skipped && (result.missed > 0 || result.alerted > 0)) {
+        logger.warn(`[call-ingest-watchdog] scanned=${result.scanned} missed=${result.missed} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-ingest watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

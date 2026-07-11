@@ -31,7 +31,7 @@ import BrandFooter from '../components/BrandFooter';
 import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
-import PaymentPreferenceButtons from '../components/estimate/PaymentPreferenceButtons';
+import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
@@ -67,7 +67,7 @@ import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDi
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
-import { PRICE_FONT, W } from '../components/estimate/tokens';
+import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
 const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
@@ -561,16 +561,140 @@ function HeaderTailSkeleton() {
   );
 }
 
-function NotFoundCard() {
+// extensionEligible comes from the /data 404 body: the server only sets it
+// when the token maps to a real, published estimate that died of expiry (and
+// the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
+// grow a button that can only fail. First click self-serves a 7-day
+// extension (the server texts the refreshed link too); once the lifetime
+// auto-grant is used, later clicks just notify the office. onExtended lets
+// the parent re-fetch /data — the link is live again after an auto-grant.
+function NotFoundCard({ token = null, extensionEligible = false, onExtended = null }) {
+  // idle | sending | extended | requested | failed. Terminal states render
+  // even if a parent re-fetch flips extensionEligible off (a successful
+  // auto-grant makes the estimate viewable again, which does exactly that).
+  const [requestState, setRequestState] = useState('idle');
+  const [newExpiresAt, setNewExpiresAt] = useState(null);
+  // The server reports whether the estimate_extended SMS/email actually went
+  // out (no phone or email on file / opt-out / suppression / gates / template
+  // inactive all block them) — only claim channels that really fired.
+  const [smsSent, setSmsSent] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+
+  const requestExtension = async () => {
+    if (requestState !== 'idle' && requestState !== 'failed') return;
+    setRequestState('sending');
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/extension-request`, { method: 'POST' });
+      if (!r.ok) throw new Error(`extension_request_failed_${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      if (body.autoExtended === true) {
+        setNewExpiresAt(body.expiresAt || null);
+        setSmsSent(body.smsSent === true);
+        setEmailSent(body.emailSent === true);
+        setRequestState('extended');
+      } else {
+        setRequestState('requested');
+      }
+    } catch {
+      setRequestState('failed');
+    }
+  };
+
+  const freshLinkSentence = smsSent && emailSent
+    ? ' We also texted and emailed you a fresh link.'
+    : smsSent
+      ? ' We also texted you a fresh link.'
+      : emailSent
+        ? ' We also emailed you a fresh link.'
+        : '';
+
+  // ET, matching the SMS and every other estimate-expiry surface — a
+  // West-Coast browser must not show a "through" date a day earlier than
+  // the deadline the text message quotes.
+  const expiryLabel = newExpiresAt
+    ? new Date(newExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+    : null;
+
+  // A granted extension flips the whole card's story: the estimate is live
+  // again, so the "unavailable / call us" framing would contradict the
+  // outcome the customer just got.
+  const extendedNow = requestState === 'extended';
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       <div style={{ fontSize: 34 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        This link may have expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
-        and we'll get you sorted.
+      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+        {extendedNow ? "You're all set" : 'Estimate unavailable'}
       </div>
+      {!extendedNow ? (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          This link may have expired or isn't valid. Call us at{' '}
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+          and we'll get you sorted.
+        </div>
+      ) : null}
+      {token && (extensionEligible || requestState !== 'idle') ? (
+        requestState === 'extended' ? (
+          <>
+            <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+              Your estimate has been extended{expiryLabel ? ` through ${expiryLabel}` : ' by 7 days'}.
+              {freshLinkSentence}
+            </div>
+            {onExtended ? (
+              <button
+                type="button"
+                onClick={onExtended}
+                style={{
+                  minHeight: 48,
+                  border: 0,
+                  borderRadius: 10,
+                  padding: '0 24px',
+                  marginTop: 16,
+                  background: ESTIMATE_BUTTON_BG,
+                  color: COLORS.white,
+                  fontSize: 15,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                View your estimate
+              </button>
+            ) : null}
+          </>
+        ) : requestState === 'requested' ? (
+          <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
+            Request sent — we've let our office know you'd like more time on this estimate. We'll reach out shortly.
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={requestExtension}
+              disabled={requestState === 'sending'}
+              style={{
+                minHeight: 48,
+                border: 0,
+                borderRadius: 10,
+                padding: '0 24px',
+                marginTop: 20,
+                background: ESTIMATE_BUTTON_BG,
+                color: COLORS.white,
+                fontSize: 15,
+                fontWeight: 800,
+                cursor: requestState === 'sending' ? 'not-allowed' : 'pointer',
+                opacity: requestState === 'sending' ? 0.8 : 1,
+              }}
+            >
+              {requestState === 'sending' ? 'Extending…' : 'Request an extension'}
+            </button>
+            {requestState === 'failed' ? (
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
+                We couldn't extend that just now — give us a call and we'll get it done over the phone.
+              </div>
+            ) : null}
+          </>
+        )
+      ) : null}
     </div>
   );
 }
@@ -649,9 +773,12 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
            every line: the glass auto-tier tags small text as caption/fine
            and uppercases short names as eyebrows, which split this block
            across different faces — the block styles itself. */
-        <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
+        /* Slightly tighter + smaller than the 07-09 pass (owner ask
+           2026-07-10): 17px/gap-4 read too heavy against the new
+           per-application price cards. */
+        <div style={{ marginTop: 14, display: 'grid', gap: 2 }}>
           {[nameLine, ...contactLines].filter(Boolean).map((line) => (
-            <div key={line} data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{line}</div>
+            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>{line}</div>
           ))}
         </div>
       ) : null}
@@ -739,7 +866,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       {metrics.length ? (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
+          // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
+          // the third tile onto its own row); any other count keeps the
+          // responsive auto-fit grid (4 wraps 2×2 on phones).
+          gridTemplateColumns: metrics.length === 3
+            ? 'repeat(3, 1fr)'
+            : 'repeat(auto-fit, minmax(132px, 1fr))',
           gap: 12,
           marginTop: 16,
         }}>
@@ -1393,11 +1525,12 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
 // Tap either to switch mode — slider, add-ons, and price card respond
 // to the mode change (one-time hides slider + add-ons, shows one-time
 // price card content).
-function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
+function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false }) {
   const pillBase = {
     padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
-    cursor: 'pointer', border: 'none', textAlign: 'center', flex: 1,
+    cursor: disabled ? 'wait' : 'pointer', border: 'none', textAlign: 'center', flex: 1,
     transition: docTransition('background', 'color'),
+    opacity: disabled ? 0.65 : 1,
   };
   return (
     <div style={{
@@ -1408,6 +1541,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
     }}>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('recurring')}
         style={{
           ...pillBase,
@@ -1417,6 +1551,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange }) {
       >Recurring Pest Control</button>
       <button
         type="button"
+        disabled={disabled}
         onClick={() => onChange('one_time')}
         style={{
           ...pillBase,
@@ -1524,10 +1659,28 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
+// Stable identity for a one-time breakdown row — the exclusion handshake
+// between the embedded per-service rows and the standalone card below.
+// The identity is the FULL row (service + label + amount + quote state),
+// never `service` alone: two rows can share a service (a priced embedded
+// install and a quote-required sibling), and a service-only key would drop
+// the unembedded sibling from the standalone card so its Quote Required row
+// never renders. Serviceless legacy rows (termite "Advance Installation")
+// still key on label+amount. Contribution items are the same row objects as
+// the breakdown items server-side, so fields match on both sides.
+export function oneTimeRowIdentityKey(item = {}) {
+  const label = String(item?.label || item?.name || item?.displayName || '').trim().toLowerCase();
+  const amount = Number(item?.amount ?? item?.price);
+  const quoteState = item?.quoteRequired === true || item?.kind === 'quote_required' ? 'qr' : '';
+  return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
+}
+
 export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+  // excludeServices accepts plain service keys (setup-fee callers) and
+  // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((item) => !excluded.has(item?.service));
+    .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
@@ -1565,7 +1718,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
             }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
-                  {item.label || 'One-time service'}
+                  {customerOneTimeLabel(item)}
                 </div>
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
@@ -2000,7 +2153,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           We won&rsquo;t charge you today. Your card is charged the final total after your visit is completed.
           A {feeText} fee applies only if you cancel within {windowText} or aren&rsquo;t home.
-          {' '}Credit cards add a small processing fee; debit and bank cards don&rsquo;t.
+          {' '}{CARD_SURCHARGE_DISCLOSURE}
         </div>
         <div ref={mountRef} />
         {error ? (
@@ -2122,7 +2275,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
   );
 }
 
-function SuccessCard({ acceptResult }) {
+export function SuccessCard({ acceptResult }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -2211,7 +2364,12 @@ function SuccessCard({ acceptResult }) {
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           {bookingUrl
-            ? 'Check your phone for the booking link, or pick your appointment now.'
+            ? (acceptResult?.alreadyAccepted
+              // Already-accepted retry: /accept returns a fresh booking URL
+              // but does NOT re-send the SMS — don't promise a text that
+              // never went out; the on-screen button is the real path.
+              ? 'This estimate was already accepted — pick your appointment now.'
+              : 'Check your phone for the booking link, or pick your appointment now.')
             : 'Our team will follow up to help schedule your appointment.'}
         </div>
         {bookingUrl ? (
@@ -2231,7 +2389,12 @@ function SuccessCard({ acceptResult }) {
         You're booked.
       </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        Check your phone for the confirmation text. Our team will confirm the schedule.
+        {/* A retry of an already-accepted estimate returns the full success
+            payload with alreadyAccepted: true — the original confirmation
+            text may not re-send, so don't promise one. */}
+        {acceptResult?.alreadyAccepted
+          ? 'This estimate was already accepted — you\'re all set. Our team will confirm the schedule.'
+          : 'Check your phone for the confirmation text. Our team will confirm the schedule.'}
       </div>
     </div>
   );
@@ -2254,6 +2417,24 @@ export function DraftPreviewBanner() {
         This is the exact page the customer will get. Booking, payment, and
         requests stay disabled until the estimate is sent.
       </div>
+    </div>
+  );
+}
+
+// Shared failure banner for the reserve/accept/deposit/card-hold flow.
+// Accept-path failures land the customer back in the REVIEW phase, not just
+// configure, so both branches must render it — a review-phase 500 used to
+// show nothing at all.
+function EstimateErrorBanner({ error }) {
+  if (!error) return null;
+  return (
+    <div style={{
+      background: '#fee', borderRadius: 12, padding: 12,
+      border: `1px solid ${W.red}`, marginBottom: 16,
+      color: W.red, fontSize: 14,
+    }}>
+      Something went wrong: {error}. Try again or call{' '}
+      <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
     </div>
   );
 }
@@ -2381,6 +2562,168 @@ function ReviewBeforeBookingCard({ reason }) {
   );
 }
 
+// Service-related card headlines (owner directive 2026-07-10): every service
+// box leads with copy about ITS service — the generic "Same protection" line
+// only survives as the fallback for unmapped/bundle sections. Pest keeps its
+// original line.
+const SERVICE_CARD_HEADLINES = {
+  pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
+  mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
+  termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
+  lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
+  tree_shrub: 'Tree & Shrub Care by Waves — ornamental protection through the seasons',
+  foam_recurring: 'Targeted Foam Treatment by Waves — recurring protection at the source',
+  rodent_bait: 'Rodent Defense by Waves — exterior stations monitored on schedule',
+  palm_injection: 'Palm Care by Waves — injection care timed to your palms',
+};
+
+// One-time work that belongs to a service renders INSIDE that service's box
+// (owner directive 2026-07-10: the Advance Installation lives with Termite
+// Bait Monitoring, not in a detached card). Plain charges only — quote-
+// required and waiver rows stay on the standalone breakdown card paths.
+// Per-service "send me the full details" row (GATE_SERVICE_DETAILS_PDF,
+// renderFlags.showServiceDetailsRequest). Customer-initiated transactional
+// send to the contact info ALREADY on the estimate — the destination is
+// never chosen client-side. Only services with a packet defined server-side
+// render the row (SERVICE_DETAILS_KEYS mirrors SERVICE_DETAILS_COPY).
+const SERVICE_DETAILS_KEYS = new Set(['pest_control', 'mosquito', 'termite_bait', 'lawn_care', 'tree_shrub']);
+
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false }) {
+  const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
+  if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
+  const send = async (channel) => {
+    if (state.status === 'sending') return;
+    setState({ status: 'sending', channel, message: '' });
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: serviceKey, channel }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.ok) {
+        setState({ status: 'error', channel, message: body.error || 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+        return;
+      }
+      setState({ status: 'sent', channel, message: '' });
+    } catch {
+      setState({ status: 'error', channel, message: 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+    }
+  };
+  const sentLabel = state.channel === 'email'
+    ? `Sent! Check ${customerEmail || 'your email'}.`
+    : 'Sent! Check your texts for the link.';
+  return (
+    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.45, marginBottom: 10 }}>
+        Want the fine print? Get the full details PDF — how visits work, every product with its label &amp; safety sheet.
+      </div>
+      {state.status === 'sent' ? (
+        <div style={{ fontSize: 14, fontWeight: 700, color: W.green }}>
+          <span aria-hidden="true" style={{ marginRight: 6 }}>&#10003;</span>{sentLabel}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {customerEmail ? (
+            <button
+              type="button"
+              disabled={disabled || state.status === 'sending'}
+              onClick={() => send('email')}
+              style={{
+                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
+                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
+                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              {state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
+            </button>
+          ) : null}
+          {customerPhone ? (
+            <button
+              type="button"
+              disabled={disabled || state.status === 'sending'}
+              onClick={() => send('sms')}
+              style={{
+                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
+                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
+                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              {state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
+            </button>
+          ) : null}
+        </div>
+      )}
+      {state.status === 'error' ? (
+        <div style={{ fontSize: 14, color: W.noticeText, fontWeight: 600, marginTop: 8 }}>{state.message}</div>
+      ) : null}
+    </div>
+  );
+}
+
+// Customer-facing one-time labels: product names mean nothing to customers —
+// "Advance Installation" / "Trelona Installation" render as "Termite Bait
+// Installation" (owner 2026-07-10); the detail line keeps stations/LF.
+function customerOneTimeLabel(item = {}) {
+  const label = String(item.label || '').trim();
+  const isTermiteInstall = item.service === 'termite_bait_installation'
+    || /\b(advance|trelona)\s+installation\b/i.test(label);
+  if (isTermiteInstall) return 'Termite Bait Installation';
+  return label || 'One-time service';
+}
+
+function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
+  const items = Array.isArray(contribution?.items)
+    ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+    : [];
+  if (!items.length) return null;
+  const lead = variant === 'lead';
+  // Owner copy (2026-07-10, investment framing): the termite install price
+  // reads as a sentence, not a bare figure — "$639 gets every station in the
+  // ground." Only the lead-variant termite install gets sentence treatment.
+  const isTermiteInstall = (item) => item?.service === 'termite_bait_installation'
+    || /\binstallation\b/i.test(String(item?.label || ''));
+  return (
+    <div style={lead
+      ? { margin: '16px 0 4px' }
+      : { borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      {/* No "One-time services" header inside a service box (owner
+          2026-07-10) — the rows speak for themselves. */}
+      <div style={{ display: 'grid', gap: 10 }}>
+        {items.map((item, i) => {
+          const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
+          if (lead && isTermiteInstall(item)) {
+            return (
+              <div key={`${item.service || item.label || 'item'}-${i}`}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                  {amount} gets every station in the ground.
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={`${item.service || item.label || 'item'}-${i}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                {amount}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -2396,6 +2739,8 @@ export function ServiceSection({
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
+  oneTimeEmbed = null,
+  serviceDetailsRequest = null,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2427,58 +2772,89 @@ export function ServiceSection({
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
 
+  // The synthetic unsplittable multi-service section (key 'bundle') keeps
+  // waveGuardTierEligible=true whenever ANY member service is eligible, but
+  // badging it would resurrect the deleted plan-level badge on the whole
+  // "Recurring services" card (owner directive: recurring pest + mosquito
+  // lines badge individually ONLY) — real per-service sections only.
+  const sectionTierEligible = section?.waveGuardTierEligible !== false && section?.key !== 'bundle';
+  const showTierBadge = !!waveGuardTier && sectionTierEligible;
   return (
     <section>
       {/* Frequency choice + price live in ONE shadow-box card, same
           treatment as every other section (owner: "all boxes should
           render like" the Waves AI card). */}
-      <div style={estimateCard()}>
+      <div style={estimateCard({ position: 'relative' })}>
+        {/* WaveGuard membership badge pinned to the box's top-right corner
+            (owner directive 2026-07-10 — was inline next to the price). */}
+        {showTierBadge ? (
+          <span style={{
+            position: 'absolute', top: 16, right: 16,
+            display: 'inline-block', padding: '4px 12px',
+            ...waveGuardChipStyle(waveGuardTier),
+            borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+            whiteSpace: 'nowrap',
+          }}>
+            WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
+          </span>
+        ) : null}
         {servicesLength > 1 ? (
           <h3 style={{
             fontSize: 18,
             color: ESTIMATE_TEXT,
             margin: '0 0 16px',
+            // Keep clear of the absolutely-positioned corner badge.
+            paddingRight: showTierBadge ? 140 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
           </h3>
         ) : null}
 
+        {/* Every service box leads with its own service-related headline —
+            the "HOW OFTEN?" eyebrow is gone and no-selector services
+            (termite monitoring) get a headline too (owner 2026-07-10). */}
+        <h2 style={{
+          fontSize: 20, fontWeight: 500, lineHeight: 1.2,
+          color: '#1B2C5B', margin: '0 0 4px',
+          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 140,
+        }}>
+          {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
+        </h2>
         {showSlider ? (
-          <div>
-            {/* Section header for the cadence choice (owner 2026-07-06). */}
-            <div style={{
-              fontSize: 12, fontWeight: 700, color: '#475569',
-              textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-            }}>
-              How often?
+          <GlassFrequencyPills
+            frequencies={frequencies}
+            selected={selectedFrequencyKey}
+            onChange={(next) => onFrequencyChange(section.key, next)}
+            disabled={disabled}
+          />
+        ) : null}
+
+        {/* Termite reads install-first (owner copy 2026-07-10, investment
+            framing): stations go in once, then the bridge line hands off to
+            the monitoring price so the two figures read as ONE plan. */}
+        {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
+          <>
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#1B2C5B', margin: '14px 0 0' }}>
+              Monitoring is what keeps them working:
             </div>
-            <h2 style={{
-                            fontSize: 20, fontWeight: 500, lineHeight: 1.2,
-              color: '#1B2C5B', margin: '0 0 4px',
-            }}>
-              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
-                  cadence selector labeled "Pest Protection" reads like the
-                  wrong quote, so every other section (incl. the synthetic
-                  'bundle' key, slug null) keeps the generic wording (codex
-                  rd3). */}
-              {sectionSlug === 'pest_control'
-                ? 'Pest Protection by Waves — ride the wave that fits your home'
-                : 'Same protection — pick the rhythm that fits your home'}
-            </h2>
-            <GlassFrequencyPills
-              frequencies={frequencies}
-              selected={selectedFrequencyKey}
-              onChange={(next) => onFrequencyChange(section.key, next)}
-              disabled={disabled}
-            />
-          </div>
+          </>
         ) : null}
 
         {current ? (
           <PriceCard
             frequency={current}
-            waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
+            // Every eligible section badges its own card — multi-service
+            // plans no longer hoist one plan-level badge (owner directive
+            // 2026-07-10). The server's waveGuardTierEligible flag keeps
+            // palm/rodent cards badge-free, and the synthetic 'bundle'
+            // fallback section never badges (see sectionTierEligible).
+            waveGuardTier={sectionTierEligible ? waveGuardTier : null}
+            // The card corner carries the badge now — PriceCard keeps the
+            // tier only for its per-row service tags.
+            showTierBadge={false}
+            preferPerApplicationPrice={['pest_control', 'mosquito', 'termite_bait'].includes(sectionSlug)}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -2487,6 +2863,28 @@ export function ServiceSection({
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
+          />
+        ) : null}
+
+        {/* One-time work belonging to THIS service lives inside its service
+            box — multi-service plans no longer detach it into a separate card
+            (owner 2026-07-10). Termite renders its install ABOVE the price
+            (lead variant above); everything else trails the price block. */}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} />}
+
+        {serviceDetailsRequest ? (
+          <ServiceDetailsRequestRow
+            token={serviceDetailsRequest.token}
+            // RAW section key, not the glass slug: the slug normalizes
+            // commercial keys (commercial_mosquito → mosquito) into buttons
+            // whose POST the server rejects — it checks the estimate's
+            // canonical recurring keys. Unsupported keys hide the row.
+            serviceKey={section.key}
+            customerEmail={serviceDetailsRequest.customerEmail}
+            customerPhone={serviceDetailsRequest.customerPhone}
+            // Only the submit-phase lock disables the request — the
+            // mirror-section cadence lock (section `disabled`) must not.
+            disabled={serviceDetailsRequest.disabled === true}
           />
         ) : null}
 
@@ -2522,11 +2920,21 @@ export function ServiceSection({
   );
 }
 
+// Phases where slot (re)selection must be inert: 'submitting' has a
+// reserve/accept in flight, 'review' holds a live reservation, 'success' is
+// booked. 'configure' / 'slot_conflict' / 'reservation_expired' stay out of
+// this set — those render the picker for the customer to (re)pick a slot,
+// and every path back to them clears the reservation first.
+const SLOT_SELECTION_LOCKED_PHASES = new Set(['submitting', 'review', 'success']);
+
 export default function EstimateViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Set from the /data 404 body — true only when the server confirms this
+  // token is a real published estimate that expired (see NotFoundCard).
+  const [extensionEligible, setExtensionEligible] = useState(false);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -2557,7 +2965,21 @@ export default function EstimateViewPage() {
   // the data endpoint loads.
   const [serviceMode, setServiceMode] = useState('recurring');
   const [paymentPreference, setPaymentPreference] = useState(null);
-  const [ctaPhase, setCtaPhase] = useState('configure');
+  const [ctaPhase, setCtaPhaseState] = useState('configure');
+  // Mirrors ctaPhase SYNCHRONOUSLY. ctaPhase is React state, so async work
+  // started before a phase change — e.g. a SlotPicker AI slot search —
+  // captures the OLD phase in its closure: when it resolved mid-submission
+  // (or after the page entered review with a live reservation) its
+  // selectSlot(null) passed the state guard and cleared the slot the
+  // in-flight accept / held reservation was committing. The ref object is
+  // stable across renders, so even a stale callback reads the live value.
+  // Every phase transition goes through setCtaPhase below, keeping the ref
+  // in lockstep on all submit/exit paths.
+  const ctaPhaseRef = useRef('configure');
+  const setCtaPhase = useCallback((phase) => {
+    ctaPhaseRef.current = phase;
+    setCtaPhaseState(phase);
+  }, []);
   const [reservation, setReservation] = useState(null);
   const [acceptResult, setAcceptResult] = useState(null);
   const [error, setError] = useState(null);
@@ -2726,6 +3148,8 @@ export default function EstimateViewPage() {
     }
     const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
     if (r.status === 404) {
+      const notFoundBody = await r.json().catch(() => ({}));
+      setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
       setNotFound(true);
       setLoading(false);
       return;
@@ -2735,6 +3159,11 @@ export default function EstimateViewPage() {
       throw new Error(`estimate fetch failed: ${r.status}`);
     }
     initialViewCountedRef.current = true;
+    // A load can succeed AFTER a 404 set notFound — the expired-screen
+    // extension auto-grant revives the estimate and re-fetches — so clear
+    // the dead-end state or the loaded data would render the NotFoundCard.
+    setNotFound(false);
+    setExtensionEligible(false);
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
@@ -2822,6 +3251,12 @@ export default function EstimateViewPage() {
   }, [reservation]);
 
   const onToggleAddOn = useCallback(async (sectionKey, key) => {
+    // Live-ref submit lock (mirror of the SlotPicker onSelect guards): the
+    // disabled prop freezes the rendered toggles, but a callback retained
+    // from before the submit — or a keyboard/synthetic change that skips the
+    // disabled attribute — must not reprice the estimate underneath an
+    // in-flight reserve/accept.
+    if (ctaPhaseRef.current === 'submitting') return;
     // Draft preview: PUT /preferences persists into estimate_data, and the
     // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
     // longer active" message reads like a broken draft. Explain instead.
@@ -3176,10 +3611,15 @@ export default function EstimateViewPage() {
     setCtaPhase('configure');
     setReservation(null);
     setPaymentPreference(null);
-    // Don't clear selectedSlotId — the customer may want to retry with
-    // the same slot if the reservation call succeeded. Reservation row
-    // still exists server-side for up to 15 min; the commit-on-accept
-    // is idempotent.
+    setError(null);
+    // Don't clear selectedSlotId — the customer usually goes back to tweak
+    // something and continues with the same slot. The hold stays live
+    // server-side (up to 15 min) and is intentionally NOT released here:
+    // continuing re-POSTs /reserve, which is idempotent for the customer's
+    // own same-slot hold (returns/refreshes it) and supersedes it when a
+    // different slot is picked. A /reserve 409 therefore still means a
+    // genuine conflict (someone else holds the slot) and keeps its
+    // slot_conflict handling.
   }, []);
 
   // Entering review (and success) swaps the tall configure page for a much
@@ -3245,7 +3685,28 @@ export default function EstimateViewPage() {
     );
   }
   if (notFound || !data) {
-    return <Page><NotFoundCard /></Page>;
+    return (
+      <Page>
+        <NotFoundCard
+          token={token}
+          extensionEligible={extensionEligible}
+          onExtended={() => {
+            // Refresh semantics, NOT a first load: the initial 404 never
+            // marked the view counted, so a bare loadEstimate() would flip
+            // loading=true — swapping this card for the skeleton, stranding
+            // the skeleton forever on a network rejection, and losing the
+            // "You're all set" state on a 5xx. As a refresh the card stays
+            // up until /data actually 200s (then the live estimate renders
+            // in place); on failure nothing changes and the card—with its
+            // success copy and retry button—survives. The server counts the
+            // revived estimate's first real view regardless (?refresh=1 is
+            // only honored once viewed_at is set).
+            initialViewCountedRef.current = true;
+            loadEstimate().catch(() => {});
+          }}
+        />
+      </Page>
+    );
   }
 
   const { estimate, pricing, cta } = data;
@@ -3393,19 +3854,9 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
-          {/* Multi-service plans show the WaveGuard tier ONCE, above the
-              boxes on the left — not repeated in every card. */}
-          {services.length > 1 && waveGuardTier && combinedTierEligible ? (
-            <div style={{ marginBottom: 12 }}>
-              <span style={{
-                display: 'inline-block', padding: '4px 12px',
-                background: '#EEF2FF', color: COLORS.blueDeeper,
-                borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-              }}>
-                WaveGuard {glassContent ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-              </span>
-            </div>
-          ) : null}
+          {/* The plan-level WaveGuard badge is gone (owner directive
+              2026-07-10) — the membership shows on each eligible service's
+              own card (recurring pest / mosquito) instead. */}
 
           {/* Multi-service plans stack vertically (owner directive) —
               each service keeps its own boxed price section. */}
@@ -3448,6 +3899,15 @@ export default function EstimateViewPage() {
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
+                // Multi-service plans embed each service's one-time work in
+                // its own box; single-service keeps the afterPrice breakdown.
+                oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
+                // Details-packet request buttons (dark gate). Live estimates
+                // only — the read-only accepted recap and staff draft preview
+                // must not offer customer sends.
+                serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly && !adminDraftPreview
+                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled }
+                  : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
                 // Glass removes the customize section everywhere — including
@@ -3484,9 +3944,25 @@ export default function EstimateViewPage() {
               breakdown={pricing.oneTimeBreakdown}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
-              excludeServices={(pricing.firstVisitFees || [])
-                .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
-                .map((fee) => fee.service)}
+              // Items embedded inside their own service box
+              // (section.oneTimeContribution) are excluded — this card only
+              // keeps one-time work that has no rendered service section,
+              // and hides entirely when nothing is left.
+              excludeServices={[
+                ...(pricing.firstVisitFees || [])
+                  .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
+                  .map((fee) => fee.service),
+                // Identity keys, not bare service strings — embedded rows
+                // without a `service` (label-normalized termite installs)
+                // must still be excluded or they'd total twice. Mirror
+                // SectionOneTimeBlock's quote-required filter: rows it
+                // refuses to render never actually embed, so excluding them
+                // here would make the required work vanish from the page
+                // entirely instead of showing its "Quote Required" row.
+                ...services.flatMap((s) => (s?.oneTimeContribution?.items || [])
+                  .filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+                  .map((item) => oneTimeRowIdentityKey(item))),
+              ]}
               prepayWaivedServices={prepayWaivedServices}
             />
           ) : null}
@@ -3513,6 +3989,12 @@ export default function EstimateViewPage() {
                   addOns={frequency?.addOns || []}
                   selectedKeys={selectedAddOns[section.key] || new Set()}
                   onToggle={(key) => onToggleAddOn(section.key, key)}
+                  // This one-time configure layout is what renders while
+                  // ctaPhase is 'submitting' (reserve/accept in flight) — a
+                  // toggle mid-submit would reprice the booking underneath
+                  // the request. readOnly is false on this branch, so this
+                  // is exactly the submit lock.
+                  disabled={cardsDisabled}
                 />
               );
             })
@@ -3721,6 +4203,10 @@ export default function EstimateViewPage() {
               ReviewPhase, and anchoring the group leaves the confirm action
               below the fold on mobile (Codex #2545). */}
           <div id={REVIEW_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+          {/* Inside the scroll anchor so a failed confirm scrolls the error
+              into view along with the confirm card. Cleared on every retry
+              (performAccept/handleConfirm) and on Go back (handleReviewCancel). */}
+          <EstimateErrorBanner error={error} />
           <ReviewPhase
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
@@ -3735,7 +4221,7 @@ export default function EstimateViewPage() {
             manualScheduling={!!reservation?.manualScheduling}
             serviceMode={serviceMode}
             depositNote={serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime
-              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. Credit cards add a small processing fee; debit and bank cards don't.`
+              ? `A card on file holds your visit — not charged today. We charge the final total after completion; a ${fmtMoney(data.cardHoldPolicy.noShowFeeAmount)} fee applies only if you cancel within ${data.cardHoldPolicy.cancelWindowHours} hours or aren't home. ${CARD_SURCHARGE_DISCLOSURE}`
               : ((data?.depositPolicy?.required || (serviceMode === 'one_time' && data?.depositPolicy?.requiredForOneTime))
                 ? (invoiceOnlyAccept
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
@@ -3776,6 +4262,10 @@ export default function EstimateViewPage() {
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
+              // The configure layout is what renders while ctaPhase is
+              // 'submitting' (reserve/accept in flight) — a mode flip
+              // mid-submit would clear the slot the request is committing.
+              disabled={ctaPhase === 'submitting'}
               onChange={(m) => {
                 reserveAttemptRef.current += 1;
                 setServiceMode(m);
@@ -3809,20 +4299,38 @@ export default function EstimateViewPage() {
 
           <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {canShowSlotPicker ? (
-              <SlotPicker
-                token={token}
-                askToken={estimate.askToken}
-                selectedSlotId={selectedSlotId}
-                onSelect={setSelectedSlotId}
-                onSelectMeta={setSelectedSlotMeta}
-                selectedSlotFallbackMeta={selectedSlotMeta}
-                licenseNumber={estimate.licenseNumber}
-                refreshSignal={slotsRefreshSignal}
-                serviceMode={serviceMode}
-                selectedFrequency={selectedFrequency}
-                onFirstSlotDate={setFirstSlotDate}
-                cityLabel={estimateCity}
-              />
+              // SlotPicker takes no disabled prop, so freeze it from out here
+              // while a reserve/accept is in flight (ctaPhase 'submitting'
+              // renders this configure layout): pointer-events blocks taps,
+              // the guarded handlers block keyboard selection, and the wrapper
+              // stays mounted either way so the slot fetch doesn't restart.
+              // The handler guards read ctaPhaseRef, NOT ctaPhase — a slot
+              // search started before the submit retains a callback with the
+              // old phase in its closure, and only the ref stays live there.
+              // They reject on every locked phase, not just 'submitting': a
+              // pre-reserve search can also resolve after the page enters
+              // review (or after a failed accept returns to review), where
+              // its selectSlot(null) would clear the slot behind the
+              // still-live reservation.
+              <div
+                aria-disabled={ctaPhase === 'submitting' || undefined}
+                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+              >
+                <SlotPicker
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedSlotId={selectedSlotId}
+                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
+                  selectedSlotFallbackMeta={selectedSlotMeta}
+                  licenseNumber={estimate.licenseNumber}
+                  refreshSignal={slotsRefreshSignal}
+                  serviceMode={serviceMode}
+                  selectedFrequency={selectedFrequency}
+                  onFirstSlotDate={setFirstSlotDate}
+                  cityLabel={estimateCity}
+                />
+              </div>
             ) : (
               <AcceptanceModeCard acceptance={acceptance} />
             )}
@@ -3878,16 +4386,7 @@ export default function EstimateViewPage() {
             </div>
           ) : null}
 
-          {error ? (
-            <div style={{
-              background: '#fee', borderRadius: 12, padding: 12,
-              border: `1px solid ${W.red}`, marginBottom: 16,
-              color: W.red, fontSize: 14,
-            }}>
-              Something went wrong: {error}. Try again or call{' '}
-              <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: W.red }}>{WAVES_PHONE_DISPLAY}</a>.
-            </div>
-          ) : null}
+          <EstimateErrorBanner error={error} />
 
           {/* Glass-ordered tail (approved section positioning): why-price-
               custom with its lock-in CTA, reviews with the join CTA, the app
@@ -3947,7 +4446,6 @@ export default function EstimateViewPage() {
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
           priceLabel={stickyBarPrice.label}
-          periodLabel={stickyBarPrice.period}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />

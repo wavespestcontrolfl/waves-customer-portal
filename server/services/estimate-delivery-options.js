@@ -28,11 +28,17 @@ function validateEstimateDeliveryOptions({
     }
   }
   if (billByInvoice && oneTimeAmount <= 0 && recurringAmount <= 0
-    && !hasBillableCommercialProposal(estimateData)) {
+    && !hasBillableCommercialProposal(estimateData)
+    && !estimateDataHasQuoteRequirement(estimateData)) {
     // A commercial proposal carries its pricing in estimate_data.proposal
     // (the top-level totals stay 0), and its first invoice is built from the
     // proposal lines on win (#1917) — so a billable proposal satisfies the
-    // "billable total" requirement here.
+    // "billable total" requirement here. A quote-required (manual-quote)
+    // draft's totals are likewise zero BY DESIGN until the operator authors
+    // the proposal lines — the estimator's commercial handoff saves exactly
+    // such a draft on its way to the proposal builder. An unbillable draft
+    // can be neither sent nor won, so invoice mode may ride along until the
+    // proposal PUT prices it.
     return 'Bill by invoice requires a billable recurring or one-time total.';
   }
   return null;

@@ -576,13 +576,17 @@ async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = an
 // ── Report loader ───────────────────────────────────────────────────────────────
 
 async function photoUrl(photo) {
-  // Prefer a stored direct URL; otherwise presign the S3 key (same view-URL helper
-  // the lawn report uses) so the customer report's photo cards actually render.
-  if (photo.url) return photo.url;
+  // Presign from the S3 key FIRST — a stored photo.url can be a stale
+  // presign from write time and 403 later; the stored URL only remains as
+  // the fallback for legacy rows that never got a key.
   if (photo.s3_key && PhotoService && !String(photo.s3_key).startsWith('pending/')) {
-    try { return await PhotoService.getViewUrl(photo.s3_key, 15 * 60); } catch { return null; }
+    try {
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the stored URL */
+    }
   }
-  return null;
+  return photo.url || null;
 }
 
 function formatAssessmentScores(row) {

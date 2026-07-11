@@ -116,8 +116,13 @@ ${recentSMS || 'None'}`
     // Alert Adam for critical customers
     if (health.churn_risk === 'critical' && TwilioService && process.env.ADAM_PHONE) {
       try {
+        // Null-safe header: leads/one-time customers have no tier or monthly
+        // rate — the old interpolation rendered "Sam null (null $null/mo)".
+        const alertName = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'Customer';
+        const alertRate = customer.monthly_rate ? `$${customer.monthly_rate}/mo` : '';
+        const alertMeta = [customer.waveguard_tier, alertRate].filter(Boolean).join(' ');
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `🚨 CHURN ALERT: ${customer.first_name} ${customer.last_name} (${customer.waveguard_tier} $${customer.monthly_rate}/mo)\nHealth: ${health.overall_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
+          `🚨 CHURN ALERT: ${alertName}${alertMeta ? ` (${alertMeta})` : ''}\nHealth: ${health.overall_score}/100\nRisk: ${riskFactors[0]?.value || 'Multiple signals'}\nAction: ${outreach.outreach_type.toUpperCase()} — "${(outreach.message || '').substring(0, 100)}..."`,
           { messageType: 'internal_alert' }
         );
       } catch (err) {

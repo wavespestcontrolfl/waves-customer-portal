@@ -77,11 +77,61 @@ function hasAffirmativeRoachMention(text) {
 // exact catalog pick. Each maps to a service_key that must exist in the
 // loaded catalog (missing/inactive keys are simply skipped), so a rule can
 // never book a service the catalog doesn't offer.
+// Rodent intent → the right catalog service (owner directive 2026-07-10:
+// map coarse rodent calls to real catalog rows by intent, never a made-up
+// label). Most-specific first — inspection wins over trapping wins over a
+// general rodent call. A rodent mention with no specific action defaults to
+// the general "Rodent Pest Control Service".
+const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
+// Rodent mentions get the same affirmative-only treatment as roaches: "not
+// rats, it's ants" and "we had mice last time but now need spiders treated"
+// describe what the visit is NOT for, and must not anchor the booking to a
+// rodent catalog row. Same negation window as NEGATED_ROACH_RE (negation word
+// + up to four plain-word fillers, adversative conjunctions excluded so
+// "don't have ants but rats are everywhere" keeps its affirmative mention)
+// and the same both-order historical strip — EXCEPT the trailing direction:
+// "rats showed up two days ago" is a CURRENT problem with an onset time, not
+// history, so the noun→"ago" strip refuses to cross an onset verb (showed/
+// started/came/…). "We had rats a year ago" has no onset verb between the
+// mention and "ago" and still strips.
+const RODENT_NOUN = "(?:rodents?|rats?|mouse|mice)";
+const RODENT_ONSET_VERBS = "(?:showed|shows?|showing|started|starting|began|begun|appeared|appearing|noticed|spotted|saw|seen|found|heard|moved|came|come|coming|returned|arrived|got|gotten|turned|popped|since)";
+// A contrast cue between a history phrase and the rodent noun means the noun
+// is the CURRENT problem, not the history: "Last visit we treated ants, now I
+// have mice" books mice. The leading-direction strip refuses to cross one.
+const RODENT_CONTRAST_CUES = "(?:now|but|today|currently|this\\s+time)";
+// The negation consumes COORDINATED nouns too ("no mice or rats", "not rats
+// and mice") — without the trailing group, "no mice or rats, just ants"
+// strips only "no mice" and the surviving "rats" reads as affirmative.
+const NEGATED_RODENT_RE = new RegExp(`\\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|never|without)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RODENT_NOUN}\\b(?:(?:\\s*,\\s*(?:or|and|nor)\\s+|\\s*,\\s*|\\s+(?:or|and|nor)\\s+)${RODENT_NOUN}\\b)*`, 'gi');
+const HISTORICAL_RODENT_RE = new RegExp(`\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)\\b(?:(?!\\b${RODENT_CONTRAST_CUES}\\b)[^.!?\\n]){0,40}?${RODENT_NOUN}\\b`, 'gi');
+const RODENT_HISTORICAL_RE = new RegExp(`\\b${RODENT_NOUN}\\b(?:(?!\\b${RODENT_ONSET_VERBS}\\b)[^.!?\\n]){0,40}?\\b(?:last\\s+(?:time|visit|year)|previous(?:ly)?|in\\s+the\\s+past|ago)\\b`, 'gi');
+
+function hasAffirmativeRodentMention(text) {
+  const cleaned = String(text || '')
+    .replace(NEGATED_RODENT_RE, ' ')
+    .replace(HISTORICAL_RODENT_RE, ' ')
+    .replace(RODENT_HISTORICAL_RE, ' ');
+  return RODENT_RE.test(cleaned);
+}
+
 const KEYWORD_SERVICE_RULES = [
   {
     serviceKey: 'cockroach_control',
     matches: hasAffirmativeRoachMention,
   },
+  // "inspection"/"inspect(s)" only — NOT "inspector": "the home inspector
+  // found rats, I need trapping" is a trapping call, and the prefix match
+  // would book (and price) an inspection before the trapping rule runs.
+  { serviceKey: 'rodent_inspection', matches: (h) => hasAffirmativeRodentMention(h) && /\binspect(?:ion)?s?\b/i.test(h) },
+  // Trap + seal prefers the dedicated bundle SKU (7% bundle pricing, its own
+  // duration); the older rodent_exclusion key is the fallback when the bundle
+  // row is absent/inactive (missing keys are skipped, so ordering does this).
+  { serviceKey: 'rodent_trapping_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_exclusion', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_trapping', matches: (h) => hasAffirmativeRodentMention(h) && /\btrap/i.test(h) },
+  { serviceKey: 'rodent_exclusion_only', matches: (h) => hasAffirmativeRodentMention(h) && /\bexclu|seal/i.test(h) },
+  { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
 async function loadBookableCallServices(conn) {

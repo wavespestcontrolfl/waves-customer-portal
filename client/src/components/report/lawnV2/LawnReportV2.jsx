@@ -367,10 +367,12 @@ export function LawnPhotoStrip({ photos = [], summary = null }) {
           >
             {pics.map((p, i) => (
               <figure key={i} style={{ margin: 0, flex: '0 0 100%', scrollSnapAlign: 'center' }}>
+                {/* Eager on purpose: these are presigned URLs, and lazy
+                    deferred the fetch until after they expired — swiped-to
+                    slides rendered blank (owner-reported). ≤5 photos. */}
                 <img
                   src={p.url}
                   alt={p.label || 'Lawn photo'}
-                  loading="lazy"
                   style={{ width: '100%', height: 240, objectFit: 'cover', borderRadius: 12, border: `1px solid ${BORDER}`, display: 'block' }}
                 />
                 {p.label ? <figcaption style={{ fontSize: 12, color: MUTED, marginTop: 6 }}>{p.label}</figcaption> : null}
@@ -717,7 +719,8 @@ export function MowingHeightGauge({ mowing = {} }) {
       ) : null}
       {photoUrl ? (
         <figure style={{ margin: hasGauge ? '16px 0 0' : 0 }}>
-          <img src={photoUrl} alt="On-site lawn length" loading="lazy"
+          {/* Eager: presigned URL — see LawnPhotoStrip. */}
+          <img src={photoUrl} alt="On-site lawn length"
             style={{ width: '100%', borderRadius: 10, display: 'block', border: `1px solid ${COLORS.greenLight}` }} />
           <figcaption style={{ marginTop: 6, fontSize: 12, color: MUTED }}>On-site lawn length</figcaption>
         </figure>

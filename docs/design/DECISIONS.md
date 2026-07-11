@@ -1545,6 +1545,14 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 
 **Verification.** vite build clean; client vitest 45 suites, 441 tests green. Client-only one-file diff (plus this log). Not rendered end-to-end: this container has no DATABASE_URL/backend, so the completion flow could not be driven live.
 
+## 2026-07-10 — Glass UI: card material drops to solid on mobile (claude/glass-ui-mobile-scroll-tac5f1)
+
+**Context.** Owner (lawn service report on iPhone, screenshots): the glass UI looks great, but scrolling on mobile feels wrong — the inner glass rectangles look weird while the page moves. Root cause: `backdrop-filter: blur()` re-composites whatever sits behind each card on every scroll frame, so against the fixed scene the card interiors visibly smear/shimmer during touch scrolling; on top of that, touch fires the desktop `:hover` lift mid-scroll, so cards jump under the finger. Owner ruled the glass comes off the mobile version.
+
+**Change.** CSS-only, the two glass-system files. `glass-theme.css`: the ≤640px block (previously just a blur reduction) now removes the material — `data-glass` surfaces render near-solid white `rgba(255,255,255,0.93)` (the same surface the existing `@supports not (backdrop-filter)` fallback uses), backdrop-filter off, the specular `::before`/`::after` sheens dropped, and the card/chip hover-lift transforms disabled. Gold `data-glass-accent` CTAs keep their gradient over an opaque `rgb(240,165,0)` base. Modals + scrim keep the glass — the page cannot scroll under an open dialog, so they never show the artifact. The scene (mesh, orbs, grain) and every width above 640px are untouched. `glass-components.css`: the same de-glass for the estimate chrome (freq pills, scarcity badge, tech chip, proof strip, sticky book bar, section CTAs). One shared material, so this covers every glass surface at once: service/lawn/pest/project reports, portal, pay pages, login, estimates.
+
+**Verification.** Rendered live against the vite dev server in headless Chromium: at 390px the cards compute `backdrop-filter: none`, solid background, sheen `display: none`; at desktop width the full material (blur 32px, translucent card, sheen) is unchanged. `check:portal-brand` clean; glass-engine vitest 9/9 green. No gate — owner-requested visual fix; revert = revert commit.
+
 ## 2026-07-10 — Sent estimates become editable in place: revise keeps the customer's link (claude/edit-sent-estimates-s4ltd5)
 
 **Context.** Owner (lead screen screenshot, Beverly Carter): a lead's estimate had already been created and viewed, and the customer then asked to add lawn care — but nothing in the portal could edit a sent estimate's services or pricing. The only re-pricing surface was the commercial-proposal editor (wrong shape: it converts the row to COMMERCIAL), so the workaround was create-new + archive-old, which changes the customer's link. Owner asked for true in-place editing.

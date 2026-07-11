@@ -1,10 +1,28 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const NotificationService = {
   // Create a notification
   async create({ recipientType, recipientId, category, title, body, icon, link, metadata }) {
     try {
+      // Demo/internal test accounts (App Store review account) must not ring
+      // the admin bell — their bounce alerts and junk service requests are
+      // noise. Central gate: emitters carry the customer id in metadata,
+      // either top-level or nested under a trigger payload (sms_reply uses
+      // threadId = customer id). Push dispatch for triggers is separately
+      // gated in notification-triggers.js.
+      const metaCid = metadata?.customerId || metadata?.customer_id
+        || metadata?.payload?.customerId || metadata?.payload?.customer_id
+        || metadata?.payload?.threadId;
+      if (recipientType === 'admin' && isInternalTestCustomerId(metaCid)) {
+        logger.info(`[notifications] Suppressed admin notification for internal test customer (${category})`);
+        // TRUTHY sentinel, not null: callers treat null as "insert failed"
+        // (requests.js logs an ops error; the estimate-extension route
+        // releases its claim and 500s). Intentional suppression must read
+        // as success-without-a-row.
+        return { id: null, suppressed: true };
+      }
       const [notif] = await db('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,

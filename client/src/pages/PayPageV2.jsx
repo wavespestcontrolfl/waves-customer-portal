@@ -99,6 +99,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
 import { getStripe } from '../lib/stripeLoader';
+import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -462,7 +463,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
     setSyncingAmount(true);
     setAmountSyncError(false);
     try {
-      const res = await fetch(`${API_BASE}/pay/${token}/update-amount`, {
+      const res = await fetchWithNetworkRetry(`${API_BASE}/pay/${token}/update-amount`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -895,7 +896,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         return;
       }
 
-      const quoteRes = await fetch(`${API_BASE}/pay/${token}/quote`, {
+      const quoteRes = await fetchWithNetworkRetry(`${API_BASE}/pay/${token}/quote`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ paymentMethodId: paymentMethod.id }),

@@ -16,6 +16,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(asyn
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');
 const NotificationService = require('../services/notification-service');
+const { getAppointmentContacts } = require('../services/customer-contact');
 const AppointmentReminders = require('../services/appointment-reminders');
 
 const { apptChannel, deliverAppointmentNotice, deliverConfirmationByChannel, getReminderPrefs } = AppointmentReminders._test;
@@ -41,6 +42,7 @@ const args = (extra = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   AppointmentEmail.sendAppointmentReminderEmail.mockResolvedValue({ ok: true });
+  getAppointmentContacts.mockImplementation(() => []);
   db.mockImplementation(() => chain());
   db.raw = jest.fn((sql) => sql);
 });
@@ -266,5 +268,93 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(reached).toBe(true);
     expect(smsAttempt).toHaveBeenCalledTimes(1);
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
+  });
+});
+
+// A table-aware db mock: distinct rows for customers / notification_prefs /
+// sms_log / messaging_suppression so the false-positive guard can be
+// exercised. The sms_log and messaging_suppression chains are phone-aware —
+// they capture the last-10-digits whereRaw binding and answer per number, so
+// tests can distinguish the primary phone from a service contact's. Unlisted
+// tables resolve first() to null (the notifications dedupe check finds no
+// prior alert).
+function tableAwareDb({ customer = null, prefs = null, deliveredByDigits = {}, suppressedDigits = [] } = {}) {
+  return (table) => {
+    const q = chain();
+    if (table === 'customers') {
+      q.first = jest.fn(async () => customer);
+    } else if (table === 'notification_prefs') {
+      q.first = jest.fn(async () => prefs);
+    } else if (table === 'sms_log' || table === 'messaging_suppression') {
+      let digits = null;
+      q.whereRaw = jest.fn((sql, bindings) => { digits = bindings?.[0]; return q; });
+      q.first = jest.fn(async () => {
+        if (table === 'sms_log') return deliveredByDigits[digits] || null;
+        return suppressedDigits.includes(digits) ? { phone: digits } : null;
+      });
+    }
+    return q;
+  };
+}
+
+describe('alertNoReachableChannel — text-reachable false-positive guard', () => {
+  const cust = { id: 'c1', phone: '+19412345678', first_name: 'Adam', last_name: 'Pitts' };
+  const primaryContact = { phone: '+19412345678', email: '', name: 'Adam', role: 'primary' };
+  const svcContact = { phone: '+19419998877', email: '', name: 'Tenant', role: 'service_contact' };
+
+  test('suppresses the alert when a recent delivered SMS proves the recipient is text-reachable', async () => {
+    getAppointmentContacts.mockReturnValue([primaryContact]);
+    db.mockImplementation(tableAwareDb({ customer: cust, deliveredByDigits: { 9412345678: { id: 'sms1' } } }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('still alerts when there is no delivered SMS on file (genuinely unreachable)', async () => {
+    getAppointmentContacts.mockReturnValue([primaryContact]);
+    db.mockImplementation(tableAwareDb({ customer: cust }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('still alerts when the delivered number has since been suppressed (STOP / wrong number)', async () => {
+    getAppointmentContacts.mockReturnValue([primaryContact]);
+    db.mockImplementation(tableAwareDb({
+      customer: cust,
+      deliveredByDigits: { 9412345678: { id: 'sms1' } },
+      suppressedDigits: ['9412345678'],
+    }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('still alerts when the customer has SMS disabled, despite a past delivery', async () => {
+    getAppointmentContacts.mockReturnValue([primaryContact]);
+    db.mockImplementation(tableAwareDb({
+      customer: cust,
+      prefs: { sms_enabled: false },
+      deliveredByDigits: { 9412345678: { id: 'sms1' } },
+    }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test("still alerts when the notice routes to a service contact with no delivered SMS, even though the owner's primary phone has one", async () => {
+    getAppointmentContacts.mockReturnValue([svcContact]);
+    db.mockImplementation(tableAwareDb({
+      customer: cust,
+      deliveredByDigits: { 9412345678: { id: 'sms1' } },
+    }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('suppresses when the service-contact recipient itself has a recent delivered SMS', async () => {
+    getAppointmentContacts.mockReturnValue([svcContact]);
+    db.mockImplementation(tableAwareDb({
+      customer: cust,
+      deliveredByDigits: { 9419998877: { id: 'sms2' } },
+    }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 });

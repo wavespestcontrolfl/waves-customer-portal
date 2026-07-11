@@ -349,10 +349,22 @@ export default function PublicBookingPage() {
           // as pricing_estimate_id so it never influences identity resolution.
           pricing_estimate_id: estimateIdParam || undefined,
           estimate_token: estimateTokenParam || undefined,
+          // Accept-retry correlation — pure passthrough of the URL's
+          // estimate_id; the server validates it (uuid shape + existence)
+          // and stamps scheduled_services.source_estimate_id. Never used
+          // for identity resolution.
+          source_estimate_id: estimateIdParam || undefined,
           slot_date: selectedDate,
           slot_start: selectedSlot.start_time,
           slot_end: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id,
+          // Server-signed offer from the availability response — pure
+          // passthrough; /confirm rejects slots it never offered without it.
+          slot_sig: selectedSlot.slot_sig,
+          // Catalog id the availability request was made with — the server
+          // re-derives the signed service scope (and the visit duration)
+          // from this, so it must match what step 2 fetched slots for.
+          service_id: service.id,
           service_type: quotedServiceLabel || service.label,
           quoted_service_label: quotedServiceLabel || null,
           duration_minutes: service.duration,
