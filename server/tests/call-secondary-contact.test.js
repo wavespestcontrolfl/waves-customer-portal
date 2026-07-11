@@ -483,7 +483,7 @@ describe('persistCallSecondaryContact', () => {
       email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
     };
     const extracted = {
-      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer' },
+      secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
     };
     const res = validatePhoneCallAppointmentCustomer(base, extracted, '+14074933469');
     expect(res.missing).not.toContain('email');
@@ -494,7 +494,7 @@ describe('persistCallSecondaryContact', () => {
 
     // Array form (1.4.0 secondary_contacts) works too.
     const resArr = validatePhoneCallAppointmentCustomer(base, {
-      secondary_contacts: [{ first_name: 'Leslie', email: 'lferraro@hotmail.com', role: 'home_buyer' }],
+      secondary_contacts: [{ first_name: 'Leslie', email: 'lferraro@hotmail.com', role: 'home_buyer', wants_notifications: true }],
     }, '+14074933469');
     expect(resArr.missing).not.toContain('email');
 
@@ -502,9 +502,23 @@ describe('persistCallSecondaryContact', () => {
     // arrives via the RESOLVED contacts param (resolveCallSecondaryContacts),
     // not the legacy extracted fields.
     const resResolved = validatePhoneCallAppointmentCustomer(base, {}, '+14074933469', [
-      { first_name: 'Joseph', email: 'joseph.haught89431@gmail.com', role: 'home_buyer' },
+      { first_name: 'Joseph', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
     ]);
     expect(resResolved.missing).not.toContain('email');
+  });
+
+  test('a secondary email WITHOUT notification intent does NOT satisfy the requirement (access contact)', () => {
+    // persistCallSecondaryContact skips wants_notifications !== true, so this
+    // email would never be stored or notified — letting it pass validation
+    // would auto-create an appointment with no deliverable email anywhere.
+    const base = {
+      first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
+      email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
+    };
+    const res = validatePhoneCallAppointmentCustomer(base, {
+      secondary_contact: { first_name: 'Rigo', email: 'rigo@example.com', role: 'home_seller', wants_notifications: false, notes: 'access contact' },
+    }, '+14074933469');
+    expect(res.missing).toContain('email');
   });
 
   test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {

@@ -2104,13 +2104,20 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // resolvedSecondaryContacts (resolveCallSecondaryContacts output) folds in
   // contacts that exist only in the V2 payload — without it a realtor/lender
   // call where V2 captured the buyer email but V1 did not still fails here.
+  // Notification intent required: persistCallSecondaryContact only stores
+  // contacts with wants_notifications === true, so only those can ever
+  // RECEIVE the appointment email — an access-contact email captured for the
+  // record (wants_notifications false) must not let the booking pass with no
+  // deliverable address anywhere. Mirrors the implicit guarantee of the
+  // slotEmail leg (slots are only written for notification-intent contacts).
   const secondaryCandidates = [
     extracted.secondary_contact,
     ...(Array.isArray(extracted.secondary_contacts) ? extracted.secondary_contacts : []),
     ...(Array.isArray(resolvedSecondaryContacts) ? resolvedSecondaryContacts : []),
   ];
   const extractedSecondaryEmail = secondaryCandidates
-    .map((c) => (c && typeof c === 'object' ? String(c.email || '').trim().toLowerCase() : ''))
+    .filter((c) => c && typeof c === 'object' && c.wants_notifications === true)
+    .map((c) => String(c.email || '').trim().toLowerCase())
     .find((e) => EMAIL_RE.test(e)) || null;
   const merged = {
     firstName: customer.first_name || extracted.first_name || null,
