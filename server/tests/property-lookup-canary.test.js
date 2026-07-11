@@ -84,6 +84,9 @@ beforeEach(() => {
   mockLookupByParcel.mockResolvedValue(healthyRecord());
   // Default: the bell write lands. Tests that exercise failed delivery override.
   mockTriggerNotification.mockResolvedValue({ bellWritten: true, push: null });
+  // The timeout path runs a browser-UA diagnostic probe against the county
+  // host — stub fetch so unit tests never touch the network.
+  global.fetch = jest.fn(async () => ({ ok: true, status: 200 }));
 });
 
 describe('evaluateGoldenRecord', () => {
@@ -223,11 +226,26 @@ describe('runPropertyLookupCanary', () => {
 
     const n3 = await runPropertyLookupCanary();
     expect(n3.ok).toBe(false);
-    expect(n3.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (timeout) — 3 nights running');
+    // A timeout now carries the browser-UA probe verdict in the detail.
+    const streakRe = /^Sarasota golden parcel: by-parcel lookup threw \(timeout\) — browser-UA probe: .+ — 3 nights running$/;
+    expect(n3.failures.some((f) => streakRe.test(f))).toBe(true);
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
     expect(mockTriggerNotification).toHaveBeenCalledWith('property_lookup_canary_failed', {
-      failures: ['Sarasota golden parcel: by-parcel lookup threw (timeout) — 3 nights running'],
+      failures: [expect.stringMatching(streakRe)],
     });
+  });
+
+  it('a blocked (non-2xx) browser-UA probe does NOT claim UA-scoring', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 403 }));
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortError();
+      return healthyRecord();
+    });
+    const n1 = await runPropertyLookupCanary();
+    const detail = n1.suppressed.find((s) => s.includes('Sarasota'));
+    expect(detail).toContain('HTTP 403');
+    expect(detail).toContain('blocked response');
+    expect(detail).not.toContain('UA-scoring likely');
   });
 
   it('fails closed when the canary state table is unavailable — a transient pages immediately', async () => {
@@ -238,7 +256,7 @@ describe('runPropertyLookupCanary', () => {
     });
     const result = await runPropertyLookupCanary();
     expect(result.ok).toBe(false); // can't suppress without the streak → page now
-    expect(result.failures).toContain('Sarasota golden parcel: by-parcel lookup threw (timeout) (canary state unavailable — escalated)');
+    expect(result.failures.some((f) => /^Sarasota golden parcel: by-parcel lookup threw \(timeout\) — browser-UA probe: .+ \(canary state unavailable — escalated\)$/.test(f))).toBe(true);
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
