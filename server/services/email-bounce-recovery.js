@@ -544,6 +544,17 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       // when we have one, e.g. a medium-confidence typo below the auto-send bar).
       if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other', 'has_attachments', 'address_no_longer_on_file'].includes(decision.status)) {
         await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
+        // Audio re-verification lane (gated, best-effort): the domain
+        // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
+        // "P-I-T-T-S"), but the source recording can settle them. Deliberately
+        // NOT awaited — re-transcription takes tens of seconds and this runs
+        // off the bounce webhook; the result is a Needs-Review card, nothing
+        // time-coupled to this handler.
+        try {
+          const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+          reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
+            .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
+        } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
       }
       logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
       return { skipped: decision.status };
