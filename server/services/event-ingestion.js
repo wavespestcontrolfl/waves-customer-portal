@@ -181,12 +181,45 @@ function externalIdFor(item) {
   return `${(item.title || '').slice(0, 100)}|${item.pubDate || ''}`.slice(0, 256);
 }
 
-// Escape bare ampersands that aren't already part of a valid entity.
-// Real-world WP feeds (The Gabber) ship titles like "Rock & Roll" unescaped;
-// rss-parser's strict sax backend fails the ENTIRE feed on one bad entity
-// ("Invalid character in entity name"), and it has no tolerant option.
+// Escape ampersands the XML parser can't resolve. Real-world WP feeds (The
+// Gabber) ship titles like "Rock & Roll" unescaped; rss-parser's strict sax
+// backend fails the ENTIRE feed on one bad entity ("Invalid character in
+// entity name"), and it has no tolerant option.
+//
+// Only the five XML-predefined entities and numeric references survive —
+// sax (strict) resolves nothing else, so an entity-SHAPED reference like
+// "AT&T;" or an HTML entity like "&nbsp;" would still kill the parse if
+// left alone. Escaping them costs at worst a literal "&nbsp;" in a title;
+// not escaping them costs the whole source.
+//
+// CDATA sections are opaque to the parser — entities inside them are NOT
+// expanded, so rewriting them would corrupt valid titles/links. Split on
+// CDATA (capture group keeps the sections at odd indexes) and escape only
+// the markup between them.
+const BARE_AMP_RE = /&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g;
 function escapeBareXmlEntities(xml) {
-  return xml.replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
+  return String(xml)
+    .split(/(<!\[CDATA\[[\s\S]*?\]\]>)/)
+    .map((segment, i) => (i % 2 === 1 ? segment : segment.replace(BARE_AMP_RE, '&amp;')))
+    .join('');
+}
+
+// Decode the response with its DECLARED charset. resp.text() always decodes
+// as UTF-8, which silently mojibakes ISO-8859-1 / Windows-1252 feeds (the
+// old parseURL path honored the Content-Type charset). Header wins; fall
+// back to the <?xml encoding="…"?> prolog; then UTF-8.
+function decodeXmlBody(buf, contentType) {
+  let charset = /charset=["']?([\w.-]+)/i.exec(contentType || '')?.[1];
+  if (!charset) {
+    const head = buf.subarray(0, 256).toString('latin1');
+    charset = /<\?xml[^>]*encoding=["']([\w.-]+)["']/i.exec(head)?.[1];
+  }
+  try {
+    return new TextDecoder(charset || 'utf-8', { fatal: false }).decode(buf);
+  } catch {
+    // Unknown/invalid charset label — UTF-8 is the least-wrong fallback.
+    return buf.toString('utf8');
+  }
 }
 
 async function pullRssSource(source) {
@@ -214,7 +247,7 @@ async function pullRssSource(source) {
       },
     });
     if (!resp.ok) throw new Error(`Status code ${resp.status}`);
-    xml = await resp.text();
+    xml = decodeXmlBody(Buffer.from(await resp.arrayBuffer()), resp.headers.get('content-type'));
   } finally {
     clearTimeout(timer);
   }
@@ -933,4 +966,5 @@ module.exports = {
   normalizeExtractedEvent,
   recoverEventObjectsFromTruncatedJson,
   escapeBareXmlEntities,
+  decodeXmlBody,
 };
