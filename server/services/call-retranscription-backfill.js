@@ -24,12 +24,12 @@
  *     retranscribe_attempts and retry on later runs, stamping permanently
  *     only after MAX_ATTEMPTS — an OpenAI outage must not burn the backlog.
  *
- * Candidates mirror the miner exactly: inbound, consent disclaimer played,
- * not wrong_number/spam (by outcome OR processing_status) — and at least 7
- * days old, past the live processor's longest retry horizon, so the live
- * lane and this job never contend for a row; the guarded UPDATE re-checks
- * still-undiarized so a live result is never clobbered. Self-terminating:
- * zero candidates → no-op. Spend bounded by the batch cap.
+ * Candidates: inbound, consent disclaimer played, not wrong_number/spam,
+ * at least 7 days old, AND in a processing state the live pipeline is
+ * provably done with (processed / fenced-out extraction_failed) — this job
+ * never contends with or mutates the live call state machine; the guarded
+ * UPDATE re-checks still-undiarized so a live result is never clobbered.
+ * Self-terminating: zero candidates → no-op. Spend bounded by the batch cap.
  *
  * PII: never log transcript bodies or full phone numbers.
  */
@@ -62,10 +62,16 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     // The miner drops wrong_number/spam — don't pay to transcribe them.
     // NULL outcome stays eligible (NOT IN is UNKNOWN on NULL).
     .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
-    // The live processor classifies spam/voicemail on processing_status
-    // WITHOUT stamping call_outcome — the outcome filter alone would pay to
-    // re-transcribe them and feed spam into the training corpus.
-    .where((q) => q.whereNull('processing_status').orWhereNotIn('processing_status', ['spam', 'voicemail']))
+    // ONLY states the live pipeline is provably done with (Codex r5):
+    // 'processed' rows are skipped by processRecording and never re-swept;
+    // 'extraction_failed' rows are past processAllPending's 7-day fence
+    // given the age filter above. Everything else (NULL/pending/
+    // no_transcription/stale processing) still BELONGS to the live sweep —
+    // however old — so this job never touches it, and spam/voicemail are
+    // excluded for free. no_transcription rows lose nothing: the sweep has
+    // retried them hourly with this same transcriber since the pipeline
+    // shipped; what is still untranscribed is unrescuable audio.
+    .whereIn('processing_status', ['processed', 'extraction_failed'])
     .select('id', 'recording_url', 'transcription', 'from_phone', 'to_phone', 'customer_id',
       'created_at', 'recording_duration_seconds', 'duration_seconds')
     .orderBy('created_at', 'desc')
@@ -136,14 +142,9 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
           transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
           transcription: text,
           retranscribed_at: dbi.fn.now(),
-          // TRAINING-ONLY: a sweep-eligible status (processAllPending picks
-          // up no_transcription unconditionally) plus a fresh transcript
-          // would resurrect this legacy call into live extraction/lead/
-          // appointment workflows. Park it as processed; terminal statuses
-          // (spam/voicemail/processed) are preserved as-is.
-          processing_status: dbi.raw(
-            "CASE WHEN processing_status IS NULL OR processing_status IN ('pending','no_transcription','extraction_failed','processing') THEN 'processed' ELSE processing_status END"
-          ),
+          // processing_status is deliberately untouched: candidates are
+          // restricted to states the live pipeline is done with, so there is
+          // nothing to park and no live state machine to disturb (Codex r5).
         });
       if (changed) {
         summary.upgraded += 1;

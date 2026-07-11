@@ -19,7 +19,7 @@ function makeFakeDbi(candidates, { attemptsAfterFailure = 1 } = {}) {
     }
     return builder;
   };
-  for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereNotIn', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orWhereNotIn', 'select', 'orderBy', 'limit']) {
     builder[m] = record(m);
   }
   builder.update = (patch) => {
@@ -66,9 +66,10 @@ describe('candidateQuery — mirrors the miner posture, clear of the live proces
     expect(flat).toMatch(/NOT ILIKE '%agent:%'/);
     expect(flat).toContain('["whereNull",["call_outcome"]]');
     expect(flat).toContain('["orWhereNotIn",["call_outcome",["wrong_number","spam"]]]');
-    // spam/voicemail live on processing_status WITHOUT a call_outcome stamp (Codex r3 P2)
-    expect(flat).toContain('["whereNull",["processing_status"]]');
-    expect(flat).toContain('["orWhereNotIn",["processing_status",["spam","voicemail"]]]');
+    // Only live-pipeline-terminal states are backfillable (Codex r5 P2):
+    // sweep-owned rows (NULL/pending/no_transcription/processing) are never
+    // touched, and spam/voicemail are excluded for free.
+    expect(flat).toContain('["whereIn",["processing_status",["processed","extraction_failed"]]]');
     expect(flat).toContain('["limit",[7]]');
   });
 
@@ -90,12 +91,9 @@ describe('runRetranscriptionBackfill — verdict vs retry discipline', () => {
     expect(dbi.__updates).toHaveLength(1);
     expect(dbi.__updates[0].transcription).toContain('Agent:');
     expect(dbi.__updates[0].transcription_pre_backfill).toMatch(/COALESCE/);
-    // Sweep-eligible rows are parked as processed so processAllPending never
-    // resurrects a backfilled legacy call into live workflows (Codex r3 P1);
-    // terminal statuses ride the CASE's ELSE and are preserved.
-    expect(dbi.__updates[0].processing_status).toMatch(/CASE WHEN processing_status/);
-    expect(dbi.__updates[0].processing_status).toMatch(/'processed'/);
-    expect(dbi.__updates[0].processing_status).toMatch(/'no_transcription','extraction_failed','processing'/);
+    // The live state machine is never mutated — candidates are restricted to
+    // terminal states instead, so processing_status stays untouched (Codex r5).
+    expect(dbi.__updates[0].processing_status).toBeUndefined();
     const flat = JSON.stringify(dbi.__calls);
     expect(flat.match(/NOT ILIKE '%agent:%'/g).length).toBeGreaterThanOrEqual(2); // select AND guarded update
   });
