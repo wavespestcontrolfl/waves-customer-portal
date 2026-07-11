@@ -2664,7 +2664,12 @@ router.get('/:id/deposit-credit', requireAdmin, async (req, res, next) => {
     }
     res.json({
       credit: credit
-        ? { amount: credit.amount, estimateId: credit.estimateId, payerBilled }
+        ? {
+          amount: credit.amount,
+          estimateId: credit.estimateId,
+          estimateSlug: credit.estimateSlug || null,
+          payerBilled,
+        }
         : null,
     });
   } catch (err) { next(err); }
@@ -2742,20 +2747,24 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // for payer-billed customers below (their invoices can't be tendered in person).
     const chargeInPerson = req.body?.chargeInPerson === true;
     // Open estimate-deposit balance (e.g. restored when a prior prepay invoice
-    // was voided) applies to this invoice automatically — a paid deposit
-    // credits the FIRST invoice and any remainder rolls to subsequent ones;
-    // this flow previously skipped the ledger, so operators hand-netted the
-    // deposit into the typed amount and the ledger credit stranded. The
-    // operator enters the FULL plan amount; create() appends the negative
-    // credit line (capped against its own after-tax total, skipped for
-    // payer-billed invoices) and consumption below must match the applied
-    // figure exactly or the whole mint rolls back — same contract as the
-    // estimate-accept path. applyDepositCredit:false is the operator opt-out
-    // (e.g. the deposit is being refunded instead).
-    const applyDepositCredit = req.body?.applyDepositCredit !== false;
+    // was voided) can apply to this invoice — a paid deposit credits the
+    // FIRST invoice and any remainder rolls to subsequent ones; this flow
+    // previously skipped the ledger, so operators hand-netted the deposit
+    // into the typed amount and the ledger credit stranded. STRICT double
+    // opt-in (Codex round-2): the credit applies only when the caller sends
+    // applyDepositCredit === true AND names the estimate whose ledger it saw
+    // in the preview (depositCreditEstimateId) — an omitted field (stale
+    // admin tab, old payload) means NO credit, so the server can never
+    // subtract a credit the operator never saw. The operator enters the FULL
+    // plan amount; create() appends the negative credit line (capped against
+    // its own after-tax total, skipped for payer-billed invoices) and
+    // consumption below must match the applied figure exactly or the whole
+    // mint rolls back — same contract as the estimate-accept path.
+    const applyDepositCredit = req.body?.applyDepositCredit === true;
+    const requestedCreditEstimateId = cleanOptionalText(req.body?.depositCreditEstimateId) || null;
     const InvoiceService = require('../services/invoice');
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    const { pendingDepositCreditForCustomer, consumeDepositCredit } = require('../services/estimate-deposits');
+    const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
     let invoice;
     let term = null;
     let appliedDepositCredit = 0;
@@ -2766,12 +2775,35 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         trx, customer.id, termStart, req.body?.allowOverlap === true,
         'Customer already has an annual prepay term through',
       );
-      // Ledger read fails CLOSED (aborts the mint) like the accept path — a
-      // read error here would otherwise mint the invoice with the credit
-      // silently dropped and strand the deposit on the ledger.
-      const pendingCredit = applyDepositCredit
-        ? await pendingDepositCreditForCustomer(customer.id, trx)
-        : null;
+      // The credit consumes ONLY the estimate the operator was shown in the
+      // preview banner (echoed back as depositCreditEstimateId) — never a
+      // server-side pick, so an unrelated job's rolled-forward deposit can't
+      // be silently redirected onto the prepay (Codex round-2). Validation
+      // fails CLOSED (409, mint aborted): minting gross when the operator
+      // expected net silently un-nets the invoice they approved. The ledger
+      // read failing also aborts, like the accept path.
+      let pendingCredit = null;
+      if (applyDepositCredit) {
+        const unavailable = (message) => {
+          const err = new Error(message);
+          err.depositCreditUnavailable = true;
+          return err;
+        };
+        if (!requestedCreditEstimateId) {
+          throw unavailable('applyDepositCredit requires depositCreditEstimateId (the estimate shown in the preview). Refresh and retry.');
+        }
+        const creditEstimate = await trx('estimates')
+          .where({ id: requestedCreditEstimateId, customer_id: customer.id })
+          .first('id');
+        if (!creditEstimate) {
+          throw unavailable('The deposit-credit estimate does not belong to this customer. Refresh and retry.');
+        }
+        const credit = await pendingDepositCredit(requestedCreditEstimateId, trx);
+        if (!credit) {
+          throw unavailable('The deposit credit is no longer available (consumed or refunded since the preview). Refresh and retry.');
+        }
+        pendingCredit = { ...credit, estimateId: requestedCreditEstimateId };
+      }
       invoice = await InvoiceService.create({
         database: trx,
         customerId: customer.id,
@@ -2818,10 +2850,18 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         const [settled] = await trx('invoices')
           .where({ id: invoice.id })
           .update({
-            status: 'paid',
+            // 'prepaid' + paid_at — NOT 'paid', NOT payment_recorded_at
+            // (Codex round-2): paid_at is what activates the term
+            // (invoiceTermStatus), while 'prepaid' with no payments row and
+            // no payment_recorded_at is the one settled state
+            // assertInvoiceVoidable + the void money-guard accept — so an
+            // operator can still void this invoice, which restores the
+            // deposit ledger (restoreDepositCreditForVoidedInvoice) and
+            // cancels the term. 'paid'/payment_recorded_at would weld the
+            // credit to a possibly-unwanted term with no in-app undo.
+            status: 'prepaid',
             paid_at: trx.fn.now(),
             payment_method: 'deposit_credit',
-            payment_recorded_at: trx.fn.now(),
             updated_at: trx.fn.now(),
           })
           .returning('*');
@@ -2958,6 +2998,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);
     if (err && err.chargeInPersonPayerBlocked) return res.status(400).json({ error: err.message });
+    if (err && err.depositCreditUnavailable) return res.status(409).json({ error: err.message });
     next(err);
   }
 });

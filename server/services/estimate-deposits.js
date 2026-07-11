@@ -1420,14 +1420,17 @@ async function pendingDepositCreditForCustomer(customerId, trx = db) {
     .where('e.customer_id', customerId)
     .where('d.status', 'received')
     .orderBy('d.created_at', 'asc')
-    .select('d.estimate_id');
+    .select('d.estimate_id', 'e.estimate_slug');
   const checked = new Set();
   for (const row of rows) {
     const estimateId = row.estimate_id;
     if (!estimateId || checked.has(estimateId)) continue;
     checked.add(estimateId);
     const credit = await pendingDepositCredit(estimateId, trx);
-    if (credit) return { ...credit, estimateId };
+    // estimateSlug rides along so preview UIs can NAME the estimate whose
+    // deposit is being applied — cross-estimate application must be a
+    // visible operator choice, never a silent server pick.
+    if (credit) return { ...credit, estimateId, estimateSlug: row.estimate_slug || null };
   }
   return null;
 }

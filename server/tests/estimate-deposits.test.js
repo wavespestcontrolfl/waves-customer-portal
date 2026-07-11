@@ -1184,13 +1184,17 @@ describe('webhook + invoice credit', () => {
         },
         orderBy() { return this; },
         select: async () => (table === 'estimate_deposits as d'
-          ? [{ estimate_id: 'est-old' }, { estimate_id: 'est-new' }]
+          ? [
+            { estimate_id: 'est-old', estimate_slug: 'EST-2026-0001' },
+            { estimate_id: 'est-new', estimate_slug: 'EST-2026-0002' },
+          ]
           : (ledger[b._estimateId] || [])),
       };
       return b;
     };
     const credit = await pendingDepositCreditForCustomer('cust-1');
     expect(credit.estimateId).toBe('est-new');
+    expect(credit.estimateSlug).toBe('EST-2026-0002');
     expect(credit.amount).toBe(49);
     expect(credit.lineItem.unit_price).toBe(-49);
     expect(credit.lineItem.category).toBe('deposit_credit');

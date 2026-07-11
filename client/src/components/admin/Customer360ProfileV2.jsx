@@ -3571,8 +3571,13 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           note: note.trim() || undefined,
           // Only apply when the banner actually RENDERED (preview loaded, not
           // payer-billed): a slow/failed preview must not silently subtract a
-          // credit the operator never saw — they may have hand-netted it.
+          // credit the operator never saw — they may have hand-netted it. The
+          // estimate id echoes back so the server consumes exactly the ledger
+          // the banner named — the server 409s on a mismatch.
           applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
+          ...(depositCredit && !depositCredit.payerBilled && applyCredit
+            ? { depositCreditEstimateId: depositCredit.estimateId }
+            : {}),
         }),
       });
       if (result?.delivery && result.delivery.ok === false) {
@@ -3608,9 +3613,12 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termEnd,
           dueDate,
           note: note.trim() || undefined,
-          // Same visible-banner gate as the send path — never apply a credit
-          // the operator didn't see.
+          // Same visible-banner gate + estimate echo as the send path — never
+          // apply a credit the operator didn't see.
           applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
+          ...(depositCredit && !depositCredit.payerBilled && applyCredit
+            ? { depositCreditEstimateId: depositCredit.estimateId }
+            : {}),
           chargeInPerson: true,
         }),
       });
@@ -3657,8 +3665,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           )}
           {depositCredit && depositCredit.payerBilled && (
             <div className="sm:col-span-2 text-12 text-zinc-900 bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5">
-              ${Number(depositCredit.amount).toFixed(2)} deposit credit on file — NOT applied
-              here: this customer's invoices bill to a third party, and the homeowner's
+              ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+              {depositCredit.estimateSlug ? ` (estimate ${depositCredit.estimateSlug})` : ""} — NOT
+              applied here: this customer's invoices bill to a third party, and the homeowner's
               deposit never credits a payer's bill. The credit stays on the ledger.
             </div>
           )}
@@ -3672,7 +3681,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
                   className="mt-0.5 u-focus-ring"
                 />
                 <span>
-                  Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file.
+                  Apply ${Number(depositCredit.amount).toFixed(2)} deposit credit on file
+                  {depositCredit.estimateSlug ? ` from estimate ${depositCredit.estimateSlug}` : ""}.
                   Enter the full plan amount — the credit comes off the invoice automatically
                   {applyCredit && Number(amount) > 0
                     ? ` (customer pays $${Math.max(0, estTaxInclusiveTotal - Number(depositCredit.amount)).toFixed(2)})`
