@@ -223,12 +223,22 @@ const COMPETITOR_BRAND_SIGNALS = [
   // Suffix-less lawn/mosquito franchise brands — no pest-industry suffix, so
   // the comparison gate's provider-name shape can't catch them in option
   // headers; recognition must come from this curated list. Only unambiguous
-  // brand tokens here: generic-word brands ("Bug Out", "Moxie") belong in a
-  // competitor's case-sensitive aliasesCS, never in this CI list.
+  // brand tokens here — generic-word brands go in the CASE-SENSITIVE list
+  // below so ordinary prose ("ask a lawn doctor", "bugs out") stays clean.
   'TruGreen',
-  'Lawn Doctor',
   'Mosquito Joe',
   'Greenix',
+];
+
+// Case-SENSITIVE brand signals: brands built from ordinary English words.
+// Matched only in their capitalized brand form ("Lawn Doctor franchise"),
+// never in lowercase prose ("ask a lawn doctor to diagnose the turf").
+// Single ambiguous tokens ("Moxie" — also a common noun, sentence-start
+// capitalization) stay out entirely; add such brands as full COMPETITORS
+// records with aliasesCS when they matter.
+const COMPETITOR_BRAND_SIGNALS_CS = [
+  'Lawn Doctor',
+  'Bug Out',
 ];
 
 function normalize(s) {
@@ -266,6 +276,7 @@ const DETECTABLE_NAMES = (() => {
 const DETECTABLE_NAMES_CS = (() => {
   const set = new Set();
   for (const c of COMPETITORS) for (const a of c.aliasesCS || []) set.add(a);
+  for (const s of COMPETITOR_BRAND_SIGNALS_CS) set.add(s);
   return [...set].sort((a, b) => b.length - a.length);
 })();
 

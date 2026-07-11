@@ -125,12 +125,38 @@ describe('comparison-table-gate', () => {
   });
 
   test('suffix-less franchise brands are recognized via the curated signal list (Codex round-2 P1)', () => {
-    for (const brand of ['TruGreen', 'Mosquito Joe', 'Lawn Doctor', 'Greenix']) {
+    for (const brand of ['TruGreen', 'Mosquito Joe', 'Lawn Doctor', 'Greenix', 'Bug Out']) {
       const t = CATEGORY_TABLE.replace('National chain', brand);
       const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
       expect(r.pass).toBe(false);
       expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
     }
+  });
+
+  test('lowercase business-shaped headers still fail closed (Codex round-3 P1)', () => {
+    for (const header of ['acme pest control', 'acme lawn care']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
+    }
+  });
+
+  test('seasonal lawn-care copy is not a phantom business — headers or prose (Codex round-3 P2)', () => {
+    const t = CATEGORY_TABLE.replace('National chain', 'Spring lawn care');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    expect(r.pass).toBe(true);
+
+    const prose = gate.evaluate({ body: 'Spring lawn care is unreliable without irrigation tuned first. No table here.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
+  });
+
+  test('lowercase generic phrases never match the case-sensitive brand signals (Codex round-3 P2)', () => {
+    const prose = gate.evaluate({ body: 'If turf keeps thinning, ask a lawn doctor to diagnose it, or bug out the crawl space screens. No table.' }, { namedCompetitorEnabled: true });
+    expect(prose.pass).toBe(true);
+    expect(prose.findings).toHaveLength(0);
   });
 
   test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {

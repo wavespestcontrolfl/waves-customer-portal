@@ -127,7 +127,11 @@ const RANKING_RE = new RegExp([
 // Sarasota, Manatee, Venice, …) are deliberately NOT excluded: "Sarasota Pest
 // Control" is a business-name pattern, not a generic phrase, so a location lead
 // + industry suffix in prose/title must still be flagged for review.
-const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year|DIY';
+// Seasons and months included: with "Care" in the industry suffix, "Spring
+// lawn care" / "July lawn care" would otherwise read as provider names in
+// both the header classifier and the case-insensitive prose scan (which
+// builds on this list via CI_PROSE_EXCLUSIONS).
+const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year|DIY|Spring|Summer|Fall|Autumn|Winter|Early|Late|January|February|March|April|May|June|July|August|September|October|November|December';
 // Broad pest-industry suffix set so business names with less-common suffixes
 // (e.g. "HomeTeam Pest Defense", "Gulf Coast Termite Specialists") are still
 // recognized — a proper-noun lead + any of these.
@@ -247,12 +251,14 @@ function classifyOption(header) {
   if (mentions.some((m) => !m.inAllowlist)) return 'unknown_competitor';
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (OWN_BRAND_RE.test(h)) return 'own';
-  // providerNameRe (not the bare case-insensitive suffix test) is the
-  // business-shape check here: it requires a PROPER-NAME lead before the
-  // industry suffix, so "Acme Lawn Care" fails closed while generic category
-  // headers like "DIY lawn care" / "Professional lawn care" stay educational
-  // (Codex round-2 P2: the bare suffix test re-created phantom businesses).
-  if (BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
+  // providerNameRe (not the bare suffix test) is the business-shape check
+  // here: it requires a NAME lead before the industry suffix, so "Acme Lawn
+  // Care" fails closed while generic category headers like "DIY lawn care" /
+  // "Professional lawn care" / "Spring lawn care" stay educational — the
+  // GENERIC_LEAD_EXCLUSIONS carry that distinction. Case-insensitive for
+  // headers (a lowercase "acme pest control" column is the same business);
+  // prose scans keep their own casing rules.
+  if (BUSINESS_MARKER_RE.test(h) || providerNameRe('i').test(h)) return 'unclassified';
   // Not business-SHAPED (no proper-name + industry suffix, no company
   // marker, no recognized competitor): a generic option header.
   // The writer legitimately uses <ComparisonTable> for educational content —
