@@ -1637,16 +1637,15 @@ router.post('/voice-profiles/:id/review', requireAdmin, async (req, res, next) =
   try {
     const { reviewVoiceProfile } = require('../services/voice-profile-distiller');
     const action = String(req.body?.action || '').trim();
-    const result = await reviewVoiceProfile({ id: req.params.id, action, reviewedBy: actorName(req) });
-    if (!result.ok) return res.status(result.status).json({ error: result.error });
-
-    await db('activity_log').insert({
-      admin_user_id: req.technicianId || null,
-      action: 'voice_profile_reviewed',
-      description: `Voice profile v${result.version} ${result.status}`,
-      metadata: JSON.stringify({ source: 'agents_hub', profile_id: req.params.id, action }),
+    // The audit row commits inside the same transaction as the status flip —
+    // a profile never goes live with its promised audit missing.
+    const result = await reviewVoiceProfile({
+      id: req.params.id,
+      action,
+      reviewedBy: actorName(req),
+      audit: { adminUserId: req.technicianId || null },
     });
-
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
     res.json({ version: result.version, status: result.status });
   } catch (err) {
     next(err);

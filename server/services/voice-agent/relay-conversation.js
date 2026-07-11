@@ -77,14 +77,33 @@ const SYSTEM_PROMPT = [
 // describes how Waves' real humans talk on the phone — distilled from real
 // call transcripts. Appended to the system prompt when one exists; the base
 // prompt alone is byte-identical to pre-Loop-2 behavior, so no profile =
-// no change. Cached with a short TTL (one DB read per ~10min, not per turn);
-// any fetch error fails safe to the base prompt.
+// no change.
+//
+// Cap parity: PROFILE_MAX_CHARS comes from the distiller, whose generation
+// cap is the same constant — the reviewer approves EXACTLY the text used
+// here, never a silently truncated prefix.
+const { MAX_PROFILE_CHARS: PROFILE_MAX_CHARS } = require('../voice-profile-distiller');
 const PROFILE_CACHE_TTL_MS = 10 * 60 * 1000;
-const PROFILE_MAX_CHARS = 4000;
-let _profileCache = { text: null, at: 0 };
+
+// Consumption-side defense in depth. The profile is model-generated from
+// customer-influenced corpus and human-approved — but a skimmed approval must
+// not be able to smuggle prompt-control or factual/policy content into the
+// system role. Deterministic line filter: drop directive-injection lines and
+// price/guarantee/policy-claim lines, neutralize our own frame delimiters.
+// STYLE text survives; a stripped line fails toward the base rules.
+const PROFILE_INJECTION_LINE_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|\b(assistant|system|user)\s*:/i;
+const PROFILE_FACTUAL_LINE_RE = /\$\s*\d|\bUSD\s*\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks)\b|%\s?(off|discount)|\b(guarantee[ds]?|warrant(y|ies)|refund)\b|\byou (can|may) (book|reserve|confirm)\b/i;
+function sanitizeProfileForPrompt(text) {
+  return String(text || '')
+    .split('\n')
+    .filter((l) => !PROFILE_INJECTION_LINE_RE.test(l) && !PROFILE_FACTUAL_LINE_RE.test(l))
+    .join('\n')
+    .replace(/<<<|>>>/g, '')
+    .trim();
+}
 
 function composeSystemPrompt(base, profileText) {
-  const t = String(profileText || '').trim();
+  const t = sanitizeProfileForPrompt(profileText);
   if (!t) return base;
   return [
     base,
@@ -99,15 +118,28 @@ function composeSystemPrompt(base, profileText) {
   ].join('\n');
 }
 
-async function getCachedVoiceProfileText() {
-  if (Date.now() - _profileCache.at < PROFILE_CACHE_TTL_MS) return _profileCache.text;
-  try {
-    const { getApprovedVoiceProfile } = require('../voice-profile-distiller');
-    const row = await getApprovedVoiceProfile();
-    _profileCache = { text: row?.profile_text || null, at: Date.now() };
-  } catch (err) {
-    logger.warn(`[voice-relay] voice-profile fetch failed (using base prompt): ${err.message}`);
-    _profileCache = { text: null, at: Date.now() };
+// NON-BLOCKING, single-flight cache: a live caller must never sit in dead
+// air behind a slow pool acquisition for an OPTIONAL style block. Returns
+// whatever is cached RIGHT NOW (possibly null/stale — both fail toward the
+// base prompt) and kicks off at most one background refresh when the TTL
+// has lapsed. The first call of a cold process uses the base prompt; later
+// turns/calls pick up the profile.
+let _profileCache = { text: null, at: 0 };
+let _profileRefresh = null;
+function getVoiceProfileTextNonBlocking() {
+  if (Date.now() - _profileCache.at >= PROFILE_CACHE_TTL_MS && !_profileRefresh) {
+    _profileRefresh = (async () => {
+      try {
+        const { getApprovedVoiceProfile } = require('../voice-profile-distiller');
+        const row = await getApprovedVoiceProfile();
+        _profileCache = { text: row?.profile_text || null, at: Date.now() };
+      } catch (err) {
+        logger.warn(`[voice-relay] voice-profile refresh failed (keeping ${_profileCache.text ? 'stale' : 'base'} prompt): ${err.message}`);
+        _profileCache = { text: _profileCache.text, at: Date.now() };
+      } finally {
+        _profileRefresh = null;
+      }
+    })();
   }
   return _profileCache.text;
 }
@@ -214,7 +246,7 @@ class RelayConversation {
       },
     };
 
-    const systemPrompt = composeSystemPrompt(SYSTEM_PROMPT, await getCachedVoiceProfileText());
+    const systemPrompt = composeSystemPrompt(SYSTEM_PROMPT, getVoiceProfileTextNonBlocking());
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
@@ -362,4 +394,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt };

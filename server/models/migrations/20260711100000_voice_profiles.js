@@ -27,6 +27,16 @@ exports.up = async function (knex) {
     t.unique('version');
     t.index('status');
   });
+  // The table contract promises AT MOST ONE approved row — enforce it in
+  // Postgres, not just in reviewVoiceProfile's transaction: two concurrent
+  // reviews of two different pending rows lock different rows and could both
+  // commit as approved without this partial unique index.
+  await knex.raw(
+    "CREATE UNIQUE INDEX voice_profiles_one_approved ON voice_profiles ((true)) WHERE status = 'approved'"
+  );
+  await knex.raw(
+    "ALTER TABLE voice_profiles ADD CONSTRAINT voice_profiles_status_check CHECK (status IN ('pending','approved','rejected','superseded'))"
+  );
 };
 
 exports.down = async function (knex) {
