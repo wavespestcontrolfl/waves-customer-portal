@@ -51,7 +51,11 @@ function GlassQr({ value, size = 96 }) {
     const px = size * dpr;
     canvas.width = px;
     canvas.height = px;
-    const m = px / n;
+    // Spec-required 4-module quiet zone INSIDE the canvas — scanners enforce
+    // it, and the chip padding alone doesn't count (Codex P2 #2588 r2).
+    const QUIET = 4;
+    const m = px / (n + QUIET * 2);
+    const off = QUIET * m;
     const ctx = canvas.getContext('2d');
     const fg = 'rgba(255,255,255,0.94)';
     ctx.clearRect(0, 0, px, px);
@@ -73,20 +77,20 @@ function GlassQr({ value, size = 96 }) {
         if (inFinderZone(r, c)) continue;
         if (!qr.modules.get(r, c)) continue;
         ctx.beginPath();
-        ctx.arc(c * m + m / 2, r * m + m / 2, m * 0.4, 0, Math.PI * 2);
+        ctx.arc(off + c * m + m / 2, off + r * m + m / 2, m * 0.4, 0, Math.PI * 2);
         ctx.fill();
       }
     }
 
     const finder = (row, col) => {
       ctx.fillStyle = fg;
-      rr(col * m, row * m, 7 * m, 7 * m, 2.2 * m);
+      rr(off + col * m, off + row * m, 7 * m, 7 * m, 2.2 * m);
       ctx.fill();
       ctx.globalCompositeOperation = 'destination-out';
-      rr((col + 1) * m, (row + 1) * m, 5 * m, 5 * m, 1.5 * m);
+      rr(off + (col + 1) * m, off + (row + 1) * m, 5 * m, 5 * m, 1.5 * m);
       ctx.fill();
       ctx.globalCompositeOperation = 'source-over';
-      rr((col + 2) * m, (row + 2) * m, 3 * m, 3 * m, m);
+      rr(off + (col + 2) * m, off + (row + 2) * m, 3 * m, 3 * m, m);
       ctx.fill();
     };
     finder(0, 0);

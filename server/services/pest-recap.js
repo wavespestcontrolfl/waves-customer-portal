@@ -486,6 +486,22 @@ async function submitRecap({
     smsError = 'duplicate_suppressed';
   }
 
+  // Digital business card: a recap completion is a real performed visit —
+  // mirror the /complete path's best-effort mint so a customer whose FIRST
+  // completed visit lands through the recap flow still gets their card, tied
+  // to the right tech/visit (Codex P2 on PR #2588 round 2). Fire-and-forget;
+  // the card.issued email inside stays dark behind GATE_DIGITAL_BUSINESS_CARD.
+  try {
+    const CustomerCardService = require('./customer-card');
+    void CustomerCardService.ensureCardForCompletion({
+      customerId: svc.customer_id,
+      serviceRecordId: recordId,
+      scheduledServiceId: serviceId,
+    }).catch((e) => logger.warn(`[pest-recap] card mint failed (customerId=${svc.customer_id} errType=${e?.name || 'Error'})`));
+  } catch (e) {
+    logger.warn(`[pest-recap] card mint dispatch failed: ${e?.name || 'Error'}`);
+  }
+
   logger.info(
     `[pest-recap] recap committed service=${serviceId} record=${recordId} `
     + `actor=${actorType} created=${createdRecord} `

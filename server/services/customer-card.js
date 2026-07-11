@@ -137,7 +137,9 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
       const { enrollPromoter } = require('./referral-engine');
       await enrollPromoter(customerId);
     } catch (err) {
-      logger.warn(`[customer-card] promoter enroll skipped (customerId=${customerId}): ${err.message}`);
+      // PII: error class/code only — a unique-violation message here can echo
+      // customer phone/email values from Postgres details (Codex P1 #2588 r2).
+      logger.warn(`[customer-card] promoter enroll skipped (customerId=${customerId} errType=${err?.name || 'Error'} code=${err?.code || 'n/a'})`);
     }
 
     logger.info(`[customer-card] Minted card (customerId=${customerId} cardId=${card.id} location=${card.location_id})`);
@@ -184,8 +186,12 @@ async function maybeSendCardEmail(card, customer) {
       },
       recipientType: 'customer',
       recipientId: customer.id,
-      // One card email per customer, ever.
-      idempotencyKey: `card.issued:customer:${customer.id}`,
+      // One card email per customer — but the key carries a blocked-attempt
+      // generation because the email library dedupes terminally on 'blocked'
+      // rows. Same generation ⇒ concurrent attempts collapse to one send;
+      // a blocked result bumps the generation below so a LATER completion
+      // can retry once the suppression is corrected (Codex P2 #2588 r2).
+      idempotencyKey: `card.issued:customer:${customer.id}:b${card.email_blocked_count || 0}`,
       triggerEventId: `card.issued:first_completion:${customer.id}`,
       categories: ['digital_card'],
       suppressProviderErrorLog: true,
@@ -194,6 +200,12 @@ async function maybeSendCardEmail(card, customer) {
     // instead of throwing — don't stamp those, so the send retries on a
     // later completion if the suppression is corrected (Codex P2 on #2588).
     if (!result?.sent) {
+      if (result?.blocked) {
+        await db('customer_cards').where({ id: card.id }).update({
+          email_blocked_count: db.raw('COALESCE(email_blocked_count, 0) + 1'),
+          updated_at: new Date(),
+        }).catch((err) => logger.warn(`[customer-card] blocked-count bump failed (cardId=${card.id} errType=${err?.name || 'Error'})`));
+      }
       logger.info(`[customer-card] card.issued not sent (customerId=${customer.id} blocked=${!!result?.blocked} reason=${result?.reason || 'unknown'})`);
       return null;
     }

@@ -26,6 +26,9 @@ router.get('/:token', async (req, res, next) => {
   try {
     const data = await CardService.getCardData(req.params.token);
     if (!data) return res.status(404).json({ error: 'Card not found' });
+    // Bearer-token payload (name, review flag, referral link, presigned tech
+    // photo) — same no-store treatment as the /card/:token shell.
+    res.set('Cache-Control', 'private, no-store');
     res.json(data);
   } catch (err) {
     next(err);
@@ -38,6 +41,10 @@ router.get('/:token/contact.vcf', async (req, res, next) => {
     if (!TOKEN_RE.test(token)) return res.status(404).send('Not found');
     const card = await db('customer_cards').where({ share_token: token }).first();
     if (!card) return res.status(404).send('Not found');
+    // Consistent with the JSON route: archived/merged customers' old tokens
+    // must 404 here too, not keep serving the contact (Codex P3 #2588 r2).
+    const customer = await db('customers').where({ id: card.customer_id }).first('id', 'deleted_at');
+    if (!customer || customer.deleted_at) return res.status(404).send('Not found');
 
     let techName = null;
     if (card.technician_id) {
@@ -59,6 +66,7 @@ router.get('/:token/contact.vcf', async (req, res, next) => {
       .replace(/^-+|-+$/g, '') || 'waves';
     res.set('Content-Type', 'text/vcard; charset=utf-8');
     res.set('Content-Disposition', `attachment; filename="waves-${slug}.vcf"`);
+    res.set('Cache-Control', 'private, no-store');
     res.send(vcf);
   } catch (err) {
     next(err);

@@ -5151,8 +5151,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
     // Internal-only completion profiles (e.g. Waves Assessment) suppress all
     // customer comms/public tokens above, so they must not mint a
-    // customer-facing card either (Codex P1 on PR #2588).
-    if (!isInternalOnlyCompletion) {
+    // customer-facing card either (Codex P1 on PR #2588). Non-performed
+    // outcomes (inspection_only / customer_declined) also skip: no service
+    // was delivered, and minting would tie the lifetime card to the wrong
+    // first visit/tech (Codex P2 #2588 r2; 'incomplete' returned earlier).
+    const cardMintOutcomePerformed = !['inspection_only', 'customer_declined'].includes(visitOutcome);
+    if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
       try {
         const CustomerCardService = require('../services/customer-card');
         void CustomerCardService.ensureCardForCompletion({
