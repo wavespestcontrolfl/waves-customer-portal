@@ -2234,6 +2234,32 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 // ── Download Twilio recording (authenticated) ──
+// ── Provider-fetch timeouts ─────────────────────────────────────────────
+//
+// A HUNG provider call (TCP black hole, provider incident) never throws, so
+// it never increments the extraction retry budget — the 10-min stale-lock
+// reclaim just re-runs it every cycle forever while the zombie runs pile up.
+// Bounding every provider fetch converts a hang into an ordinary thrown
+// TimeoutError that flows the EXISTING failure paths: extraction_attempts +
+// exhausted triage for extraction, the Gemini fallback / no_transcription
+// path for transcription, and the audit-log skip for the label pass.
+// Defaults are deliberately generous — these kill hangs, they must never
+// race a slow-but-working provider (a 9-minute recording transcribes slowly).
+// Env-tunable without deploy.
+function envMs(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+const PROVIDER_FETCH_TIMEOUTS_MS = {
+  recording_download: envMs('CALL_PROC_DOWNLOAD_TIMEOUT_MS', 120000),
+  transcription: envMs('CALL_PROC_TRANSCRIBE_TIMEOUT_MS', 300000),
+  transcript_label: envMs('CALL_PROC_LABEL_TIMEOUT_MS', 120000),
+  extraction: envMs('CALL_PROC_EXTRACT_TIMEOUT_MS', 180000),
+};
+function providerTimeoutSignal(kind) {
+  return AbortSignal.timeout(PROVIDER_FETCH_TIMEOUTS_MS[kind] || PROVIDER_FETCH_TIMEOUTS_MS.extraction);
+}
+
 async function downloadRecording(mp3Url) {
   const twilioAuth = Buffer.from(
     `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
@@ -2242,6 +2268,7 @@ async function downloadRecording(mp3Url) {
   const res = await fetch(mp3Url, {
     headers: { Authorization: `Basic ${twilioAuth}` },
     redirect: 'follow',
+    signal: providerTimeoutSignal('recording_download'),
   });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
@@ -2338,6 +2365,7 @@ async function labelTranscriptWithOpenAI(transcript, opts = {}) {
   try {
     const res = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
+      signal: providerTimeoutSignal('transcript_label'),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -2448,6 +2476,7 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: form,
+      signal: providerTimeoutSignal('transcription'),
     });
 
     if (!res.ok) {
@@ -2486,6 +2515,7 @@ async function transcribeWithGemini(audioBuffer, opts = {}) {
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TRANSCRIPTION_MODEL}:generateContent?key=${apiKey}`,
       {
         method: 'POST',
+        signal: providerTimeoutSignal('transcription'),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{
@@ -2833,6 +2863,7 @@ Return ONLY valid JSON.`;
     `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_V1_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
       method: 'POST',
+      signal: providerTimeoutSignal('extraction'),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
@@ -2955,6 +2986,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
       `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EXTRACTION_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: 'POST',
+        signal: providerTimeoutSignal('extraction'),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
@@ -6968,6 +7000,9 @@ CallRecordingProcessor._test = {
   classifyCallerAccount,
   summarizeKnownCaller,
   summarizePriorCall,
+  providerTimeoutSignal,
+  PROVIDER_FETCH_TIMEOUTS_MS,
+  downloadRecording,
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,

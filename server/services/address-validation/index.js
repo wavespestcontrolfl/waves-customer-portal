@@ -26,6 +26,14 @@
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
 
+// Google address calls are fail-open by design — a HUNG call must fail the
+// same way a failed one does (validation skipped, raw address kept) instead
+// of stalling the caller's run deadline. Env-tunable without deploy.
+const GOOGLE_ADDRESS_TIMEOUT_MS = (() => {
+  const n = Number(process.env.GOOGLE_ADDRESS_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 30000;
+})();
+
 const GOOGLE_KEY = () => process.env.GOOGLE_ADDRESS_VALIDATION_API_KEY
   || process.env.GOOGLE_API_KEY
   || process.env.GOOGLE_MAPS_API_KEY;
@@ -59,7 +67,7 @@ async function reverseGeocodeCounty(location, key) {
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${location.latitude},${location.longitude}`
       + `&result_type=administrative_area_level_2&key=${key}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS) });
     if (!res.ok) return null;
     const data = await res.json();
     for (const r of data.results || []) {
@@ -140,6 +148,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
   try {
     const res = await fetch(`https://addressvalidation.googleapis.com/v1:validateAddress?key=${key}`, {
       method: 'POST',
+      signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: { regionCode, addressLines: lines } }),
     });
