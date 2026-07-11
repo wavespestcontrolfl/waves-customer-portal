@@ -803,6 +803,10 @@ async function reviseAdminEstimate({
   technician,
   now = () => new Date(),
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+  // Run every guard and the full pricing pipeline but skip the write — the
+  // builder preflights an edit-mode save with this so the operator confirms a
+  // server-repriced total BEFORE it publishes to the customer's live link.
+  dryRun = false,
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
@@ -812,6 +816,17 @@ async function reviseAdminEstimate({
   // stored blob (and silently orphan the linkage keys preserved below).
   if (!body?.estimateData || typeof body.estimateData !== 'object') {
     throw errorWithStatus('estimateData is required to revise an estimate.', 400);
+  }
+  // An in-place revision can never move the row to another account: the token
+  // already in the customer's hands would become a bearer link into someone
+  // else's quote and acceptance. A different explicit customerId (customer
+  // lookup picking another match in the builder) is a new-estimate job.
+  if (estimate.customer_id && body.customerId
+      && String(body.customerId) !== String(estimate.customer_id)) {
+    throw errorWithStatus(
+      'This estimate is linked to a customer and an in-place edit cannot move it to a different customer. Create a new estimate for the other customer.',
+      409,
+    );
   }
   const existingData = parseStoredEstimateData(estimate.estimate_data) || {};
 
@@ -916,6 +931,34 @@ async function reviseAdminEstimate({
         );
       }
     }
+
+    // Token-only rows (no lead, no ORIGINAL customer link — attaching one in
+    // this same revise doesn't count, that's how an audience swap would dress
+    // itself up) have nothing to revalidate against, but the same-audience
+    // rule still holds: once the quote is delivered, the token in the
+    // recipient's hands is a bearer link, and a contact move would point it
+    // at another person's quote. Normalized compare so a pure reformat of
+    // the same phone/email still saves.
+    const delivered = !!(estimate.sent_at || estimate.viewed_at);
+    if (delivered && !linkedLead && !estimate.customer_id) {
+      const phoneMoved = normalizeContactPhone(writeFields.customer_phone)
+        !== normalizeContactPhone(estimate.customer_phone);
+      const emailMoved = normalizeContactEmail(writeFields.customer_email)
+        !== normalizeContactEmail(estimate.customer_email);
+      if (phoneMoved || emailMoved) {
+        throw errorWithStatus(
+          'This estimate was already sent and has no linked customer or lead to validate a contact change against. Create a new estimate for the other contact.',
+          409,
+        );
+      }
+    }
+  }
+
+  // Preflight stops here: same guards, same pricing pipeline, no write — the
+  // returned totals let the builder confirm a server reprice with the
+  // operator before anything reaches the customer's live link.
+  if (dryRun) {
+    return { estimate: { ...estimate, ...writeFields }, dryRun: true };
   }
 
   // Atomic revise guard: the editability check above ran on a pre-read, so

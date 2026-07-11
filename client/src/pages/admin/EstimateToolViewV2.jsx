@@ -363,6 +363,45 @@ function estimatePreviewUrlFromSave(data) {
   return data?.viewUrl || null;
 }
 
+// The server recomputes the authoritative price on save (pricing-constant
+// changes, existing-customer combined-tier fold). A difference from the
+// client preview needs the operator's eyes: banner after a draft save,
+// blocking confirm before an edit-mode publish or a send.
+function serverRecomputeNotice(saveResponse, clientMonthly, clientOnetime) {
+  const serverMonthly = Number(saveResponse.monthlyTotal);
+  const serverOnetime = Number(saveResponse.onetimeTotal);
+  const monthlyDiffers =
+    Number.isFinite(serverMonthly) &&
+    Math.abs(serverMonthly - (clientMonthly || 0)) >= 0.5;
+  const onetimeDiffers =
+    Number.isFinite(serverOnetime) &&
+    Math.abs(serverOnetime - (clientOnetime || 0)) >= 0.5;
+  if (!(monthlyDiffers || onetimeDiffers) || saveResponse.pricingAuthority !== "SERVER") {
+    return null;
+  }
+  return {
+    serverMonthly: monthlyDiffers ? serverMonthly : null,
+    clientMonthly: monthlyDiffers ? clientMonthly || 0 : null,
+    serverOnetime: onetimeDiffers ? serverOnetime : null,
+    clientOnetime: onetimeDiffers ? clientOnetime || 0 : null,
+  };
+}
+
+function describeRecomputeNotice(notice) {
+  const parts = [];
+  if (notice.serverMonthly != null) {
+    parts.push(
+      `$${notice.serverMonthly.toFixed(2)}/mo (preview showed $${Number(notice.clientMonthly || 0).toFixed(2)}/mo)`,
+    );
+  }
+  if (notice.serverOnetime != null) {
+    parts.push(
+      `$${notice.serverOnetime.toFixed(2)} one-time (preview showed $${Number(notice.clientOnetime || 0).toFixed(2)})`,
+    );
+  }
+  return parts.join(", ");
+}
+
 // ── Error Boundary ──────────────────────────────────────────────
 class EstimateErrorBoundary extends Component {
   constructor(props) {
@@ -3792,33 +3831,59 @@ export default function EstimateToolViewV2({
         manualDiscount: E.manualDiscount || E.totals?.manualDiscount || null,
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
-      // Edit mode revises the existing estimate in place (same id + token —
-      // the customer's link starts showing the updated quote); otherwise a
+      const isEditRevision = !!editMode?.id;
+      const payload = {
+        address: form.address,
+        customerName: form.customerName || "",
+        customerPhone: form.customerPhone || "",
+        customerEmail: form.customerEmail || "",
+        leadId: isEditRevision ? null : form.leadId || null,
+        customerId: form.customerId || existingCustomerMatch?.id || null,
+        estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
+        monthlyTotal,
+        annualTotal: monthlyTotal * 12,
+        onetimeTotal,
+        waveguardTier: E.recurring?.tier || "Bronze",
+        notes: form.notes || "",
+        satelliteUrl: satelliteData?.imageUrl || null,
+        showOneTimeOption: !!form.showOneTimeOption,
+        billByInvoice: !!form.billByInvoice,
+      };
+      // Edit mode publishes on save (same id + token — the customer's link
+      // starts showing the updated quote), so a server-side reprice must be
+      // confirmed BEFORE the write: preflight the same payload with dryRun.
+      // A create lands as a draft and the send flow gates on the banner, so
+      // it needs no preflight.
+      if (isEditRevision) {
+        const pf = await fetch(`/api/admin/estimates/${editMode.id}`, {
+          method: "PUT",
+          headers: authHeaders,
+          body: JSON.stringify({ ...payload, dryRun: true }),
+        });
+        if (!pf.ok)
+          throw new Error(
+            await summarizeEstimateResponseFailure(pf, "Save failed"),
+          );
+        const preflight = await pf.json();
+        const preNotice = serverRecomputeNotice(preflight, monthlyTotal, onetimeTotal);
+        if (preNotice) {
+          const proceed = window.confirm(
+            `The server recomputed the final price: ${describeRecomputeNotice(preNotice)}.\n\n` +
+              "Saving publishes this recomputed price to the customer's existing link. Save it?",
+          );
+          if (!proceed) return null;
+        }
+      }
+      // Edit mode revises the existing estimate in place; otherwise a
       // normal create.
       const r = await fetch(
-        editMode?.id
+        isEditRevision
           ? `/api/admin/estimates/${editMode.id}`
           : "/api/admin/estimates",
         {
-          method: editMode?.id ? "PUT" : "POST",
+          method: isEditRevision ? "PUT" : "POST",
           headers: authHeaders,
-          body: JSON.stringify({
-            address: form.address,
-            customerName: form.customerName || "",
-            customerPhone: form.customerPhone || "",
-            customerEmail: form.customerEmail || "",
-            leadId: editMode?.id ? null : form.leadId || null,
-            customerId: form.customerId || existingCustomerMatch?.id || null,
-            estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
-            monthlyTotal,
-            annualTotal: monthlyTotal * 12,
-            onetimeTotal,
-            waveguardTier: E.recurring?.tier || "Bronze",
-            notes: form.notes || "",
-            satelliteUrl: satelliteData?.imageUrl || null,
-            showOneTimeOption: !!form.showOneTimeOption,
-            billByInvoice: !!form.billByInvoice,
-          }),
+          body: JSON.stringify(payload),
         },
       );
       if (!r.ok)
@@ -3831,23 +3896,7 @@ export default function EstimateToolViewV2({
       // The server recomputes the authoritative price on save. If it differs
       // from the preview, surface it so we don't quote a number the system
       // won't honor.
-      const serverMonthly = Number(d.monthlyTotal);
-      const serverOnetime = Number(d.onetimeTotal);
-      const monthlyDiffers =
-        Number.isFinite(serverMonthly) &&
-        Math.abs(serverMonthly - (monthlyTotal || 0)) >= 0.5;
-      const onetimeDiffers =
-        Number.isFinite(serverOnetime) &&
-        Math.abs(serverOnetime - (onetimeTotal || 0)) >= 0.5;
-      let recomputeNotice = null;
-      if ((monthlyDiffers || onetimeDiffers) && d.pricingAuthority === "SERVER") {
-        recomputeNotice = {
-          serverMonthly: monthlyDiffers ? serverMonthly : null,
-          clientMonthly: monthlyDiffers ? monthlyTotal || 0 : null,
-          serverOnetime: onetimeDiffers ? serverOnetime : null,
-          clientOnetime: onetimeDiffers ? onetimeTotal || 0 : null,
-        };
-      }
+      const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
       setSavedId(id);
       setSavedViewUrl(viewUrl);
@@ -4115,20 +4164,8 @@ export default function EstimateToolViewV2({
     // Without this gate the send fires before the recompute banner is even
     // readable, so a price the operator never saw goes to the customer.
     if (saved.recomputeNotice) {
-      const n = saved.recomputeNotice;
-      const parts = [];
-      if (n.serverMonthly != null) {
-        parts.push(
-          `$${n.serverMonthly.toFixed(2)}/mo (preview showed $${Number(n.clientMonthly || 0).toFixed(2)}/mo)`,
-        );
-      }
-      if (n.serverOnetime != null) {
-        parts.push(
-          `$${n.serverOnetime.toFixed(2)} one-time (preview showed $${Number(n.clientOnetime || 0).toFixed(2)})`,
-        );
-      }
       const proceed = window.confirm(
-        `The server recomputed the final price on save: ${parts.join(", ")}.\n\n` +
+        `The server recomputed the final price on save: ${describeRecomputeNotice(saved.recomputeNotice)}.\n\n` +
           "This recomputed price is what the customer will see. Send it?",
       );
       if (!proceed) return;

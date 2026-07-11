@@ -434,6 +434,94 @@ describe('reviseAdminEstimate', () => {
     expect(updates[0].satellite_url).toBeNull();
   });
 
+  test('409s when the revise tries to move a linked estimate to another customer id', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, customerId: 'cust-other' },
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('409s a contact move on a delivered token-only estimate', async () => {
+    const tokenOnly = { ...sentEstimate, customer_id: null };
+    const { database, updates } = makeReviseDatabase({ estimate: tokenOnly, customer: null });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, customerPhone: '9415559999', customerEmail: 'other@example.com' },
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('409s an audience swap that attaches a matching customer to a delivered token-only estimate', async () => {
+    const tokenOnly = { ...sentEstimate, customer_id: null };
+    const otherCustomer = { id: 'cust-2', phone: '9415559999', email: 'other@example.com' };
+    const { database, updates } = makeReviseDatabase({ estimate: tokenOnly, customer: otherCustomer });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: {
+        ...reviseBody,
+        customerId: 'cust-2',
+        customerPhone: '9415559999',
+        customerEmail: 'other@example.com',
+      },
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('allows a pure contact reformat on a delivered token-only estimate', async () => {
+    const tokenOnly = { ...sentEstimate, customer_id: null };
+    const { database, updates } = makeReviseDatabase({ estimate: tokenOnly, customer: null });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, customerPhone: '941-555-0102' },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].customer_id).toBeNull();
+  });
+
+  test('dryRun runs the guards and pricing pipeline without writing', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const result = await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+      dryRun: true,
+    });
+    expect(result.dryRun).toBe(true);
+    expect(result.estimate.token).toBe('tok-abc123');
+    expect(Number(result.estimate.monthly_total)).toBe(132);
+    expect(updates).toHaveLength(0);
+  });
+
+  test('dryRun still rejects a guarded revise the same way', async () => {
+    const tokenOnly = { ...sentEstimate, customer_id: null };
+    const { database, updates } = makeReviseDatabase({ estimate: tokenOnly, customer: null });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, customerPhone: '9415559999', customerEmail: 'other@example.com' },
+      recompute: noRecompute,
+      now: fixedNow,
+      dryRun: true,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
   test('keeps the satellite snapshot across a pure address reformat', async () => {
     const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
     await reviseAdminEstimate({

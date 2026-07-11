@@ -483,14 +483,22 @@ router.post('/', async (req, res, next) => {
 // and for commercial proposals (their editor is PUT /:id/proposal).
 router.put('/:id', async (req, res, next) => {
   try {
+    // dryRun runs every guard + the full pricing pipeline without writing, so
+    // the builder can confirm a server reprice with the operator BEFORE the
+    // edit publishes to the customer's live link.
+    const dryRun = req.body?.dryRun === true;
     const { estimate } = await reviseAdminEstimate({
       estimateId: req.params.id,
       body: req.body,
       technicianId: req.technicianId,
       technician: req.technician,
+      dryRun,
     });
-    logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+    if (!dryRun) {
+      logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+    }
     res.json({
+      dryRun: dryRun || undefined,
       id: estimate.id,
       token: estimate.token,
       viewUrl: estimateViewUrl(estimate.token),
