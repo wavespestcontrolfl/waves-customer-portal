@@ -49,6 +49,14 @@ describe('computeMissedCalls — family-aware Twilio↔call_log diff', () => {
     expect(computeMissedCalls(legs, new Set(), { now: NOW })).toHaveLength(0);
   });
 
+  test('calls before windowStart are clamped out (Twilio startTimeAfter is date-granular)', () => {
+    const windowStart = new Date(NOW.getTime() - 6 * 3600 * 1000);
+    const older = call({ sid: 'CAtooOld', startTime: new Date(NOW.getTime() - 10 * 3600 * 1000).toISOString() });
+    const inWindow = call({ sid: 'CAin', startTime: new Date(NOW.getTime() - 3 * 3600 * 1000).toISOString() });
+    const missed = computeMissedCalls([older, inWindow], new Set(), { now: NOW, windowStart });
+    expect(missed.map((c) => c.sid)).toEqual(['CAin']);
+  });
+
   test('short, unanswered, and in-grace calls are excluded', () => {
     const legs = [
       call({ sid: 'CAshort', duration: MIN_DURATION_SECONDS - 1 }),

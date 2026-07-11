@@ -34,6 +34,13 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 
 const MIN_DURATION_SECONDS = 20;
+
+// Log-safe phone rendering — full numbers belong ONLY in the admin
+// notification body (an authenticated surface); Railway logs are plaintext.
+function maskPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
 // How far back each run looks. Generous overlap with the run cadence so a
 // missed tick (deploy, crash) can't open a blind spot; the dedupe makes
 // re-scanning cheap.
@@ -49,8 +56,13 @@ const AGGREGATE_THRESHOLD = 3;
 // member in call_log? `twilioCalls` are plain objects ({ sid, parentCallSid,
 // direction, status, duration, startTime, from, to }); `knownSids` is a Set
 // of every twilio_call_sid / call_sid / recording_sid in the window.
-function computeMissedCalls(twilioCalls, knownSids, { now = new Date() } = {}) {
+function computeMissedCalls(twilioCalls, knownSids, { now = new Date(), windowStart = null } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
+  // Twilio's startTimeAfter list filter is DATE-granular (UTC), so the fetch
+  // can include calls from midnight of windowStart's date — outside the
+  // call_log window we diff against. Clamp locally or those extra calls
+  // false-alarm as misses.
+  const clampStart = windowStart ? new Date(windowStart) : null;
   const childrenByParent = new Map();
   for (const c of twilioCalls) {
     if (!c.parentCallSid) continue;
@@ -64,6 +76,7 @@ function computeMissedCalls(twilioCalls, knownSids, { now = new Date() } = {}) {
     if (Number(c.duration || 0) < MIN_DURATION_SECONDS) continue;
     const started = c.startTime ? new Date(c.startTime) : null;
     if (!started || started > graceCutoff) continue;
+    if (clampStart && started < clampStart) continue;
     const family = [c.sid, ...(childrenByParent.get(c.sid) || []).map((k) => k.sid)];
     if (family.some((sid) => knownSids.has(sid))) continue;
     missed.push(c);
@@ -95,6 +108,21 @@ async function alreadyAlerted(dedupeKey) {
   return !!existing;
 }
 
+// Per-call dedupe: a SID is settled by its own miss bell OR by membership in
+// any prior aggregate bell's missed_call_sids — otherwise a 4+ batch that
+// fired the aggregate would stay "fresh" every hour and re-ring forever.
+async function sidAlreadyAlerted(sid) {
+  const existing = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw(
+      "(metadata->>'dedupeKey' = ? OR (metadata->'missed_call_sids') @> ?::jsonb)",
+      [`call-ingest-miss:${sid}`, JSON.stringify([sid])],
+    )
+    .first('id')
+    .catch(() => null);
+  return !!existing;
+}
+
 async function runCallIngestWatchdog({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callIngestWatchdog')) {
@@ -104,10 +132,21 @@ async function runCallIngestWatchdog({ now = new Date() } = {}) {
     logger.warn('[call-ingest-watchdog] Twilio credentials missing; skipping');
     return { skipped: true, reason: 'no_twilio_creds' };
   }
+  // Cross-replica + deploy-overlap serialization: alreadyAlerted() is a
+  // read-then-notify with no unique constraint, so two concurrent ticks
+  // would double-ring every bell. Non-blocking — the overlapping tick skips
+  // and the 30-min cadence picks the work back up.
+  const { runExclusive } = require('../utils/cron-lock');
+  return runExclusive('call-ingest-watchdog', () => runCallIngestWatchdogInner({ now }));
+}
 
+async function runCallIngestWatchdogInner({ now = new Date() } = {}) {
   const windowStart = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
   const client = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  const calls = await client.calls.list({ startTimeAfter: windowStart, limit: 1000 });
+  // No `limit`: the SDK pages through EVERYTHING in the window. A cap here
+  // would silently truncate the ground-truth ledger on a high-volume day
+  // (child dial-legs count too), hiding exactly the misses we exist to find.
+  const calls = await client.calls.list({ startTimeAfter: windowStart, pageSize: 400 });
   const plain = calls.map((c) => ({
     sid: c.sid,
     parentCallSid: c.parentCallSid || null,
@@ -122,12 +161,12 @@ async function runCallIngestWatchdog({ now = new Date() } = {}) {
   // Slack on the DB window: a call near the window edge may have been
   // ingested slightly before/after its Twilio startTime.
   const known = await loadKnownCallLogSids(new Date(windowStart.getTime() - 2 * 3600 * 1000));
-  const missed = computeMissedCalls(plain, known, { now });
+  const missed = computeMissedCalls(plain, known, { now, windowStart });
 
-  // Filter to misses not already alerted.
+  // Filter to misses not already alerted (individually OR via an aggregate).
   const fresh = [];
   for (const c of missed) {
-    if (!(await alreadyAlerted(`call-ingest-miss:${c.sid}`))) fresh.push(c);
+    if (!(await sidAlreadyAlerted(c.sid))) fresh.push(c);
   }
   if (!fresh.length) {
     return { skipped: false, scanned: plain.length, missed: missed.length, alerted: 0 };
@@ -136,6 +175,12 @@ async function runCallIngestWatchdog({ now = new Date() } = {}) {
   const describe = (c) => {
     const when = c.startTime ? new Date(c.startTime).toLocaleString('en-US', { timeZone: 'America/New_York' }) : 'unknown time';
     return `${c.from || 'unknown caller'} → ${c.to || '?'} at ${when} ET (${c.duration}s)`;
+  };
+  // Same line for Railway logs — phones masked (logs are plaintext PII sinks;
+  // the full number lives only in the admin notification).
+  const describeMasked = (c) => {
+    const when = c.startTime ? new Date(c.startTime).toLocaleString('en-US', { timeZone: 'America/New_York' }) : 'unknown time';
+    return `${maskPhone(c.from)} → ${maskPhone(c.to)} at ${when} ET (${c.duration}s)`;
   };
 
   if (fresh.length > AGGREGATE_THRESHOLD) {
@@ -149,7 +194,9 @@ async function runCallIngestWatchdog({ now = new Date() } = {}) {
         `Call ingest may be DOWN — ${fresh.length} answered calls missing from the pipeline`,
         `${fresh.length} completed inbound calls in the last ${LOOKBACK_HOURS}h never reached call_log. ` +
         `Newest: ${describe(fresh[0])}. Check the Twilio voice webhook and recent deploys.`,
-        { link: '/admin/communications', metadata: { dedupeKey, missed_call_sids: fresh.map((c) => c.sid).slice(0, 25) } },
+        // EVERY fresh sid rides in metadata — that's what settles them for
+        // sidAlreadyAlerted, so a fixed outage doesn't re-ring next hour.
+        { link: '/admin/communications', metadata: { dedupeKey, missed_call_sids: fresh.map((c) => c.sid) } },
       );
     }
     logger.error(`[call-ingest-watchdog] ${fresh.length} un-ingested calls in window — aggregate alert fired`);
@@ -167,7 +214,7 @@ async function runCallIngestWatchdog({ now = new Date() } = {}) {
       { link: '/admin/communications', metadata: { dedupeKey, call_sid: c.sid, from_phone: c.from } },
     );
     alerted += 1;
-    logger.warn(`[call-ingest-watchdog] Un-ingested call ${c.sid} (${describe(c)}) — alert fired`);
+    logger.warn(`[call-ingest-watchdog] Un-ingested call ${c.sid} (${describeMasked(c)}) — alert fired`);
   }
   return { skipped: false, scanned: plain.length, missed: missed.length, alerted };
 }
