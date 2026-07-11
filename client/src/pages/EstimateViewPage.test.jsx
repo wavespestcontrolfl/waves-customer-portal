@@ -751,10 +751,11 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
   };
 
-  it('itemizes subtotal → referral credit → net (subtotal = net + credit)', () => {
-    const { container } = render(<PlanTotalSummary combined={combined} />);
+  it('itemizes subtotal → credit → net as the per-service-sum minus the net', () => {
+    // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82/mo →
+    // the credit shown is the exact difference ($2.08), and subtotal−credit=net.
+    const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
     const text = container.textContent;
-    // Net $82/mo, credit $25/yr → $2.08/mo, so pre-credit subtotal is $84.08/mo.
     expect(text).toContain('Plan subtotal');
     expect(text).toContain('$84.08');
     expect(text).toContain('Referral Credit');
@@ -765,69 +766,65 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
   });
 
   it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
-    const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} />);
+    const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it('renders nothing without a combined payload', () => {
-    const { container } = render(<PlanTotalSummary combined={null} />);
+    const { container } = render(<PlanTotalSummary combined={null} preCreditMonthly={84.08} />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('tracks the SELECTED cadence over the default subtotal', () => {
-    // Customer switched to a pricier cadence: net $110/mo, $1320/yr. Credit is
-    // cadence-invariant ($2.08/mo), so subtotal = $112.08 and net follows the
-    // selection — not the frozen $82 default subtotal.
+  it('tracks the SELECTED cadence — subtotal and net both follow the selection', () => {
+    // Switched to a pricier cadence: per-service sum $112.08, net $110/mo. The
+    // credit is the difference ($2.08) and everything follows the selection.
     const { container } = render(
-      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} />,
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
     );
     const text = container.textContent;
-    expect(text).toContain('$112.08'); // 110 + 2.08 credit
+    expect(text).toContain('$112.08');
+    expect(text).toMatch(/[−-]\$2\.08/);
     expect(text).toContain('$110');
     expect(text).toContain('$1,320 / year');
     expect(text).not.toContain('$82');
   });
 
-  it('suppresses cadence-dependent credits (percentage / floor-capped) that would go stale', () => {
-    // The net tracks the selected cadence but the credit is read from the default
-    // payload — a % or floor-capped credit varies by cadence, so it must not print.
-    const pct = { ...combined, manualDiscount: { label: 'Promo', type: 'PERCENT', value: 10, amount: 90, recurringAmount: 90, monthlyAmount: 7.5 } };
-    expect(render(<PlanTotalSummary combined={pct} />).container).toBeEmptyDOMElement();
-    const capped = { ...combined, manualDiscount: { ...combined.manualDiscount, capped: true, capReason: 'lawn_program_minimum' } };
-    expect(render(<PlanTotalSummary combined={capped} />).container).toBeEmptyDOMElement();
+  it('shows the ACTUAL (capped) credit by construction, not a stale default amount', () => {
+    // The selected cadence caps the credit so the net is higher ($83.50, only
+    // $0.58 off the $84.08 sum). The difference shows the real $0.58 — never the
+    // default $2.08 — so the on-screen math always reconciles.
+    const text = render(
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 83.50, annual: 1002 }} preCreditMonthly={84.08} />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$83.50');
+  });
+
+  it('renders nothing when the per-service sum is missing or does not exceed the net', () => {
+    // No reliable pre-credit basis → nothing to itemize (not ranged/quote-required).
+    expect(render(<PlanTotalSummary combined={combined} />).container).toBeEmptyDOMElement();
+    expect(render(<PlanTotalSummary combined={combined} preCreditMonthly={82} />).container).toBeEmptyDOMElement();
   });
 
   it('on a ranged low-confidence plan keeps the credit visible but no exact net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
-    const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
+    const text = render(<PlanTotalSummary combined={ranged} preCreditMonthly={84.08} />).container.textContent;
     expect(text).toContain('Referral Credit'); // credit stays visible…
     expect(text).toMatch(/[−-]\$2\.08/);
     expect(text).not.toContain('Your price'); // …but no exact subtotal/net
     expect(text).not.toContain('Plan subtotal');
     // Same when the range rides on the selected frequency.
     const text2 = render(
-      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} />,
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
     ).container.textContent;
     expect(text2).toContain('Referral Credit');
     expect(text2).not.toContain('Your price');
   });
 
-  it('suppresses when the SELECTED cadence caps/suppresses the credit', () => {
-    // The credit amount here is the default (uncapped) one, but the selected
-    // combo caps or drops it — net (post-cap) and this credit would disagree.
-    const capped = render(
-      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 60 }} selectedCombo={{ manualDiscount: { capped: true } }} />,
-    );
-    expect(capped.container).toBeEmptyDOMElement();
-    const suppressed = render(
-      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 60 }} selectedCombo={{ manualDiscountSuppressed: true }} />,
-    );
-    expect(suppressed.container).toBeEmptyDOMElement();
-  });
-
   it('suppresses for a quote-required selection (page hides exact dollars)', () => {
     const { container } = render(
-      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} />,
+      <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', quoteRequired: true }} preCreditMonthly={84.08} />,
     );
     expect(container).toBeEmptyDOMElement();
   });
