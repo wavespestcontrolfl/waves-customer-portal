@@ -298,6 +298,42 @@ describe('applyRecurringIntentDefault', () => {
       .toBe('Quarterly Pest Control Service');
   });
 
+  test('request idioms with "have" are asks, not pressure', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: can I have quarterly service?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want to have monthly service.').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('bare and plural plan/package requests trigger', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want a plan.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: what packages do you offer?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: do you have plans?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // "plan to" (intention, not program) does not.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I have a plan to seal the garage myself.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('bare ongoing/year-round problem DESCRIPTIONS never convert', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: it is an ongoing ant problem.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: year-round bugs are the issue here.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('an explicitly negated veto cadence does not erase the chosen one', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want monthly, not bi-monthly.').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('a cadence-only opt-out does not erase a package request', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want a package, no monthly though.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');

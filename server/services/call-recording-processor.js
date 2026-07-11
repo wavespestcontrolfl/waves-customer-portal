@@ -2743,11 +2743,16 @@ const RECURRING_PEST_PROGRAMS = new Set([
 // Program words that are unambiguous on their own. Bare cadence words —
 // including "quarterly"/"semiannual" — are NOT here: they only count with
 // the pest-pressure/history guard below ("we get ants every month" and
-// "I USED TO HAVE quarterly service" are not plan asks).
-const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|(?:service|maintenance|pest|treatment) plan|package|membership)\b/i;
-const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bongoing\b|\byear[- ]?round\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
-// "we get/see/have fire ants every month" describes pressure, not a plan ask.
-const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in))\b[^.?!]{0,40}$/i;
+// "I USED TO HAVE quarterly service" are not plan asks). Bare
+// "ongoing"/"year-round" are nowhere: as descriptions ("an ongoing ant
+// problem", "year-round bugs") they're pressure, and the genuine asks are
+// the service-anchored forms here (plus "keep … year-round").
+const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+to\b)|plans\b(?!\s+to\b)|packages?|memberships?)\b/i;
+const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
+// "we get/see/have fire ants every month" describes pressure, not a plan
+// ask. "have" is pressure ONLY as possession — request idioms ("can I
+// have…", "want to have…") are excluded by lookbehind.
+const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:want|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in))\b[^.?!]{0,40}$/i;
 // ...but a request verb AFTER the pressure verb re-frames the clause as an
 // ask: "I HAVE ants and WANT monthly service".
 const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
@@ -2760,7 +2765,13 @@ const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me
 // The negated-want gap is clause-bounded (no ;) and must not cross another
 // "want/need" — "I don't want just a one-time; I want a package" pivots to a
 // request and is NOT a decline.
-const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plan|package|membership|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plans?|packages?|memberships?|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
+// A decline whose object is ONLY a cadence ("no monthly", "don't want
+// quarterly") excludes that cadence, it does not decline recurring service —
+// the negated-cadence filter already keeps it from being chosen. Only a
+// decline naming the PROGRAM itself (plan/package/recurring/one-time…)
+// carries veto semantics.
+const PROGRAM_DECLINE_RE = /\b(?:recurring|plans?|packages?|memberships?|ongoing|one[- ]?time)\b/i;
 
 // A cadence word the caller is EXCLUDING ("but not monthly", "instead of
 // monthly") must not count as their chosen cadence.
@@ -2895,7 +2906,7 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
   // quarterly" → "yes"), made a recurring request.
   const decline = callerText.match(RECURRING_DECLINED_RE);
   let postDeclineOffer = null;
-  if (decline) {
+  if (decline && PROGRAM_DECLINE_RE.test(decline[0])) {
     const afterDecline = callerText.slice(decline.index + decline[0].length);
     const declineTurnIdx = turns.reduce(
       (acc, t, i) => (t.speaker === 'caller' && RECURRING_DECLINED_RE.test(t.text) ? i : acc), -1
@@ -2922,7 +2933,10 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
     { key: 'semiannual', fallback: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/gi },
     { key: 'quarterly', fallback: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/gi },
   ];
-  const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText) && !(f.veto && f.veto.test(cadenceText)));
+  // Vetoes are negation-aware too: "I want monthly, not bi-monthly" must
+  // not let the (negated) bi-monthly mention erase the monthly choice.
+  const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText)
+    && !(f.veto && nonNegatedMatch(f.veto, cadenceText)));
   const chosen = hits.length === 1 ? hits[0] : families.find((f) => f.key === 'quarterly');
   const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
 
