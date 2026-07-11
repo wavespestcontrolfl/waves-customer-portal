@@ -378,7 +378,15 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
   token gate + archived-customer 404 + rate limit + `no-store`; contents are
   COMPANY-ONLY — tech name/title, office line, company email/site/address,
-  license line — never customer data).
+  license line — never customer data),
+  `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
+  64-hex token gate + archived-customer 404 + per-route rate limit +
+  `no-store`; 404s whenever the PASS_* signing env vars are unset (config
+  self-gate — the card payload's walletAvailable mirrors it so the button
+  never renders a dead tap); pass carries customer FIRST NAME + member-since
+  year only — NO home coordinates, NO next-visit date (static pass, no
+  update plumbing), review QR falls back to the card link for
+  has_left_google_review customers).
   `/api/public/lawn-assessment/:id/claim` (write; contact capture that unlocks
   the full report — same gate-404 + honeypot + privacy headers, 10 req/min
   limit, UUID + 32-hex claim-token format gates with generic 404 so tokens

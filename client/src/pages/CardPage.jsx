@@ -10,7 +10,8 @@
  * resolves to the Google review page for the office nearest the customer.
  *
  * The review block hides itself for customers flagged has_left_google_review.
- * Apple Wallet is a follow-up PR (needs the Pass Type ID cert).
+ * The Add-to-Apple-Wallet button renders only when the server reports pass
+ * signing configured (walletAvailable) AND the UA is an Apple platform.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -236,6 +237,11 @@ export default function CardPage() {
       })
     : null;
   const showReview = !!data.reviewUrl && !data.customer?.hasLeftGoogleReview;
+  // Wallet passes only open on Apple platforms — hide the button elsewhere
+  // (Android users have the Play badge below; Google Wallet is a follow-up).
+  const isApplePlatform = typeof navigator !== 'undefined'
+    && /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent || '');
+  const showWallet = !!data.walletAvailable && isApplePlatform;
   const techName = data.tech?.name || 'Waves Pest Control';
   const initials = techName.split(/\s+/).map((p) => p[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
 
@@ -356,6 +362,30 @@ export default function CardPage() {
             {data.customer?.firstName ? `Prepared for ${data.customer.firstName}` : 'Your Waves card'}
             {firstVisit ? ` · First visit ${firstVisit}` : ''}
           </div>
+        )}
+
+        {showWallet && (
+          <a
+            className="wcard-tap"
+            href={`${API_BASE}/card/${token}/wallet.pkpass`}
+            aria-label="Add to Apple Wallet"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              background: '#000000', color: '#FFFFFF', borderRadius: 14,
+              padding: '11px 18px', fontSize: 15, fontWeight: 620,
+              textDecoration: 'none', boxShadow: '0 8px 20px rgba(1,16,28,0.40)',
+            }}
+          >
+            <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="2.6" y="4.2" width="18.8" height="15.6" rx="3" fill="#F4F5F7" />
+              <rect x="4.1" y="5.8" width="15.8" height="3.4" rx="1.3" fill="#4AA9F5" />
+              <rect x="4.1" y="8.1" width="15.8" height="3.4" rx="1.3" fill="#5BC96A" />
+              <rect x="4.1" y="10.4" width="15.8" height="3.4" rx="1.3" fill="#F7C948" />
+              <rect x="4.1" y="12.7" width="15.8" height="3.4" rx="1.3" fill="#F2694B" />
+              <path d="M2.6 13.6h18.8v3.2a3 3 0 0 1-3 3H5.6a3 3 0 0 1-3-3v-3.2z" fill="#E4E7EC" />
+            </svg>
+            Add to Apple Wallet
+          </a>
         )}
 
         {/* Get the app */}

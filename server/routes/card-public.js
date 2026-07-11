@@ -46,6 +46,28 @@ router.get('/:token', async (req, res, next) => {
   }
 });
 
+// Signed Apple Wallet pass. 404s (never 500s) while signing certs are not
+// configured — walletConfigured() is the availability gate, mirrored by
+// walletAvailable in the card payload so the page only renders the button
+// when a tap can succeed. Kill switch = unset the PASS_* env vars.
+router.get('/:token/wallet.pkpass', async (req, res, next) => {
+  try {
+    // no-store on EVERY outcome, including the early 404s — a cached 404
+    // from a pre-rollout tap must not outlive the PASS_* config flip
+    // (Codex P2 #2592).
+    res.set('Cache-Control', 'no-store');
+    const WalletPass = require('../services/wallet-pass');
+    if (!WalletPass.walletConfigured()) return res.status(404).send('Not found');
+    const buf = await WalletPass.generateForToken(req.params.token);
+    if (!buf) return res.status(404).send('Not found');
+    res.set('Content-Type', 'application/vnd.apple.pkpass');
+    res.set('Content-Disposition', 'attachment; filename="waves-card.pkpass"');
+    res.send(buf);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/:token/contact.vcf', async (req, res, next) => {
   try {
     const token = String(req.params.token || '');

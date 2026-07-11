@@ -50,6 +50,25 @@ describe('customer-card vCard builder', () => {
   });
 });
 
+describe('customer-card memberSinceYearET', () => {
+  const { memberSinceYearET } = require('../services/customer-card');
+
+  test('member_since DATE string/UTC-midnight Date read as calendar year', () => {
+    expect(memberSinceYearET({ member_since: '2026-07-11' })).toBe(2026);
+    expect(memberSinceYearET({ member_since: new Date('2026-12-31T00:00:00.000Z') })).toBe(2026);
+  });
+
+  test('created_at fallback uses the ET calendar, not server UTC', () => {
+    // 2027-01-01T02:30Z is Dec 31 2026, 9:30 PM in America/New_York —
+    // getFullYear() on a UTC server would say 2027 (Codex P3 #2592).
+    expect(memberSinceYearET({ created_at: '2027-01-01T02:30:00.000Z' })).toBe(2026);
+  });
+
+  test('returns null with no dates', () => {
+    expect(memberSinceYearET({})).toBeNull();
+  });
+});
+
 describe('customer-card location pick', () => {
   const { __private: { pickCardLocation } } = require('../services/customer-card');
 
