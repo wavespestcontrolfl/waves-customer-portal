@@ -96,6 +96,54 @@ describe('applyRecurringIntentDefault', () => {
     expect(out.matched_service).toBe('Quarterly Pest Control Service');
   });
 
+  test('pest-frequency observations are not plan interest', () => {
+    expect(applyRecurringIntentDefault(
+      lead({ matched_service: 'Fire Ant Treatment Service' }),
+      'Caller: we get fire ants every month in that corner of the yard.'
+    ).matched_service).toBe('Fire Ant Treatment Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I keep seeing them every few weeks.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    // ...but a service-framed cadence still counts, and picks its family.
+    expect(applyRecurringIntentDefault(lead(), 'Caller: could you come out every month?').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('bare opt-outs decline ("no package"), but "no contract" is month-to-month language, not a decline', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: no package, only the wasp nest please.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: no recurring, just this nest.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: can I do quarterly with no contract?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('caller continuation lines in a diarized turn are scanned', () => {
+    const t = [
+      'Agent: what are you looking for?',
+      'Caller: I have a wasp nest by the garage',
+      'and I would also want a quarterly package for the ants.',
+      'Agent: sure, we can do that.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Quarterly Pest Control Service');
+    // Agent continuation lines still don't leak into the caller text.
+    const t2 = [
+      'Caller: I just have the one wasp nest.',
+      'Agent: we do offer a plan,',
+      'a quarterly package many customers like.',
+      'Caller: okay.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t2).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('generic one-time pest catalog names are covered (knockdown protocols deliberately not)', () => {
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Cockroach Control Service' }), 'Caller: I want a recurring package.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Initial Pest Cleanout' }), 'Caller: sign me up for the quarterly plan.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Initial German Roach Knockdown Service' }), 'Caller: I want a recurring package.').matched_service)
+      .toBe('Initial German Roach Knockdown Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
