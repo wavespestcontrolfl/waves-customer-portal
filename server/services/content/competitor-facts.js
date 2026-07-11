@@ -220,6 +220,15 @@ const COMPETITOR_BRAND_SIGNALS = [
   'Aptive Environmental',
   'Hawx',
   'Catseye',
+  // Suffix-less lawn/mosquito franchise brands — no pest-industry suffix, so
+  // the comparison gate's provider-name shape can't catch them in option
+  // headers; recognition must come from this curated list. Only unambiguous
+  // brand tokens here: generic-word brands ("Bug Out", "Moxie") belong in a
+  // competitor's case-sensitive aliasesCS, never in this CI list.
+  'TruGreen',
+  'Lawn Doctor',
+  'Mosquito Joe',
+  'Greenix',
 ];
 
 function normalize(s) {

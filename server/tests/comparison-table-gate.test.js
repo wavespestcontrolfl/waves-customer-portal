@@ -115,6 +115,24 @@ describe('comparison-table-gate', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(true);
   });
 
+  test('generic lawn-care CATEGORY headers are not phantom businesses (Codex round-2 P2)', () => {
+    for (const header of ['DIY lawn care', 'Professional lawn care', 'DIY Lawn Care']) {
+      const t = CATEGORY_TABLE.replace('National chain', header);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
+  test('suffix-less franchise brands are recognized via the curated signal list (Codex round-2 P1)', () => {
+    for (const brand of ['TruGreen', 'Mosquito Joe', 'Lawn Doctor', 'Greenix']) {
+      const t = CATEGORY_TABLE.replace('National chain', brand);
+      const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+      expect(r.pass).toBe(false);
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    }
+  });
+
   test('an unallowlisted LAWN CARE company header stays fail-closed (Codex P1)', () => {
     const t = CATEGORY_TABLE.replace('National chain', 'Acme Lawn Care');
     const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });

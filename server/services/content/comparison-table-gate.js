@@ -127,7 +127,7 @@ const RANKING_RE = new RegExp([
 // Sarasota, Manatee, Venice, …) are deliberately NOT excluded: "Sarasota Pest
 // Control" is a business-name pattern, not a generic phrase, so a location lead
 // + industry suffix in prose/title must still be flagged for review.
-const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
+const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year|DIY';
 // Broad pest-industry suffix set so business names with less-common suffixes
 // (e.g. "HomeTeam Pest Defense", "Gulf Coast Termite Specialists") are still
 // recognized — a proper-noun lead + any of these.
@@ -147,7 +147,6 @@ function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 const LEGAL_ENTITY_NAME_SRC = `\\b([A-Z][A-Za-z0-9&'.\\-]*(?:\\s+[A-Za-z0-9&'.\\-]+){0,3}\\s+(?:LLC|L\\.L\\.C\\.|Inc\\.?|Incorporated|Corp\\.?|Co\\.|Bros\\.?|Brothers|& Sons?))\\b`;
 function legalEntityRe(flags) { return new RegExp(LEGAL_ENTITY_NAME_SRC, flags); }
 
-const INDUSTRY_SUFFIX_RE = new RegExp(`\\b(${INDUSTRY_SUFFIX_SRC})\\b`, 'i');
 const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
 const OWN_BRAND_RE = /\bwaves\b/i;
 
@@ -248,9 +247,14 @@ function classifyOption(header) {
   if (mentions.some((m) => !m.inAllowlist)) return 'unknown_competitor';
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (OWN_BRAND_RE.test(h)) return 'own';
-  if (INDUSTRY_SUFFIX_RE.test(h) || BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
-  // Not business-SHAPED (no industry suffix, no company marker, no
-  // provider-name shape, no recognized competitor): a generic option header.
+  // providerNameRe (not the bare case-insensitive suffix test) is the
+  // business-shape check here: it requires a PROPER-NAME lead before the
+  // industry suffix, so "Acme Lawn Care" fails closed while generic category
+  // headers like "DIY lawn care" / "Professional lawn care" stay educational
+  // (Codex round-2 P2: the bare suffix test re-created phantom businesses).
+  if (BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
+  // Not business-SHAPED (no proper-name + industry suffix, no company
+  // marker, no recognized competitor): a generic option header.
   // The writer legitimately uses <ComparisonTable> for educational content —
   // species lookalikes ("Real Brown Recluse"), attribute columns ("Type",
   // "Kid-safe?"), DIY methods ("Bleach + Google") — and the old
