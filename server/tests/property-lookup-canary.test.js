@@ -86,7 +86,7 @@ beforeEach(() => {
   mockTriggerNotification.mockResolvedValue({ bellWritten: true, push: null });
   // The timeout path runs a browser-UA diagnostic probe against the county
   // host — stub fetch so unit tests never touch the network.
-  global.fetch = jest.fn(async () => ({ status: 200 }));
+  global.fetch = jest.fn(async () => ({ ok: true, status: 200 }));
 });
 
 describe('evaluateGoldenRecord', () => {
@@ -233,6 +233,19 @@ describe('runPropertyLookupCanary', () => {
     expect(mockTriggerNotification).toHaveBeenCalledWith('property_lookup_canary_failed', {
       failures: [expect.stringMatching(streakRe)],
     });
+  });
+
+  it('a blocked (non-2xx) browser-UA probe does NOT claim UA-scoring', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 403 }));
+    mockLookupByParcel.mockImplementation(async (parcel) => {
+      if (parcel.county === 'Sarasota') throw abortError();
+      return healthyRecord();
+    });
+    const n1 = await runPropertyLookupCanary();
+    const detail = n1.suppressed.find((s) => s.includes('Sarasota'));
+    expect(detail).toContain('HTTP 403');
+    expect(detail).toContain('blocked response');
+    expect(detail).not.toContain('UA-scoring likely');
   });
 
   it('fails closed when the canary state table is unavailable — a transient pages immediately', async () => {

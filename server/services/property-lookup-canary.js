@@ -120,7 +120,13 @@ async function probeCountyHostWithBrowserUa(county) {
   const t0 = Date.now();
   try {
     const resp = await fetch(url, { signal: controller.signal, headers: { 'User-Agent': BROWSER_PROBE_UA } });
-    return `HTTP ${resp.status} in ${((Date.now() - t0) / 1000).toFixed(1)}s — UA-scoring likely; set COUNTY_LOOKUP_UA to a browser string`;
+    const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    // A fast 403/429/5xx means the browser UA did NOT work — pointing the
+    // operator at COUNTY_LOOKUP_UA there would be a no-op. Only a 2xx is
+    // evidence of UA-scoring.
+    return resp.ok
+      ? `HTTP ${resp.status} in ${elapsed} — UA-scoring likely; set COUNTY_LOOKUP_UA to a browser string`
+      : `HTTP ${resp.status} in ${elapsed} — blocked response; a UA change alone is unlikely to help`;
   } catch (err) {
     return errLabel(err) === 'timeout'
       ? 'also timed out — IP-level block likely'
