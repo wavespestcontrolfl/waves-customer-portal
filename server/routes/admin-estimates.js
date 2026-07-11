@@ -1813,7 +1813,9 @@ router.post('/:id/extend', async (req, res, next) => {
       sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
     });
   } catch (err) {
-    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    if (err.statusCode === 400 || err.statusCode === 409) {
+      return res.status(err.statusCode).json({ error: err.message });
+    }
     next(err);
   }
 });

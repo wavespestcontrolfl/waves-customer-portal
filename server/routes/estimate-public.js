@@ -9147,56 +9147,52 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
-    // Dedupe: one admin notification per estimate per 24h, claimed ATOMICALLY
-    // — the conditional UPDATE both checks and stamps extensionRequestedAt in
-    // one statement, so concurrent POSTs can't each pass a read-then-write
-    // check and fan out duplicate notifications. The stamp lives in
-    // estimate_data (no migration for one timestamp). A non-object blob can't
-    // hold the stamp: it stays claimable every time (jsonb_set CASE leaves it
-    // unchanged) and the rate limiter alone bounds repeats — same tradeoff as
-    // the viewedMonthlyTotal stamp above.
-    const claimed = await db('estimates')
-      .where({ id: estimate.id })
-      .whereRaw(
-        `(jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) <> 'object'
-          OR COALESCE(estimate_data->>'extensionRequestedAt', '') = ''
-          OR (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours')`,
-      )
-      .update({
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
-          [new Date().toISOString()],
-        ),
-      });
-    if (!claimed) {
-      return res.json({ success: true, alreadyRequested: true });
+    // Fail CLOSED on malformed estimate_data: a non-object blob (never seen
+    // in practice) cannot hold the dedupe/burn stamps, and granting without
+    // recordable stamps would make this public endpoint an unbounded snooze
+    // button. NULL is fine — the claim UPDATEs below COALESCE it into '{}'.
+    if (estimate.estimate_data != null) {
+      let parsedShape = estimate.estimate_data;
+      if (typeof parsedShape === 'string') {
+        try { parsedShape = JSON.parse(parsedShape); } catch { parsedShape = null; }
+      }
+      if (!parsedShape || typeof parsedShape !== 'object' || Array.isArray(parsedShape)) {
+        logger.warn(`[estimate-extension-request] non-object estimate_data on estimate ${estimate.id} — failing closed`);
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
     }
 
-    const releaseClaim = () => db('estimates').where({ id: estimate.id }).update({
-      estimate_data: db.raw(
-        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
-      ),
-    }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+    const nowIso = new Date().toISOString();
+    // 24h dedupe window, shared by both claim shapes below.
+    const DEDUPE_OPEN_SQL = `(COALESCE(estimate_data->>'extensionRequestedAt', '') = ''
+      OR (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours')`;
+    const OBJECT_SQL = "jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'";
 
     const NotificationService = require('../services/notification-service');
     const expiredLine = estimate.expires_at
       ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
       : 'link expired';
 
-    // Lifetime auto-grant cap. The atomic 24h claim above serializes
-    // concurrent requests, so within the claim holder this read is safe.
-    let estData = {};
-    try {
-      estData = typeof estimate.estimate_data === 'string'
-        ? JSON.parse(estimate.estimate_data)
-        : (estimate.estimate_data || {});
-    } catch { estData = {}; }
+    // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
+    // checks the 24h dedupe AND the unburned cap AND records BOTH stamps
+    // (extensionRequestedAt + extensionAutoGrantedAt), so the burn is atomic
+    // with the claim: concurrent POSTs can't double-grant, and there is no
+    // window where an extension exists without its burn. Burn-BEFORE-grant is
+    // the fail-closed direction — if the extension then fails we release the
+    // stamps best-effort, and if THAT fails the customer merely loses the
+    // self-serve grant (office path still works), never gains extras.
+    const autoClaimed = await db('estimates')
+      .where({ id: estimate.id })
+      .whereRaw(`${OBJECT_SQL} AND ${DEDUPE_OPEN_SQL} AND COALESCE(estimate_data->>'extensionAutoGrantedAt', '') = ''`)
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true), '{extensionAutoGrantedAt}', to_jsonb(?::text), true)",
+          [nowIso, nowIso],
+        ),
+      });
 
-    if (!estData?.extensionAutoGrantedAt) {
-      // Auto-grant path: the EXTENSION is the deliverable. A failure here
-      // releases the claim and 500s into the client's "call us" fallback; a
-      // failed notification insert afterwards only logs — the customer
-      // already has their extension and the estimate row shows it.
+    if (autoClaimed) {
+      // Auto-grant path: the EXTENSION is the deliverable.
       let granted;
       try {
         const { extendEstimate } = require('../services/estimate-extension');
@@ -9208,30 +9204,37 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
           smsMetadata: { original_message_type: 'estimate_extended_auto' },
         });
       } catch (err) {
-        await releaseClaim();
+        // Release both stamps we just set so a later retry isn't locked out
+        // by a grant that never happened. If the release itself fails we stay
+        // burned — fail closed.
+        await db('estimates').where({ id: estimate.id }).update({
+          estimate_data: db.raw(
+            "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN (estimate_data - 'extensionRequestedAt') - 'extensionAutoGrantedAt' ELSE estimate_data END",
+          ),
+        }).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
 
-      // Burn the lifetime cap only AFTER the grant committed. If this stamp
-      // fails, the worst case is a second auto-grant on a later request —
-      // preferable to burning the cap on a grant that never happened.
-      await db('estimates').where({ id: estimate.id }).update({
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionAutoGrantedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
-          [new Date().toISOString()],
-        ),
-      }).catch((e) => logger.warn(`[estimate-extension-request] auto-grant stamp failed for estimate ${estimate.id}: ${e.message}`));
-
+      // The office must hear about every self-serve grant (AGENTS.md
+      // contract). notifyAdmin swallows insert errors and returns null, so
+      // retry once; on a double failure the grant stands (the customer
+      // already has it and the row carries extensionAutoGrantedAt), so log
+      // loudly rather than confusing the customer with a failure they can't
+      // act on.
       const smsLine = granted.smsResult.sent
         ? 'confirmation SMS sent'
         : `SMS not sent (${granted.smsResult.reason || 'blocked'})`;
-      await NotificationService.notifyAdmin(
+      const notifyAutoGrant = () => NotificationService.notifyAdmin(
         'estimate',
         `Extension auto-granted: ${estimate.customer_name}`,
         `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}`,
         { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
       );
+      const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
+      if (!autoNotification) {
+        logger.error(`[estimate-extension-request] auto-grant admin notification failed twice for estimate ${estimate.id} — grant stands, office unnotified`);
+      }
 
       return res.status(201).json({
         success: true,
@@ -9241,12 +9244,26 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       });
     }
 
-    // Cap already used → notify-office-only fallback. Here the notification
-    // IS the deliverable — and NotificationService.create swallows insert
-    // errors and returns null, so check the value rather than relying on a
-    // rejection. On failure, release the claim (else the retry is suppressed
-    // for 24h with nothing delivered) and 500 so the customer gets the
-    // "call us" fallback instead of a false "request sent".
+    // Step 2 — cap already burned (or the auto claim lost a race and burned
+    // the dedupe window): try the plain 24h notify-only claim.
+    const claimed = await db('estimates')
+      .where({ id: estimate.id })
+      .whereRaw(`${OBJECT_SQL} AND ${DEDUPE_OPEN_SQL}`)
+      .update({
+        estimate_data: db.raw(
+          "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionRequestedAt}', to_jsonb(?::text), true)",
+          [nowIso],
+        ),
+      });
+    if (!claimed) {
+      return res.json({ success: true, alreadyRequested: true });
+    }
+
+    // Notify-office-only fallback. Here the notification IS the deliverable —
+    // check the value (NotificationService.create swallows errors into null).
+    // On failure, release the claim (else the retry is suppressed for 24h
+    // with nothing delivered) and 500 so the customer gets the "call us"
+    // fallback instead of a false "request sent".
     const notification = await NotificationService.notifyAdmin(
       'estimate',
       `Extension requested (again): ${estimate.customer_name}`,
@@ -9254,7 +9271,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
     );
     if (!notification) {
-      await releaseClaim();
+      await db('estimates').where({ id: estimate.id }).update({
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
+        ),
+      }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
       return res.status(500).json({ error: 'extension_request_failed' });
     }
 

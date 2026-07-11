@@ -25,7 +25,13 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 // estimate-follow-up service uses.
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 
-const EXTENDABLE_STATUSES = ['sent', 'viewed', 'expired'];
+// Every PUBLISHED status the public eligibility predicate
+// (isEstimateExtensionRequestEligible) can admit, plus the admin trio. A
+// date-expired send_failed row with sent_at (some channel delivered) and a
+// stuck date-expired 'sending' row are both real customer-held links — the
+// service must be able to extend anything the UI offers the button for, or
+// the POST deterministically 500s on an eligible row.
+const EXTENDABLE_STATUSES = ['sent', 'viewed', 'expired', 'send_failed', 'sending'];
 
 function validationError(message) {
   const err = new Error(message);
@@ -43,11 +49,13 @@ function computeExtensionExpiry(estimate = {}, days, now = new Date()) {
   return new Date(anchor.getTime() + days * 86400000);
 }
 
-// Expired estimates flipping back to active need their status reset to
-// whatever they were before expiry — viewed if the customer had viewed,
-// otherwise sent. Non-expired statuses stay untouched.
+// Estimates whose status itself blocks the customer view need reviving on
+// extension: 'expired' (the sweep's flip) and 'send_failed' (404s in
+// isEstimateCustomerViewable regardless of expiry) reset to viewed/sent per
+// the customer's history. 'sending' stays as-is — it's already viewable, and
+// the in-flight send machinery owns that status. sent/viewed stay untouched.
 function extensionStatusUpdate(estimate = {}) {
-  if (estimate.status !== 'expired') return null;
+  if (!['expired', 'send_failed'].includes(estimate.status)) return null;
   return estimate.viewed_at ? 'viewed' : 'sent';
 }
 
@@ -67,7 +75,9 @@ function extensionStatusUpdate(estimate = {}) {
  *   'template_missing' | provider/consent block reasons from
  *   sendCustomerMessage.
  * @throws validation errors carrying statusCode 400 (bad days / status /
- *   archived) so route callers can pass them straight through.
+ *   archived) and concurrency conflicts carrying statusCode 409 (the row
+ *   changed between read and guarded write) so route callers can pass them
+ *   straight through.
  */
 async function extendEstimate({ estimate, days, silent = false, entryPoint, workflow, smsMetadata = {} }) {
   if (!estimate || !estimate.id) throw validationError('Estimate not found');
@@ -95,7 +105,25 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   };
   const revivedStatus = extensionStatusUpdate(estimate);
   if (revivedStatus) updates.status = revivedStatus;
-  await db('estimates').where({ id: estimate.id }).update(updates);
+
+  // Guarded write — the caller's row is a snapshot, so predicate on the
+  // state this extension was computed FROM, not just the id. This stops a
+  // stale snapshot from (a) shortening a concurrent longer extension (the
+  // expires_at < newExpiry guard: never move an expiry backwards), (b)
+  // resurrecting a row a concurrent accept/decline/archive just made
+  // terminal (status + archived_at guards), or (c) reporting success over a
+  // concurrent sweep flip (status guard). Zero rows → 409, callers surface
+  // retry/failure.
+  const updated = await db('estimates')
+    .where({ id: estimate.id, status: estimate.status })
+    .whereNull('archived_at')
+    .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+    .update(updates);
+  if (!updated) {
+    const err = new Error('Estimate changed while extending — retry.');
+    err.statusCode = 409;
+    throw err;
+  }
 
   // Customer notification — Waves voice. Skipped if no phone or the caller
   // asked for silence; consent/opt-out/gate enforcement lives inside

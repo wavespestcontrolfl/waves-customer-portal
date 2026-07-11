@@ -313,18 +313,26 @@ finding and warns on P1. Reviewers must return JSON matching
   behind GATE_ESTIMATE_EXTENSION_REQUEST. Eligibility requires a PUBLISHED
   estimate (sent_at/viewed_at set — the expiration sweep flips never-sent
   drafts to 'expired' too, and those must never qualify) that is past
-  expires_at or sweep-expired, not accepted/declined/archived. Concurrency:
-  an atomic 24h-dedupe `extensionRequestedAt` claim inside estimate_data
-  (conditional UPDATE so concurrent POSTs can't fan out duplicates; released
-  on failure). First request per estimate AUTO-GRANTS a 7-day extension via
-  the shared services/estimate-extension.js core (same expiry anchoring,
-  status revival, and `estimate_extended` SMS as the admin extend route —
-  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage), capped
-  at ONE per estimate lifetime by an `extensionAutoGrantedAt` stamp so a
-  public endpoint can't become an infinite self-serve snooze; repeat requests
-  fall back to notify-office-only. Every path raises an in-app admin
-  notification; response carries only success/autoExtended/expiresAt — no
-  PII),
+  expires_at or sweep-expired, not accepted/declined/archived; non-object
+  estimate_data fails CLOSED (generic 404 — the stamps below would be
+  unrecordable). Concurrency: an atomic 24h-dedupe `extensionRequestedAt`
+  claim inside estimate_data (conditional UPDATE so concurrent POSTs can't
+  fan out duplicates; released on failure). First request per estimate
+  AUTO-GRANTS a 7-day extension via the shared
+  services/estimate-extension.js core (same expiry anchoring, status
+  revival, and `estimate_extended` SMS as the admin extend route —
+  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage; the
+  write is guarded on the snapshot's status/archived_at and never moves an
+  expiry backwards, 409 on conflict), capped at ONE per estimate lifetime by
+  an `extensionAutoGrantedAt` stamp burned ATOMICALLY in the same claim
+  UPDATE before any mutation (fail-closed: a failed grant releases both
+  stamps best-effort; a failed release stays burned) so a public endpoint
+  can't become an infinite self-serve snooze; repeat requests fall back to
+  notify-office-only. Every path raises an in-app admin notification (the
+  auto-grant alert retries once and error-logs on double failure; the
+  notify-only path treats the notification as the deliverable and releases
+  its claim + 500s when it can't persist); response carries only
+  success/autoExtended/expiresAt/smsSent — no PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired

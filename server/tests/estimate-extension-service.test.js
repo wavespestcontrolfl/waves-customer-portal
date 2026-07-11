@@ -26,7 +26,7 @@ describe('computeExtensionExpiry (shared by admin extend + public auto-grant)', 
   });
 });
 
-describe('extensionStatusUpdate (sweep-expired revival)', () => {
+describe('extensionStatusUpdate (view-blocking status revival)', () => {
   it('revives a sweep-expired row to viewed when the customer had viewed', () => {
     expect(extensionStatusUpdate({ status: 'expired', viewed_at: PAST })).toBe('viewed');
   });
@@ -35,14 +35,25 @@ describe('extensionStatusUpdate (sweep-expired revival)', () => {
     expect(extensionStatusUpdate({ status: 'expired', viewed_at: null })).toBe('sent');
   });
 
-  it('leaves non-expired statuses untouched (returns null = no status write)', () => {
+  it('revives send_failed (view-blocked regardless of expiry) the same way', () => {
+    expect(extensionStatusUpdate({ status: 'send_failed', viewed_at: PAST })).toBe('viewed');
+    expect(extensionStatusUpdate({ status: 'send_failed', viewed_at: null })).toBe('sent');
+  });
+
+  it('leaves already-viewable statuses untouched (returns null = no status write)', () => {
     expect(extensionStatusUpdate({ status: 'sent', viewed_at: null })).toBe(null);
     expect(extensionStatusUpdate({ status: 'viewed', viewed_at: PAST })).toBe(null);
+    // 'sending' is viewable and owned by the in-flight send machinery.
+    expect(extensionStatusUpdate({ status: 'sending', viewed_at: null })).toBe(null);
   });
 });
 
 describe('EXTENDABLE_STATUSES', () => {
-  it('matches the admin extend contract: sent / viewed / expired only', () => {
-    expect(EXTENDABLE_STATUSES).toEqual(['sent', 'viewed', 'expired']);
+  it('covers every published status the public eligibility predicate can admit', () => {
+    // Superset requirement: isEstimateExtensionRequestEligible admits
+    // date-expired send_failed/sending rows with sent_at, so the service must
+    // accept them or the public POST 500s on a row the UI offered the button
+    // for (codex P1, 2026-07-10).
+    expect(EXTENDABLE_STATUSES).toEqual(['sent', 'viewed', 'expired', 'send_failed', 'sending']);
   });
 });
