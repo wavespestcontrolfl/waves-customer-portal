@@ -1420,12 +1420,22 @@ async function pendingDepositCreditForCustomer(customerId, trx = db) {
     .where('e.customer_id', customerId)
     .where('d.status', 'received')
     .orderBy('d.created_at', 'asc')
-    .select('d.estimate_id', 'e.estimate_slug');
-  const checked = new Set();
+    .select('d.estimate_id', 'd.amount', 'd.credited_amount', 'd.refunded_amount', 'e.estimate_slug');
+  // FIFO by each estimate's first genuinely OPEN row (Codex round-3): skip
+  // exhausted rows entirely so an estimate can't jump the queue on the
+  // strength of an early fully-consumed/refunded row while an older still-open
+  // row on another estimate waits behind it. The first estimate reached
+  // through an open row owns the oldest open credit; pendingDepositCredit then
+  // sums that estimate's full open balance for the amount actually consumed.
+  const seen = new Set();
   for (const row of rows) {
+    const availableCents = Math.round(Number(row.amount || 0) * 100)
+      - Math.round(Number(row.credited_amount || 0) * 100)
+      - Math.round(Number(row.refunded_amount || 0) * 100);
+    if (availableCents <= 0) continue;
     const estimateId = row.estimate_id;
-    if (!estimateId || checked.has(estimateId)) continue;
-    checked.add(estimateId);
+    if (!estimateId || seen.has(estimateId)) continue;
+    seen.add(estimateId);
     const credit = await pendingDepositCredit(estimateId, trx);
     // estimateSlug rides along so preview UIs can NAME the estimate whose
     // deposit is being applied — cross-estimate application must be a

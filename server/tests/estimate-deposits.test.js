@@ -1167,14 +1167,11 @@ describe('webhook + invoice credit', () => {
     expect(await pendingDepositCredit('est-1')).toBeNull();
   });
 
-  it('pendingDepositCreditForCustomer skips exhausted estimates and tags the owning estimateId', async () => {
-    // est-old's deposit is fully consumed; est-new still has an open $49 —
-    // the helper must skip past est-old (oldest first) and return est-new's
-    // credit with the estimateId the caller needs for consumption.
-    const ledger = {
-      'est-old': [{ id: 'd1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' }],
-      'est-new': [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
-    };
+  // Mock helper: the customer-wide scan query ('estimate_deposits as d')
+  // returns `scanRows`; the per-estimate pendingDepositCredit query returns
+  // `ledger[estimateId]`. `where({ estimate_id })` records which estimate the
+  // ledger read is scoped to.
+  const mockCustomerDepositLedger = (scanRows, ledger) => {
     mockDbHandler = (table) => {
       const b = {
         join() { return this; },
@@ -1184,14 +1181,27 @@ describe('webhook + invoice credit', () => {
         },
         orderBy() { return this; },
         select: async () => (table === 'estimate_deposits as d'
-          ? [
-            { estimate_id: 'est-old', estimate_slug: 'EST-2026-0001' },
-            { estimate_id: 'est-new', estimate_slug: 'EST-2026-0002' },
-          ]
+          ? scanRows
           : (ledger[b._estimateId] || [])),
       };
       return b;
     };
+  };
+
+  it('pendingDepositCreditForCustomer skips exhausted estimates and tags the owning estimateId', async () => {
+    // est-old's deposit is fully consumed; est-new still has an open $49 —
+    // the helper must skip past est-old (oldest first) and return est-new's
+    // credit with the estimateId the caller needs for consumption.
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-old', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0001' },
+        { estimate_id: 'est-new', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0002' },
+      ],
+      {
+        'est-old': [{ id: 'd1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' }],
+        'est-new': [{ id: 'd2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
+      },
+    );
     const credit = await pendingDepositCreditForCustomer('cust-1');
     expect(credit.estimateId).toBe('est-new');
     expect(credit.estimateSlug).toBe('EST-2026-0002');
@@ -1200,37 +1210,61 @@ describe('webhook + invoice credit', () => {
     expect(credit.lineItem.category).toBe('deposit_credit');
   });
 
-  it('an exhausted older row must not hide a later open row on the SAME estimate (Codex P2)', async () => {
+  it('an exhausted older row must not hide a later open row on the SAME estimate (Codex round-1 P2)', async () => {
     // d1 was split between credit and refund (nothing left); d2 is fully
     // open. The estimate-level aggregate is $99 — a per-row gate on d1 would
     // have skipped the whole estimate and stranded d2.
-    mockDbHandler = (table) => ({
-      join() { return this; },
-      where() { return this; },
-      orderBy() { return this; },
-      select: async () => (table === 'estimate_deposits as d'
-        ? [{ estimate_id: 'est-1' }, { estimate_id: 'est-1' }]
-        : [
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-1', amount: '49.00', credited_amount: '24.00', refunded_amount: '25.00', estimate_slug: 'EST-2026-0009' },
+        { estimate_id: 'est-1', amount: '99.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0009' },
+      ],
+      {
+        'est-1': [
           { id: 'd1', amount: '49.00', credited_amount: '24.00', refunded_amount: '25.00' },
           { id: 'd2', amount: '99.00', credited_amount: '0.00', refunded_amount: '0.00' },
-        ]),
-    });
+        ],
+      },
+    );
     const credit = await pendingDepositCreditForCustomer('cust-1');
     expect(credit.estimateId).toBe('est-1');
     expect(credit.amount).toBe(99);
     expect(credit.lineItem.unit_price).toBe(-99);
   });
 
-  it('pendingDepositCreditForCustomer returns null when every row is consumed or refunded (or none exist)', async () => {
-    mockDbHandler = () => ({
-      join() { return this; },
-      where() { return this; },
-      orderBy() { return this; },
-      select: async () => [
-        { estimate_id: 'est-1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
-        { estimate_id: 'est-2', amount: '99.00', credited_amount: '0.00', refunded_amount: '99.00' },
+  it('picks the estimate with the oldest OPEN row, not one fronted by an exhausted early row (Codex round-3 FIFO)', async () => {
+    // Scan order (created_at asc): est-a's earliest row is exhausted, est-b's
+    // row is the oldest still-OPEN deposit, est-a has a later open row. The
+    // true FIFO winner is est-b — est-a must not jump the queue on the
+    // strength of its early fully-consumed row.
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-a', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0100' },
+        { estimate_id: 'est-b', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0101' },
+        { estimate_id: 'est-a', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0100' },
       ],
-    });
+      {
+        'est-a': [
+          { id: 'a1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00' },
+          { id: 'a2', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' },
+        ],
+        'est-b': [{ id: 'b1', amount: '49.00', credited_amount: '0.00', refunded_amount: '0.00' }],
+      },
+    );
+    const credit = await pendingDepositCreditForCustomer('cust-1');
+    expect(credit.estimateId).toBe('est-b');
+    expect(credit.estimateSlug).toBe('EST-2026-0101');
+    expect(credit.amount).toBe(49);
+  });
+
+  it('pendingDepositCreditForCustomer returns null when every row is consumed or refunded (or none exist)', async () => {
+    mockCustomerDepositLedger(
+      [
+        { estimate_id: 'est-1', amount: '49.00', credited_amount: '49.00', refunded_amount: '0.00', estimate_slug: 'EST-2026-0001' },
+        { estimate_id: 'est-2', amount: '99.00', credited_amount: '0.00', refunded_amount: '99.00', estimate_slug: 'EST-2026-0002' },
+      ],
+      {},
+    );
     expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();
     mockDbHandler = () => ({ join() { return this; }, where() { return this; }, orderBy() { return this; }, select: async () => [] });
     expect(await pendingDepositCreditForCustomer('cust-1')).toBeNull();

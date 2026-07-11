@@ -3576,7 +3576,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           // the banner named — the server 409s on a mismatch.
           applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
           ...(depositCredit && !depositCredit.payerBilled && applyCredit
-            ? { depositCreditEstimateId: depositCredit.estimateId }
+            ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
         }),
       });
@@ -3617,7 +3617,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           // apply a credit the operator didn't see.
           applyDepositCredit: !!(depositCredit && !depositCredit.payerBilled && applyCredit),
           ...(depositCredit && !depositCredit.payerBilled && applyCredit
-            ? { depositCreditEstimateId: depositCredit.estimateId }
+            ? { depositCreditEstimateId: depositCredit.estimateId, depositCreditAmount: depositCredit.amount }
             : {}),
           chargeInPerson: true,
         }),

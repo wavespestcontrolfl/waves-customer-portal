@@ -2802,6 +2802,18 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         if (!credit) {
           throw unavailable('The deposit credit is no longer available (consumed or refunded since the preview). Refresh and retry.');
         }
+        // The live balance must match what the operator approved in the
+        // preview TO THE CENT (Codex round-3): a partial refund/consume
+        // between preview and submit can leave the balance positive but
+        // different, which would silently mint a different net than the
+        // modal showed. Echo the previewed cents and 409 on any drift.
+        const previewCents = Math.round(Number(req.body?.depositCreditAmount) * 100);
+        if (!Number.isFinite(previewCents) || previewCents <= 0) {
+          throw unavailable('applyDepositCredit requires depositCreditAmount (the credit shown in the preview). Refresh and retry.');
+        }
+        if (Math.round(Number(credit.amount) * 100) !== previewCents) {
+          throw unavailable(`The deposit credit changed since the preview (previewed $${(previewCents / 100).toFixed(2)}, now $${Number(credit.amount).toFixed(2)}). Refresh and retry.`);
+        }
         pendingCredit = { ...credit, estimateId: requestedCreditEstimateId };
       }
       invoice = await InvoiceService.create({
@@ -2825,6 +2837,16 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       // ledger moved under us — roll the whole mint back rather than leave a
       // credit line without dollar-for-dollar ledger backing.
       appliedDepositCredit = Number(invoice?.applied_deposit_credit) || 0;
+      // A requested credit that create() DECLINED to apply (customer flipped to
+      // payer-billed between preview and submit — create() zeroes deposit
+      // credit on payer invoices) must NOT mint the gross invoice the operator
+      // never approved; 409 and abort instead of silently sending it (Codex
+      // round-3). Rolls back inside the transaction like the reads above.
+      if (pendingCredit && !(appliedDepositCredit > 0)) {
+        const err = new Error('This customer is now billed to a third party, so the deposit credit could not be applied. Refresh and retry.');
+        err.depositCreditUnavailable = true;
+        throw err;
+      }
       if (appliedDepositCredit > 0) {
         depositCreditEstimateId = pendingCredit.estimateId;
         const allocated = await consumeDepositCredit({
