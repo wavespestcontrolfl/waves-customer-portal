@@ -1531,6 +1531,7 @@ async function createSelfBooking(payload = {}) {
     // unresolvable price leaves the booking price-less (today's behavior). No
     // charge or card capture happens here; billing rides completion.
     let visitPrice = null;
+    let followUpVisitPrice = null;
     let paymentPref = null;
     if (payAtVisit) {
       try {
@@ -1602,7 +1603,11 @@ async function createSelfBooking(payload = {}) {
             ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
             : null);
         if (priced) {
+          // Anchored split: the parent (first) visit absorbs the remainder
+          // cents; seeded follow-ups bill the even quotient, so the 4-visit
+          // year sums to the quoted annual exactly (no penny drift).
           visitPrice = priced.amount;
+          followUpVisitPrice = priced.followUpAmount ?? priced.amount;
           paymentPref = 'pay_at_visit';
         }
       } catch (err) {
@@ -1881,6 +1886,10 @@ async function createSelfBooking(payload = {}) {
           weekendShift: 'forward',
           durationMinutes: duration,
           source: source || 'self_booked',
+          // Follow-ups bill the even quotient — the parent already absorbed
+          // the remainder cents — instead of inheriting the parent's price
+          // (which would re-introduce the ±cents/year drift on the series).
+          ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
         });
         followUpRows = seedResult.insertedRows || [];
       } catch (err) {

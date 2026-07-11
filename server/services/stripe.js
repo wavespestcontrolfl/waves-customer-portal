@@ -997,6 +997,13 @@ const StripeService = {
   async chargeMonthly(customerId, idempotencyKey = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
+    // NULL/0 monthly_rate = unpriced (manual quote pending), not "charge
+    // nothing": the cron already filters monthly_rate > 0, so this guards
+    // direct callers from minting a $0/NaN PaymentIntent off an unpriced
+    // customer (NULL-not-$0 rule).
+    if (!(Number(customer.monthly_rate) > 0)) {
+      throw new Error(`Customer ${customerId} has no positive monthly_rate — refusing autopay charge`);
+    }
 
     // The "WaveGuard Monthly" marker is load-bearing: billing-cron identifies
     // monthly autopay rows by a `%WaveGuard Monthly%` LIKE match for its
@@ -1494,7 +1501,10 @@ const StripeService = {
     const priorCents = Math.round(parseFloat(payment.refund_amount || 0) * 100);
     const remainingCents = paidCents - priorCents;
     const requestCents = amount ? Math.round(amount * 100) : null;
-    const requestTag = requestCents === null ? 'rest' : String(requestCents);
+    // Tag of what the OPERATOR entered (base dollars) — replay detection keys
+    // on this, so a retry of the same entered amount replays the original
+    // attempt even though the amount actually sent to Stripe is grossed up.
+    const enteredTag = requestCents === null ? 'rest' : String(requestCents);
 
     // Persist the attempt key BEFORE calling Stripe. The retry contract
     // ("re-running the same refund is safe") must hold even when the
@@ -1508,7 +1518,55 @@ const StripeService = {
     try {
       meta = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
     } catch { meta = {}; }
-    const isReplay = !!(meta.pending_refund_key && meta.pending_refund_request === requestTag);
+
+    // Card-brand rule: a partial refund must return the prorated share of the
+    // recorded card surcharge, not just the entered base dollars — the
+    // surcharge was collected on the refunded portion too. All math comes
+    // from the one authority (computeRefundSurcharge in stripe-pricing);
+    // payments.surcharge_amount_cents is the recorded surcharge (the
+    // compliance-migration column every Stripe insert path populates) and
+    // payments.refunded_surcharge_cents tracks the cumulative returned share
+    // so successive partials prorate without drift. Full ("rest") refunds
+    // already return everything and skip this.
+    const surchargeCents = Math.max(0, Number(payment.surcharge_amount_cents) || 0);
+    const alreadyRefundedSurchargeCents = Math.min(surchargeCents, Math.max(0, Number(payment.refunded_surcharge_cents) || 0));
+    const surchargeShareCents = requestCents !== null && surchargeCents > 0
+      ? computeRefundSurcharge({
+          refundBaseCents: requestCents,
+          originalBaseCents: Math.max(0, paidCents - surchargeCents),
+          originalSurchargeCents: surchargeCents,
+          totalRefundedBaseCents: Math.max(0, priorCents - alreadyRefundedSurchargeCents),
+          alreadyRefundedSurchargeCents,
+        })
+      : 0;
+    // Never push the grossed amount past the remaining balance — near the end
+    // of a heavily-refunded payment the cap eats into the share, not the base.
+    let grossCents = requestCents === null
+      ? null
+      : Math.min(requestCents + surchargeShareCents, Math.max(requestCents, remainingCents));
+
+    // Replay detection keys on the ENTERED amount (pending_refund_base);
+    // legacy markers predate the gross-up and stored the entered amount in
+    // pending_refund_request, so fall back to it.
+    const isReplay = !!(meta.pending_refund_key
+      && (meta.pending_refund_base ?? meta.pending_refund_request) === enteredTag);
+    // The freshly-computed gross for the CURRENT balance — a stale replay
+    // whose original attempt provably never landed restarts from this, not
+    // from the dead attempt's frozen/legacy amount.
+    const freshGrossCents = grossCents;
+    if (isReplay && grossCents !== null) {
+      // Resend the ORIGINAL amount verbatim — Stripe rejects a reused key
+      // whose parameters differ, and a definitive rejection would clear the
+      // marker and open the door to a double refund. New-style markers froze
+      // the grossed amount; LEGACY (pre-gross-up) markers sent exactly the
+      // entered amount, so replay that — never a freshly computed gross.
+      grossCents = Number.isFinite(Number(meta.pending_refund_gross))
+        ? Number(meta.pending_refund_gross)
+        : requestCents;
+    }
+    let requestTag = isReplay
+      ? meta.pending_refund_request
+      : (grossCents === null ? 'rest' : String(grossCents));
     if (meta.pending_refund_key && !isReplay) {
       throw new Error(`An unresolved refund attempt (${meta.pending_refund_request === 'rest' ? 'full remaining balance' : `$${(Number(meta.pending_refund_request) / 100).toFixed(2)}`}) exists for this payment — re-run that refund or reconcile in Stripe before starting a different one`);
     }
@@ -1527,10 +1585,26 @@ const StripeService = {
     };
     let idempotencyKey;
     const attemptReason = reason || 'requested_by_customer';
+    // Bounced attempts leave the amounts untouched (nothing was returned),
+    // so a retry after a bounce sees the SAME tag and priorCents — without
+    // the bounce-count suffix it would reuse the dead attempt's key and
+    // Stripe's idempotency layer would hand back the bounced refund object
+    // instead of creating a new refund.
+    const bouncedIds = Array.isArray(meta.failed_refund_ids) ? meta.failed_refund_ids : [];
     const persistPendingAttempt = async () => {
-      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}`;
+      idempotencyKey = `refund_pay_${paymentId}_${requestTag}_${priorCents}${bouncedIds.length ? `_b${bouncedIds.length}` : ''}`;
       await db('payments').where({ id: paymentId }).update({
-        metadata: JSON.stringify({ ...meta, pending_refund_key: idempotencyKey, pending_refund_request: requestTag, pending_refund_reason: attemptReason, pending_refund_at: new Date().toISOString() }),
+        metadata: JSON.stringify({
+          ...meta,
+          pending_refund_key: idempotencyKey,
+          pending_refund_request: requestTag,
+          // Entered base + frozen grossed amount: replays match on the base
+          // and resend the gross verbatim (see gross-up block above).
+          pending_refund_base: enteredTag,
+          ...(grossCents !== null ? { pending_refund_gross: grossCents } : {}),
+          pending_refund_reason: attemptReason,
+          pending_refund_at: new Date().toISOString(),
+        }),
       });
     };
 
@@ -1571,8 +1645,13 @@ const StripeService = {
         // remainder never sent. An unparseable key can't be reconciled —
         // no adoption; the fresh 'rest' attempt below is still safe because
         // Stripe computes the remainder from its own ledger.
-        let expectedCents = requestCents;
-        if (requestCents === null) {
+        // Prefer the frozen grossed amount — that is what the original
+        // attempt actually sent to Stripe (legacy markers have no gross and
+        // fall back to the entered amount, which WAS what they sent).
+        let expectedCents = Number.isFinite(Number(meta.pending_refund_gross))
+          ? Number(meta.pending_refund_gross)
+          : requestCents;
+        if (expectedCents === null) {
           const keyPriorCents = Number((meta.pending_refund_key || '').split('_').pop());
           expectedCents = (Number.isInteger(keyPriorCents) && keyPriorCents >= 0 && keyPriorCents < paidCents)
             ? paidCents - keyPriorCents
@@ -1584,7 +1663,14 @@ const StripeService = {
           && (!pendingAtMs || r.created * 1000 >= pendingAtMs - 5 * 60 * 1000))) || null;
         if (!adoptedRefund) {
           // The original attempt never landed at Stripe — start over as a
-          // validated fresh attempt against the CURRENT balance.
+          // validated fresh attempt against the CURRENT balance. The gross
+          // and tag were forced to the dead attempt's values above (a legacy
+          // marker would resend the UNGROSSED base, shorting the customer
+          // the prorated surcharge); recompute both — a fresh tag also
+          // derives a fresh idempotency key, so the new amount can't wedge
+          // on the stale key's parameter check.
+          grossCents = freshGrossCents;
+          requestTag = grossCents === null ? 'rest' : String(grossCents);
           assertNewAttemptRefundable();
           await persistPendingAttempt();
         }
@@ -1596,6 +1682,8 @@ const StripeService = {
     const clearedMeta = { ...meta };
     delete clearedMeta.pending_refund_key;
     delete clearedMeta.pending_refund_request;
+    delete clearedMeta.pending_refund_base;
+    delete clearedMeta.pending_refund_gross;
     delete clearedMeta.pending_refund_reason;
     delete clearedMeta.pending_refund_at;
 
@@ -1606,8 +1694,10 @@ const StripeService = {
           payment_intent: payment.stripe_payment_intent_id,
           reason: replayReason || attemptReason,
         };
-        if (requestCents !== null) {
-          refundParams.amount = requestCents;
+        if (grossCents !== null) {
+          // Entered base + prorated surcharge share (capped at the remaining
+          // balance) — see the gross-up block above.
+          refundParams.amount = grossCents;
         }
         refund = await stripe.refunds.create(refundParams, { idempotencyKey });
       }
@@ -1656,6 +1746,55 @@ const StripeService = {
     }
     const isFullRefund = totalRefundedCents >= paidCents;
 
+    // LIVE metadata read — the charge.refunded / refund.failed webhooks may
+    // have written stamps or bounce fences while this attempt was in flight,
+    // and clearedMeta is a pre-call snapshot that would otherwise erase them.
+    let liveMeta = null;
+    try {
+      const liveRow = await db('payments').where({ id: paymentId }).first('metadata');
+      try {
+        liveMeta = liveRow?.metadata ? (typeof liveRow.metadata === 'string' ? JSON.parse(liveRow.metadata) : liveRow.metadata) : {};
+      } catch { liveMeta = {}; }
+    } catch (liveErr) {
+      logger.warn(`[stripe] live metadata read failed for payment ${paymentId}: ${liveErr.message}`);
+      liveMeta = null; // unknown — fall back to the loaded snapshot below
+    }
+
+    // A refund whose FAILURE was already recorded must never be stamped as
+    // returned money: when the original attempt's ledger write failed, the
+    // pending marker survives its own refund's bounce, and the retry's
+    // idempotent key replay hands back the ORIGINAL bounced refund object
+    // as if newly created. Stamping it would record money Stripe kept — and
+    // handleRefundFailed would never rewind it (the bounce is already
+    // fenced, so the event replay is a no-op). Abort: clear the pending
+    // marker (the next attempt derives a fresh bounce-suffixed key) and
+    // tell the operator the truth.
+    const bounceFence = new Set([
+      ...bouncedIds,
+      ...(liveMeta && Array.isArray(liveMeta.failed_refund_ids) ? liveMeta.failed_refund_ids : []),
+    ]);
+    if (refund?.id && bounceFence.has(refund.id)) {
+      const abortMeta = { ...(liveMeta || clearedMeta) };
+      for (const k of ['pending_refund_key', 'pending_refund_request', 'pending_refund_base', 'pending_refund_gross', 'pending_refund_reason', 'pending_refund_at']) {
+        delete abortMeta[k];
+      }
+      await db('payments').where({ id: paymentId }).update({ metadata: JSON.stringify(abortMeta) }).catch(() => {});
+      logger.error(`[stripe] refund ${refund.id} for payment ${paymentId} already bounced at the bank — attempt aborted, nothing stamped`);
+      throw new Error('This refund attempt already bounced at the bank — no money was returned. Re-run the refund to start a fresh attempt.');
+    }
+    // Preserve concurrently-recorded bounce fences of OTHER refunds — the
+    // wholesale metadata write below must not erase them.
+    if (bounceFence.size) clearedMeta.failed_refund_ids = [...bounceFence];
+
+    // Record this refund as STAMPED (metadata.stamped_refund_ids) so a later
+    // bounce stays attributable after newer stamps overwrite stripe_refund_id.
+    const mergedStamps = new Set([
+      ...(liveMeta && Array.isArray(liveMeta.stamped_refund_ids) ? liveMeta.stamped_refund_ids : []),
+      ...(Array.isArray(clearedMeta.stamped_refund_ids) ? clearedMeta.stamped_refund_ids : []),
+      ...(refund?.id ? [refund.id] : []),
+    ]);
+    if (mergedStamps.size) clearedMeta.stamped_refund_ids = [...mergedStamps];
+
     try {
       await db('payments')
         .where({ id: paymentId })
@@ -1664,6 +1803,20 @@ const StripeService = {
           refund_amount: totalRefundedCents / 100,
           refund_status: refund.status,
           stripe_refund_id: refund.id,
+          // Cumulative surcharge-returned tracker — the NEXT partial prorates
+          // from this. The share actually sent this attempt = Stripe's refund
+          // amount minus the entered base (0 on legacy/no-surcharge attempts);
+          // a full refund returns the whole surcharge by definition.
+          ...(surchargeCents > 0
+            ? {
+                refunded_surcharge_cents: isFullRefund
+                  ? surchargeCents
+                  : Math.min(
+                      surchargeCents,
+                      alreadyRefundedSurchargeCents + Math.max(0, (Number(refund.amount) || 0) - (requestCents || 0)),
+                    ),
+              }
+            : {}),
           metadata: JSON.stringify(clearedMeta),
         });
     } catch (dbErr) {
