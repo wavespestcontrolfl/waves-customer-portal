@@ -160,10 +160,21 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     return { skipped: 'no_new_corpus' };
   }
 
-  const rows = await dbi('voice_corpus_examples')
+  // Fetch each source under its OWN cap (newest first). A single global
+  // newest-first limit would let one source exhaust the window — transcripts
+  // mine same-day while SMS pairs ride a 7-day-delayed band, so a grown
+  // corpus would silently produce a profile with zero SMS evidence and the
+  // phone-vs-SMS guidance would be fiction.
+  const bySource = (source, limit) => dbi('voice_corpus_examples')
+    .where({ source })
     .select('source', 'transcript_text', 'inbound_text', 'reply_text', 'occurred_at')
     .orderBy('occurred_at', 'desc')
-    .limit(MAX_TRANSCRIPTS + MAX_SMS_PAIRS + 100);
+    .limit(limit);
+  const [transcriptRows, smsRows] = await Promise.all([
+    bySource('call_transcript', MAX_TRANSCRIPTS),
+    bySource('sms_human_reply', MAX_SMS_PAIRS),
+  ]);
+  const rows = [...transcriptRows, ...smsRows];
   if (!rows.length) {
     logger.info('[voice-profile] corpus is empty — skipping run');
     return { skipped: 'empty_corpus' };

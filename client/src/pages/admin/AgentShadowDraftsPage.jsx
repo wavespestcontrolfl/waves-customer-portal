@@ -380,16 +380,23 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
     setError("");
     try {
       const qs = intentFilter ? `?intent=${encodeURIComponent(intentFilter)}` : "";
-      const [drafts, scoreRows, modeRows, profileRows] = await Promise.all([
+      const [drafts, scoreRows, modeRows] = await Promise.all([
         adminFetch(`/admin/agents/shadow-drafts${qs}`),
         adminFetch("/admin/agents/shadow-scores"),
         adminFetch("/admin/agents/intent-modes"),
-        adminFetch("/admin/agents/voice-profiles"),
       ]);
       setData(drafts);
       setScores(scoreRows);
       setModes(modeRows);
-      setProfiles(profileRows);
+      // The voice-profile card is additive — a failure here (e.g. the
+      // voice_profiles migration not yet run) must not blank the whole
+      // established Shadow Drafts tab, so it loads outside the shared
+      // Promise.all and degrades to "no card".
+      try {
+        setProfiles(await adminFetch("/admin/agents/voice-profiles"));
+      } catch {
+        setProfiles(null);
+      }
     } catch (err) {
       setError(err.message || "Failed to load shadow drafts.");
     } finally {
