@@ -203,9 +203,14 @@ function GraduationNote({ g }) {
       {/* Intent is AT auto_send but the send-time gate is blocking (e.g. a
           prompt bump reset the cohort evidence) — mirror the executor. */}
       {g.autoSendHealth && !g.autoSendHealth.sendReady && (
-        <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>
-          ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
-        </span>
+        <>
+          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>
+            ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
+          </span>
+          <span style={{ color: D.muted }}>
+            Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.
+          </span>
+        </>
       )}
       {!g.eligibleFor && rungLabel && (
         <span style={{ color: D.muted }}>

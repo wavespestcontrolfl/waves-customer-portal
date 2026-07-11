@@ -304,6 +304,16 @@ function rollupSuggestOutcomes(rows, cohort) {
  * while — e.g. right after a prompt bump reset the cohort evidence — the
  * executor is silently blocking every send. sendReady mirrors what the
  * executor will actually decide.
+ *
+ * Recovery after a prompt bump is self-healing but slow: blocked auto-sends
+ * fail closed to suggestion cards (sms-shadow-drafter fallback), and any
+ * suggestion that is NOT accepted verbatim/corrected reverts its draft to
+ * shadow, where the nightly judge scores it — so current-version evidence
+ * re-accrues from live traffic. Accepted suggestions are deliberately never
+ * judged (self-pairing would inflate scores). To rebuild evidence faster, the
+ * operator can demote the intent to shadow; the UI surfaces this next to the
+ * gated chip. Auto-demoting here would contradict the engine's contract —
+ * it flips nothing; mode changes stay manual.
  */
 function evaluateAutoSendHealth({ judge = {}, suggest = {}, judgeAvailable = true } = {}) {
   const rung = evaluateRung({ mode: 'suggest', locked: false, judge, suggest, judgeAvailable });
