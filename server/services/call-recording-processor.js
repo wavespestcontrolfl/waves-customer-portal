@@ -2713,6 +2713,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
 // mislabel, and collapsing it into the program would lose the protocol.
 const RECURRING_OVERRIDE_SOURCES = new Set([
   'one-time pest control',
+  'pest control', // bare "Pest Control Service" — the scheduler's one-time fallback label
   'bee / wasp nest removal',
   'mud dauber nest removal',
   'fire ant treatment',
@@ -2754,16 +2755,22 @@ const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me
 // request and is NOT a decline.
 const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plan|package|membership|ongoing)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:recurring|plans?|packages?|memberships?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
 
+// A cadence word the caller is EXCLUDING ("but not monthly", "instead of
+// monthly") must not count as their chosen cadence.
+const NEGATED_CADENCE_BEFORE_RE = /\b(?:not|no|never|without|rather than|instead of|don'?t (?:want|need|do))\s+(?:the |a |any )?$/i;
+
 // True when `re` (global) matches somewhere that reads as SERVICE cadence:
-// not preceded by a pest-pressure verb in the same clause, unless a request
-// verb after the pressure verb turned the clause into an ask.
+// not negated, and not preceded by a pest-pressure verb in the same clause —
+// unless a request verb after the pressure verb turned the clause into an ask.
 function serviceCadenceMatch(re, text) {
   const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   let m;
   while ((m = scan.exec(text))) {
     const before = text.slice(Math.max(0, m.index - 60), m.index);
-    const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
-    if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
+    if (!NEGATED_CADENCE_BEFORE_RE.test(before)) {
+      const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
+      if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
+    }
     if (scan.lastIndex === m.index) scan.lastIndex++;
   }
   return false;
@@ -2829,7 +2836,15 @@ function applyRecurringIntentDefault(extracted, transcription) {
   if (!matchedIsSingular && !specificIsSingular && !matchedIsRecurring && !specificIsRecurring) return extracted;
 
   const callerText = callerOnlyText(transcription);
-  if (RECURRING_DECLINED_RE.test(callerText)) return extracted;
+  // A decline only vetoes when nothing recurring FOLLOWS it — "I don't want
+  // the monthly plan; can we do quarterly instead?" rejects one option and
+  // chooses another, which is a recurring request, not a decline.
+  const decline = callerText.match(RECURRING_DECLINED_RE);
+  if (decline) {
+    const afterDecline = callerText.slice(decline.index + decline[0].length);
+    if (!RECURRING_INTENT_STRONG_RE.test(afterDecline)
+      && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)) return extracted;
+  }
   const callerVoiced = RECURRING_INTENT_STRONG_RE.test(callerText)
     || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
   const acceptedOffer = callerVoiced ? null : acceptedPlanOfferText(transcription);
@@ -5617,7 +5632,27 @@ const CallRecordingProcessor = {
       // not carry the recurring-interest rule (adding it would re-version the
       // shadow prompt mid-promotion-cohort). Re-assert the owner rule over
       // the merged fields; no-op when nothing singular survived.
+      const preReassertMatched = extracted.matched_service;
+      const preReassertSpecific = extracted.specific_service_name;
       extracted = applyRecurringIntentDefault(extracted, transcription);
+      if (extracted.matched_service !== preReassertMatched
+        || extracted.specific_service_name !== preReassertSpecific) {
+        // ai_extraction and the lead's service_interest were persisted BEFORE
+        // this V2 merge ran — backfill them so pipeline reporting shows the
+        // same program the appointment books. Fail-open: booking proceeds
+        // on the in-memory value regardless.
+        try {
+          await db('call_log').where({ id: call.id }).update({
+            ai_extraction: JSON.stringify(extracted),
+            updated_at: new Date(),
+          });
+          if (leadId) {
+            await db('leads').where({ id: leadId }).update({ service_interest: extracted.matched_service });
+          }
+        } catch (bfErr) {
+          logger.warn(`[call-proc] recurring-default backfill failed open: ${bfErr.message}`);
+        }
+      }
     }
 
     // Step 5: If appointment detected with a SPECIFIC time, send confirmation SMS

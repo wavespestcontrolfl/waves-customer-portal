@@ -198,6 +198,26 @@ describe('applyRecurringIntentDefault', () => {
     ).matched_service).toBe('Quarterly Pest Control Service');
   });
 
+  test('the bare "Pest Control Service" scheduler fallback label is covered', () => {
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Pest Control Service' }), 'Caller: I want a quarterly package.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('declining one option then choosing another is a recurring request', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want the monthly plan. Can we do quarterly instead?").matched_service)
+      .toBe('Quarterly Pest Control Service');
+    // A decline with nothing recurring after it still declines.
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want a plan. Just the nest please.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('negated cadence words are not the chosen cadence', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want a package, but not monthly.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: instead of monthly, could you do every other month?').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
