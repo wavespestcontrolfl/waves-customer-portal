@@ -779,6 +779,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     excludeServiceIds,
     dayStartHour: parseInt((config.day_start || '08:00').split(':')[0]),
     dayEndHour: parseInt((config.day_end || '17:00').split(':')[0]),
+    // Waves works weekends (Sat AND Sun) — the estimate slot flow already
+    // offers Sundays (estimate-slot-availability defaults includeWeekends:true).
+    // find-time's legacy default drops Sundays, which silently hid every Sunday
+    // from the self-booking funnel and the Waves AI search: on a Saturday
+    // "this weekend"/"tomorrow" both resolve to Sunday and dead-ended with a
+    // "no open window" message despite real weekend availability. Match the
+    // estimate flow so both booking surfaces offer the same days.
+    includeWeekends: true,
     // The default best-4 window is narrow, so 200 ranked candidates is ample.
     // A specific-date / "Find more dates" browse (expandOpenDays) can span the
     // full 90-day horizon across several techs — capping at 200 there would
