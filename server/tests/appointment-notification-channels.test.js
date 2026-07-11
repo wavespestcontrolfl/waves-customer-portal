@@ -268,3 +268,31 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 });
+
+// A table-aware db mock: distinct rows for customers / sms_log / notifications
+// so the false-positive guard can be exercised. Unlisted tables resolve first()
+// to null (the notifications dedupe check finds no prior alert).
+function tableAwareDb({ customer = null, delivered = null } = {}) {
+  return (table) => {
+    const q = chain();
+    if (table === 'customers') q.first = jest.fn(async () => customer);
+    else if (table === 'sms_log') q.first = jest.fn(async () => delivered);
+    return q;
+  };
+}
+
+describe('alertNoReachableChannel — text-reachable false-positive guard', () => {
+  const cust = { id: 'c1', phone: '+19412345678', first_name: 'Adam', last_name: 'Pitts' };
+
+  test('suppresses the alert when a recent delivered SMS proves the customer is text-reachable', async () => {
+    db.mockImplementation(tableAwareDb({ customer: cust, delivered: { id: 'sms1' } }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('still alerts when there is no delivered SMS on file (genuinely unreachable)', async () => {
+    db.mockImplementation(tableAwareDb({ customer: cust, delivered: null }));
+    await AppointmentReminders.alertNoReachableChannel({ customerId: 'c1', kind: '24h', scheduledServiceId: 'ss1' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+});

@@ -90,6 +90,31 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     if (existing) return;
 
     const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
+
+    // False-positive guard: this alert claims the customer is reachable by
+    // "neither text nor email". But a one-off Twilio 30006 permanently caches the
+    // primary phone as landline, and a suppressed email (hard bounce / spam
+    // complaint) blocks the email leg — so a customer whose mobile actually
+    // DELIVERS texts can wrongly trip this bell. Before ringing it, confirm there
+    // is genuinely no working text channel: if we've delivered an SMS to their
+    // primary phone recently, they ARE text-reachable and the alert is spurious
+    // (a suppressed/absent email alone is not "no reachable channel").
+    if (customer?.phone) {
+      const digits = lastTenDigits(customer.phone);
+      const recentDelivered = digits
+        ? await db('sms_log')
+          .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+          .where('status', 'delivered')
+          .where('created_at', '>=', db.raw("now() - interval '60 days'"))
+          .first('id')
+          .catch(() => null)
+        : null;
+      if (recentDelivered) {
+        logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS proves text-reachable`);
+        return;
+      }
+    }
+
     const name = customer
       ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ').trim() || customer.company_name || 'Customer')
       : 'Customer';
