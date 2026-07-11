@@ -731,8 +731,14 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
-    // OR for the same reason: either extractor hearing "the owner pays" is enough.
-    is_billing_party: v1.is_billing_party === true || v2.is_billing_party === true,
+    // Tie the billing flag to whoever supplies the email the payer would be
+    // billed at (resolveCallBillingPayer creates the payer from that address).
+    // Do NOT OR the flag across the two sides: when V1/V2 filled different
+    // fields of a maybe-same person (V1 has the tenant's email, V2 marks the
+    // owner as billing with no email), ORing would attach "owner pays" to the
+    // tenant's inbox and bill the wrong party. The email winner (v1.email ||
+    // v2.email) is the identity actually used, so its own flag governs.
+    is_billing_party: (v1.email ? v1 : v2).is_billing_party === true,
     notes: v1.notes || v2.notes,
   };
 }
@@ -5254,14 +5260,7 @@ const CallRecordingProcessor = {
     // when the service was UNCLEAR (noMatch) under fail-open, so the existing
     // (catalogRow && noMatch) branch books it. Hard vetoes (ok:false, no
     // noMatch) never set a catalog row, so they stay un-bookable.
-    // Review-gated outbound-callback booking (GATE_CALL_OUTBOUND_BOOKING): a
-    // confirmed booking on an OUTBOUND call (a return call to an inbound lead)
-    // still creates the appointment — but PENDING/needs-review, never
-    // auto-confirmed and with no auto-SMS (see the insert + send guards below).
-    // Fail-open leniency and the Waves Assessment fallback stay INBOUND-only, so
-    // an outbound booking only lands when the service genuinely resolves.
-    const outboundReviewBooking = isOutboundCall(call) && isEnabled('callOutboundBooking');
-    const canCreateAppointmentFromCall = (!isOutboundCall(call) || outboundReviewBooking)
+    const canCreateAppointmentFromCall = !isOutboundCall(call)
       && !genericBookingUnbookable
       && (serviceResolution.ok || (!!callBookingCatalogRow && serviceResolution.noMatch === true));
     if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && !canCreateAppointmentFromCall) {
@@ -5552,6 +5551,13 @@ const CallRecordingProcessor = {
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
+                          // Carry the primary's Bill-To to the follow-up: an
+                          // unpriced follow-up is billed at completion, and
+                          // without this PayerService.resolveForInvoice would
+                          // fall back to customer.payer_id/self-pay and send the
+                          // second visit's invoice to the homeowner instead of
+                          // the named payer.
+                          payer_id: primaryRow.payer_id || null,
                           technician_id: primaryRow.technician_id || defaultTechnicianId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would
@@ -5735,14 +5741,11 @@ const CallRecordingProcessor = {
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
-                  // Outbound-callback bookings land PENDING/needs-review (the
-                  // office confirms + no auto-SMS goes out); inbound confirmed
-                  // bookings auto-confirm as before.
-                  status: outboundReviewBooking ? 'pending' : 'confirmed',
-                  customer_confirmed: !outboundReviewBooking,
-                  ...(outboundReviewBooking ? {} : { confirmed_at: new Date() }),
+                  status: 'confirmed',
+                  customer_confirmed: true,
+                  confirmed_at: new Date(),
                   notes: [
-                    outboundReviewBooking ? 'Booked via outbound callback — CONFIRM with customer before dispatch.' : 'Booked via phone call.',
+                    'Booked via phone call.',
                     `Call SID: ${callSid}.`,
                     defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
                     priceInfo.price != null
@@ -5803,13 +5806,6 @@ const CallRecordingProcessor = {
                     callSid,
                     keepOpenForQuote: callQuotePromised,
                   });
-                  if (outboundReviewBooking) {
-                    // Pending outbound-callback booking — surface it for office
-                    // confirmation (it did NOT auto-confirm and no SMS went out).
-                    await trx('triage_items')
-                      .insert(buildTriageItem({ callLogId: call.id, flag: 'outbound_booking_review', extraction: v2Extraction || extracted, severity: 'advisory' }))
-                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-                  }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
                 }
@@ -5892,15 +5888,7 @@ const CallRecordingProcessor = {
               scheduledServiceId = svc.id;
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
-              if (!scheduleWasReused && outboundReviewBooking) {
-                // A pending outbound-callback booking must NOT arm reminder side
-                // effects: registerAppointment marks confirmation_sent and the
-                // 72h/24h reminder cron doesn't skip 'pending', so this would
-                // auto-text the customer before the office confirms — breaking
-                // the no-auto-SMS contract. The outbound_booking_review triage
-                // already surfaces it for the office.
-                logger.info(`[call-proc] Outbound review booking ${svc.id} created PENDING — no reminders armed until office confirms`);
-              } else if (!scheduleWasReused) {
+              if (!scheduleWasReused) {
                 logger.info(`[call-proc] Scheduled service created: ${svc.id} on ${scheduledDate} at ${windowStart}`);
                 await registerScheduleSideEffects({
                   scheduledServiceId: svc.id,
@@ -5973,15 +5961,7 @@ const CallRecordingProcessor = {
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
-          if (scheduledServiceId && outboundReviewBooking) {
-            // Outbound-callback booking is PENDING office confirmation — never
-            // auto-text a "confirmed" appointment the customer wasn't re-confirmed
-            // on. Keep scheduledServiceId on the result so the downstream audit
-            // block doesn't mistake this for a skipped-after-approval booking and
-            // open a phantom reconcile card.
-            logger.info(`[call-proc] Skipping SMS for ${callSid}: outbound booking pending office review`);
-            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
-          } else if (scheduledServiceId && v2SmsBlocked) {
+          if (scheduledServiceId && v2SmsBlocked) {
             logger.info(`[call-proc] Skipping SMS for ${callSid}: v2 TCPA gate blocked (consent not captured)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {

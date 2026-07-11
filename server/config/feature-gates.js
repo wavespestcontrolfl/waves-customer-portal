@@ -363,12 +363,6 @@ const gates = {
   // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
   // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
   callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
-  // Review-gated OUTBOUND-callback bookings: a confirmed booking on an outbound
-  // call (a return call to an inbound lead) creates the appointment in a
-  // `pending`/needs-review status (NOT auto-confirmed, NO auto-SMS) with an
-  // outbound_booking_review triage item, instead of being silently skipped as
-  // 'outbound_call'. Off → outbound bookings stay manual (current behavior).
-  callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message

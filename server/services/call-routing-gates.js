@@ -120,9 +120,6 @@ function buildTriageItem({
     auto_booking_skipped_after_approval: 'time_ambiguous',
     existing_appointment_same_date: 'time_ambiguous',
     auto_booking_previously_cancelled: 'time_ambiguous',
-    // Pending booking created from an OUTBOUND callback — office confirms the
-    // appointment (and any card/payer) before it's treated as booked.
-    outbound_booking_review: 'time_ambiguous',
     multi_property_call: 'address_review',
     caller_not_authorized: 'customer_field_conflict',
     hoa_common_area_requires_approval: 'customer_field_conflict',

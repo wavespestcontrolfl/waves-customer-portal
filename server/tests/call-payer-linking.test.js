@@ -65,10 +65,22 @@ describe('is_billing_party flows through the extraction mapping', () => {
     expect(mapped.is_billing_party).toBe(false);
   });
 
-  test('the V1/V2 merge ORs is_billing_party from either extractor', () => {
+  test('the merge ties is_billing_party to the email owner — never bills a tenant email for an owner flag', () => {
+    // V1 supplies the tenant's email but isn't the payer; V2 marks the owner as
+    // payer but has no email. The payer is created from the email that wins
+    // (the tenant's), so the flag must NOT ride along and bill the tenant.
     const merged = proc._test.resolveCallSecondaryContact(
-      { secondary_contact: { first_name: 'Jim', email: 'jim@example.com', is_billing_party: false } },
-      { secondary_contact: { first_name: 'Jim', email: 'jim@example.com', role: 'landlord', wants_notifications: true, is_billing_party: true } },
+      { secondary_contact: { first_name: 'Jim', email: 'tenant@example.com', is_billing_party: false } },
+      { secondary_contact: { first_name: 'Jim', role: 'landlord', wants_notifications: true, is_billing_party: true } },
+    );
+    expect(merged.email).toBe('tenant@example.com');
+    expect(merged.is_billing_party).toBe(false);
+  });
+
+  test('the merge keeps is_billing_party when the email owner IS the flagged payer', () => {
+    const merged = proc._test.resolveCallSecondaryContact(
+      { secondary_contact: { first_name: 'Jim', email: 'jim@example.com', is_billing_party: true } },
+      { secondary_contact: { first_name: 'Jim', role: 'landlord', wants_notifications: true } },
     );
     expect(merged.is_billing_party).toBe(true);
   });
