@@ -731,14 +731,17 @@ function resolveCallSecondaryContact(extracted = {}, v2Extraction = null) {
     // OR, not V1-wins: either extractor observing the caller's direction
     // ("send notifications to the buyer and myself") is enough.
     wants_notifications: v1.wants_notifications === true || v2.wants_notifications === true,
-    // Tie the billing flag to whoever supplies the email the payer would be
-    // billed at (resolveCallBillingPayer creates the payer from that address).
-    // Do NOT OR the flag across the two sides: when V1/V2 filled different
-    // fields of a maybe-same person (V1 has the tenant's email, V2 marks the
-    // owner as billing with no email), ORing would attach "owner pays" to the
-    // tenant's inbox and bill the wrong party. The email winner (v1.email ||
-    // v2.email) is the identity actually used, so its own flag governs.
-    is_billing_party: (v1.email ? v1 : v2).is_billing_party === true,
+    // Billing flag: the identity-conflict check above already returns v1
+    // unmerged when the two sides name different people (differing name/phone/
+    // email), so reaching here means the same/compatible contact — OR the flag
+    // so V2 can gap-fill a billing flag V1 missed for the SAME billed email. The
+    // one residual case the conflict check can't see is a V2 flag whose own
+    // email differs from the email we'll actually bill (v1.email || v2.email);
+    // suppress the V2 flag only then, so an "owner pays" flag never rides onto a
+    // different contact's inbox.
+    is_billing_party: v1.is_billing_party === true
+      || (v2.is_billing_party === true
+        && (!v2.email || !v1.email || norm(v1.email) === norm(v2.email))),
     notes: v1.notes || v2.notes,
   };
 }
