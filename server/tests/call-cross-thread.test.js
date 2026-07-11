@@ -65,9 +65,13 @@ describe('summarizePriorCall', () => {
     return fn;
   }
 
+  // Fixed times: the row sits exactly 20h before the fixed anchor the tests
+  // pass as the current call's created_at — never derived from wall clock,
+  // so the hoursAgo assertion can't rot as real time passes.
+  const ANCHOR = '2026-07-11T09:00:00Z';
   const V1_ROW = {
     id: 'prior-1',
-    created_at: new Date(Date.now() - 20 * 3600 * 1000).toISOString(),
+    created_at: '2026-07-10T13:00:00.000Z',
     call_summary: 'Realtor ordering a WDO inspection; cut off mid-dictation.',
     ai_extraction: JSON.stringify({
       first_name: 'Kathy', last_name: 'Callahan', phone: '+19419008088',
@@ -80,8 +84,8 @@ describe('summarizePriorCall', () => {
 
   test('maps the prior extraction into a compact, PII-light context object', async () => {
     const conn = connMock(V1_ROW);
-    const prior = await summarizePriorCall('+19419008088', 'current-call', conn, '2026-07-11T09:00:00Z');
-    expect(prior.hoursAgo).toBeGreaterThanOrEqual(19);
+    const prior = await summarizePriorCall('+19419008088', 'current-call', conn, ANCHOR);
+    expect(prior.hoursAgo).toBe(20);
     expect(prior.captured.name).toBe('Kathy Callahan');
     expect(prior.captured.address).toBe('4471 McIntosh Lake Avenue, Sarasota, 34233');
     expect(prior.captured.secondary_contact).toContain('Leslie Ferraro (home_buyer)');
@@ -90,7 +94,7 @@ describe('summarizePriorCall', () => {
     expect(conn._q.whereNot).toHaveBeenCalledWith('id', 'current-call');
     // …and only accepts STRICTLY EARLIER calls (reprocess / out-of-order
     // queue drains must never hand call 1 the future as its past).
-    expect(conn._q.where).toHaveBeenCalledWith('created_at', '<', '2026-07-11T09:00:00Z');
+    expect(conn._q.where).toHaveBeenCalledWith('created_at', '<', ANCHOR);
   });
 
   test('prior text is flattened and delimiter-safe (untrusted prompt data)', async () => {
@@ -114,14 +118,14 @@ describe('summarizePriorCall', () => {
 
   test('lookup matches calls TO the contact (office callbacks) and anchors the window to call time', async () => {
     const conn = connMock(V1_ROW);
-    await summarizePriorCall('+19419008088', 'current-call', conn, '2026-07-11T09:00:00Z');
+    await summarizePriorCall('+19419008088', 'current-call', conn, ANCHOR);
     const rawCalls = conn._q.whereRaw.mock.calls;
     // Both phone columns in one predicate…
     const phonePredicate = rawCalls.find(([sql]) => sql.includes('from_phone') && sql.includes('to_phone'));
     expect(phonePredicate[1]).toEqual(['9008088'.padStart(10, '941'), '9008088'.padStart(10, '941')]);
     // …and the 7-day lower bound anchored to the call's own timestamp.
     const windowPredicate = rawCalls.find(([sql]) => sql.includes("interval '7 days'"));
-    expect(windowPredicate[1]).toEqual(['2026-07-11T09:00:00Z']);
+    expect(windowPredicate[1]).toEqual([ANCHOR]);
   });
 
   test('the prompt block carries the shared-line different-person rule', () => {
