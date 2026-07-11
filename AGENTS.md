@@ -324,9 +324,10 @@ finding and warns on P1. Reviewers must return JSON matching
   UPDATE so concurrent POSTs can't fan out duplicates. First request per
   estimate AUTO-GRANTS a 7-day extension via the shared
   services/estimate-extension.js core (same expiry anchoring, status
-  revival, and `estimate_extended` SMS as the admin extend route —
-  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage;
-  post-write SMS plumbing never throws; the write is guarded on the
+  revival, `estimate_extended` SMS, and `estimate.extended` email as the
+  admin extend route — consent/opt-out/Twilio-gate enforcement inside
+  sendCustomerMessage, suppression/dedupe inside the email template
+  library; post-write SMS/email plumbing never throws; the write is guarded on the
   snapshot's status/archived_at and never moves an expiry backwards, 409 on
   conflict; LIVE 'sending' claims are refused — only date-expired stale
   ones extend), burned ATOMICALLY in the same claim UPDATE before any
@@ -338,7 +339,7 @@ finding and warns on P1. Reviewers must return JSON matching
   retries once and error-logs on double failure; the notify-only path
   treats the notification as the deliverable and releases its claim + 500s
   when it can't persist); response carries only
-  success/autoExtended/expiresAt/smsSent — no PII),
+  success/autoExtended/expiresAt/smsSent/emailSent — no PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired

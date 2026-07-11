@@ -9227,10 +9227,13 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       const smsLine = granted.smsResult.sent
         ? 'confirmation SMS sent'
         : `SMS not sent (${granted.smsResult.reason || 'blocked'})`;
+      const emailLine = granted.emailResult?.sent
+        ? 'confirmation email sent'
+        : `email not sent (${granted.emailResult?.reason || 'blocked'})`;
       const notifyAutoGrant = () => NotificationService.notifyAdmin(
         'estimate',
         `Extension auto-granted: ${estimate.customer_name}`,
-        `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}`,
+        `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}; ${emailLine}`,
         { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
       );
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
@@ -9249,6 +9252,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         autoExtended: true,
         expiresAt: granted.newExpiry.toISOString(),
         smsSent: !!granted.smsResult.sent,
+        emailSent: !!granted.emailResult?.sent,
       });
     }
 
