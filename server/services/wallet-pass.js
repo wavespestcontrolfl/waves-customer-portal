@@ -219,7 +219,8 @@ async function generateForToken(token) {
       nextVisitLabel = etDateLabel(raw);
     }
   } catch (err) {
-    logger.warn(`[wallet-pass] next-visit lookup skipped (customerId=${customer.id}): ${err.message}`);
+    // PII: error class only, matching the card-service logging rule.
+    logger.warn(`[wallet-pass] next-visit lookup skipped (customerId=${customer.id} errType=${err?.name || 'Error'})`);
   }
 
   const memberSince = customer.member_since || customer.created_at;

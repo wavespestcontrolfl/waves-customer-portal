@@ -10,7 +10,8 @@
  * resolves to the Google review page for the office nearest the customer.
  *
  * The review block hides itself for customers flagged has_left_google_review.
- * Apple Wallet is a follow-up PR (needs the Pass Type ID cert).
+ * The Add-to-Apple-Wallet button renders only when the server reports pass
+ * signing configured (walletAvailable) AND the UA is an Apple platform.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
