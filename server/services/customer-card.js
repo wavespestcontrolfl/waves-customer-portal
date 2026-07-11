@@ -299,6 +299,9 @@ async function getCardData(token) {
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,
     firstVisitCompletedAt: card.first_visit_completed_at,
+    // True only when pass-signing certs are configured — the page renders the
+    // Add-to-Wallet button off this so a tap can never 404.
+    walletAvailable: require('./wallet-pass').walletConfigured(),
   };
 }
 

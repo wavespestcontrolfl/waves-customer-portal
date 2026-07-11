@@ -1,0 +1,263 @@
+/**
+ * Apple Wallet pass for the digital business card (PR 2 of the card lane).
+ *
+ * Generates a signed .pkpass for a customer_cards row: navy generic pass
+ * fronted by the tech on record, the same tracked /l review QR the card page
+ * carries (Wallet draws the barcode itself — no branded QR here), the
+ * customer's coordinates for lock-screen relevance, and contact/portal/
+ * referral links on the back of the pass.
+ *
+ * Self-gating by config: signing needs PASS_SIGNER_CERT_B64 /
+ * PASS_SIGNER_KEY_B64 / PASS_WWDR_CERT_B64 (base64 PEMs, Railway env). When
+ * any are unset, walletConfigured() is false, the .pkpass route 404s, and
+ * the card page hides its Add-to-Wallet button — kill switch = unset the
+ * vars. Cert bundle + renewal date (2027-08-10) live in
+ * ~/waves-wallet-certs/README.md on the owner's machine.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const db = require('../models/db');
+const logger = require('./logger');
+const { WAVES_LOCATIONS } = require('../config/locations');
+const { publicPortalUrl } = require('../utils/portal-url');
+const {
+  WAVES_FL_LICENSE_LINE,
+  WAVES_WEBSITE_URL,
+} = require('../constants/business');
+
+const PASS_TYPE_ID_DEFAULT = 'pass.com.wavespestcontrol.card';
+const TEAM_ID_DEFAULT = 'BMNXJ4Q89M';
+const ASSET_DIR = path.join(__dirname, '..', 'assets', 'wallet');
+const ASSET_FILES = ['icon.png', 'icon@2x.png', 'icon@3x.png', 'logo.png', 'logo@2x.png', 'logo@3x.png'];
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function walletConfigured() {
+  return Boolean(
+    process.env.PASS_SIGNER_CERT_B64
+    && process.env.PASS_SIGNER_KEY_B64
+    && process.env.PASS_WWDR_CERT_B64,
+  );
+}
+
+function loadCerts() {
+  return {
+    wwdr: Buffer.from(process.env.PASS_WWDR_CERT_B64, 'base64'),
+    signerCert: Buffer.from(process.env.PASS_SIGNER_CERT_B64, 'base64'),
+    signerKey: Buffer.from(process.env.PASS_SIGNER_KEY_B64, 'base64'),
+  };
+}
+
+/**
+ * 'YYYY-MM-DD' → 'Sep 9' WITHOUT going through Date: pg DATE strings parsed
+ * by new Date() land at UTC midnight, which renders as the previous ET day
+ * (the house timestamptz trap) — so format from the string parts directly.
+ */
+function etDateLabel(dateStr) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dateStr || ''));
+  if (!m) return null;
+  const month = MONTHS[Number(m[2]) - 1];
+  return month ? `${month} ${Number(m[3])}` : null;
+}
+
+function firstNameOf(fullName) {
+  return String(fullName || '').trim().split(/\s+/)[0] || '';
+}
+
+/**
+ * Complete pass.json for the card — pure, unit-testable. Wallet renders the
+ * QR itself from `barcodes`; colors carry the glass theme (passes are flat
+ * by Apple's spec — no translucency).
+ */
+function buildPassJson({
+  card,
+  customerFirstName,
+  memberSinceYear,
+  techName,
+  location,
+  nextVisitLabel = null,
+  reviewUrl,
+  referralUrl,
+  portalUrl,
+}) {
+  const techFirst = firstNameOf(techName);
+  const secondaryFields = [
+    { key: 'customer', label: 'CUSTOMER', value: customerFirstName || 'Waves customer' },
+  ];
+  if (nextVisitLabel) {
+    secondaryFields.push({ key: 'next_visit', label: 'NEXT VISIT', value: nextVisitLabel });
+  }
+
+  const passJson = {
+    formatVersion: 1,
+    passTypeIdentifier: process.env.PASS_TYPE_ID || PASS_TYPE_ID_DEFAULT,
+    teamIdentifier: process.env.PASS_TEAM_ID || TEAM_ID_DEFAULT,
+    serialNumber: String(card.id),
+    organizationName: 'Waves Pest Control',
+    description: 'Waves Pest Control business card',
+    backgroundColor: 'rgb(4,57,94)',
+    foregroundColor: 'rgb(255,255,255)',
+    labelColor: 'rgb(155,212,234)',
+    barcodes: [{
+      format: 'PKBarcodeFormatQR',
+      message: reviewUrl,
+      messageEncoding: 'iso-8859-1',
+      altText: 'Review Waves on Google',
+    }],
+    generic: {
+      headerFields: memberSinceYear
+        ? [{ key: 'since', label: 'SINCE', value: String(memberSinceYear) }]
+        : [],
+      primaryFields: [
+        { key: 'technician', label: 'YOUR TECHNICIAN', value: techName || 'Waves Pest Control' },
+      ],
+      secondaryFields,
+      backFields: [
+        {
+          key: 'text',
+          label: techFirst ? `TEXT ${techFirst.toUpperCase()}` : 'TEXT US',
+          value: location.phone,
+          attributedValue: `<a href="sms:${location.phoneRaw}">${location.phone}</a>`,
+        },
+        {
+          key: 'call',
+          label: techFirst ? `CALL ${techFirst.toUpperCase()}` : 'CALL US',
+          value: location.phone,
+          attributedValue: `<a href="tel:${location.phoneRaw}">${location.phone}</a>`,
+        },
+        {
+          key: 'portal',
+          label: 'CUSTOMER PORTAL',
+          value: portalUrl,
+          attributedValue: `<a href="${portalUrl}">${portalUrl.replace(/^https?:\/\//, '')}</a>`,
+        },
+        {
+          key: 'referral',
+          label: 'SHARE WAVES WITH A FRIEND',
+          value: referralUrl,
+          attributedValue: `<a href="${referralUrl}">${referralUrl.replace(/^https?:\/\//, '')}</a>`,
+        },
+        {
+          key: 'website',
+          label: 'WEBSITE',
+          value: WAVES_WEBSITE_URL,
+          attributedValue: `<a href="${WAVES_WEBSITE_URL}">wavespestcontrol.com</a>`,
+        },
+        {
+          key: 'license',
+          label: 'LICENSED & INSURED',
+          value: WAVES_FL_LICENSE_LINE,
+        },
+      ],
+    },
+  };
+
+  // Lock-screen relevance at the customer's own address (≤10 allowed; one).
+  const lat = card.customer_latitude;
+  const lng = card.customer_longitude;
+  if (lat != null && lng != null && Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) {
+    passJson.locations = [{
+      latitude: Number(lat),
+      longitude: Number(lng),
+      relevantText: techFirst
+        ? `Your Waves card — ${techFirst} is a text away.`
+        : 'Your Waves card — we’re a text away.',
+    }];
+  }
+
+  return passJson;
+}
+
+/**
+ * Signed .pkpass buffer for a card share token, or null when the token is
+ * unknown / customer archived. Throws only on signing/config errors (the
+ * route maps those to 500 via next()).
+ */
+async function generateForToken(token) {
+  if (!walletConfigured()) return null;
+  if (!/^[a-f0-9]{64}$/.test(String(token || ''))) return null;
+
+  const card = await db('customer_cards').where({ share_token: token }).first();
+  if (!card) return null;
+
+  const customer = await db('customers')
+    .where({ id: card.customer_id })
+    .first('id', 'first_name', 'member_since', 'created_at', 'latitude', 'longitude', 'deleted_at', 'referral_code');
+  if (!customer || customer.deleted_at) return null;
+
+  let techName = null;
+  if (card.technician_id) {
+    const tech = await db('technicians').where({ id: card.technician_id }).first('name');
+    techName = tech?.name || null;
+  }
+
+  const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
+
+  let referralUrl = `${publicPortalUrl()}/?tab=refer`;
+  try {
+    const promoter = await db('referral_promoters')
+      .where({ customer_id: customer.id })
+      .first('referral_link');
+    if (promoter?.referral_link) referralUrl = promoter.referral_link;
+  } catch { /* table optional in older envs */ }
+
+  // Next upcoming visit (DATE column — format from string parts, see
+  // etDateLabel). pending/confirmed only; anything else isn't "booked".
+  let nextVisitLabel = null;
+  try {
+    const next = await db('scheduled_services')
+      .where({ customer_id: customer.id })
+      .whereIn('status', ['pending', 'confirmed'])
+      .where('scheduled_date', '>=', db.raw("(now() at time zone 'America/New_York')::date"))
+      .orderBy('scheduled_date', 'asc')
+      .first('scheduled_date');
+    if (next?.scheduled_date) {
+      const raw = next.scheduled_date instanceof Date
+        ? next.scheduled_date.toISOString().slice(0, 10)
+        : String(next.scheduled_date);
+      nextVisitLabel = etDateLabel(raw);
+    }
+  } catch (err) {
+    logger.warn(`[wallet-pass] next-visit lookup skipped (customerId=${customer.id}): ${err.message}`);
+  }
+
+  const memberSince = customer.member_since || customer.created_at;
+  const passJson = buildPassJson({
+    card: {
+      ...card,
+      customer_latitude: customer.latitude,
+      customer_longitude: customer.longitude,
+    },
+    customerFirstName: customer.first_name,
+    memberSinceYear: memberSince ? new Date(memberSince).getFullYear() : null,
+    techName,
+    location,
+    nextVisitLabel,
+    reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
+    referralUrl,
+    portalUrl: publicPortalUrl(),
+  });
+
+  const files = { 'pass.json': Buffer.from(JSON.stringify(passJson)) };
+  for (const name of ASSET_FILES) {
+    try {
+      files[name] = fs.readFileSync(path.join(ASSET_DIR, name));
+    } catch (err) {
+      // icon.png is REQUIRED by Wallet; the rest degrade gracefully.
+      if (name === 'icon.png') throw err;
+      logger.warn(`[wallet-pass] asset missing: ${name}`);
+    }
+  }
+
+  const { PKPass } = require('passkit-generator');
+  const pass = new PKPass(files, loadCerts());
+  return pass.getAsBuffer();
+}
+
+module.exports = {
+  walletConfigured,
+  generateForToken,
+  buildPassJson,
+  __private: { etDateLabel, firstNameOf },
+};
