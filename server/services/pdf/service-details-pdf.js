@@ -438,6 +438,11 @@ function renderServiceDetailsPdf(content) {
       }
     }
 
+    if (content.compliance && Array.isArray(content.compliance.bullets) && content.compliance.bullets.length) {
+      sectionHeading(doc, content.compliance.heading || 'Compliance & licensing');
+      bullets(doc, content.compliance.bullets);
+    }
+
     sectionHeading(doc, 'Products we may use');
     if (Array.isArray(content.products) && content.products.length) {
       doc.font('Helvetica').fontSize(9.5).fillColor(MUTED)
