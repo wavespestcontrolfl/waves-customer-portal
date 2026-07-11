@@ -362,6 +362,49 @@ describe('applyRecurringIntentDefault', () => {
     expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Quarterly Pest Control Service');
   });
 
+  test('modified bare opt-outs decline: "no service plan", "without a maintenance plan"', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: no service plan, just the nest.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: without a maintenance plan please.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('calendar plans in more shapes stay non-intent', () => {
+    for (const t of ['Caller: I have plans Saturday.', 'Caller: plans next week, so come Monday.', 'Caller: my plans changed.']) {
+      expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Bee / Wasp Nest Removal Service');
+    }
+  });
+
+  test('billing cadence is not service cadence', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: can I pay monthly for the one-time wasp treatment?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: is this billed monthly?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('coordinated opt-outs negate BOTH cadences; positive floats still default quarterly', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want monthly or quarterly, just the nest.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want a package — monthly or quarterly, whichever you recommend.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('an active plan with ANOTHER company is context, not intent', () => {
+    expect(applyRecurringIntentDefault(
+      lead(),
+      "Caller: I'm on quarterly service with another company, but I just need this wasp nest removed."
+    ).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('an agent NEGATIVE plan statement plus "yes" is not an accepted offer', () => {
+    const t = [
+      'Caller: I have a wasp nest.',
+      "Agent: we do not offer quarterly service for a nest removal; it's one-time. Sound good?",
+      'Caller: yes.',
+    ].join('\n');
+    expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Bee / Wasp Nest Removal Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
