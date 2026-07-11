@@ -2,7 +2,6 @@ const { normalizeEmail, collapseWhitespace } = require('./contact-normalize');
 const { toE164 } = require('./phone');
 const { normalizeStreetLine, titleCaseWords, normalizeState } = require('./address-normalizer');
 const { properCase } = require('./name-case');
-const { correctEmailDomain, meetsConfidence } = require('./email-typo-correction');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -28,16 +27,16 @@ function cleanEmail(value) {
   return email || '';
 }
 
+// Strict by design — NO domain repair here. A repaired address must pass the
+// call processor's ownership gate (correctedAddressOwnedByOther, fails closed)
+// before it may be adopted, and that gate only sees corrections proposed by
+// deriveEmailReview from the RAW value. Repairing inline would hand the
+// customer/lead upserts a corrected address that could belong to a different
+// customer. Invalid captures demote to email_raw below, where the (now
+// missing_tld-aware) correction fires inside the gated review path.
 function cleanValidEmailOrNull(value) {
   const email = cleanEmail(value);
-  if (EMAIL_RE.test(email)) return email;
-  // Repair a HIGH-confidence domain error before rejecting (mis-heard/dropped
-  // TLD, e.g. "@gmail" → "@gmail.com"); weaker cases stay null for review.
-  const fix = email ? correctEmailDomain(email) : null;
-  if (fix && meetsConfidence(fix.confidence, 'high') && EMAIL_RE.test(fix.corrected)) {
-    return fix.corrected;
-  }
-  return null;
+  return EMAIL_RE.test(email) ? email : null;
 }
 
 // A syntactically-valid email whose local part reads like a URL fragment is a

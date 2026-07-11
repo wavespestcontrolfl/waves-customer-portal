@@ -1,7 +1,6 @@
 const { toE164 } = require('./phone');
 const { normalizeEmail, properCaseName, collapseWhitespace } = require('./contact-normalize');
 const { normalizeStreetLine } = require('./address-normalizer');
-const { correctEmailDomain, meetsConfidence } = require('./email-typo-correction');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -11,20 +10,16 @@ function cleanText(value) {
   return s || null;
 }
 
+// Strict by design — NO domain repair here. Repair of a mis-heard/dropped TLD
+// ("brandon@gmail" → "brandon@gmail.com") happens exclusively in
+// deriveEmailReview, whose proposal must clear the call processor's ownership
+// gate (correctedAddressOwnedByOther, fails closed) before adoption. An inline
+// repair would flow straight into customer/lead/service-contact writes with no
+// check that the corrected address belongs to this caller.
 function cleanValidEmail(value) {
   if (!value) return null;
   const normalized = normalizeEmail(value);
-  if (normalized && EMAIL_RE.test(normalized)) return normalized;
-  // Repair a HIGH-confidence domain error before rejecting — a mis-heard/dropped
-  // TLD ("brandon@gmail" → "brandon@gmail.com") otherwise drops the email or (via
-  // another path) gets stored raw and emailed straight to a bounce. Only high
-  // confidence auto-applies (missing_dot / unambiguous domain typo); anything
-  // weaker stays null and is surfaced for review by deriveEmailReview.
-  const fix = normalized ? correctEmailDomain(normalized) : null;
-  if (fix && meetsConfidence(fix.confidence, 'high') && EMAIL_RE.test(fix.corrected)) {
-    return fix.corrected;
-  }
-  return null;
+  return normalized && EMAIL_RE.test(normalized) ? normalized : null;
 }
 
 function normalizePhone(value) {
@@ -48,6 +43,13 @@ function normalizeState(value) {
 
 function normalizeCaller(caller) {
   if (!caller) return caller;
+  // Same transcript-garble rejection as the V1 normalizer and the secondary-
+  // contact path below: a URL-shaped "email" ("www.cw63@gmail.com") is a
+  // mishearing of spelled-out letters, never a mailbox — the literal string
+  // may be a real stranger's address, so it must not survive into the
+  // caller's customer/lead writes or first-touch sends.
+  const { looksGarbledTranscriptEmail } = require('./intake-normalize');
+  const validEmail = cleanValidEmail(caller.email);
   return {
     ...caller,
     name_full: cleanText(caller.name_full),
@@ -56,7 +58,7 @@ function normalizeCaller(caller) {
     organization_name: cleanText(caller.organization_name),
     phone_e164: normalizePhone(caller.phone_e164),
     phone_raw_spoken: cleanText(caller.phone_raw_spoken),
-    email: cleanValidEmail(caller.email),
+    email: validEmail && !looksGarbledTranscriptEmail(validEmail) ? validEmail : null,
   };
 }
 

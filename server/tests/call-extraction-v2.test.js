@@ -169,6 +169,21 @@ describe('schema validation', () => {
       expect(valid).toBe(false);
     });
 
+    test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {
+      // A dropped TLD ("brandon@gmail") used to fail format:"email" here,
+      // which under CALL_EXTRACTION_V2_DRIVES_ROUTING fail-closed the entire
+      // call to triage BEFORE the repair path ever saw the address. The
+      // model-output schema accepts it as-heard; normalizeCaller nulls what
+      // it can't validate, so the persisted schema (still format:"email")
+      // stays strict.
+      const data = validModelOutput();
+      data.caller.email = 'brandon@gmail';
+      const { valid } = validateModelOutput(data);
+      expect(valid).toBe(true);
+      const normalized = normalizeExtractionV2(data);
+      expect(normalized.caller.email).toBeNull();
+    });
+
     test('scheduling.status=confirmed is valid', () => {
       const data = validModelOutput();
       data.scheduling.status = 'confirmed';
@@ -344,10 +359,20 @@ describe('normalize extraction v2', () => {
     expect(normalizeState(null)).toBeNull();
   });
 
-  test('normalizes email', () => {
+  test('normalizes email (strict — the domain repair lives in the gated review path, not here)', () => {
     expect(cleanValidEmail('Test@Example.COM')).toBe('test@example.com');
     expect(cleanValidEmail('not-an-email')).toBeNull();
+    // A bare-SLD capture is NOT repaired inline; deriveEmailReview proposes
+    // the fix and the processor's ownership gate decides adoption.
+    expect(cleanValidEmail('brandon@gmail')).toBeNull();
     expect(cleanValidEmail(null)).toBeNull();
+  });
+
+  test('normalizeCaller rejects a URL-shaped caller email (transcript garble)', () => {
+    const extraction = validModelOutput();
+    extraction.caller.email = 'www.cw63@gmail.com';
+    const result = normalizeExtractionV2(extraction);
+    expect(result.caller.email).toBeNull();
   });
 
   test('normalizeExtractionV2 handles full extraction', () => {
