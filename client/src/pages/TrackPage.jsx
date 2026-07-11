@@ -360,13 +360,15 @@ function TechBlock({ tech, size = 'md' }) {
   );
 }
 
-// Client identity block (owner spec 2026-07-06): replaces the old
-// "Today's visit" service-description/window/address meta — the card
-// shows WHO the visit is for (name, address, email, phone).
+// Client identity block (owner spec 2026-07-06, service details re-added
+// 2026-07-11): the card shows WHO the visit is for (name, address, email,
+// phone) and WHAT the visit is (service type + 2-hour arrival window).
 function ClientMeta({ data }) {
   const c = data.customer || {};
   const addrLines = fullAddressLines(data.property);
-  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
+  const serviceType = data.service?.type || null;
+  const arrivalWindow = formatWindow(data.window?.start);
+  if (!c.name && addrLines.length === 0 && !c.email && !c.phone && !serviceType && !arrivalWindow) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
       {c.name ? (
@@ -382,6 +384,16 @@ function ClientMeta({ data }) {
       ) : null}
       {c.phone ? (
         <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
+      ) : null}
+      {serviceType ? (
+        <div style={{ fontSize: 14, marginTop: 12, color: TRACK_SURFACE.body }}>
+          <span style={{ color: TRACK_SURFACE.muted }}>Service: </span>{serviceType}
+        </div>
+      ) : null}
+      {arrivalWindow ? (
+        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>
+          <span style={{ color: TRACK_SURFACE.muted }}>Arrival window: </span>{arrivalWindow}
+        </div>
       ) : null}
     </div>
   );
