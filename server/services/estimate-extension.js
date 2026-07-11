@@ -52,11 +52,21 @@ function computeExtensionExpiry(estimate = {}, days, now = new Date()) {
 // Estimates whose status itself blocks the customer view need reviving on
 // extension: 'expired' (the sweep's flip) and 'send_failed' (404s in
 // isEstimateCustomerViewable regardless of expiry) reset to viewed/sent per
-// the customer's history. 'sending' stays as-is — it's already viewable, and
-// the in-flight send machinery owns that status. sent/viewed stay untouched.
-function extensionStatusUpdate(estimate = {}) {
-  if (!['expired', 'send_failed'].includes(estimate.status)) return null;
-  return estimate.viewed_at ? 'viewed' : 'sent';
+// the customer's history. A DATE-EXPIRED 'sending' row with publication
+// evidence is a STUCK send claim, not an in-flight send (claims live
+// seconds-to-minutes; expiry windows are days) — it must revive too, because
+// extending it in place would bump updated_at (delaying
+// recoverStaleScheduledEstimateClaims) and that recovery later flips the row
+// to send_failed/scheduled, killing the just-extended link (codex P2,
+// 2026-07-11). A 'sending' row without sent_at/viewed_at stays untouched —
+// the send/recovery machinery owns it. sent/viewed stay untouched.
+function extensionStatusUpdate(estimate = {}, now = new Date()) {
+  const revived = () => (estimate.viewed_at ? 'viewed' : 'sent');
+  if (['expired', 'send_failed'].includes(estimate.status)) return revived();
+  if (estimate.status === 'sending'
+    && estimate.expires_at && new Date(estimate.expires_at) < now
+    && (estimate.sent_at || estimate.viewed_at)) return revived();
+  return null;
 }
 
 /**

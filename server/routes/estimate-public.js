@@ -9150,22 +9150,23 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // Fail CLOSED on malformed estimate_data: a non-object blob (never seen
     // in practice) cannot hold the dedupe/burn stamps, and granting without
     // recordable stamps would make this public endpoint an unbounded snooze
-    // button. NULL is fine — the claim UPDATEs below COALESCE it into '{}'.
-    if (estimate.estimate_data != null) {
-      let parsedShape = estimate.estimate_data;
-      if (typeof parsedShape === 'string') {
-        try { parsedShape = JSON.parse(parsedShape); } catch { parsedShape = null; }
-      }
-      if (!parsedShape || typeof parsedShape !== 'object' || Array.isArray(parsedShape)) {
-        logger.warn(`[estimate-extension-request] non-object estimate_data on estimate ${estimate.id} — failing closed`);
-        return res.status(404).json({ error: 'Estimate not found' });
-      }
+    // button. The /data 404 flag applies the same check, so the SPA never
+    // offers a button this path would reject.
+    if (!estimateDataCanHoldExtensionStamps(estimate)) {
+      logger.warn(`[estimate-extension-request] non-object estimate_data on estimate ${estimate.id} — failing closed`);
+      return res.status(404).json({ error: 'Estimate not found' });
     }
 
     const nowIso = new Date().toISOString();
-    // 24h dedupe window, shared by both claim shapes below.
-    const DEDUPE_OPEN_SQL = `(COALESCE(estimate_data->>'extensionRequestedAt', '') = ''
-      OR (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours')`;
+    // 24h dedupe window, shared by both claim shapes below. CASE (not OR)
+    // because Postgres doesn't guarantee OR short-circuit order — a malformed
+    // stamp value must hit the format guard as claimable, never the
+    // ::timestamptz cast (which would 500 the request on bad JSON metadata).
+    const DEDUPE_OPEN_SQL = `(CASE
+      WHEN COALESCE(estimate_data->>'extensionRequestedAt', '') = '' THEN true
+      WHEN (estimate_data->>'extensionRequestedAt') !~ '^\\d{4}-\\d{2}-\\d{2}T' THEN true
+      ELSE (estimate_data->>'extensionRequestedAt')::timestamptz < NOW() - interval '24 hours'
+    END)`;
     const OBJECT_SQL = "jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object'";
 
     const NotificationService = require('../services/notification-service');
@@ -10715,6 +10716,20 @@ function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate.sent_at && !estimate.viewed_at) return false;
   if (estimate.status === 'expired') return true;
   return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
+}
+
+// Whether estimate_data can hold the extension-request dedupe/burn stamps:
+// an object (or NULL — the claim UPDATEs COALESCE it into '{}'). A string/
+// array/number blob can't be jsonb_set, so the POST fails closed AND the
+// /data 404 must not advertise the button (the flag and the endpoint must
+// agree, or the SPA renders a button that can only 404).
+function estimateDataCanHoldExtensionStamps(estimate = {}) {
+  if (estimate.estimate_data == null) return true;
+  let parsed = estimate.estimate_data;
+  if (typeof parsed === 'string') {
+    try { parsed = JSON.parse(parsed); } catch { return false; }
+  }
+  return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed);
 }
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
@@ -14558,9 +14573,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // re-checks eligibility + gate server-side regardless. The flag is only
       // ever INCLUDED when true — an explicit `false` here would distinguish
       // real-but-ineligible tokens (drafts, archived, send_failed) from
-      // unknown ones and break the generic-404 contract.
+      // unknown ones and break the generic-404 contract. The stampable-shape
+      // check mirrors the POST's fail-closed guard — a malformed-blob row
+      // must not advertise a button whose endpoint would 404.
       if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)) {
+        && isEstimateExtensionRequestEligible(estimate)
+        && estimateDataCanHoldExtensionStamps(estimate)) {
         return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
       }
       return res.status(404).json({ error: 'Estimate not found' });
@@ -15067,6 +15085,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
+module.exports.estimateDataCanHoldExtensionStamps = estimateDataCanHoldExtensionStamps;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.cleanStoredName = cleanStoredName;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;

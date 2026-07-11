@@ -598,8 +598,11 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
     }
   };
 
+  // ET, matching the SMS and every other estimate-expiry surface — a
+  // West-Coast browser must not show a "through" date a day earlier than
+  // the deadline the text message quotes.
   const expiryLabel = newExpiresAt
-    ? new Date(newExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+    ? new Date(newExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })
     : null;
 
   // A granted extension flips the whole card's story: the estimate is live

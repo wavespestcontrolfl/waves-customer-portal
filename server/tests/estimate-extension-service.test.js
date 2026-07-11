@@ -40,11 +40,21 @@ describe('extensionStatusUpdate (view-blocking status revival)', () => {
     expect(extensionStatusUpdate({ status: 'send_failed', viewed_at: null })).toBe('sent');
   });
 
+  it('revives a DATE-EXPIRED stuck sending row with publication evidence (codex P2)', () => {
+    // Left as 'sending', the extension's updated_at bump delays
+    // recoverStaleScheduledEstimateClaims, and that recovery later flips the
+    // row to send_failed/scheduled — killing the just-extended link.
+    expect(extensionStatusUpdate({ status: 'sending', sent_at: PAST, expires_at: PAST }, NOW)).toBe('sent');
+    expect(extensionStatusUpdate({ status: 'sending', viewed_at: PAST, expires_at: PAST }, NOW)).toBe('viewed');
+  });
+
   it('leaves already-viewable statuses untouched (returns null = no status write)', () => {
     expect(extensionStatusUpdate({ status: 'sent', viewed_at: null })).toBe(null);
     expect(extensionStatusUpdate({ status: 'viewed', viewed_at: PAST })).toBe(null);
-    // 'sending' is viewable and owned by the in-flight send machinery.
-    expect(extensionStatusUpdate({ status: 'sending', viewed_at: null })).toBe(null);
+    // An ACTIVE (future-expiry) or evidence-less 'sending' row belongs to the
+    // in-flight send machinery.
+    expect(extensionStatusUpdate({ status: 'sending', sent_at: PAST, expires_at: FUTURE }, NOW)).toBe(null);
+    expect(extensionStatusUpdate({ status: 'sending', sent_at: null, viewed_at: null, expires_at: PAST }, NOW)).toBe(null);
   });
 });
 
