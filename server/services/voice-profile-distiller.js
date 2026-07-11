@@ -152,6 +152,7 @@ function styleOnlyFlags(profileText) {
  * The only consumer is the owner-activation-gated phone agent, and its
  * consumption-side sanitizer still runs on whatever is approved.
  */
+const POLICY_CLAIM_RE = /\b(?:no|without)\s+(?:contracts?|commitments?|obligations?)\b|\bcancel\s+(?:any\s*time|whenever)\b|\bfree\s+(?:re-?services?|re-?treatments?|estimates?|inspections?|quotes?|visits?)\b|\bmonth-to-month\b|\bno\s+hidden\s+fees?\b/i;
 const DAY_WORDS = '(?:mon|tues?|wednes|thurs?|fri|satur|sun)days?';
 const AVAIL_WORDS = '(?:available|availability|appointments?|open|slots?)';
 const PROFILE_SCHEDULE_CLAIM_RE = new RegExp(
@@ -178,8 +179,8 @@ function evaluateAutoApproval({ profileText, stats, flags } = {}) {
   // but the price/guarantee sanitizer can't see ("Saturday appointments are
   // usually available", "open until 5pm", "we spray Termidor"). Any hit
   // parks for a human — over-parking is the safe direction.
-  const factualClaims = text.split('\n').filter((l) => PROFILE_SCHEDULE_CLAIM_RE.test(l)).length;
-  if (factualClaims) reasons.push(`${factualClaims} schedule/availability/product claim line(s)`);
+  const factualClaims = text.split('\n').filter((l) => PROFILE_SCHEDULE_CLAIM_RE.test(l) || POLICY_CLAIM_RE.test(l)).length;
+  if (factualClaims) reasons.push(`${factualClaims} schedule/availability/product/policy claim line(s)`);
   if (/<<<|>>>/.test(text)) reasons.push('contains frame delimiters');
   if (!stats || !Number(stats.transcripts)) reasons.push('no call-transcript evidence in this distillation');
   return { approve: reasons.length === 0, reasons };
@@ -269,6 +270,8 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     return { skipped: 'empty_corpus' };
   }
 
+  const runStartWatermark = lastProfile?.watermark ? String(lastProfile.watermark) : null;
+
   const { system, user, stats } = buildDistillationPrompt(rows);
 
   let client = anthropicClient;
@@ -309,6 +312,22 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   // Exception-based review: green auto-applies (audit-logged, no bell —
   // nothing for a human to do); anything else parks + bells, the old flow.
   const verdict = evaluateAutoApproval({ profileText, stats, flags });
+  // A human decision landing WHILE the LLM ran (Adam revoking the live
+  // profile mid-run is the case that matters) moves the review watermark —
+  // auto-approving over it would override a kill switch pressed seconds
+  // ago. Any movement → park as an exception instead.
+  if (verdict.approve) {
+    const wmNow = await dbi('voice_profiles')
+      .select(dbi.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+      .whereNot('id', row.id)
+      .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+      .first();
+    const wmNowStr = wmNow?.watermark ? String(wmNow.watermark) : null;
+    if (wmNowStr !== runStartWatermark) {
+      verdict.approve = false;
+      verdict.reasons.push('a review decision landed while this run was distilling');
+    }
+  }
   if (verdict.approve) {
     const applied = await reviewVoiceProfile({
       id: row.id,

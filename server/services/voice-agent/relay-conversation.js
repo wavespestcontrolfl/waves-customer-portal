@@ -83,7 +83,12 @@ const SYSTEM_PROMPT = [
 // cap is the same constant — the reviewer approves EXACTLY the text used
 // here, never a silently truncated prefix.
 const { MAX_PROFILE_CHARS: PROFILE_MAX_CHARS } = require('../voice-profile-distiller');
-const PROFILE_CACHE_TTL_MS = 10 * 60 * 1000;
+// 60s, deliberately short: invalidateVoiceProfileCache is in-process, and
+// while the portal runs as a single Railway service, a deploy overlap (or a
+// future second pod) would not see it — the TTL is the cross-process bound
+// on how long a revoked profile can keep serving. One tiny non-blocking DB
+// read per process per minute is free; a stale kill switch is not.
+const PROFILE_CACHE_TTL_MS = 60 * 1000;
 
 // Consumption-side defense in depth. The profile is model-generated from
 // customer-influenced corpus and human-approved — but a skimmed approval must

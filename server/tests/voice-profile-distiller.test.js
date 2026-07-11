@@ -130,6 +130,18 @@ describe('evaluateAutoApproval — exception-based review (green auto, exception
     });
     expect(style.approve).toBe(true);
   });
+
+  test('POLICY claims are exceptions too (Codex r3): contracts, cancel-anytime, free services', () => {
+    for (const claim of [
+      'They tell callers there are no contracts required',
+      'You can cancel anytime, they say',
+      'Free re-service is always offered',
+      'Everything is month-to-month',
+    ]) {
+      const v = evaluateAutoApproval({ profileText: `${CLEAN}\n${claim}`, stats: GOOD_STATS, flags: [] });
+      expect(v.approve).toBe(false);
+    }
+  });
 });
 
 describe('reviewVoiceProfile — the human gate state machine', () => {
