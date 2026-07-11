@@ -114,6 +114,18 @@ describe('runRetranscriptionBackfill — verdict vs retry discipline', () => {
     expect(dbi.__updates).toEqual([{ retranscribed_at: 'NOW' }]);
   });
 
+  test('an openai_unlabeled_fallback result is RETRYABLE, not a verdict (Codex r2 P2)', async () => {
+    const dbi = makeFakeDbi([CALL], { attemptsAfterFailure: 1 });
+    const out = await runRetranscriptionBackfill({
+      dbi,
+      // Labeling + Gemini both transiently failed: raw text, no labels.
+      transcribe: async () => ({ transcription: 'raw unlabeled words', provider: 'openai_unlabeled_fallback' }),
+      implausible: notImplausible,
+    });
+    expect(out).toMatchObject({ attempted: 1, retried: 1, unusable: 0, upgraded: 0 });
+    expect(dbi.__updates[0].retranscribed_at).toBeUndefined();
+  });
+
   test('a transcriber THROW is an infrastructure failure: attempt counted, NOT stamped (Codex P2)', async () => {
     const dbi = makeFakeDbi([CALL], { attemptsAfterFailure: 1 });
     const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => { throw new Error('rate limited'); } });

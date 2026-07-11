@@ -102,8 +102,10 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
     try {
       const result = await transcribeFn(call);
       const text = result?.transcription || null;
-      if (!text) {
-        // Indistinguishable from a provider problem — treat as retryable.
+      if (!text || result?.provider === 'openai_unlabeled_fallback') {
+        // No text, or raw unlabeled text because BOTH the labeling pass and
+        // the Gemini fallback failed transiently — either way this says
+        // nothing about the audio itself. Retryable, not a verdict.
         summary[await recordFailure(call.id)] += 1;
         continue;
       }
