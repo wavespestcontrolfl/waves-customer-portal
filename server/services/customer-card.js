@@ -49,6 +49,12 @@ function pickCardLocation(customer = {}) {
     const geo = nearestLocation(lat, lng);
     if (geo) return geo;
   }
+  // Stored office next: tracking-number leads store an AREA label in city
+  // ("North Port / Port Charlotte") with the true office in
+  // nearest_location_id — same precedence the review cadence uses
+  // (Codex P2 #2588 r4).
+  const stored = WAVES_LOCATIONS.find((l) => l.id === customer.nearest_location_id);
+  if (stored) return stored;
   const ReviewService = require('./review-request');
   const locationId = ReviewService.resolveReviewLocationId(customer);
   return WAVES_LOCATIONS.find((l) => l.id === locationId) || WAVES_LOCATIONS[0];
@@ -110,27 +116,6 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
     card = await db('customer_cards').where({ customer_id: customerId }).first();
     if (!card) return null;
 
-    // Short-link the review target so QR scans are click-tracked and the
-    // destination stays swappable. Never blocks the mint — on shortener
-    // failure the card simply keeps the long g.page URL.
-    if (!card.review_short_code && card.review_target_url) {
-      const { code, shortUrl } = await createTrackedShortLink(card.review_target_url, {
-        kind: 'card',
-        purpose: 'card_review',
-        entityType: 'customer_cards',
-        entityId: card.id,
-        customerId,
-      });
-      if (code) {
-        await db('customer_cards').where({ id: card.id }).update({
-          review_short_code: code,
-          review_short_url: shortUrl,
-          updated_at: new Date(),
-        });
-        card = { ...card, review_short_code: code, review_short_url: shortUrl };
-      }
-    }
-
     // Make sure a referral link exists so the card's Share action has a real
     // destination. enrollPromoter is get-or-create with no sends.
     try {
@@ -149,6 +134,29 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
       updated_at: new Date(),
     });
     card = { ...card, first_visit_completed_at: new Date() };
+  }
+
+  // Short-link the review target so QR scans are click-tracked and the
+  // destination stays swappable. Runs OUTSIDE the mint branch so a card
+  // whose mint hit a degraded shortener heals on a later completion
+  // instead of staying untracked forever (Codex P2 #2588 r4). Never blocks
+  // — on failure the card keeps the long g.page URL.
+  if (!card.review_short_code && card.review_target_url) {
+    const { code, shortUrl } = await createTrackedShortLink(card.review_target_url, {
+      kind: 'card',
+      purpose: 'card_review',
+      entityType: 'customer_cards',
+      entityId: card.id,
+      customerId,
+    });
+    if (code) {
+      await db('customer_cards').where({ id: card.id }).update({
+        review_short_code: code,
+        review_short_url: shortUrl,
+        updated_at: new Date(),
+      });
+      card = { ...card, review_short_code: code, review_short_url: shortUrl };
+    }
   }
 
   await maybeSendCardEmail(card, customer);
@@ -257,13 +265,23 @@ async function getCardData(token) {
   }
 
   // Share = the customer's referral link, never their personal card token.
-  let referralUrl = `${publicPortalUrl()}/?tab=refer`;
+  // Attribution order (Codex P2 #2588 r4): promoter row → rebuild from the
+  // customer's own referral_code → only then the generic portal link.
+  let referralUrl = null;
   try {
     const promoter = await db('referral_promoters')
       .where({ customer_id: customer.id })
       .first('referral_link');
     if (promoter?.referral_link) referralUrl = promoter.referral_link;
   } catch { /* table optional in older envs */ }
+  if (!referralUrl && customer.referral_code) {
+    try {
+      const { getPromoterReferralLink, getSettings } = require('./referral-engine');
+      const settings = await getSettings().catch(() => ({}));
+      referralUrl = getPromoterReferralLink({ referral_code: customer.referral_code }, settings) || null;
+    } catch { /* settings/table unavailable — generic fallback below */ }
+  }
+  if (!referralUrl) referralUrl = `${publicPortalUrl()}/?tab=refer`;
 
   const memberSince = customer.member_since || customer.created_at;
 

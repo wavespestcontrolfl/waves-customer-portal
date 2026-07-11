@@ -71,6 +71,16 @@ describe('customer-card location pick', () => {
     expect(loc.id).toBe('bradenton');
   });
 
+  test('stored nearest_location_id beats the city map (area-label cities)', () => {
+    // Tracking-number leads store "North Port / Port Charlotte" as city with
+    // the true office in nearest_location_id (Codex P2 #2588 r4).
+    const loc = pickCardLocation({ city: 'North Port / Port Charlotte', nearest_location_id: 'venice' });
+    expect(loc.id).toBe('venice');
+    // Geodata still wins over the stored id.
+    const geo = pickCardLocation({ latitude: 27.5698, longitude: -82.4265, nearest_location_id: 'venice' });
+    expect(geo.id).toBe('parrish');
+  });
+
   test('NULL lat/lng columns fall back to city routing — never treated as (0,0)', () => {
     // Number(null) === 0; the guard must keep null coords out of the
     // haversine path (Codex P2 on PR #2588).
