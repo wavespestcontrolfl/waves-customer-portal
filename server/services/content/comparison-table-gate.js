@@ -95,13 +95,34 @@ const ACTIVE_DISPARAGEMENT_SRC = [
 ].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
-// Self-declared ranking / superlative framing. Scanned over body + title/meta,
-// so prose-safe: "best/top" only fire with a ranking context, never "the best
-// time to treat" or "best pest control method".
-const RANKING_RE = new RegExp([
+// The full disparagement vocabulary DIRECTED at a provider noun — the
+// PROVIDER_DISPARAGEMENT_RE shapes (adjacent / linking-verb) but with every
+// DISPARAGEMENT_RE term, not just NEG_ADJ: "overpriced pest control services",
+// "pest control companies that are scams". Used by the table path's PROSE
+// scan, where a bare disparagement token is no longer enough (see evaluate).
+const DIRECTED_DISPARAGEMENT_RE = new RegExp([
+  `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
+  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+].join('|'), 'i');
+
+// Numeric self-ranking ("#1", "No. 1", "number one") split out of the
+// context-free ranking set: in educational pest prose these are overwhelmingly
+// the "#1 entry point / #1 hidden breeding site" idiom, not a declared winner.
+// PROD 2026-07-11: three educational drafts hard-blocked on exactly that idiom
+// (and on "shady" meaning literal shade — see the prose disparagement scan).
+// Numeric-one now needs comparison context: a <ComparisonTable> block, the
+// title/meta, or a provider/brand near it in prose (evaluate()).
+const NUMERIC_ONE_SRC = [
   '#\\s?1\\b',
   '\\bno\\.?\\s?1\\b',
   '\\bnumber one\\b',
+];
+const NUMERIC_ONE_RE = new RegExp(NUMERIC_ONE_SRC.join('|'), 'i');
+
+// Self-declared ranking / superlative framing. Scanned over body + title/meta,
+// so prose-safe: "best/top" only fire with a ranking context, never "the best
+// time to treat" or "best pest control method".
+const SELF_RANKING_SRC = [
   '\\btop[\\s-]?rated\\b',
   '\\bunbeatable\\b',
   '\\bbest[\\s-]in[\\s-]class\\b',
@@ -119,7 +140,11 @@ const RANKING_RE = new RegExp([
   // standalone self-ranking: "the best." / "the top choice" / "the best option"
   '\\bthe best\\b(?=\\s*(?:[.!?,;:)\\]"\\u2019\']|$))',
   '\\bthe (?:best|top) (?:choice|option|pick)\\b',
-].join('|'), 'i');
+];
+const SELF_RANKING_RE = new RegExp(SELF_RANKING_SRC.join('|'), 'i');
+// Full set, kept for the module export (compat) — evaluate() scans the two
+// halves separately so numeric-one can be context-scoped.
+const RANKING_RE = new RegExp([...NUMERIC_ONE_SRC, ...SELF_RANKING_SRC].join('|'), 'i');
 
 // Generic descriptors / methodologies that may precede a pest-industry suffix in
 // PROSE but are not a business name.
@@ -631,17 +656,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const unsupportedFacts = new Set();
   const negativeReliability = new Set();
 
-  // ── Whole-text scans (body + title/meta) ──
-  const disp = scanText.match(DISPARAGEMENT_RE) || scanText.match(PROVIDER_DISPARAGEMENT_RE);
-  if (disp) {
-    findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-      `Comparison draft contains disparaging language about a provider ("${disp[0].trim()}"). State attributes, never insults — in the table, the prose, or the title/meta.`));
-  }
-  const rank = scanText.match(RANKING_RE);
-  if (rank) {
-    findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
-      `Comparison draft uses ranking/superlative framing ("${rank[0].trim()}"). Present neutral trade-offs — do not declare a winner, in the table, the prose, or the title/meta.`));
-  }
+  // Business names are collected BEFORE the tone scans: the prose-scoped
+  // disparagement/ranking checks below need the full name inventory as
+  // proximity targets.
   for (const m of competitorFacts.findBusinessMentions(nameScanText)) {
     (m.inAllowlist ? known : unknown).add(m.name);
   }
@@ -657,6 +674,76 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     if (OWN_BRAND_RE.test(nm)) continue;
     if (competitorFacts.isKnownCompetitor(nm)) known.add(competitorFacts.findCompetitor(nm).name);
     else unclassified.add(nm);
+  }
+
+  // proseText = body with the <ComparisonTable> blocks removed, plus
+  // title/meta. Used by the prose-scoped tone scans here and by the
+  // competitor-in-prose check further down.
+  let proseText = body;
+  for (const b of blocks) proseText = proseText.split(b).join(' ');
+  if (metaText) proseText = `${proseText}\n${metaText}`;
+  const proseNameText = stripQuotesForNames(proseText); // length-preserving; indices align
+
+  // A detected business name within PROVIDER_NEGATIVE_PROXIMITY of a prose
+  // match — same window idiom as the competitor scans below.
+  const targetNames = [...known, ...unknown, ...unclassified];
+  const nearBusinessName = (idx, len, { includeOwnBrand = false } = {}) => {
+    const window = proseNameText
+      .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+    if (includeOwnBrand && OWN_BRAND_RE.test(window)) return true;
+    return targetNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
+  };
+
+  // ── Whole-text + prose tone scans (body + title/meta) ──
+  // PROD 2026-07-11: bare disparagement tokens used to block ANYWHERE in the
+  // draft — "shady corners of the lanai" / "shady, humid microclimates"
+  // (literal shade, the dominant sense in pest content) hard-blocked
+  // educational drafts. The finding claims language "about a provider", so
+  // the PROSE scan now requires one: the term must be DIRECTED at a provider
+  // noun (PROVIDER_DISPARAGEMENT_RE / DIRECTED_DISPARAGEMENT_RE) or sit
+  // within proximity of a detected business name. Inside a <ComparisonTable>
+  // block the bare vocabulary still blocks unconditionally (per-table scan
+  // below) — table cells are provider/option context by construction, and
+  // category-table strictness is asserted by existing tests.
+  let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE) || scanText.match(DIRECTED_DISPARAGEMENT_RE);
+  if (!disp) {
+    const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
+    let dm;
+    while ((dm = bareDispRe.exec(proseText)) !== null) {
+      if (nearBusinessName(dm.index, dm[0].length)) { disp = dm; break; }
+    }
+  }
+  if (disp) {
+    findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+      `Comparison draft contains disparaging language about a provider ("${disp[0].trim()}"). State attributes, never insults — in the table, the prose, or the title/meta.`));
+  }
+  // Non-numeric self-ranking ("clear winner", "the best choice in …") stays a
+  // whole-text scan — those phrases declare a winner in any context. Numeric
+  // "#1" / "number one" needs comparison context: a table block, the
+  // title/meta, or a provider/brand near it in prose — "the #1 entry point" /
+  // "#1 hidden breeding site" is educational idiom, not a declared winner
+  // (PROD 2026-07-11 false positives).
+  let rank = scanText.match(SELF_RANKING_RE)
+    || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
+    || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
+  if (!rank) {
+    const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
+    const providerNounRe = new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i');
+    let nm1;
+    while ((nm1 = numRe.exec(proseText)) !== null) {
+      const window = proseNameText
+        .slice(Math.max(0, nm1.index - PROVIDER_NEGATIVE_PROXIMITY), nm1.index + nm1[0].length + PROVIDER_NEGATIVE_PROXIMITY);
+      if (providerNounRe.test(window) || nearBusinessName(nm1.index, nm1[0].length, { includeOwnBrand: true })) {
+        rank = nm1;
+        break;
+      }
+    }
+  }
+  if (rank) {
+    findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
+      `Comparison draft uses ranking/superlative framing ("${rank[0].trim()}"). Present neutral trade-offs — do not declare a winner, in the table, the prose, or the title/meta.`));
   }
   // Prose/title/meta negatives within proximity of a NAMED competitor — these
   // tie an insult/reliability claim to the brand even without a provider noun
@@ -770,6 +857,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       if (!attributed) unsourcedKnown.add(n); // per-occurrence: any unsourced naming flags
     });
 
+    // The bare disparagement vocabulary blocks unconditionally INSIDE a
+    // table block (options are providers/categories by construction) — the
+    // prose scan above is target-scoped, so this keeps table strictness.
+    if (DISPARAGEMENT_RE.test(block)) {
+      const m = block.match(DISPARAGEMENT_RE);
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `Comparison table contains disparaging language about an option ("${m[0].trim()}"). State attributes, never insults.`));
+    }
     if (TABLE_DISPARAGEMENT_RE.test(block)) {
       const m = block.match(TABLE_DISPARAGEMENT_RE);
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
@@ -789,15 +884,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // is validated against curated facts. A mention in the surrounding prose /
   // title / meta carries unvalidatable claims ("Orkin offers free same-day
   // service in Sarasota"), so flag it — the writer must move the competitor into
-  // the table. proseText = body with the <ComparisonTable> blocks removed.
-  let proseText = body;
-  for (const b of blocks) proseText = proseText.split(b).join(' ');
-  if (metaText) proseText = `${proseText}\n${metaText}`;
+  // the table. proseText (body minus blocks, plus title/meta) was built above;
+  // proseNameText is its quote/backslash-stripped copy so an escaped/embedded-
+  // quote brand named in prose ("All \"U\" Need Pest Control offers …") is
+  // detected, not just the straight/smart-quote spellings findBusinessMentions
+  // normalizes on its own.
   const competitorInProse = new Set();
-  // Strip quotes/backslashes here too so an escaped/embedded-quote brand named in
-  // prose ("All \"U\" Need Pest Control offers …") is detected, not just the
-  // straight/smart-quote spellings findBusinessMentions normalizes on its own.
-  for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(proseText))) {
+  for (const m of competitorFacts.findBusinessMentions(proseNameText)) {
     if (m.inAllowlist) competitorInProse.add(m.name);
   }
 

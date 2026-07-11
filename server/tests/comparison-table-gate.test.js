@@ -932,6 +932,77 @@ describe('table-less drafts: operator-authorized competitor naming (Codex round 
   });
 });
 
+describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => {
+  // Three real drafts hard-blocked that day: "shady" meaning literal shade
+  // (millipede/mosquito resting sites) and the "#1 <noun>" educational idiom
+  // ("#1 entry point / hidden source / breeding site"). In PROSE these now
+  // need a provider target; inside a table block they still block bare.
+
+  test('"shady" meaning literal shade in educational prose does NOT trip disparagement', () => {
+    for (const prose of [
+      'Rake up leaf litter and pine straw against the house, under downspout splash zones, and in shady corners of the lanai.',
+      'Your slab, garage threshold, and lanai are the shady, humid microclimates they hit first.',
+      'Adult female mosquitoes hide in cool, humid, shady foliage between blood meals.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
+  test('"#1 <noun>" educational idiom in prose does NOT trip rigged-ranking', () => {
+    for (const prose of [
+      'Pull the drip pan, clean and dry it — this is the #1 hidden source.',
+      'Old rubber sweeps flatten out: the garage door threshold is the #1 entry point for millipedes.',
+      'Clogged gutters — the #1 hidden breeding site in SWFL homes.',
+      'The number one mistake homeowners make is overwatering the lawn.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
+  test('"shady" DIRECTED at a provider noun still blocks (P0)', () => {
+    const r = gate.evaluate({ body: `Some shady pest control companies quote one price and bill another.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('a disparagement term near a detected business name still blocks (P0)', () => {
+    const r = gate.evaluate({ body: `Coastline Pest Defense has some shady billing practices.\n\n${CATEGORY_TABLE}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('numeric self-ranking near the own brand or a provider noun still blocks', () => {
+    for (const prose of [
+      'Waves is #1 in Venice for a reason.',
+      'We are the #1 pest control company in Venice.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('numeric self-ranking in the title/meta still blocks', () => {
+    const r = gate.evaluate(
+      { body: `Intro prose.\n\n${CATEGORY_TABLE}`, frontmatter: { title: '#1 Pest Control in Venice' } },
+      {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('bare disparagement vocabulary INSIDE a table block still blocks (table strictness unchanged)', () => {
+    const t = CATEGORY_TABLE.replace('Generic playbook', 'Shady billing');
+    const r = gate.evaluate(wrap(t), {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('consumer-protection prose with no target passes on the table path too', () => {
+    const r = gate.evaluate({ body: `Watch out for hidden fees when comparing quotes.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+});
+
 describe('top-level title/meta in comparison scans (Codex round 10)', () => {
   test('a disparaging TOP-LEVEL title is scanned even though frontmatter is empty', () => {
     // The runner and sibling gates accept the metadata-at-top-level draft
