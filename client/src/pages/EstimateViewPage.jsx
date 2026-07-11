@@ -1917,17 +1917,29 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // the net they actually pay. Renders ONLY when there's a credit to itemize: the
 // standalone "Recurring total" card was removed (owner directive 2026-07-07), so
 // a no-credit multi-service plan stays summary-free and unchanged.
-export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null }) {
+export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
   if (!combined) return null;
-  // The plan credit that gates rendering and supplies the label + the ranged
-  // fallback amount — the itemized amounts come from the selected-cadence
-  // difference below. Prefer the SELECTED row's discount: the server nulls
+  // The live discount object (selected row first — the server nulls
   // combined.manualDiscount whenever the DEFAULT cadence floor-suppresses the
-  // credit, but another selected cadence can still carry it, and the summary
-  // must not vanish on that selection.
+  // credit — else the default payload's) prices the ranged fallback and
+  // corroborates $0 nets; the itemized amounts come from the selected-cadence
+  // difference below.
   const liveDiscount = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
   const manual = liveDiscount(selectedFrequency?.manualDiscount) || liveDiscount(combined.manualDiscount);
-  if (!manual) return null;
+  // Render gate: ANY evidence the plan carries a manual credit. Combo rows drop
+  // the discount fields and the combinedFrequency overlay keeps only the base
+  // row's, so a credit that's suppressed on the default/base row but live in
+  // the selected combo's net must gate in via the row's suppressed flag or the
+  // payload-level planDiscount — its amount then comes from the diff. A
+  // creditless plan carries none of these signals, so reconciliation drift can
+  // never conjure a discount line out of nothing.
+  const planHasCredit = Boolean(manual)
+    || Boolean(selectedFrequency?.manualDiscount)
+    || selectedFrequency?.manualDiscountSuppressed === true
+    || Boolean(combined.manualDiscount)
+    || Boolean(planDiscount);
+  if (!planHasCredit) return null;
+  const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
   // Quote-required selection: the rest of the estimate hides exact dollars for a
   // quote-required row, so there's no exact subtotal/net to itemize here either.
   if (selectedFrequency?.quoteRequired === true) return null;
@@ -1954,7 +1966,7 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
       fontWeight: 800,
       fontSize: 16,
     }}>
-      <span>{manual.label || 'Discount'}</span>
+      <span>{creditLabel}</span>
       <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
     </div>
   );
@@ -1975,7 +1987,7 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   // subtotal (1-cent tolerance, same as the split reconciliation): a legacy
   // payload with a zeroed/missing subtotal and an ordinary credit must not
   // render as "fully comped".
-  if (netMonthly === 0 && manualDiscountMonthlyAmount(manual) < subtotalMonthly - 0.011) return null;
+  if (netMonthly === 0 && manualDiscountMonthlyAmount(manual || planDiscount) < subtotalMonthly - 0.011) return null;
 
   // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
   // range, not one exact number — but the credit is applied by accept regardless,
@@ -4109,6 +4121,11 @@ export default function EstimateViewPage() {
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
               selectedFrequency={combinedFrequency}
+              // Payload-level plan credit: gate/label evidence for selections
+              // whose row-level discount fields are unavailable (combo overlays
+              // keep only the base row's) — survives unless EVERY priced
+              // frequency suppresses the credit.
+              planDiscount={pricing.manualDiscount || null}
               // Sum of the per-service cards at their SELECTED cadence — these are
               // pre-credit (WaveGuard-net), so subtotal − net = the actual credit.
               // Mirrors each ServiceSection's frequency resolution.

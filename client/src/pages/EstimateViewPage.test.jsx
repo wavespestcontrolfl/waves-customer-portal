@@ -918,6 +918,68 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).toMatch(/[−-]\$2\.08/);
     expect(text).toContain('$110');
   });
+
+  it('gates in on the suppressed flag when a combo-selected credit is live (combo rows carry no discount fields)', () => {
+    // Default cadence suppresses the credit (combined.manualDiscount nulled) and
+    // the base row carries only manualDiscountSuppressed — but the selected
+    // COMBO's net still applies the credit. The overlay keeps the base row's
+    // flag, which proves the plan has a credit; the diff prices it.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320, manualDiscountSuppressed: true }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Discount');
+    expect(text).toContain('$110');
+  });
+
+  it('uses the payload-level planDiscount for the gate and label when row fields are unavailable', () => {
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984 };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }}
+        preCreditMonthly={112.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$110');
+  });
+
+  it('never conjures a discount line from reconciliation drift on a creditless plan', () => {
+    // Positive subtotal−net difference but NO credit signal anywhere (no live
+    // object, no suppressed flag, no planDiscount) → nothing renders.
+    const { container } = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 82, annual: 984 }}
+        preCreditMonthly={84.08}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('corroborates a $0 net against the planDiscount when row-level objects are absent', () => {
+    // Comped via a combo selection: no row-level discount object survives the
+    // overlay, but the payload-level credit covers the whole subtotal.
+    const text = render(
+      <PlanTotalSummary
+        combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
+        selectedFrequency={{ key: 'alt', monthly: 0, annual: 0, manualDiscountSuppressed: true }}
+        preCreditMonthly={84.08}
+        planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Your price');
+    expect(text).toMatch(/[−-]\$84\.08/);
+  });
 });
 
 describe('ReviewPhase — site-confirmation hold copy', () => {
