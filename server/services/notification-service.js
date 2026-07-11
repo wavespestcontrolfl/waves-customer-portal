@@ -17,7 +17,11 @@ const NotificationService = {
         || metadata?.payload?.threadId;
       if (recipientType === 'admin' && isInternalTestCustomerId(metaCid)) {
         logger.info(`[notifications] Suppressed admin notification for internal test customer (${category})`);
-        return null;
+        // TRUTHY sentinel, not null: callers treat null as "insert failed"
+        // (requests.js logs an ops error; the estimate-extension route
+        // releases its claim and 500s). Intentional suppression must read
+        // as success-without-a-row.
+        return { id: null, suppressed: true };
       }
       const [notif] = await db('notifications').insert({
         recipient_type: recipientType,
