@@ -79,20 +79,28 @@ exports.up = async function (knex) {
   // ── 1. pricing_config: usage step + link flags ──────────────────────────
   const data = await loadPreslabConfig(knex);
   if (data) {
-    // An admin-set usage_step_sqft (any number, incl. 0 = intentionally off)
-    // is left alone; only absence turns the feature on.
-    const alreadyConfigured = Number.isFinite(Number(data.usage_step_sqft));
+    // An admin-set usage step (any number, incl. 0 = intentionally off) is
+    // left alone; only absence turns the feature on. The db-bridge accepts
+    // both spellings, so an existing camelCase setting counts as configured
+    // too — writing the snake_case default over it would silently win the
+    // `snake ?? camel` read and re-enable stepping (codex r2).
+    const existingStep = data.usage_step_sqft ?? data.usageStepSqFt;
+    const existingLink = data.link_container_costs_to_catalog ?? data.linkContainerCostsToCatalog;
+    const alreadyConfigured = Number.isFinite(Number(existingStep)) && existingStep !== null && existingStep !== '';
     if (!alreadyConfigured) {
       const newData = {
         ...data,
         usage_step_sqft: USAGE_STEP_SQFT,
-        link_container_costs_to_catalog: data.link_container_costs_to_catalog === false ? false : true,
+        link_container_costs_to_catalog: existingLink === false ? false : true,
         products: { ...(data.products || {}) },
       };
       for (const [key, catalogName] of Object.entries(CATALOG_NAME_BY_PRODUCT)) {
         newData.products[key] = {
           ...(newData.products[key] || {}),
-          catalog_product_name: newData.products[key]?.catalog_product_name || catalogName,
+          catalog_product_name:
+            newData.products[key]?.catalog_product_name ||
+            newData.products[key]?.catalogProductName ||
+            catalogName,
         };
       }
       await savePreslabConfig(knex, data, newData, UP_REASON);
@@ -141,6 +149,7 @@ exports.up = async function (knex) {
           .where('price', STALE_SITEONE_PRICE)
           .update({ is_active: false, is_best_price: false, updated_at: knex.fn.now() });
 
+        const realCostPerOz = Math.round((TERMIDOR_REAL_COST / TERMIDOR_CONTAINER_OZ) * 10000) / 10000;
         const ownerRealValues = {
           price: TERMIDOR_REAL_COST,
           price_amount: TERMIDOR_REAL_COST,
@@ -148,7 +157,14 @@ exports.up = async function (knex) {
           quantity: '78 oz',
           unit: 'oz',
           unit_normalized: 'oz',
-          price_per_oz: Math.round((TERMIDOR_REAL_COST / TERMIDOR_CONTAINER_OZ) * 10000) / 10000,
+          price_per_oz: realCostPerOz,
+          // The admin best-price recalc ranks rows by
+          // COALESCE(landed_unit_price, normalized_unit_price, price_amount,
+          // price) — without a normalized $/oz this row's $174.72 package
+          // price would compare against other rows' per-oz values and lose
+          // to any normalized row, feeding a wrong price back into the
+          // pre-slab catalog link (codex r2).
+          normalized_unit_price: realCostPerOz,
           approval_status: 'approved',
           is_best_price: true,
           is_active: true,
@@ -200,19 +216,35 @@ exports.up = async function (knex) {
 
 exports.down = async function (knex) {
   // Only unwind the config keys if this migration's up() set them (keyed off
-  // the audit row) so later admin edits survive rollback.
+  // the audit row), and only where the CURRENT value still equals what up()
+  // wrote — an operator who later edited a key (e.g. usage_step_sqft = 0 as
+  // the documented kill switch) must keep that edit through a rollback
+  // instead of falling back to the in-code defaults (codex r2).
   if (await knex.schema.hasTable('pricing_config_audit')) {
     const ownUp = await knex('pricing_config_audit')
       .where({ config_key: 'onetime_preslab', changed_by: MIGRATION_TAG, reason: UP_REASON })
-      .first('id');
+      .first('id', 'new_value');
     if (ownUp) {
+      let written = {};
+      try {
+        written = typeof ownUp.new_value === 'string' ? JSON.parse(ownUp.new_value) : (ownUp.new_value || {});
+      } catch (_) {
+        written = {};
+      }
       const data = await loadPreslabConfig(knex);
       if (data) {
         const newData = { ...data, products: { ...(data.products || {}) } };
-        delete newData.usage_step_sqft;
-        delete newData.link_container_costs_to_catalog;
+        if (newData.usage_step_sqft === written.usage_step_sqft) {
+          delete newData.usage_step_sqft;
+        }
+        if (newData.link_container_costs_to_catalog === written.link_container_costs_to_catalog) {
+          delete newData.link_container_costs_to_catalog;
+        }
         for (const key of Object.keys(CATALOG_NAME_BY_PRODUCT)) {
-          if (newData.products[key]) {
+          if (
+            newData.products[key] &&
+            newData.products[key].catalog_product_name === written.products?.[key]?.catalog_product_name
+          ) {
             newData.products[key] = { ...newData.products[key] };
             delete newData.products[key].catalog_product_name;
           }
