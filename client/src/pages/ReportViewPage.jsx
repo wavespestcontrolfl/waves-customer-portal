@@ -1674,7 +1674,7 @@ function TechnicianVisitLine({ data }) {
   return (
     <div className="tech-visit-line">
       {technician.photoUrl ? (
-        <img src={technician.photoUrl} alt={name} className="tech-photo" />
+        <img src={technician.photoUrl} alt={name} className="tech-photo" referrerPolicy="no-referrer" />
       ) : (
         <div className="tech-photo tech-photo-fallback" aria-hidden="true">{initials}</div>
       )}

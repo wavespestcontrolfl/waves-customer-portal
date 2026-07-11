@@ -30,7 +30,7 @@ router.use(authenticate);
 async function signedUrl(s3Key) {
   if (!s3Key || !PhotoService || s3Key.startsWith('pending/')) return null;
   try {
-    return await PhotoService.getViewUrl(s3Key, 600);
+    return await PhotoService.getViewUrl(s3Key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
   } catch {
     return null;
   }

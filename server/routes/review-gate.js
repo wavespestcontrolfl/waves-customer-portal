@@ -91,7 +91,10 @@ router.get('/:token', async (req, res, next) => {
           .first('photo_s3_key', 'photo_url');
         if (tech) {
           const { resolveTechPhotoUrl } = require('../services/tech-photo');
-          techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url);
+          // Customer-dwell TTL: rate pages sit open for hours (the
+          // tech-photo helper's own docs sanction longer TTLs here).
+          const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
+          techPhotoUrl = await resolveTechPhotoUrl(tech.photo_s3_key, tech.photo_url, CUSTOMER_DWELL_TTL_SECONDS);
         }
       } catch (err) {
         logger.warn(`[review-gate] tech photo resolve failed: ${err.message}`);

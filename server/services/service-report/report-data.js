@@ -1216,13 +1216,17 @@ function buildWorkflowEvents({ service = {}, structured = {}, serviceData = {}, 
 }
 
 async function photoUrl(photo) {
-  if (photo.s3_url) return photo.s3_url;
-  if (!photo.s3_key || !PhotoService) return null;
-  try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
-  } catch {
-    return null;
+  // Presign from s3_key FIRST: service_photos.s3_url is a legacy stored-URL
+  // column whose values expire/go stale (see the track-public.js note) — it
+  // only remains as the fallback for ancient rows that never got a key.
+  if (photo.s3_key && PhotoService) {
+    try {
+      return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+    } catch {
+      /* fall through to the legacy stored URL */
+    }
   }
+  return photo.s3_url || null;
 }
 
 function buildProtocolPayload(record) {
@@ -1658,7 +1662,7 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
-    return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
+    return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
   } catch {
     return null;
   }
@@ -2381,6 +2385,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const technicianPhotoUrl = await resolveTechPhotoUrl(
     service.technician_photo_s3_key,
     service.technician_avatar_url || service.technician_photo_url,
+    // PhotoService is guard-loaded above — fall back to the helper's default
+    // TTL rather than throwing when it's unavailable.
+    PhotoService?.CUSTOMER_DWELL_TTL_SECONDS ?? undefined,
   ).catch(() => service.technician_avatar_url || service.technician_photo_url || null);
   const publicZones = zones.map((zone) => ({
     id: zone.id,
