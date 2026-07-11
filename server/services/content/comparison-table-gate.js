@@ -173,7 +173,14 @@ const HEADER_BUSINESS_SUFFIX_RE = new RegExp(
   `\\b(?:${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+Care)\\b`,
   'i',
 );
-const HEADER_CATEGORY_MODS = '(?:diy|do[\\s-]it[\\s-]yourself|professional|pro|basic|standard|custom|premium|quality|affordable|budget|store[\\s-]bought|over[\\s-]the[\\s-]counter|national|local|regional|independent|corporate|franchise|big[\\s-]box|quarterly|monthly|annual|seasonal|recurring|one[\\s-]time|preventive|preventative|reactive|on[\\s-]demand|organic|natural|eco|traditional|conventional|residential|commercial|typical|average|weekly|bi[\\s-]weekly|year[\\s-]round|early|late|spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december)';
+// Only UNAMBIGUOUS category modifiers — method (DIY/professional/basic),
+// structure (national/franchise/…), cadence (quarterly/…), audience
+// (residential/commercial), and temporal (seasons/months) words. Quality
+// adjectives (Quality/Affordable/Eco/Budget/Premium/Standard/Organic/…) and
+// "Local"/"Pro" are deliberately ABSENT: real companies are named that way
+// ("Quality Pest Control", "Eco Pest Control"), so those headers fail closed
+// and route to review, matching the gate's original behavior (Codex round-7).
+const HEADER_CATEGORY_MODS = '(?:diy|do[\\s-]it[\\s-]yourself|professional|basic|store[\\s-]bought|over[\\s-]the[\\s-]counter|national|regional|independent|corporate|franchise|big[\\s-]box|quarterly|monthly|annual|seasonal|recurring|one[\\s-]time|preventive|preventative|reactive|on[\\s-]demand|residential|commercial|weekly|bi[\\s-]weekly|year[\\s-]round|early|late|spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december)';
 const HEADER_GENERIC_SERVICE_PHRASE = '(?:(?:pest|lawn|mosquito|termite|bug|wildlife|rodent)\\s+(?:control|care|service|services|management|treatment|treatments|removal)(?:\\s+(?:service|services|plan|plans|program|programs))?|exterminators?|extermination)';
 const HEADER_CATEGORY_FORM_RE = new RegExp(
   `^(?:${HEADER_CATEGORY_MODS}\\s+)*${HEADER_GENERIC_SERVICE_PHRASE}\\??$`,
