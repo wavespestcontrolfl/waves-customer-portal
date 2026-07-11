@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -740,6 +740,38 @@ describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTE
     render(<CombinedRecurringPriceCard combined={withoutRaw} selectedFrequency={{ key: 'alt', monthly: 600 }} />);
     // stamped 0.8 against $600 → ±$96 → $504–$696
     expect(screen.getByText(/\$504–\$696/)).toBeInTheDocument();
+  });
+});
+
+describe('PlanTotalSummary — plan-level referral credit + net', () => {
+  const combined = {
+    monthlySubtotal: 82,
+    annualSubtotal: 984,
+    waveGuardTierLabel: 'Silver',
+    manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+  };
+
+  it('itemizes subtotal → referral credit → net (subtotal = net + credit)', () => {
+    const { container } = render(<PlanTotalSummary combined={combined} />);
+    const text = container.textContent;
+    // Net $82/mo, credit $25/yr → $2.08/mo, so pre-credit subtotal is $84.08/mo.
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$84.08');
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
+    expect(text).toContain('Your price');
+    expect(text).toContain('$82');
+    expect(text).toContain('$984 / year');
+  });
+
+  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+    const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('renders nothing without a combined payload', () => {
+    const { container } = render(<PlanTotalSummary combined={null} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

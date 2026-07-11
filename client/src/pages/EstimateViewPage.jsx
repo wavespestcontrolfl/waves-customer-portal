@@ -1910,6 +1910,63 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
   );
 }
 
+// Plan-level discount summary for a multi-service plan carrying a plan-wide
+// credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
+// price PRE credit — the credit is applied to the combined plan, not baked into
+// each row — so this is the one place the customer sees list subtotal → credit →
+// the net they actually pay. Renders ONLY when there's a credit to itemize: the
+// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
+// a no-credit multi-service plan stays summary-free and unchanged.
+export function PlanTotalSummary({ combined }) {
+  if (!combined) return null;
+  const manual = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
+    ? combined.manualDiscount
+    : null;
+  if (!manual) return null;
+  const netMonthly = Number(combined.monthlySubtotal);
+  const creditMonthly = manualDiscountMonthlyAmount(manual);
+  if (!Number.isFinite(netMonthly) || netMonthly <= 0 || !(creditMonthly > 0)) return null;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const subtotalMonthly = round2(netMonthly + creditMonthly);
+  const netAnnual = Number(combined.annualSubtotal) > 0
+    ? Number(combined.annualSubtotal)
+    : round2(netMonthly * 12);
+  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
+  const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
+  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
+  return (
+    <section style={estimateCard()}>
+      <div style={{ ...row, fontSize: 16, color: ESTIMATE_BODY }}>
+        <span>Plan subtotal</span>
+        <span style={num}>{fmtMoney(subtotalMonthly)}{per('/mo')}</span>
+      </div>
+      <div style={{
+        ...row,
+        marginTop: 12,
+        padding: '12px 14px',
+        borderRadius: 10,
+        border: `1px solid ${W.greenLight}`,
+        background: W.successWash,
+        color: W.green,
+        fontWeight: 800,
+        fontSize: 16,
+      }}>
+        <span>{manual.label || 'Discount'}</span>
+        <strong style={num}>{fmtMoneySigned(-creditMonthly)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+      </div>
+      <div style={{ ...row, marginTop: 14, paddingTop: 16, borderTop: `1px solid ${W.borderCool}` }}>
+        <span style={{ fontSize: 18, fontWeight: 800, color: ESTIMATE_TEXT }}>Your price</span>
+        <span style={{ ...num, fontSize: 28, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1 }}>
+          {fmtMoney(netMonthly)}<span style={{ color: ESTIMATE_MUTED, fontSize: 16, fontWeight: 500 }}> /mo</span>
+        </span>
+      </div>
+      <div style={{ ...num, textAlign: 'right', marginTop: 6, fontSize: 14, color: ESTIMATE_MUTED }}>
+        {fmtMoney(netAnnual)} / year
+      </div>
+    </section>
+  );
+}
+
 function CountdownLine({ secondsRemaining }) {
   const m = Math.max(0, Math.floor(secondsRemaining / 60));
   const s = Math.max(0, secondsRemaining % 60);
@@ -3983,7 +4040,12 @@ export default function EstimateViewPage() {
 
           {/* The combined "Recurring total" card was removed (owner directive
               2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. */}
+              the bundle's monthly price. It returns ONLY to itemize a plan-wide
+              credit (e.g. Referral Credit) and show the net: the per-service
+              cards are pre-credit, so without this the credit + final price
+              would never appear on a split multi-service plan. Renders nothing
+              when there's no credit, so no-credit bundles stay unchanged. */}
+          {services.length > 1 ? <PlanTotalSummary combined={pricing.combinedRecurring} /> : null}
 
           {/* One guarantee line for the whole plan — not one per box. */}
           {services.length > 1 ? (

@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'lawn', 'accepted'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -298,10 +298,99 @@ function lawnScenario() {
   };
 }
 
+// Pest + Lawn WITH a Referral Credit — the exact split payload the server now
+// produces after the reconciliation fix (a referral no longer collapses the
+// plan into the badge-free bundle card). Numbers mirror the real Silver
+// pest+lawn draft: per-service cards show WaveGuard-net prices (pre-referral),
+// and the referral + net live in the plan-level discount summary.
+function bundleReferralScenario() {
+  return {
+    estimate: { ...BASE_ESTIMATE, serviceCategory: 'bundle', intelligence: PEST_INTELLIGENCE },
+    pricing: {
+      services: [
+        {
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'quarterly',
+          // Silver 10% off: $107 anchor → $96.30/visit.
+          frequencies: [
+            {
+              key: 'quarterly', label: 'Quarterly', monthly: 32.10, annual: 385.20, perVisit: 107,
+              perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Quarterly)', displayPrice: 96.30, perTreatment: 107, visitsPerYear: 4 }],
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+            {
+              key: 'bi_monthly', label: 'Bi-monthly', monthly: 40.93, annual: 491.16, perVisit: 90.95,
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+            {
+              key: 'monthly', label: 'Monthly', monthly: 67.41, annual: 808.92, perVisit: 67.41,
+              included: [{ key: 'pest_control', label: 'Pest Control', detail: null }], addOns: [],
+            },
+          ],
+          copy: { priceWording: {} },
+        },
+        {
+          key: 'lawn_care',
+          label: 'Lawn Care',
+          isRecurring: true,
+          isPest: false,
+          waveGuardTierEligible: true,
+          defaultFrequencyKey: 'enhanced',
+          // Silver 10% off: $57.75/mo base → $51.98/mo.
+          frequencies: [
+            {
+              key: 'enhanced', label: 'Lawn Program', serviceCategory: 'lawn_care', visitsPerYear: 9,
+              monthly: 51.98, monthlyBase: 57.75, annual: 623.76, billingFrequencyKey: 'monthly',
+              included: [
+                { key: 'fert', label: 'Fertilization + weed control', detail: '9 applications/year' },
+                { key: 'pests', label: 'Chinch, sod webworm & turf pest response', detail: null },
+              ],
+              addOns: [],
+            },
+            {
+              key: 'premium', label: 'Premium', serviceCategory: 'lawn_care', visitsPerYear: 12,
+              monthly: 71.10, monthlyBase: 79, annual: 853.20, billingFrequencyKey: 'monthly',
+              included: [
+                { key: 'fert', label: 'Fertilization + weed control', detail: '12 applications/year' },
+                { key: 'pests', label: 'Chinch, sod webworm & turf pest response', detail: null },
+              ],
+              addOns: [],
+            },
+          ],
+          copy: { priceWording: {} },
+        },
+      ],
+      renderFlags: { showRecurringSummary: true, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
+      waveGuardTier: 'Silver',
+      combinedRecurring: {
+        monthlySubtotal: 82,
+        annualSubtotal: 984,
+        waveGuardTierLabel: 'Silver',
+        manualDiscount: {
+          label: 'Referral Credit', type: 'FIXED', value: 25,
+          amount: 25, recurringAmount: 25, monthlyAmount: 2.08,
+        },
+      },
+      askChips: ['What is included in this plan?', 'How do you handle ants?', 'Are pets and kids safe?'],
+      anchorOneTimePrice: 0,
+      oneTimeBreakdown: { total: 0, items: [] },
+      setupFee: null,
+      annualPrepayEligible: true,
+      defaultServiceMode: 'recurring',
+    },
+    cta: { canAccept: true, terminalState: null, quoteRequired: false, quoteRequiredReason: null, reviewBeforeBooking: false },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
   bundle: bundleScenario,
+  bundle_referral: bundleReferralScenario,
   lawn: lawnScenario,
   accepted: acceptedScenario,
 };

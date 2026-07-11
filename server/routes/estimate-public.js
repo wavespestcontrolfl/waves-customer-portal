@@ -13016,11 +13016,25 @@ function frequencyServiceRowsMatchMonthly(frequency = {}, keys = []) {
   if (!Number.isFinite(monthly)) return false;
   const rowsMonthly = frequencyServiceRowsMonthlyTotal(frequency, keys);
   if (rowsMonthly == null) return false;
+  // The per-service treatment rows are WaveGuard-net but PRE manual/referral
+  // discount: a plan-level credit (e.g. Referral Credit) is applied on top of
+  // the combined price, not baked into each service row. frequency.monthly is
+  // net of that credit, so add it back before reconciling — otherwise the
+  // row-sum exceeds monthly by the credit and a splittable multi-service plan
+  // collapses into the single combined-price bundle card, which drops every
+  // per-service WaveGuard badge (issue: referral hid the tier on pest+lawn).
+  const md = frequency?.manualDiscount;
+  const manualMonthly = md
+    ? Math.max(0, Number(md.monthlyAmount)
+      || roundMonthly((Number(md.recurringAmount ?? md.amount) || 0) / 12)
+      || 0)
+    : 0;
+  const preManualMonthly = roundMonthly(monthly + manualMonthly);
   // Compare in integer cents: the intended tolerance is one cent, but a raw
   // float compare (|84.08 - 84.07| <= 0.01) evaluates 0.010000000000005 > 0.01
   // and rejected legitimate 1-cent rounding-path drift, collapsing splittable
   // pest+lawn bundles into the single combined-price card.
-  return Math.abs(Math.round(roundMonthly(monthly) * 100) - Math.round(rowsMonthly * 100)) <= 1;
+  return Math.abs(Math.round(preManualMonthly * 100) - Math.round(rowsMonthly * 100)) <= 1;
 }
 
 function canSplitRecurringSelectableLadder(frequencies = [], recurringKeys = []) {
