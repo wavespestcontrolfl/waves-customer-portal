@@ -223,8 +223,12 @@ export default function CardPage() {
     );
   }
 
+  // Business layer is Eastern-only: pin the timezone so an evening ET
+  // completion never renders as the next calendar day for a non-ET viewer.
   const firstVisit = data.firstVisitCompletedAt
-    ? new Date(data.firstVisitCompletedAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+    ? new Date(data.firstVisitCompletedAt).toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+      })
     : null;
   const showReview = !!data.reviewUrl && !data.customer?.hasLeftGoogleReview;
   const techName = data.tech?.name || 'Waves Pest Control';

@@ -38,8 +38,13 @@ function firstNameOf(fullName) {
  * palmetto → bradenton), which itself defaults to Bradenton.
  */
 function pickCardLocation(customer = {}) {
-  const lat = Number(customer.latitude);
-  const lng = Number(customer.longitude);
+  // Null/blank-guard BEFORE Number(): Number(null) === 0, which would route
+  // every un-geocoded customer to the office nearest (0,0) instead of falling
+  // back to city routing (Codex P2 on PR #2588).
+  const rawLat = customer.latitude;
+  const rawLng = customer.longitude;
+  const lat = rawLat == null || rawLat === '' ? NaN : Number(rawLat);
+  const lng = rawLng == null || rawLng === '' ? NaN : Number(rawLng);
   if (Number.isFinite(lat) && Number.isFinite(lng)) {
     const geo = nearestLocation(lat, lng);
     if (geo) return geo;
@@ -169,7 +174,7 @@ async function maybeSendCardEmail(card, customer) {
 
   try {
     const EmailTemplateLibrary = require('./email-template-library');
-    await EmailTemplateLibrary.sendTemplate({
+    const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'card.issued',
       to: email,
       payload: {
@@ -185,6 +190,13 @@ async function maybeSendCardEmail(card, customer) {
       categories: ['digital_card'],
       suppressProviderErrorLog: true,
     });
+    // sendTemplate reports suppressions as { sent: false, blocked: true }
+    // instead of throwing — don't stamp those, so the send retries on a
+    // later completion if the suppression is corrected (Codex P2 on #2588).
+    if (!result?.sent) {
+      logger.info(`[customer-card] card.issued not sent (customerId=${customer.id} blocked=${!!result?.blocked} reason=${result?.reason || 'unknown'})`);
+      return null;
+    }
     await db('customer_cards').where({ id: card.id }).update({
       email_sent_at: new Date(),
       updated_at: new Date(),

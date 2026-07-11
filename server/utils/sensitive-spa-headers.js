@@ -44,13 +44,20 @@ function isEstimatePath(reqPath = '') {
   return !SERVICE_ESTIMATE_SLUGS.has(match[1].toLowerCase());
 }
 
+// Public digital business card — 64-hex bearer token for the life of the
+// customer (customer_cards.share_token), so the shell must never be
+// indexed/archived and must not leak the token via Referer.
+function isCardPath(reqPath = '') {
+  return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -64,4 +71,5 @@ module.exports = {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isCardPath,
 };

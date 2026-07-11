@@ -70,4 +70,13 @@ describe('customer-card location pick', () => {
     const loc = pickCardLocation({ city: 'Rotonda West' });
     expect(loc.id).toBe('bradenton');
   });
+
+  test('NULL lat/lng columns fall back to city routing — never treated as (0,0)', () => {
+    // Number(null) === 0; the guard must keep null coords out of the
+    // haversine path (Codex P2 on PR #2588).
+    const loc = pickCardLocation({ latitude: null, longitude: null, city: 'Venice' });
+    expect(loc.id).toBe('venice');
+    const blank = pickCardLocation({ latitude: '', longitude: '', city: 'Sarasota' });
+    expect(blank.id).toBe('sarasota');
+  });
 });
