@@ -9118,14 +9118,22 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
 const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 
 // POST /api/estimates/:token/extension-request — one-click "my link expired
-// but I still want this" signal from the React expired/not-found screen.
+// but I still want this" from the React expired/not-found screen.
 // Contract (AGENTS.md public-by-token allowlist): estimate token format gate,
 // generic 404 (unknown token, malformed token, ineligible row, and gate-off
 // are indistinguishable), 5 req/hr rate limit, dark behind
-// GATE_ESTIMATE_EXTENSION_REQUEST. Writes NOTHING customer-visible and sends
-// NO customer comms: it records the ask on the estimate row and raises an
-// in-app admin notification so the office can extend/resend on their own
-// judgment.
+// GATE_ESTIMATE_EXTENSION_REQUEST.
+//
+// First click per estimate AUTO-GRANTS a 7-day extension (owner directive
+// 2026-07-10): the shared estimate-extension service pushes expires_at,
+// revives the sweep-expired status, and texts the customer the refreshed
+// link via the `estimate_extended` template (consent/opt-out/gate
+// enforcement inside sendCustomerMessage). The auto-grant is capped at ONE
+// per estimate for the row's lifetime (`estimate_data.extensionAutoGrantedAt`
+// — a public endpoint must not be an infinite self-serve snooze button);
+// later requests fall back to notify-office-only, and the office extends
+// manually via POST /api/admin/estimates/:id/extend on their own judgment.
+// Every path raises an in-app admin notification.
 router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateExtensionRequest')) {
@@ -9164,31 +9172,93 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.json({ success: true, alreadyRequested: true });
     }
 
-    // The notification IS the deliverable — and NotificationService.create
-    // swallows insert errors and returns null, so check the value rather than
-    // relying on a rejection. On failure, release the claim (else the retry
-    // is suppressed for 24h with nothing delivered) and 500 so the customer
-    // gets the "call us" fallback instead of a false "request sent".
+    const releaseClaim = () => db('estimates').where({ id: estimate.id }).update({
+      estimate_data: db.raw(
+        "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
+      ),
+    }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+
     const NotificationService = require('../services/notification-service');
     const expiredLine = estimate.expires_at
       ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
       : 'link expired';
+
+    // Lifetime auto-grant cap. The atomic 24h claim above serializes
+    // concurrent requests, so within the claim holder this read is safe.
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string'
+        ? JSON.parse(estimate.estimate_data)
+        : (estimate.estimate_data || {});
+    } catch { estData = {}; }
+
+    if (!estData?.extensionAutoGrantedAt) {
+      // Auto-grant path: the EXTENSION is the deliverable. A failure here
+      // releases the claim and 500s into the client's "call us" fallback; a
+      // failed notification insert afterwards only logs — the customer
+      // already has their extension and the estimate row shows it.
+      let granted;
+      try {
+        const { extendEstimate } = require('../services/estimate-extension');
+        granted = await extendEstimate({
+          estimate,
+          days: 7,
+          entryPoint: 'public_estimate_extension_request',
+          workflow: 'public_estimate_extension_request',
+          smsMetadata: { original_message_type: 'estimate_extended_auto' },
+        });
+      } catch (err) {
+        await releaseClaim();
+        logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
+        return res.status(500).json({ error: 'extension_request_failed' });
+      }
+
+      // Burn the lifetime cap only AFTER the grant committed. If this stamp
+      // fails, the worst case is a second auto-grant on a later request —
+      // preferable to burning the cap on a grant that never happened.
+      await db('estimates').where({ id: estimate.id }).update({
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{extensionAutoGrantedAt}', to_jsonb(?::text), true) ELSE estimate_data END",
+          [new Date().toISOString()],
+        ),
+      }).catch((e) => logger.warn(`[estimate-extension-request] auto-grant stamp failed for estimate ${estimate.id}: ${e.message}`));
+
+      const smsLine = granted.smsResult.sent
+        ? 'confirmation SMS sent'
+        : `SMS not sent (${granted.smsResult.reason || 'blocked'})`;
+      await NotificationService.notifyAdmin(
+        'estimate',
+        `Extension auto-granted: ${estimate.customer_name}`,
+        `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}`,
+        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+      );
+
+      return res.status(201).json({
+        success: true,
+        autoExtended: true,
+        expiresAt: granted.newExpiry.toISOString(),
+        smsSent: !!granted.smsResult.sent,
+      });
+    }
+
+    // Cap already used → notify-office-only fallback. Here the notification
+    // IS the deliverable — and NotificationService.create swallows insert
+    // errors and returns null, so check the value rather than relying on a
+    // rejection. On failure, release the claim (else the retry is suppressed
+    // for 24h with nothing delivered) and 500 so the customer gets the
+    // "call us" fallback instead of a false "request sent".
     const notification = await NotificationService.notifyAdmin(
       'estimate',
-      `Extension requested: ${estimate.customer_name}`,
-      `${estimate.address || 'no address'} — ${expiredLine}; customer asked for more time on this estimate`,
+      `Extension requested (again): ${estimate.customer_name}`,
+      `${estimate.address || 'no address'} — ${expiredLine}; customer already used their self-serve extension and asked for more time`,
       { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
     );
     if (!notification) {
-      await db('estimates').where({ id: estimate.id }).update({
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN estimate_data - 'extensionRequestedAt' ELSE estimate_data END",
-        ),
-      }).catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+      await releaseClaim();
       return res.status(500).json({ error: 'extension_request_failed' });
     }
 
-    res.status(201).json({ success: true });
+    res.status(201).json({ success: true, autoExtended: false });
   } catch (err) { next(err); }
 });
 

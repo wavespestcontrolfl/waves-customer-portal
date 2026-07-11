@@ -1782,101 +1782,40 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
 //
 // Body: { days: 7 | 14 | 30 | 90 | <any 1-180 int> }
 // Send SMS by default; pass { silent: true } to skip the customer text.
+// Core (expiry anchoring, status revival, nudge re-arm, estimate_extended
+// SMS) lives in services/estimate-extension.js, shared with the public
+// expired-screen auto-grant — behavior here is 1:1 with the pre-extraction
+// inline version, including the 422-after-write template quirk.
 router.post('/:id/extend', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
     const days = Number.parseInt(req.body?.days, 10);
-    if (!Number.isFinite(days) || days < 1 || days > 180) {
-      return res.status(400).json({ error: 'days must be an integer between 1 and 180.' });
-    }
-    if (!['sent', 'viewed', 'expired'].includes(estimate.status)) {
-      return res.status(400).json({
-        error: `Only sent / viewed / expired estimates can be extended. Current status: ${estimate.status}.`,
-      });
-    }
-    if (estimate.archived_at) {
-      return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
-    }
-
-    // Anchor the extension on the LATER of "now" and the current expiry —
-    // extending an already-expired estimate by 7d means 7d from today, not
-    // 7d after the expiry that already passed. Active estimates get their
-    // current expiry pushed out by the requested days.
-    const now = new Date();
-    const currentExpiry = estimate.expires_at ? new Date(estimate.expires_at) : now;
-    const anchor = currentExpiry > now ? currentExpiry : now;
-    const newExpiry = new Date(anchor.getTime() + days * 86400000);
-
-    // Re-arm the expiring nudge for the new deadline. Other stage flags
-    // (unviewed / viewed / final) stay as-is — those are tied to send /
-    // view timestamps that haven't moved.
-    const updates = {
-      expires_at: newExpiry,
-      followup_expiring_sent: false,
-      updated_at: db.fn.now(),
-    };
-    // Expired estimates flipping back to active need their status reset
-    // to whatever they were before expiry — viewed if the customer had
-    // viewed, otherwise sent.
-    if (estimate.status === 'expired') {
-      updates.status = estimate.viewed_at ? 'viewed' : 'sent';
-    }
-    await db('estimates').where({ id: estimate.id }).update(updates);
-
-    // Customer notification — Waves voice. Skipped if no phone, opted out,
-    // or the caller passed silent=true (e.g. internal cleanup operations).
-    let smsResult = { sent: false, reason: 'silent' };
-    if (!req.body?.silent && estimate.customer_phone) {
-      const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-      const longUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
-      const viewUrl = await shortenOrPassthrough(longUrl, {
-        kind: 'estimate', entityType: 'estimates', entityId: estimate.id, customerId: estimate.customer_id,
-        leadId: await leadIdForEstimate(estimate),
-        channel: 'sms', purpose: 'estimate_extended',
-      });
-      const newExpiryLabel = newExpiry.toLocaleDateString('en-US', {
-        month: 'long', day: 'numeric', timeZone: 'America/New_York',
-      });
-      const body = await renderTemplate(
-        'estimate_extended',
-        { first_name: firstName, estimate_url: viewUrl, new_expiry: newExpiryLabel, days_added: String(days) },
-        {
-          workflow: 'admin_estimate_extend',
-          entity_type: 'estimate',
-          entity_id: estimate.id,
-        },
-      );
-      if (!body) return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
-      smsResult = await sendCustomerMessage({
-        to: estimate.customer_phone,
-        body,
-        channel: 'sms',
-        audience: estimate.customer_id ? 'customer' : 'lead',
-        purpose: 'estimate_followup',
-        customerId: estimate.customer_id || undefined,
-        estimateId: estimate.id,
-        identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-        consentBasis: estimate.customer_id ? undefined : {
-          status: 'transactional_allowed',
-          source: 'admin_estimate_extend',
-          capturedAt: estimate.created_at || new Date().toISOString(),
-        },
-        entryPoint: 'admin_estimate_extend',
-        metadata: { original_message_type: 'estimate_extended_manual', days_added: days },
-      });
+    const { extendEstimate } = require('../services/estimate-extension');
+    const { newExpiry, status, smsResult } = await extendEstimate({
+      estimate,
+      days,
+      silent: !!req.body?.silent,
+      entryPoint: 'admin_estimate_extend',
+      workflow: 'admin_estimate_extend',
+      smsMetadata: { original_message_type: 'estimate_extended_manual' },
+    });
+    if (smsResult.reason === 'template_missing') {
+      return res.status(422).json({ error: 'SMS template estimate_extended is missing or inactive' });
     }
 
-    logger.info(`[estimates] Extended estimate ${estimate.id} by ${days}d to ${newExpiry.toISOString()} (sms=${smsResult.sent ? 'sent' : smsResult.reason || 'skipped'})`);
     res.json({
       success: true,
       expires_at: newExpiry.toISOString(),
       days_added: days,
-      status: updates.status || estimate.status,
+      status,
       sms: { sent: !!smsResult.sent, reason: smsResult.reason || null },
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/estimates/:id/mark-accepted — admin records a verbal yes.

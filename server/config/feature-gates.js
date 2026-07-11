@@ -455,10 +455,14 @@ const gates = {
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
 
   // Estimate extension request — "Request an extension" button on the React
-  // estimate page's expired/not-found screen. One click records the ask and
-  // notifies admin in-app (no customer comms, no expiry change — the office
-  // decides). Gates BOTH the /data 404 eligibility flag (which is what makes
-  // the button render) and the POST endpoint itself.
+  // estimate page's expired/not-found screen. First click per estimate
+  // AUTO-GRANTS +7 days (shared estimate-extension service: expiry push,
+  // status revival, `estimate_extended` SMS with the refreshed link — SMS
+  // sending still requires the Twilio gate and passes the consent/opt-out
+  // checks inside sendCustomerMessage). The auto-grant is capped at one per
+  // estimate lifetime; repeat requests only notify the office. Gates BOTH
+  // the /data 404 eligibility flag (which is what makes the button render)
+  // and the POST endpoint itself.
   // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
   estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
 

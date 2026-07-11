@@ -313,12 +313,18 @@ finding and warns on P1. Reviewers must return JSON matching
   behind GATE_ESTIMATE_EXTENSION_REQUEST. Eligibility requires a PUBLISHED
   estimate (sent_at/viewed_at set — the expiration sweep flips never-sent
   drafts to 'expired' too, and those must never qualify) that is past
-  expires_at or sweep-expired, not accepted/declined/archived. Writes only an
-  atomic 24h-dedupe `extensionRequestedAt` stamp inside estimate_data
-  (claim-style conditional UPDATE so concurrent POSTs can't fan out
-  duplicates; released if the notify fails) and raises ONE in-app admin
-  notification — no customer comms, no expiry mutation, no PII in the
-  response),
+  expires_at or sweep-expired, not accepted/declined/archived. Concurrency:
+  an atomic 24h-dedupe `extensionRequestedAt` claim inside estimate_data
+  (conditional UPDATE so concurrent POSTs can't fan out duplicates; released
+  on failure). First request per estimate AUTO-GRANTS a 7-day extension via
+  the shared services/estimate-extension.js core (same expiry anchoring,
+  status revival, and `estimate_extended` SMS as the admin extend route —
+  consent/opt-out/Twilio-gate enforcement inside sendCustomerMessage), capped
+  at ONE per estimate lifetime by an `extensionAutoGrantedAt` stamp so a
+  public endpoint can't become an infinite self-serve snooze; repeat requests
+  fall back to notify-office-only. Every path raises an in-app admin
+  notification; response carries only success/autoExtended/expiresAt — no
+  PII),
   `/api/public/lawn-diagnostic/:token` (read-only prospect lawn report;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, only `status='sent'` and unexpired
