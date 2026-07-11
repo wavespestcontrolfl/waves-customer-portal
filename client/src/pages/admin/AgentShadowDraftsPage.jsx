@@ -374,19 +374,27 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
             </button>
           </div>
         )}
-        {!pending && approved && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onReview(approved, "revoke")}
-              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
-            >
-              Revoke — back to base voice
-            </button>
-          </div>
-        )}
       </div>
+      {/* The LIVE profile's revoke is rendered independently of any pending
+          exception — a normal state is "v5 live (auto), v6 parked as an
+          exception", and killing the live voice must never wait on resolving
+          an unrelated review. */}
+      {approved && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
+          <span>
+            Live now: <strong style={{ color: D.heading }}>v{approved.version}</strong>
+            {approved.reviewed_by === "auto:distiller" ? " (auto-approved)" : approved.reviewed_by ? ` (approved by ${approved.reviewed_by})` : ""}
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onReview(approved, "revoke")}
+            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+          >
+            Revoke — back to base voice
+          </button>
+        </div>
+      )}
     </div>
   );
 }

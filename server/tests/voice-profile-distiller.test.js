@@ -175,12 +175,16 @@ describe('reviewVoiceProfile — the human gate state machine', () => {
     expect(missing).toMatchObject({ ok: false, status: 404 });
   });
 
-  test('revoke retires the APPROVED profile (kill switch for auto-approval)', async () => {
+  test('revoke retires the APPROVED profile and busts the relay cache immediately (kill switch)', async () => {
+    const relay = require('../services/voice-agent/relay-conversation');
+    const invalidate = jest.spyOn(relay, 'invalidateVoiceProfileCache').mockImplementation(() => {});
     const { dbi, updates } = makeFakeDbi({ id: 'p1', status: 'approved', version: 4 });
     const result = await reviewVoiceProfile({ id: 'p1', action: 'revoke', reviewedBy: 'Adam', dbi, audit: { adminUserId: 'a1' } });
     expect(result).toMatchObject({ ok: true, status: 'rejected' });
     expect(updates).toHaveLength(1);
     expect(updates[0].patch.status).toBe('rejected');
+    expect(invalidate).toHaveBeenCalled();
+    invalidate.mockRestore();
   });
 
   test('revoke on a non-approved profile 409s; approve/reject on approved still 409', async () => {

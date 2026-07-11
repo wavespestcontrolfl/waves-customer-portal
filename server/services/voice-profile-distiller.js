@@ -182,16 +182,18 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
       logger.info('[voice-profile] pending exception awaiting review and no new corpus — skipping run');
       return { skipped: 'pending_review' };
     }
-    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
-      status: 'superseded',
-      reviewed_by: 'auto:distiller',
-      reviewed_at: dbi.fn.now(),
-    });
-    logger.info('[voice-profile] superseded an unreviewed pending exception — new corpus accrued, distilling fresh');
+    // New corpus accrued: distill fresh, but supersede the old exception only
+    // AFTER the replacement is safely inserted (below) — an LLM timeout here
+    // must not vanish the only reviewable row from the Agents surface.
+    logger.info('[voice-profile] unreviewed pending exception + new corpus — distilling a replacement');
   }
 
+  // Watermark = the latest distillation attempt of ANY status. Rejected and
+  // REVOKED rows count on purpose: a revoke must hold — if the revoked row
+  // fell out of the watermark, the next 3:30am run would re-distill the same
+  // corpus and auto-approve an equivalent profile, silently undoing the kill
+  // switch. New corpus is the only thing that restarts distillation.
   const lastProfile = await dbi('voice_profiles')
-    .whereNot('status', 'rejected')
     .orderBy('created_at', 'desc')
     .first('created_at');
   const newCorpus = await dbi('voice_corpus_examples')
@@ -268,6 +270,14 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
       schema_version: SCHEMA_VERSION,
     })
     .returning(['id', 'version']);
+
+  if (pending) {
+    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
+      status: 'superseded',
+      reviewed_by: 'auto:distiller',
+      reviewed_at: dbi.fn.now(),
+    });
+  }
 
   // Exception-based review: green auto-applies (audit-logged, no bell —
   // nothing for a human to do); anything else parks + bells, the old flow.
@@ -354,6 +364,19 @@ async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = 
       });
     }
     return { ok: true, version: row.version, status: finalStatus };
+  }).then((result) => {
+    // The phone agent caches the approved profile (10-min TTL). A successful
+    // approve/revoke must take effect on the NEXT call, not the next TTL
+    // lapse — revoke is the kill switch. Lazy require (module cycle) and
+    // fail-soft: a cache miss self-heals at the TTL anyway.
+    if (result?.ok) {
+      try {
+        require('./voice-agent/relay-conversation').invalidateVoiceProfileCache();
+      } catch (err) {
+        logger.warn(`[voice-profile] cache invalidation failed (TTL will self-heal): ${err.message}`);
+      }
+    }
+    return result;
   });
 }
 

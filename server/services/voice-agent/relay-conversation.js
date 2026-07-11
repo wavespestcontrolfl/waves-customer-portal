@@ -126,6 +126,13 @@ function composeSystemPrompt(base, profileText) {
 // turns/calls pick up the profile.
 let _profileCache = { text: null, at: 0 };
 let _profileRefresh = null;
+// Called by reviewVoiceProfile on approve/revoke: the flip must reach the
+// NEXT call, not the next TTL lapse — revoke is the operator kill switch.
+// Dropping to base immediately and letting the background refresh repopulate
+// is the fail-safe direction for both actions.
+function invalidateVoiceProfileCache() {
+  _profileCache = { text: null, at: 0 };
+}
 function getVoiceProfileTextNonBlocking() {
   if (Date.now() - _profileCache.at >= PROFILE_CACHE_TTL_MS && !_profileRefresh) {
     _profileRefresh = (async () => {
@@ -394,4 +401,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE };
