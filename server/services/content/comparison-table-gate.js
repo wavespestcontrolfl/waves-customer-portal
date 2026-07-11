@@ -127,10 +127,19 @@ const RANKING_RE = new RegExp([
 // Sarasota, Manatee, Venice, …) are deliberately NOT excluded: "Sarasota Pest
 // Control" is a business-name pattern, not a generic phrase, so a location lead
 // + industry suffix in prose/title must still be flagged for review.
-const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year';
+const GENERIC_LEAD_EXCLUSIONS = 'Professional|Local|Quality|Affordable|Best|Reliable|Trusted|Expert|Licensed|Insured|Residential|Commercial|Pest|Lawn|Green|Safe|Eco|Modern|Premier|Quarterly|Monthly|Annual|Seasonal|Same|Top|Your|Our|The|This|That|These|Those|A|An|Integrated|Sustainable|Comprehensive|Targeted|Routine|Ongoing|Effective|Proper|Smart|Organic|Natural|General|Basic|Standard|Custom|Year|DIY';
 // Broad pest-industry suffix set so business names with less-common suffixes
 // (e.g. "HomeTeam Pest Defense", "Gulf Coast Termite Specialists") are still
 // recognized — a proper-noun lead + any of these.
+//
+// "Care" is deliberately NOT in this shared set, and seasons/months are NOT
+// in GENERIC_LEAD_EXCLUSIONS: both feed the PROSE scans, where "<geo/season>
+// lawn care" is overwhelmingly education ("Sarasota lawn care is unreliable
+// without irrigation", "May lawn care checklist") and geo/temporal leads are
+// unbounded — while "May Pest Control is dishonest" must STAY a detectable
+// disparagement target (Codex rounds 2–4). Lawn-care COMPANY columns are
+// still caught by the HEADER-ONLY classifier regex below, which adds the
+// Care suffix and the season/month lead exclusions in that scope only.
 const INDUSTRY_SUFFIX_SRC = '(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife)\\s+(?:Control|Management|Solutions?|Services?|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?)|Exterminators?|Exterminating|Termite (?:&|and) Pest|Environmental(?: Pest)?|Lawn (?:&|and) Pest';
 const PROVIDER_NAME_SRC = `\\b((?!(?:${GENERIC_LEAD_EXCLUSIONS})\\b)[A-Z][A-Za-z0-9&'.\\-]*(?:\\s+(?:[A-Z][A-Za-z0-9&'.\\-]*|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`;
 function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
@@ -143,10 +152,54 @@ function providerNameRe(flags) { return new RegExp(PROVIDER_NAME_SRC, flags); }
 const LEGAL_ENTITY_NAME_SRC = `\\b([A-Z][A-Za-z0-9&'.\\-]*(?:\\s+[A-Za-z0-9&'.\\-]+){0,3}\\s+(?:LLC|L\\.L\\.C\\.|Inc\\.?|Incorporated|Corp\\.?|Co\\.|Bros\\.?|Brothers|& Sons?))\\b`;
 function legalEntityRe(flags) { return new RegExp(LEGAL_ENTITY_NAME_SRC, flags); }
 
-const INDUSTRY_SUFFIX_RE = new RegExp(`\\b(${INDUSTRY_SUFFIX_SRC})\\b`, 'i');
 const BUSINESS_MARKER_RE = /\b[A-Z][a-z]+'s\b|\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/;
-const CATEGORY_OPTION_RE = /\b(national|nationwide|chains?|franchises?|big[\s-]?box|corporate|regional|local(?:ly)?|independent|small(?:er)?|diy|do[\s-]it[\s-]yourself|self[\s-]?treat\w*|home(?:owner)?|store[\s-]bought|over[\s-]the[\s-]counter|professionals?|pros?|quarterly|monthly|annual|seasonal|one[\s-]?time|one[\s-]?off|recurring|reactive|preventive|preventative|on[\s-]demand|subscription|plans?|programs?|packages?|services?|options?|untreated|no treatment|ignoring it|what (?:to|you))\b/i;
 const OWN_BRAND_RE = /\bwaves\b/i;
+
+// ── HEADER-ONLY business-shape detectors (classifyOption) ──────────────────
+// A table option header is a short label, not prose. Rule (Codex rounds 2–6
+// converged here): any header CONTAINING a provider-suffix phrase ("Pest
+// Control", "Lawn Care", "Mosquito Squad", "Exterminators", …) fails closed —
+// no lead-shape guessing, so punctuated ("A+ Pest Control"), digit-led
+// ("360 Pest Control"), bare-suffix ("Bug Busters"), and excluded-word-led
+// ("Spring Green Lawn Care") provider names are all caught, case-
+// insensitively — UNLESS the ENTIRE header is a strict category form:
+// zero or more category modifiers followed by a generic service phrase
+// ("DIY lawn care", "Professional pest control", "Spring lawn care",
+// "quarterly pest control"). Headers with no provider-suffix phrase at all
+// (species, attributes, methods) classify as category/educational.
+// Legal-entity markers are checked case-insensitively ("bob's bugs llc");
+// possessives stay case-sensitive (BUSINESS_MARKER_RE) — "season's" etc.
+// Superset of the prose suffix set: adds the Rodent noun and the
+// Care/Removal/Treatment service verbs so "Acme Rodent Removal" /
+// "Acme Pest Treatment" are business-shaped here (Codex round-8).
+const HEADER_BUSINESS_SUFFIX_RE = new RegExp(
+  `\\b(?:${INDUSTRY_SUFFIX_SRC}|(?:Pest|Termite|Bug|Lawn|Mosquito|Wildlife|Rodent)\\s+(?:Care|Control|Management|Solutions?|Services?|Defen[sc]e|Prevention|Elimination|Experts?|Pros?|Patrol|Squad|Busters?|Brigade|Specialists?|Defenders?|Removal|Treatments?))\\b`,
+  'i',
+);
+// Only UNAMBIGUOUS category modifiers — method (DIY/professional/basic),
+// structure (national/franchise/…), cadence (quarterly/…), audience
+// (residential/commercial), and temporal (seasons/months) words. Quality
+// adjectives (Quality/Affordable/Eco/Budget/Premium/Standard/Organic/…) and
+// "Local"/"Pro" are deliberately ABSENT: real companies are named that way
+// ("Quality Pest Control", "Eco Pest Control"), so those headers fail closed
+// and route to review, matching the gate's original behavior (Codex round-7).
+const HEADER_CATEGORY_MODS = '(?:diy|do[\\s-]it[\\s-]yourself|professional|basic|store[\\s-]bought|over[\\s-]the[\\s-]counter|national|regional|independent|corporate|franchise|big[\\s-]box|quarterly|monthly|annual|seasonal|recurring|one[\\s-]time|preventive|preventative|reactive|on[\\s-]demand|residential|commercial|weekly|bi[\\s-]weekly|year[\\s-]round|early|late|spring|summer|fall|autumn|winter|january|february|march|april|may|june|july|august|september|october|november|december)';
+const HEADER_GENERIC_SERVICE_PHRASE = '(?:(?:pest|lawn|mosquito|termite|bug|wildlife|rodent)\\s+(?:control|care|service|services|management|treatment|treatments|removal)(?:\\s+(?:service|services|plan|plans|program|programs))?|exterminators?|extermination)';
+const HEADER_CATEGORY_FORM_RE = new RegExp(
+  `^(?:${HEADER_CATEGORY_MODS}\\s+)*${HEADER_GENERIC_SERVICE_PHRASE}\\??$`,
+  'i',
+);
+// A fully Title-Cased multi-word phrase reads as a NAME ("National Pest
+// Control", "May Pest Control"), not a category — the category-form
+// exemption additionally requires sentence/lower casing ("National pest
+// control", "quarterly pest control"). Leading acronyms like "DIY" are why
+// only words AFTER the first must be lowercase-led for the exemption.
+function isTitleCasedPhrase(header) {
+  const words = String(header).split(/\s+/).filter((w) => /[A-Za-z]/.test(w));
+  if (words.length < 2) return false;
+  return words.slice(1).every((w) => /^[A-Z0-9]/.test(w));
+}
+const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Co\.|Bros\.?|Brothers|& Sons?)\b/i;
 
 // Cell value affirms the row criterion → the CLAIM is the row label (so an
 // uncurated row label like "Free termite inspections | Free" is validated, not
@@ -245,9 +298,25 @@ function classifyOption(header) {
   if (mentions.some((m) => !m.inAllowlist)) return 'unknown_competitor';
   if (mentions.some((m) => m.inAllowlist)) return 'known_competitor';
   if (OWN_BRAND_RE.test(h)) return 'own';
-  if (INDUSTRY_SUFFIX_RE.test(h) || BUSINESS_MARKER_RE.test(h) || providerNameRe().test(h)) return 'unclassified';
-  if (CATEGORY_OPTION_RE.test(h)) return 'category';
-  return 'unclassified';
+  // Business-shape check via the HEADER-ONLY detectors (see their comment
+  // block): company markers, or a provider-suffix phrase anywhere in the
+  // header — fail closed unless the WHOLE header is a strict category form.
+  if (BUSINESS_MARKER_RE.test(h) || HEADER_LEGAL_MARKER_RE.test(h)) return 'unclassified';
+  if (HEADER_BUSINESS_SUFFIX_RE.test(h)) {
+    return HEADER_CATEGORY_FORM_RE.test(h) && !isTitleCasedPhrase(h) ? 'category' : 'unclassified';
+  }
+  // Not business-SHAPED (no proper-name + industry suffix, no company
+  // marker, no recognized competitor): a generic option header.
+  // The writer legitimately uses <ComparisonTable> for educational content —
+  // species lookalikes ("Real Brown Recluse"), attribute columns ("Type",
+  // "Kid-safe?"), DIY methods ("Bleach + Google") — and the old
+  // everything-fails-closed default routed 2–3 of those drafts to human
+  // review per day as phantom "businesses" (COMPARISON_UNCLASSIFIED_OPTION).
+  // Defamation needs a target; a header with no business shape has none, so
+  // it classifies as a category/educational option. Provider-category
+  // headers ("National chain", "DIY", "Local companies") land here too, as
+  // they always did.
+  return 'category';
 }
 
 // Negation markers — a NEGATED claim ("Not national", "No recurring plans")
