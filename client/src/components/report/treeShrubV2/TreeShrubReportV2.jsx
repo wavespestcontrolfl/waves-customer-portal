@@ -505,7 +505,9 @@ export function TreeShrubPhotoCards({ photos = [], summary = null }) {
       <div style={{ display: 'grid', gridTemplateColumns: print ? '1fr 1fr' : 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
         {pics.map((p, i) => (
           <figure key={i} style={{ margin: 0 }}>
-            <img src={p.url} alt={p.label || 'Plant photo'} loading="lazy"
+            {/* Eager: presigned URLs — lazy deferred fetches past expiry
+                (same class as the lawn strip; owner-reported). */}
+            <img src={p.url} alt={p.label || 'Plant photo'}
               style={{ width: '100%', height: 180, objectFit: 'cover', borderRadius: 12, border: `1px solid ${BORDER}`, display: 'block' }} />
             {p.label ? <figcaption style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 13, color: TEXT, marginTop: 7 }}>{p.label}</figcaption> : null}
             {p.caption ? <div style={{ fontSize: 13, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{p.caption}</div> : null}
