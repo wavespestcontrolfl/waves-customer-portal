@@ -173,7 +173,7 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
     .whereNotNull('recording_url')
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
     .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${escapeLike(bounced)}%`])
-    .select('id', 'recording_url', 'recording_duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
+    .select('id', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
     .modify((qb) => {
       if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
       else qb.orderBy('created_at', 'desc');
@@ -210,7 +210,31 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
       .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
       .ignore()
       .returning('id');
-    if (!claimed.length) return { skipped: 'card_open' };
+    if (!claimed.length) {
+      // An open card already exists for this call. If it's about a DIFFERENT
+      // bounced address (one recording can dictate two emails, both wrong),
+      // annotate it rather than silently dropping the second bounce — the
+      // office re-listens to the same audio once for both.
+      try {
+        const openCard = await db('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'email_bounce_reverify' })
+          .whereIn('status', ['open', 'in_progress'])
+          .first('id', 'payload');
+        const payload = typeof openCard?.payload === 'string' ? JSON.parse(openCard.payload) : (openCard?.payload || null);
+        if (payload && payload.bounced_email && payload.bounced_email !== bounced) {
+          const extra = Array.isArray(payload.additional_bounced_emails) ? payload.additional_bounced_emails : [];
+          if (!extra.includes(bounced)) {
+            extra.push(bounced);
+            await db('triage_items').where({ id: openCard.id }).update({
+              payload: JSON.stringify({ ...payload, additional_bounced_emails: extra }),
+              summary: `${payload.bounced_email} and ${extra.length} more address(es) from this call hard-bounced — confirm on the read-back`,
+              updated_at: new Date(),
+            });
+          }
+        }
+      } catch (e) { logger.warn(`[bounce-reverify] open-card annotation failed open: ${e.message}`); }
+      return { skipped: 'card_open' };
+    }
     const cardId = claimed[0].id || claimed[0];
 
     // Re-run the AUDIO through the full transcription pipeline. The stored
@@ -226,7 +250,10 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
     // and candidates decoded from it would be confidently wrong.
     // Guard signature is (transcription, recordingSeconds) — fails open on
     // unknown duration, same as the live pipeline.
-    if (!result?.transcription || CallProc.isImplausibleTranscript(result.transcription, Number(call.recording_duration_seconds) || 0)) {
+    // Same duration fallback as the live pipeline: legacy/imported rows can
+    // have duration_seconds without recording_duration_seconds.
+    const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || 0;
+    if (!result?.transcription || CallProc.isImplausibleTranscript(result.transcription, recordingSeconds)) {
       await db('triage_items').where({ id: cardId }).del().catch(() => {});
       return { skipped: !result?.transcription ? 'retranscribe_failed' : 'implausible_transcript' };
     }
