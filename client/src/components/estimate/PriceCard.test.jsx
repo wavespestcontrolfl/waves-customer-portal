@@ -217,4 +217,55 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
     expect(screen.queryByText(/You save/)).toBeNull();
     expect(screen.queryByText('$83/mo')).toBeNull();
   });
+
+  it('per-application headline: no struck-through anchor when the gap is the promo alone', () => {
+    // Mosquito-only with a manual promo: perTreatment is already net of the
+    // promo ($66 → $56 via $120/yr over 12 apps) and the promo renders as its
+    // own labeled row — the anchor strike-through must not restate it as
+    // member savings.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly12',
+          label: 'Monthly',
+          monthly: 56,
+          visitsPerYear: 12,
+          perTreatment: 56,
+          perVisit: 66,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Bronze"
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    // Net per-application headline renders…
+    expect(screen.getByText('$56')).toBeInTheDocument();
+    // …but no $66 anchor strike-through (the whole gap is the promo).
+    expect(screen.queryByText(/\$66 \/ application/)).toBeNull();
+  });
+
+  it('per-application headline: a real tier discount still anchors after the promo is netted out', () => {
+    // Anchor $66, net $46: $10/app is the promo, the remaining $10/app is a
+    // genuine member discount — the strike-through stays.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'monthly12',
+          label: 'Monthly',
+          monthly: 46,
+          visitsPerYear: 12,
+          perTreatment: 46,
+          perVisit: 66,
+          manualDiscount: { amount: 120, recurringAmount: 120, label: 'Spring promo' },
+        }}
+        waveGuardTier="Gold"
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('Spring promo')).toBeInTheDocument();
+    expect(screen.getByText(/\$66 \/ application/)).toBeInTheDocument();
+  });
 });

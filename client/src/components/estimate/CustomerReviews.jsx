@@ -23,11 +23,13 @@ function pageSizeForViewport() {
 }
 const ROTATE_MS = 6000;
 
-// Same three GBP profiles the server-rendered page falls back to.
+// All four GBP profiles (owner directive 2026-07-10) — same list the
+// server-rendered page falls back to.
 const REVIEW_FALLBACKS = [
   { name: 'Lakewood Ranch', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
   { name: 'Parrish', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
   { name: 'Sarasota', placeId: 'ChIJeT_63_Y5w4gRGTNLozgSmdw' },
+  { name: 'Venice', placeId: 'ChIJ81vmrblZw4gRREDmlDUpq0E' },
 ].map((l) => ({
   reviewerName: `Waves ${l.name}`,
   text: `Read current Google reviews for our ${l.name} location.`,

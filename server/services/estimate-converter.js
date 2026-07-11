@@ -619,17 +619,23 @@ function isTermiteBaitOneTimeItem(item = {}) {
 }
 
 // Service-type predicate (independent of existing-customer status): the WaveGuard
-// $99 setup is a recurring-Pest membership fee ONLY (owner directive 2026-07-10).
-// Mosquito, lawn, termite-bait, rodent-bait, tree & shrub, and palm carry no setup
-// fee — they earn the annual-prepay discount instead. This drives the
+// $99 setup applies ONLY to single-service recurring plans — recurring pest
+// only, or recurring mosquito only (owner directive 2026-07-10 evening,
+// supersedes the same-day pest-mixes rule). Any multi-service recurring
+// bundle carries no setup fee (the bundle is the incentive), and lawn /
+// termite-bait / rodent-bait / T&S / palm solo plans never carry it — all of
+// those earn the annual-prepay % discount instead. This drives the
 // prepay-discount decision (which must not depend on the existing-customer
 // waiver); shouldIncludeWaveGuardSetupFeeForRecurring layers the
 // existing-customer waiver on top for the actual setup invoice.
+const MEMBERSHIP_FEE_SOLO_KEYS = new Set(['pest_control', 'mosquito']);
 function recurringMixHasMembershipFeeService(recurringServices = []) {
-  const keys = (Array.isArray(recurringServices) ? recurringServices : [])
-    .map(recurringServiceKey)
-    .filter(Boolean);
-  return keys.includes('pest_control');
+  const keys = Array.from(new Set(
+    (Array.isArray(recurringServices) ? recurringServices : [])
+      .map(recurringServiceKey)
+      .filter(Boolean),
+  ));
+  return keys.length === 1 && MEMBERSHIP_FEE_SOLO_KEYS.has(keys[0]);
 }
 
 function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], estimateData = {} } = {}) {
@@ -639,7 +645,7 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
-  // Pest/Mosquito mixes always charge the setup (no 5% stacking).
+  // Solo pest / solo mosquito plans charge the setup (no 5% stacking).
   return recurringMixHasMembershipFeeService(recurring);
 }
 
@@ -2194,4 +2200,5 @@ module.exports.shouldSuppressRecurringConversion = shouldSuppressRecurringConver
 module.exports.shouldAttachScheduledServiceToStandardDraftInvoice = shouldAttachScheduledServiceToStandardDraftInvoice;
 module.exports.serviceCountsTowardWaveGuardTier = serviceCountsTowardWaveGuardTier;
 module.exports.shouldIncludeWaveGuardSetupFeeForRecurring = shouldIncludeWaveGuardSetupFeeForRecurring;
+module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;

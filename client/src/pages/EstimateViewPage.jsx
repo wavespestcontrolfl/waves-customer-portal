@@ -67,7 +67,7 @@ import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDi
 import { loadStripeSdk } from '../lib/stripeLoader';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
-import { PRICE_FONT, W } from '../components/estimate/tokens';
+import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
 const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
@@ -773,9 +773,12 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
            every line: the glass auto-tier tags small text as caption/fine
            and uppercases short names as eyebrows, which split this block
            across different faces — the block styles itself. */
-        <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
+        /* Slightly tighter + smaller than the 07-09 pass (owner ask
+           2026-07-10): 17px/gap-4 read too heavy against the new
+           per-application price cards. */
+        <div style={{ marginTop: 14, display: 'grid', gap: 2 }}>
           {[nameLine, ...contactLines].filter(Boolean).map((line) => (
-            <div key={line} data-gt="" style={{ fontSize: 17, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.4 }}>{line}</div>
+            <div key={line} data-gt="" style={{ fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>{line}</div>
           ))}
         </div>
       ) : null}
@@ -863,7 +866,12 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
       {metrics.length ? (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
+          // 3 metrics = one row of 3 (owner 2026-07-10 — auto-fit orphaned
+          // the third tile onto its own row); any other count keeps the
+          // responsive auto-fit grid (4 wraps 2×2 on phones).
+          gridTemplateColumns: metrics.length === 3
+            ? 'repeat(3, 1fr)'
+            : 'repeat(auto-fit, minmax(132px, 1fr))',
           gap: 12,
           marginTop: 16,
         }}>
@@ -1651,10 +1659,28 @@ function OneTimePriceCard({ oneTimePrice, breakdown }) {
   );
 }
 
+// Stable identity for a one-time breakdown row — the exclusion handshake
+// between the embedded per-service rows and the standalone card below.
+// The identity is the FULL row (service + label + amount + quote state),
+// never `service` alone: two rows can share a service (a priced embedded
+// install and a quote-required sibling), and a service-only key would drop
+// the unembedded sibling from the standalone card so its Quote Required row
+// never renders. Serviceless legacy rows (termite "Advance Installation")
+// still key on label+amount. Contribution items are the same row objects as
+// the breakdown items server-side, so fields match on both sides.
+export function oneTimeRowIdentityKey(item = {}) {
+  const label = String(item?.label || item?.name || item?.displayName || '').trim().toLowerCase();
+  const amount = Number(item?.amount ?? item?.price);
+  const quoteState = item?.quoteRequired === true || item?.kind === 'quote_required' ? 'qr' : '';
+  return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
+}
+
 export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+  // excludeServices accepts plain service keys (setup-fee callers) and
+  // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
-    .filter((item) => !excluded.has(item?.service));
+    .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
@@ -1692,7 +1718,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
             }}>
               <div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>
-                  {item.label || 'One-time service'}
+                  {customerOneTimeLabel(item)}
                 </div>
                 {item.detail ? (
                   <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>
@@ -2536,6 +2562,168 @@ function ReviewBeforeBookingCard({ reason }) {
   );
 }
 
+// Service-related card headlines (owner directive 2026-07-10): every service
+// box leads with copy about ITS service — the generic "Same protection" line
+// only survives as the fallback for unmapped/bundle sections. Pest keeps its
+// original line.
+const SERVICE_CARD_HEADLINES = {
+  pest_control: 'Pest Protection by Waves — whatever\u2019s getting inside, it stops here',
+  mosquito: 'Mosquito Defense by Waves — evenings outside, mosquito-free',
+  termite_bait: 'Termite Defense by Waves — protecting the biggest investment you own',
+  lawn_care: 'Lawn Care by Waves — pick the program that fits your turf',
+  tree_shrub: 'Tree & Shrub Care by Waves — ornamental protection through the seasons',
+  foam_recurring: 'Targeted Foam Treatment by Waves — recurring protection at the source',
+  rodent_bait: 'Rodent Defense by Waves — exterior stations monitored on schedule',
+  palm_injection: 'Palm Care by Waves — injection care timed to your palms',
+};
+
+// One-time work that belongs to a service renders INSIDE that service's box
+// (owner directive 2026-07-10: the Advance Installation lives with Termite
+// Bait Monitoring, not in a detached card). Plain charges only — quote-
+// required and waiver rows stay on the standalone breakdown card paths.
+// Per-service "send me the full details" row (GATE_SERVICE_DETAILS_PDF,
+// renderFlags.showServiceDetailsRequest). Customer-initiated transactional
+// send to the contact info ALREADY on the estimate — the destination is
+// never chosen client-side. Only services with a packet defined server-side
+// render the row (SERVICE_DETAILS_KEYS mirrors SERVICE_DETAILS_COPY).
+const SERVICE_DETAILS_KEYS = new Set(['pest_control', 'mosquito', 'termite_bait', 'lawn_care', 'tree_shrub']);
+
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false }) {
+  const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
+  if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
+  const send = async (channel) => {
+    if (state.status === 'sending') return;
+    setState({ status: 'sending', channel, message: '' });
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: serviceKey, channel }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.ok) {
+        setState({ status: 'error', channel, message: body.error || 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+        return;
+      }
+      setState({ status: 'sent', channel, message: '' });
+    } catch {
+      setState({ status: 'error', channel, message: 'Could not send right now — call or text us and we\u2019ll get it to you.' });
+    }
+  };
+  const sentLabel = state.channel === 'email'
+    ? `Sent! Check ${customerEmail || 'your email'}.`
+    : 'Sent! Check your texts for the link.';
+  return (
+    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.45, marginBottom: 10 }}>
+        Want the fine print? Get the full details PDF — how visits work, every product with its label &amp; safety sheet.
+      </div>
+      {state.status === 'sent' ? (
+        <div style={{ fontSize: 14, fontWeight: 700, color: W.green }}>
+          <span aria-hidden="true" style={{ marginRight: 6 }}>&#10003;</span>{sentLabel}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {customerEmail ? (
+            <button
+              type="button"
+              disabled={disabled || state.status === 'sending'}
+              onClick={() => send('email')}
+              style={{
+                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
+                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
+                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              {state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
+            </button>
+          ) : null}
+          {customerPhone ? (
+            <button
+              type="button"
+              disabled={disabled || state.status === 'sending'}
+              onClick={() => send('sms')}
+              style={{
+                padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
+                background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
+                cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.6 : 1,
+              }}
+            >
+              {state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
+            </button>
+          ) : null}
+        </div>
+      )}
+      {state.status === 'error' ? (
+        <div style={{ fontSize: 14, color: W.noticeText, fontWeight: 600, marginTop: 8 }}>{state.message}</div>
+      ) : null}
+    </div>
+  );
+}
+
+// Customer-facing one-time labels: product names mean nothing to customers —
+// "Advance Installation" / "Trelona Installation" render as "Termite Bait
+// Installation" (owner 2026-07-10); the detail line keeps stations/LF.
+function customerOneTimeLabel(item = {}) {
+  const label = String(item.label || '').trim();
+  const isTermiteInstall = item.service === 'termite_bait_installation'
+    || /\b(advance|trelona)\s+installation\b/i.test(label);
+  if (isTermiteInstall) return 'Termite Bait Installation';
+  return label || 'One-time service';
+}
+
+function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
+  const items = Array.isArray(contribution?.items)
+    ? contribution.items.filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+    : [];
+  if (!items.length) return null;
+  const lead = variant === 'lead';
+  // Owner copy (2026-07-10, investment framing): the termite install price
+  // reads as a sentence, not a bare figure — "$639 gets every station in the
+  // ground." Only the lead-variant termite install gets sentence treatment.
+  const isTermiteInstall = (item) => item?.service === 'termite_bait_installation'
+    || /\binstallation\b/i.test(String(item?.label || ''));
+  return (
+    <div style={lead
+      ? { margin: '16px 0 4px' }
+      : { borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+      {/* No "One-time services" header inside a service box (owner
+          2026-07-10) — the rows speak for themselves. */}
+      <div style={{ display: 'grid', gap: 10 }}>
+        {items.map((item, i) => {
+          const amount = fmtMoney(Math.abs(Number(item.amount) || 0));
+          if (lead && isTermiteInstall(item)) {
+            return (
+              <div key={`${item.service || item.label || 'item'}-${i}`}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+                <div style={{ fontSize: 15, fontWeight: 700, color: COLORS.navy, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+                  {amount} gets every station in the ground.
+                </div>
+              </div>
+            );
+          }
+          return (
+            <div key={`${item.service || item.label || 'item'}-${i}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'start' }}>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>{customerOneTimeLabel(item)}</div>
+                {item.detail ? (
+                  <div style={{ fontSize: 12, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.35 }}>{item.detail}</div>
+                ) : null}
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.navy, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+                {amount}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function ServiceSection({
   section,
   servicesLength = 1,
@@ -2551,6 +2739,8 @@ export function ServiceSection({
   showAddOns: showAddOnsProp = true,
   glassSetupBulletEligible = false,
   ctaSlotMeta = null,
+  oneTimeEmbed = null,
+  serviceDetailsRequest = null,
 }) {
   if (!section) return null;
   const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
@@ -2582,58 +2772,89 @@ export function ServiceSection({
   // describe their applications here and nowhere else). Bundle boxes stay
   // checklist-free (owner directive), so single-service layouts only.
 
+  // The synthetic unsplittable multi-service section (key 'bundle') keeps
+  // waveGuardTierEligible=true whenever ANY member service is eligible, but
+  // badging it would resurrect the deleted plan-level badge on the whole
+  // "Recurring services" card (owner directive: recurring pest + mosquito
+  // lines badge individually ONLY) — real per-service sections only.
+  const sectionTierEligible = section?.waveGuardTierEligible !== false && section?.key !== 'bundle';
+  const showTierBadge = !!waveGuardTier && sectionTierEligible;
   return (
     <section>
       {/* Frequency choice + price live in ONE shadow-box card, same
           treatment as every other section (owner: "all boxes should
           render like" the Waves AI card). */}
-      <div style={estimateCard()}>
+      <div style={estimateCard({ position: 'relative' })}>
+        {/* WaveGuard membership badge pinned to the box's top-right corner
+            (owner directive 2026-07-10 — was inline next to the price). */}
+        {showTierBadge ? (
+          <span style={{
+            position: 'absolute', top: 16, right: 16,
+            display: 'inline-block', padding: '4px 12px',
+            ...waveGuardChipStyle(waveGuardTier),
+            borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
+            whiteSpace: 'nowrap',
+          }}>
+            WaveGuard {glassCopyActive() ? glassTierDisplay(waveGuardTier) : waveGuardTier}
+          </span>
+        ) : null}
         {servicesLength > 1 ? (
           <h3 style={{
             fontSize: 18,
             color: ESTIMATE_TEXT,
             margin: '0 0 16px',
+            // Keep clear of the absolutely-positioned corner badge.
+            paddingRight: showTierBadge ? 140 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
           </h3>
         ) : null}
 
+        {/* Every service box leads with its own service-related headline —
+            the "HOW OFTEN?" eyebrow is gone and no-selector services
+            (termite monitoring) get a headline too (owner 2026-07-10). */}
+        <h2 style={{
+          fontSize: 20, fontWeight: 500, lineHeight: 1.2,
+          color: '#1B2C5B', margin: '0 0 4px',
+          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 140,
+        }}>
+          {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
+        </h2>
         {showSlider ? (
-          <div>
-            {/* Section header for the cadence choice (owner 2026-07-06). */}
-            <div style={{
-              fontSize: 12, fontWeight: 700, color: '#475569',
-              textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-            }}>
-              How often?
+          <GlassFrequencyPills
+            frequencies={frequencies}
+            selected={selectedFrequencyKey}
+            onChange={(next) => onFrequencyChange(section.key, next)}
+            disabled={disabled}
+          />
+        ) : null}
+
+        {/* Termite reads install-first (owner copy 2026-07-10, investment
+            framing): stations go in once, then the bridge line hands off to
+            the monitoring price so the two figures read as ONE plan. */}
+        {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
+          <>
+            <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#1B2C5B', margin: '14px 0 0' }}>
+              Monitoring is what keeps them working:
             </div>
-            <h2 style={{
-                            fontSize: 20, fontWeight: 500, lineHeight: 1.2,
-              color: '#1B2C5B', margin: '0 0 4px',
-            }}>
-              {/* The pest-branded line is pest-only — a lawn/mosquito/termite
-                  cadence selector labeled "Pest Protection" reads like the
-                  wrong quote, so every other section (incl. the synthetic
-                  'bundle' key, slug null) keeps the generic wording (codex
-                  rd3). */}
-              {sectionSlug === 'pest_control'
-                ? 'Pest Protection by Waves — ride the wave that fits your home'
-                : 'Same protection — pick the rhythm that fits your home'}
-            </h2>
-            <GlassFrequencyPills
-              frequencies={frequencies}
-              selected={selectedFrequencyKey}
-              onChange={(next) => onFrequencyChange(section.key, next)}
-              disabled={disabled}
-            />
-          </div>
+          </>
         ) : null}
 
         {current ? (
           <PriceCard
             frequency={current}
-            waveGuardTier={servicesLength > 1 ? null : (section?.waveGuardTierEligible !== false ? waveGuardTier : null)}
+            // Every eligible section badges its own card — multi-service
+            // plans no longer hoist one plan-level badge (owner directive
+            // 2026-07-10). The server's waveGuardTierEligible flag keeps
+            // palm/rodent cards badge-free, and the synthetic 'bundle'
+            // fallback section never badges (see sectionTierEligible).
+            waveGuardTier={sectionTierEligible ? waveGuardTier : null}
+            // The card corner carries the badge now — PriceCard keeps the
+            // tier only for its per-row service tags.
+            showTierBadge={false}
+            preferPerApplicationPrice={['pest_control', 'mosquito', 'termite_bait'].includes(sectionSlug)}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -2642,6 +2863,28 @@ export function ServiceSection({
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             showGuarantee={servicesLength === 1}
+          />
+        ) : null}
+
+        {/* One-time work belonging to THIS service lives inside its service
+            box — multi-service plans no longer detach it into a separate card
+            (owner 2026-07-10). Termite renders its install ABOVE the price
+            (lead variant above); everything else trails the price block. */}
+        {sectionSlug === 'termite_bait' ? null : <SectionOneTimeBlock contribution={oneTimeEmbed} />}
+
+        {serviceDetailsRequest ? (
+          <ServiceDetailsRequestRow
+            token={serviceDetailsRequest.token}
+            // RAW section key, not the glass slug: the slug normalizes
+            // commercial keys (commercial_mosquito → mosquito) into buttons
+            // whose POST the server rejects — it checks the estimate's
+            // canonical recurring keys. Unsupported keys hide the row.
+            serviceKey={section.key}
+            customerEmail={serviceDetailsRequest.customerEmail}
+            customerPhone={serviceDetailsRequest.customerPhone}
+            // Only the submit-phase lock disables the request — the
+            // mirror-section cadence lock (section `disabled`) must not.
+            disabled={serviceDetailsRequest.disabled === true}
           />
         ) : null}
 
@@ -3611,19 +3854,9 @@ export default function EstimateViewPage() {
     if (mode === 'recurring') {
       return (
         <>
-          {/* Multi-service plans show the WaveGuard tier ONCE, above the
-              boxes on the left — not repeated in every card. */}
-          {services.length > 1 && waveGuardTier && combinedTierEligible ? (
-            <div style={{ marginBottom: 12 }}>
-              <span style={{
-                display: 'inline-block', padding: '4px 12px',
-                background: '#EEF2FF', color: COLORS.blueDeeper,
-                borderRadius: 6, fontSize: 14, fontWeight: 700, letterSpacing: '0.02em',
-              }}>
-                WaveGuard {glassContent ? glassTierDisplay(waveGuardTier) : waveGuardTier}
-              </span>
-            </div>
-          ) : null}
+          {/* The plan-level WaveGuard badge is gone (owner directive
+              2026-07-10) — the membership shows on each eligible service's
+              own card (recurring pest / mosquito) instead. */}
 
           {/* Multi-service plans stack vertically (owner directive) —
               each service keeps its own boxed price section. */}
@@ -3666,6 +3899,15 @@ export default function EstimateViewPage() {
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
+                // Multi-service plans embed each service's one-time work in
+                // its own box; single-service keeps the afterPrice breakdown.
+                oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
+                // Details-packet request buttons (dark gate). Live estimates
+                // only — the read-only accepted recap and staff draft preview
+                // must not offer customer sends.
+                serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly && !adminDraftPreview
+                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled }
+                  : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
                 // Glass removes the customize section everywhere — including
@@ -3702,9 +3944,25 @@ export default function EstimateViewPage() {
               breakdown={pricing.oneTimeBreakdown}
               // Mirror of the single-service path: keep glass-suppressed
               // setup fees in the breakdown so the total stays honest.
-              excludeServices={(pricing.firstVisitFees || [])
-                .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
-                .map((fee) => fee.service)}
+              // Items embedded inside their own service box
+              // (section.oneTimeContribution) are excluded — this card only
+              // keeps one-time work that has no rendered service section,
+              // and hides entirely when nothing is left.
+              excludeServices={[
+                ...(pricing.firstVisitFees || [])
+                  .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
+                  .map((fee) => fee.service),
+                // Identity keys, not bare service strings — embedded rows
+                // without a `service` (label-normalized termite installs)
+                // must still be excluded or they'd total twice. Mirror
+                // SectionOneTimeBlock's quote-required filter: rows it
+                // refuses to render never actually embed, so excluding them
+                // here would make the required work vanish from the page
+                // entirely instead of showing its "Quote Required" row.
+                ...services.flatMap((s) => (s?.oneTimeContribution?.items || [])
+                  .filter((item) => item && item.quoteRequired !== true && item.kind !== 'quote_required')
+                  .map((item) => oneTimeRowIdentityKey(item))),
+              ]}
               prepayWaivedServices={prepayWaivedServices}
             />
           ) : null}
@@ -4188,7 +4446,6 @@ export default function EstimateViewPage() {
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
           priceLabel={stickyBarPrice.label}
-          periodLabel={stickyBarPrice.period}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />

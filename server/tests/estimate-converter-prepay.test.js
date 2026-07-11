@@ -62,16 +62,22 @@ describe('estimate converter annual prepay amount', () => {
     expect(determineTier(0, false)).toEqual(expect.objectContaining({ tier: 'none' }));
   });
 
-  test('WaveGuard setup fee applies to recurring-pest mixes only', () => {
-    // $99 setup applies only to mixes with recurring Pest Control (owner
-    // directive 2026-07-10 — mosquito no longer qualifies).
+  test('WaveGuard setup fee applies to solo pest / solo mosquito plans only', () => {
+    // $99 setup applies only to single-service recurring plans — recurring
+    // pest only or recurring mosquito only (owner directive 2026-07-10
+    // evening; supersedes the same-day pest-mixes rule).
     expect(hasWaveGuardSetupService([
       { service: 'pest_control', name: 'Pest Control' },
     ])).toBe(true);
-    // Everything else carries no setup fee (5% annual-prepay discount instead).
     expect(hasWaveGuardSetupService([
       { service: 'mosquito', name: 'Mosquito Control' },
-    ])).toBe(false);
+    ])).toBe(true);
+    // Duplicate rows of the same solo service still count as solo.
+    expect(hasWaveGuardSetupService([
+      { service: 'pest_control', name: 'Pest Control' },
+      { service: 'pest_control', name: 'Pest Control (dup)' },
+    ])).toBe(true);
+    // Every other solo service carries no setup fee (annual-prepay % instead).
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
     ])).toBe(false);
@@ -85,12 +91,16 @@ describe('estimate converter annual prepay amount', () => {
     expect(hasWaveGuardSetupService([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
     ])).toBe(false);
-    // Mixes containing recurring pest always charge the setup (no 5% stacking).
+    // Multi-service recurring bundles carry NO setup fee — the bundle is the
+    // incentive — even when pest or mosquito is in the mix.
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'pest_control', name: 'Pest Control' },
-    ])).toBe(true);
-    // No recurring pest in the mix → no setup, even with mosquito present.
+    ])).toBe(false);
+    expect(hasWaveGuardSetupService([
+      { service: 'pest_control', name: 'Pest Control' },
+      { service: 'mosquito', name: 'Mosquito Control' },
+    ])).toBe(false);
     expect(hasWaveGuardSetupService([
       { service: 'lawn_care', name: 'Lawn Care' },
       { service: 'mosquito', name: 'Mosquito Control' },
