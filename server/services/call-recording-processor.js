@@ -4215,6 +4215,11 @@ const CallRecordingProcessor = {
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
     const callSecondaryContact = callSecondaryContacts[0] || null;
+    // Capture the caller's email BEFORE the secondary-contact scrub below clears
+    // it — payer linking (resolveCallBillingPayer) uses it to reject a billing
+    // party that is really the caller duplicated into a slot (self-pay "I'll
+    // pay"). After the scrub extracted.email can be null, defeating that guard.
+    const callerEmailPreScrub = extracted.email || null;
 
     // Deterministic backstop for the exact chimera this feature exists to
     // prevent: when the model leaves the SECOND person's email/phone in the
@@ -5536,7 +5541,7 @@ const CallRecordingProcessor = {
               // extracted payer.
               const callBookingPayerId = await resolveCallBillingPayer(
                 callSecondaryContacts, v2CanonicalExtraction,
-                { email: extracted.email, phone: contactPhone },
+                { email: callerEmailPreScrub || extracted.email, phone: contactPhone },
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
@@ -5937,11 +5942,34 @@ const CallRecordingProcessor = {
               // Backfill the Bill-To on a REUSED row (findExisting / idempotency
               // reuse, or a row created before the payer gate / during a transient
               // payer-lookup failure) that has no payer yet — the fresh-insert
-              // path already carries it, so this is a no-op there.
-              if (callBookingPayerId && svc && !svc.payer_id) {
-                await db('scheduled_services').where({ id: svc.id }).update({ payer_id: callBookingPayerId });
-                svc.payer_id = callBookingPayerId;
-                logger.info(`[call-proc] Backfilled payer ${callBookingPayerId} on reused scheduled service ${maskSid(callSid)}`);
+              // path already carries it, so this is a no-op there. Guards:
+              // - whereNull('payer_id'): don't clobber a payer an operator/another
+              //   process assigned between the pre-tx read and this update.
+              // - whereNotIn status completed/cancelled: a completed visit may
+              //   already have a self-pay invoice minted; flipping only the visit
+              //   would desync it from that invoice. Skip it (office migrates).
+              if (callBookingPayerId && svc && !svc.payer_id
+                && !['completed', 'cancelled'].includes(svc.status)) {
+                const updated = await db('scheduled_services')
+                  .where({ id: svc.id })
+                  .whereNull('payer_id')
+                  .whereNotIn('status', ['completed', 'cancelled'])
+                  .update({ payer_id: callBookingPayerId });
+                if (updated) {
+                  svc.payer_id = callBookingPayerId;
+                  logger.info(`[call-proc] Backfilled payer on reused scheduled service ${maskSid(callSid)}`);
+                }
+                // Also backfill an EXISTING follow-up child (from a pre-gate run)
+                // that ensureCallFollowUpVisit returned early on — otherwise
+                // visit 2 completes self-pay while visit 1 is payer-billed.
+                await db('scheduled_services')
+                  .where((qb) => qb
+                    .where({ parent_service_id: svc.id, source_action: 'ai_call_pipeline_followup' })
+                    .orWhere({ followup_source_service_id: svc.id }))
+                  .whereNull('payer_id')
+                  .whereNotIn('status', ['completed', 'cancelled'])
+                  .update({ payer_id: callBookingPayerId })
+                  .catch((e) => logger.warn(`[call-proc] follow-up payer backfill failed for ${maskSid(callSid)}: ${e.message}`));
               }
               scheduledDateForLog = scheduledDate;
               windowStartForLog = windowStart;
