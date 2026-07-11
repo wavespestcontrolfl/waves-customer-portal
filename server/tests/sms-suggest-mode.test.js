@@ -43,9 +43,21 @@ describe('hasPriceQuote — house rule: no prices in customer SMS', () => {
     expect(hasPriceQuote('USD 50 per visit')).toBe(true);
   });
 
-  test('detects spelled-out amounts', () => {
+  test('detects spelled-out and singular amounts (Codex P2 ×2: word-form + singular)', () => {
     expect(hasPriceQuote('about 50 dollars per month')).toBe(true);
     expect(hasPriceQuote('should be 2 bucks')).toBe(true);
+    expect(hasPriceQuote('that is four hundred dollars')).toBe(true);
+    expect(hasPriceQuote('roughly a hundred bucks per visit')).toBe(true);
+    expect(hasPriceQuote('we can apply a 50 dollar credit')).toBe(true);
+    expect(hasPriceQuote('there is a 1 dollar fee')).toBe(true);
+    expect(hasPriceQuote('forty-five dollars even')).toBe(true);
+  });
+
+  test('detects per-cadence rates and Spanish currency (ask-waves parity)', () => {
+    expect(hasPriceQuote('the plan runs 45/mo')).toBe(true);
+    expect(hasPriceQuote('forty five per visit')).toBe(true);
+    expect(hasPriceQuote('cuesta 45 dólares')).toBe(true);
+    expect(hasPriceQuote('son 45 al mes')).toBe(true);
   });
 
   test('price-free replies pass, including numbers that are not money', () => {

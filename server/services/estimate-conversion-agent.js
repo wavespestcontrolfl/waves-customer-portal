@@ -629,6 +629,13 @@ async function generateLlmReviewDraft({ customer, body, decision }) {
       logger.warn(`[estimate-conversion-agent] LLM review draft leaked a redaction placeholder (customer=${customer.id}); using template`);
       return null;
     }
+    // House rule: no prices in customer SMS. This lane's draft lands in the
+    // composer's Use Draft button — same delivery boundary as suggest-mode,
+    // same deterministic guard (a priced draft falls back to the template).
+    if (parsed.reply && require('./sms-suggest-mode').hasPriceQuote(parsed.reply)) {
+      logger.warn(`[estimate-conversion-agent] LLM review draft quoted a price (customer=${customer.id}); using template`);
+      return null;
+    }
     return { reply: parsed.reply, model, promptVersion: drafter.PROMPT_VERSION, passes };
   } catch (err) {
     logger.warn(`[estimate-conversion-agent] LLM review draft failed (${err.message}); using template`);

@@ -53,11 +53,28 @@ function hasRedactionPlaceholder(text) {
 // and in a human's hands, and the July 2026 live judge readout showed the
 // drafter INVENTING dollar figures (a quoted "$415.75" that appeared nowhere
 // in the facts). Deterministic and verifier-independent like the placeholder
-// guard: a draft carrying a dollar-ish amount stays shadow / never auto-sends.
-// Matches "$50", "$ 1,200.50", "USD 50", "50 dollars", "2 bucks". False
-// positives are acceptable — they fail toward human review, never toward a
-// customer send.
-const PRICE_QUOTE_RE = /\$\s*\d|\bUSD\s*\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks)\b/i;
+// guard: a draft carrying price talk stays shadow / never auto-sends.
+//
+// Pattern mirrors the Ask Waves price scrub (ask-waves-intake PRICE_TALK_RE
+// — keep the two in sync): dollar figures ($45), digits OR spelled-out
+// amounts + dollar/buck in singular or plural ("a 50 dollar credit", "four
+// hundred dollars", "a hundred bucks"), Spanish currency ("45 dólares"), and
+// per-cadence rates without a currency word ("45/mo", "forty five per
+// visit"). False positives are acceptable — they fail toward human review,
+// never toward a customer send.
+const PRICE_NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|few|couple)';
+const PRICE_NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
+const PRICE_EN_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|a|${PRICE_NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${PRICE_NUM_WORD})*)`;
+const PRICE_ES_AMOUNT = `(?:\\d[\\d,]*(?:\\.\\d+)?|${PRICE_NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${PRICE_NUM_WORD_ES})*)`;
+const PRICE_QUOTE_RE = new RegExp(
+  '\\$\\s*\\d' // $45, $ 1,200.50
+  + '|\\bUSD\\s*\\d' // USD 50
+  + `|\\b${PRICE_EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, a 50 dollar credit, four hundred bucks
+  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares
+  + `|\\b${PRICE_EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per visit
+  + `|\\b${PRICE_ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes
+  'i',
+);
 function hasPriceQuote(text) {
   return PRICE_QUOTE_RE.test(String(text || ''));
 }
