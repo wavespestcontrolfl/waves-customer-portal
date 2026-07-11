@@ -166,7 +166,7 @@ function ctaBand(doc, estimateUrl, micro) {
   doc.link(pillX, pillY, pillW, pillH, estimateUrl);
 
   doc.font('Helvetica').fontSize(8.5).fillColor(MUTED)
-    .text(micro || 'No long-term contract · Unlimited free callbacks · 90-day money-back guarantee', L, top + H - 17, { width: W, align: 'center' });
+    .text(micro || 'Month-to-month plan · Unlimited no-charge re-services for covered pests · 90-day money-back guarantee', L, top + H - 17, { width: W, align: 'center' });
   doc.restore();
   doc.y = top + H + 10;
 }
@@ -175,10 +175,15 @@ function ctaBand(doc, estimateUrl, micro) {
 // panel — the single highest-transparency element in the guide.
 function systemBox(doc, box) {
   if (!box || !Array.isArray(box.rows) || !box.rows.length) return;
-  const rowH = 16;
   const padding = 12;
-  const noteH = box.note ? 30 : 0;
-  const H = padding * 2 + 18 + box.rows.length * rowH + noteH;
+  const valueW = W - padding * 2 - 165;
+  // Pre-measure: long values (covered-pest lists) wrap over several lines,
+  // so row heights are measured, never assumed.
+  doc.font('Helvetica').fontSize(9);
+  const rowHeights = box.rows.map(([, value]) => Math.max(13, doc.heightOfString(String(value), { width: valueW, lineGap: 1 }) + 4));
+  doc.font('Helvetica-Oblique').fontSize(8);
+  const noteH = box.note ? doc.heightOfString(box.note, { width: W - padding * 2, lineGap: 1 }) + 8 : 0;
+  const H = padding * 2 + 18 + rowHeights.reduce((a, b) => a + b, 0) + noteH;
   ensureRoom(doc, H + 16);
   doc.moveDown(0.6);
   const top = doc.y;
@@ -187,17 +192,112 @@ function systemBox(doc, box) {
   doc.roundedRect(L, top, W, H, 8).lineWidth(0.75).strokeColor(RULE).stroke();
   doc.font('Helvetica-Bold').fontSize(10.5).fillColor(NAVY).text(box.heading || 'Your system at a glance', L + padding, top + padding);
   let y = top + padding + 18;
-  for (const [label, value] of box.rows) {
+  box.rows.forEach(([label, value], i) => {
     doc.font('Helvetica-Bold').fontSize(9).fillColor(MUTED).text(label, L + padding, y, { width: 160 });
-    doc.font('Helvetica').fontSize(9).fillColor(BODY).text(String(value), L + padding + 165, y, { width: W - padding * 2 - 165 });
-    y += rowH;
-  }
+    doc.font('Helvetica').fontSize(9).fillColor(BODY).text(String(value), L + padding + 165, y, { width: valueW, lineGap: 1 });
+    y += rowHeights[i];
+  });
   if (box.note) {
-    doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(box.note, L + padding, y + 2, { width: W - padding * 2, lineGap: 1 });
+    doc.font('Helvetica-Oblique').fontSize(8).fillColor(MUTED).text(box.note, L + padding, y + 4, { width: W - padding * 2, lineGap: 1 });
   }
   doc.restore();
   doc.y = top + H + 8;
 }
+
+// ── Vector illustrations (no photo assets needed) ──────────────────────────
+
+// Florida treatment-notice sign in a lawn — pairs with the "why is there a
+// sign in my yard" FAQ (statute-required posting, reframed as transparency).
+function treatmentNoticeIllustration(doc) {
+  const H = 130;
+  ensureRoom(doc, H + 34);
+  doc.moveDown(0.5);
+  const top = doc.y;
+  doc.save();
+  // Scene panel
+  doc.roundedRect(L, top, W, H, 8).fillColor('#F2F7F4').fill();
+  doc.roundedRect(L, top, W, H, 8).lineWidth(0.75).strokeColor(RULE).stroke();
+  // Lawn band
+  doc.rect(L + 1, top + H - 34, W - 2, 33).fillColor('#7FB069').fill();
+  doc.rect(L + 1, top + H - 34, W - 2, 6).fillColor('#8FBF78').fill();
+  // Grass blades
+  doc.lineWidth(1).strokeColor('#5E9150');
+  for (let i = 0; i < 34; i++) {
+    const gx = L + 14 + i * ((W - 28) / 34);
+    doc.moveTo(gx, top + H - 30).lineTo(gx - 2, top + H - 40).stroke();
+    doc.moveTo(gx + 3, top + H - 30).lineTo(gx + 5, top + H - 38).stroke();
+  }
+  // Sign stake
+  const signCX = L + W / 2;
+  doc.rect(signCX - 2, top + 58, 4, H - 92).fillColor('#8A8F98').fill();
+  // Sign board (yellow, like FL posting signs)
+  const bw = 150; const bh = 44;
+  doc.roundedRect(signCX - bw / 2, top + 18, bw, bh, 4).fillColor('#FFD84D').fill();
+  doc.roundedRect(signCX - bw / 2, top + 18, bw, bh, 4).lineWidth(1).strokeColor('#B8860B').stroke();
+  doc.font('Helvetica-Bold').fontSize(9).fillColor('#1F2937')
+    .text('PESTICIDE APPLICATION', signCX - bw / 2, top + 25, { width: bw, align: 'center' });
+  doc.font('Helvetica').fontSize(7.5).fillColor('#374151')
+    .text('KEEP CHILDREN & PETS OFF', signCX - bw / 2, top + 37, { width: bw, align: 'center' });
+  doc.text('UNTIL DRY', signCX - bw / 2, top + 46, { width: bw, align: 'center' });
+  doc.restore();
+  doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+    .text('The state-required treatment notice we post at every qualifying visit — your digital report carries the full details.', L, top + H + 5, { width: W, align: 'center' });
+  doc.y = top + H + 22;
+}
+
+// Numbered station-map SAMPLE for the termite guide — a stylized property,
+// never a real one. The installation report carries the customer's actual map.
+function stationMapIllustration(doc) {
+  const H = 200;
+  ensureRoom(doc, H + 36);
+  doc.moveDown(0.5);
+  const top = doc.y;
+  doc.save();
+  // Lot
+  doc.roundedRect(L, top, W, H, 8).fillColor('#F4F8F2').fill();
+  doc.roundedRect(L, top, W, H, 8).lineWidth(0.75).strokeColor(RULE).stroke();
+  doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text('SAMPLE STATION MAP', L + 12, top + 10);
+  // House footprint (L-shape) centered
+  const hx = L + W / 2 - 90; const hy = top + 52; const hw = 180; const hh = 96;
+  doc.save();
+  doc.rect(hx, hy, hw, hh).fillColor('#FFFFFF').fill();
+  doc.rect(hx + hw - 58, hy + hh - 40, 58, 40).fillColor('#F4F8F2').fill(); // garage notch
+  doc.lineWidth(1.4).strokeColor(NAVY);
+  doc.moveTo(hx, hy).lineTo(hx + hw, hy).lineTo(hx + hw, hy + hh - 40)
+    .lineTo(hx + hw - 58, hy + hh - 40).lineTo(hx + hw - 58, hy + hh)
+    .lineTo(hx, hy + hh).lineTo(hx, hy).stroke();
+  doc.font('Helvetica').fontSize(8.5).fillColor(NAVY).text('HOME', hx, hy + hh / 2 - 6, { width: hw - 58, align: 'center' });
+  doc.fontSize(7).text('GARAGE', hx + hw - 58, hy + hh - 40 + 14, { width: 58, align: 'center' });
+  doc.restore();
+  // Stations around the perimeter (offset outward)
+  const o = 22;
+  const pts = [
+    [hx - o, hy - o], [hx + hw * 0.33, hy - o], [hx + hw * 0.66, hy - o], [hx + hw + o, hy - o],
+    [hx + hw + o, hy + hh - 40 - 8], [hx + hw - 58 + o, hy + hh + o],
+    [hx + hw * 0.38, hy + hh + o], [hx - o, hy + hh + o],
+    [hx - o, hy + hh * 0.5],
+  ];
+  pts.forEach(([px, py], i) => {
+    doc.circle(px, py, 8).fillColor(GOLD_PILL).fill();
+    doc.circle(px, py, 8).lineWidth(1).strokeColor('#B8860B').stroke();
+    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(NAVY)
+      .text(String(i + 1), px - 8, py - 3.5, { width: 16, align: 'center' });
+  });
+  // Legend
+  doc.circle(L + 18, top + H - 16, 5).fillColor(GOLD_PILL).fill();
+  doc.circle(L + 18, top + H - 16, 5).lineWidth(0.8).strokeColor('#B8860B').stroke();
+  doc.font('Helvetica').fontSize(8).fillColor(BODY)
+    .text('Trelona\u00ae bait station — numbered, mapped, checked quarterly', L + 28, top + H - 20);
+  doc.restore();
+  doc.font('Helvetica').fontSize(8).fillColor(MUTED)
+    .text('Illustration only — your installation report maps the actual numbered stations at your home, including any inaccessible perimeter sections.', L, top + H + 5, { width: W, align: 'center' });
+  doc.y = top + H + 24;
+}
+
+const ILLUSTRATIONS = {
+  treatment_notice: treatmentNoticeIllustration,
+  station_map: stationMapIllustration,
+};
 
 function productBlock(doc, product) {
   const lines = [];
@@ -299,6 +399,11 @@ function renderServiceDetailsPdf(content) {
     if (Array.isArray(content.faq) && content.faq.length) {
       sectionHeading(doc, 'The questions we hear most — answered straight');
       faqBlock(doc, content.faq);
+    }
+
+    for (const key of content.illustrations || []) {
+      const draw = ILLUSTRATIONS[key];
+      if (draw) draw(doc);
     }
 
     // Keep the estimate conversation going right after the answers
