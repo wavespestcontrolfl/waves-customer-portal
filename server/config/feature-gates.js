@@ -381,6 +381,13 @@ const gates = {
   // Requires a real catalog service (no generic-placeholder fallback for
   // outbound). Off → outbound bookings stay manual (current behavior).
   callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
+  // call ledger against call_log and rings an admin bell for any answered
+  // inbound call (completed, >=20s) the pipeline never received — born from
+  // the 2026-07 reconciliation that found 391 Feb–Mar calls silently never
+  // ingested. Read-only against Twilio; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
