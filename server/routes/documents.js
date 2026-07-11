@@ -635,14 +635,17 @@ router.get('/', authenticate, async (req, res, next) => {
     const previewImageFor = async (serviceRecordId) => {
       const photo = previewPhotoByServiceId.get(serviceRecordId);
       if (!photo) return null;
-      if (photo.s3_url) return photo.s3_url;
-      if (!photo.s3_key) return null;
-      try {
-        const PhotoService = require('../services/photos');
-        return await PhotoService.getViewUrl(photo.s3_key, 15 * 60);
-      } catch {
-        return null;
+      // Presign from s3_key FIRST — stored s3_url values expire/go stale;
+      // legacy fallback only (same order as the report photo resolver).
+      if (photo.s3_key) {
+        try {
+          const PhotoService = require('../services/photos');
+          return await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS);
+        } catch {
+          /* fall through to the legacy stored URL */
+        }
       }
+      return photo.s3_url || null;
     };
 
     const autoGenDocs = [];

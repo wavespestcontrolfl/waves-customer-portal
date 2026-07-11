@@ -111,6 +111,56 @@ async function createPayer(body) {
   return { payer: row };
 }
 
+/**
+ * Find an existing ACTIVE payer by AP email (case-insensitive), else create one.
+ * Used by automated linkage (e.g. the call pipeline) where the same owner-payer
+ * recurs across many jobs and must NOT spawn a duplicate `payers` row each time.
+ * An AP email is required — a payer with no email can't receive an invoice, so
+ * we return { payer: null } rather than minting an unroutable Bill-To.
+ * Never throws; returns { error } on a validation/DB problem so the caller can
+ * fall back to booking without a payer.
+ */
+async function findOrCreatePayerByEmail(body = {}) {
+  const apEmail = cleanEmail(body.apEmail ?? body.ap_email);
+  if (!apEmail || !isEmailLike(apEmail)) return { payer: null };
+  try {
+    return await db.transaction(async (trx) => {
+      // Atomic find-or-create: `payers.ap_email` has no unique index, so a bare
+      // lookup-then-insert lets two concurrent call processors both miss the
+      // existing row and insert DUPLICATE active payers for the same owner —
+      // splitting AR across payer ids. A transaction-scoped advisory lock keyed
+      // on the normalized email serializes same-email creators (different emails
+      // never contend); the lock releases on commit/rollback.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [apEmail]);
+      const matches = await trx('payers')
+        .whereRaw('LOWER(ap_email) = ?', [apEmail])
+        .orderBy('id', 'asc');
+      const active = matches.find((p) => p.active !== false);
+      if (active) return { payer: active };
+      // An INACTIVE payer with this email means an operator deliberately
+      // disabled that Bill-To — do NOT silently recreate it (that would defeat
+      // the fail-closed deactivation and route a new invoice to a disabled AP
+      // inbox). Leave it unlinked for review.
+      if (matches.length > 0) return { payer: null, inactive: true };
+      // buildPayerWrite validates/normalizes (same as createPayer); it requires
+      // display_name, so fall back to the email local-part when the caller
+      // couldn't name the payer.
+      const displayName = cleanOrNull(body.displayName ?? body.display_name, 160)
+        || apEmail.split('@')[0];
+      const { dbUpdates, error } = buildPayerWrite(
+        { ...body, ap_email: apEmail, display_name: displayName },
+        { partial: false },
+      );
+      if (error) return { error };
+      const [row] = await trx('payers').insert(dbUpdates).returning('*');
+      return { payer: row };
+    });
+  } catch (err) {
+    logger.warn(`[payer] findOrCreatePayerByEmail failed: ${err.message}`);
+    return { error: err.message };
+  }
+}
+
 async function updatePayer(id, body) {
   const pid = Number(id);
   if (!Number.isInteger(pid) || pid <= 0) return { error: 'Invalid payer id' };
@@ -349,6 +399,7 @@ module.exports = {
   listPayers,
   getPayer,
   createPayer,
+  findOrCreatePayerByEmail,
   updatePayer,
   resolveForInvoice,
   attachToInvoice,

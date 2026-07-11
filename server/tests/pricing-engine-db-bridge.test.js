@@ -356,6 +356,124 @@ describe('pricing engine DB bridge', () => {
     expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(40);
   });
 
+  test('pre-slab usage-step kill switch: 0 disables, absent key restores the enabled default', async () => {
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'onetime_preslab',
+      data: { usage_step_sqft: 0, link_container_costs_to_catalog: false },
+    }]))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.usageStepSqFt).toBe(0);
+    expect(constants.SPECIALTY.preSlabTermiticide.linkContainerCostsToCatalog).toBe(false);
+
+    // Keys removed → in-code defaults must come back (constants mutate in
+    // place across syncs; same trap as the pest program-floor kill switch).
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'onetime_preslab',
+      data: {},
+    }]))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.usageStepSqFt).toBe(100);
+    expect(constants.SPECIALTY.preSlabTermiticide.linkContainerCostsToCatalog).toBe(true);
+  });
+
+  test('validates usageStepSqFt as non-negative', () => {
+    constants.SPECIALTY.preSlabTermiticide.usageStepSqFt = -5;
+    const result = validatePestPricingConfig(constants);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain('SPECIALTY.preSlabTermiticide.usageStepSqFt must be a non-negative number');
+  });
+
+  test('inventory-price link overrides pre-slab container costs from approved catalog rows only', async () => {
+    const linkDb = (catalogRows, approvedVendorPricingRows = []) => {
+      const db = (table) => {
+        if (table === 'products_catalog') {
+          const q = {
+            whereIn: jest.fn(() => q),
+            where: jest.fn(() => q),
+            select: jest.fn(async () => catalogRows),
+          };
+          return q;
+        }
+        if (table === 'vendor_pricing') {
+          const q = {
+            whereIn: jest.fn(() => q),
+            where: jest.fn(() => q),
+            select: jest.fn(async () => approvedVendorPricingRows),
+          };
+          return q;
+        }
+        const query = {
+          select: jest.fn(async () => (table === 'pricing_config'
+            ? [{ config_key: 'onetime_preslab', data: { usage_step_sqft: 100, link_container_costs_to_catalog: true } }]
+            : [])),
+          orderBy: jest.fn(() => query),
+          then: (resolve) => resolve([]),
+        };
+        return query;
+      };
+      db.schema = { hasTable: jest.fn(async () => true) };
+      return db;
+    };
+
+    // A sane price backed by an ACTIVE, APPROVED vendor row flows into the
+    // engine (containerCost AND containerOz come from the catalog together).
+    await expect(syncConstantsFromDB(linkDb(
+      [{ name: 'Talstar P', best_price: 45.5, unit_size_oz: 128, best_vendor_pricing_id: 'vp-approved' }],
+      [{ id: 'vp-approved' }],
+    ))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(45.5);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerOz).toBe(128);
+    // Products without a usable catalog row keep the config value.
+    expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerCost).toBe(174.72);
+
+    // Approval gate (codex r1): a best_price whose backing vendor row is
+    // pending/inactive — or that has no backing row at all — must never
+    // reprice quotes, even inside the sanity band.
+    await expect(syncConstantsFromDB(linkDb(
+      [
+        { name: 'Taurus SC', best_price: 99, unit_size_oz: 78, best_vendor_pricing_id: 'vp-pending' },
+        { name: 'Bifen I/T', best_price: 44, unit_size_oz: 128, best_vendor_pricing_id: null },
+      ],
+      [], // the approval-filtered lookup returns nothing
+    ))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.taurus_sc.containerCost).toBe(95.00);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.bifen_it.containerCost).toBe(41.53);
+
+    // Fat-finger guard: a per-oz price outside [0.5x, 2x] of config is
+    // ignored even when approved ($152.10 against a 20 oz unit size is
+    // ~3.4x config per-oz — the exact bad-catalog-row shape this PR
+    // corrects).
+    await expect(syncConstantsFromDB(linkDb(
+      [{ name: 'Termidor SC', best_price: 152.10, unit_size_oz: 20, best_vendor_pricing_id: 'vp-approved' }],
+      [{ id: 'vp-approved' }],
+    ))).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerCost).toBe(174.72);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.termidor_sc.containerOz).toBe(78);
+
+    // Link kill switch: catalog rows are ignored entirely and the config
+    // container cost reasserts on the same sync (self-heals in ≤60s).
+    const killDb = (table) => {
+      if (table === 'products_catalog') {
+        throw new Error('products_catalog must not be queried when the link is off');
+      }
+      const query = {
+        select: jest.fn(async () => (table === 'pricing_config'
+          ? [{
+              config_key: 'onetime_preslab',
+              data: {
+                link_container_costs_to_catalog: false,
+                products: { talstar_p: { container_cost: 38.99, container_oz: 128 } },
+              },
+            }]
+          : [])),
+        orderBy: jest.fn(() => query),
+        then: (resolve) => resolve([]),
+      };
+      return query;
+    };
+    killDb.schema = { hasTable: jest.fn(async () => true) };
+    await expect(syncConstantsFromDB(killDb)).resolves.toBe(true);
+    expect(constants.SPECIALTY.preSlabTermiticide.products.talstar_p.containerCost).toBe(38.99);
+  });
+
   test('syncs trenching product/rate metadata from pricing_config', async () => {
     const db = pricingConfigDb([{
       config_key: 'onetime_trenching',

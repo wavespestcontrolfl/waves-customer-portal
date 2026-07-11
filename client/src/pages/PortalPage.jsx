@@ -770,7 +770,9 @@ function PhotoGallery({ photos }) {
             border: p.isBest ? `2px solid ${B.teal}` : `1px solid ${B.grayLight}`,
             boxShadow: selected === i ? `0 0 0 3px ${B.teal}44` : 'none',
           }}>
-            <img src={p.url} alt={`Lawn ${p.type || ''}`} loading="lazy" style={{
+            {/* Eager: presigned URL — lazy deferred the fetch past expiry
+                and thumbnails rendered blank. */}
+            <img src={p.url} alt={`Lawn ${p.type || ''}`} style={{
               width: '100%', height: '100%', objectFit: 'cover',
             }} />
             {p.isBest && (
@@ -1387,10 +1389,13 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
           >
             <a href={post.url} target={post.external ? '_blank' : undefined} rel={post.external ? 'noopener noreferrer' : undefined} style={{ display: 'block', textDecoration: 'none' }}>
               {post.image ? (
+                // no-referrer: blog images live on wavespestcontrol.com,
+                // whose Cloudflare hotlink protection 403s foreign referers.
                 <img
                   src={post.image}
                   alt=""
                   loading="lazy"
+                  referrerPolicy="no-referrer"
                   style={{ width: '100%', aspectRatio: compact ? '16 / 10' : '4 / 3', objectFit: 'cover', display: 'block' }}
                 />
               ) : (
@@ -8807,6 +8812,7 @@ function ServiceTracker() {
               <img
                 src={tracker.technician.photoUrl}
                 alt={tracker.technician?.firstName || techName}
+                referrerPolicy="no-referrer"
                 style={{
                   width: 56, height: 56, borderRadius: '50%',
                   objectFit: 'cover', border: `2px solid ${B.offWhite}`, flexShrink: 0,
@@ -10511,10 +10517,11 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                   }}
                 >
                   {doc.previewImage ? (
+                    // Eager: presigned URL — lazy deferred the fetch past
+                    // expiry (same class as the report photo strips).
                     <img
                       src={doc.previewImage}
                       alt=""
-                      loading="lazy"
                       style={{ width: '100%', aspectRatio: '4 / 3', objectFit: 'cover', display: 'block' }}
                     />
                   ) : (

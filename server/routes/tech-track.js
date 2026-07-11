@@ -129,6 +129,15 @@ router.post('/:id/en-route', async (req, res, next) => {
           });
         });
       } catch (err) {
+        // The shared writer's review-booking guard is an EXPECTED block here
+        // (this route allows 'pending' as a source status) — surface it as a
+        // conflict, not a 500.
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           return res.status(409).json({
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
@@ -221,6 +230,13 @@ router.post('/:id/on-site', async (req, res, next) => {
           });
         });
       } catch (err) {
+        // Same expected-block translation as the en-route leg above.
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           return res.status(409).json({
             error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,

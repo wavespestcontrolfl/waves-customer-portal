@@ -561,16 +561,140 @@ function HeaderTailSkeleton() {
   );
 }
 
-function NotFoundCard() {
+// extensionEligible comes from the /data 404 body: the server only sets it
+// when the token maps to a real, published estimate that died of expiry (and
+// the GATE_ESTIMATE_EXTENSION_REQUEST gate is on) — so garbage URLs never
+// grow a button that can only fail. First click self-serves a 7-day
+// extension (the server texts the refreshed link too); once the lifetime
+// auto-grant is used, later clicks just notify the office. onExtended lets
+// the parent re-fetch /data — the link is live again after an auto-grant.
+function NotFoundCard({ token = null, extensionEligible = false, onExtended = null }) {
+  // idle | sending | extended | requested | failed. Terminal states render
+  // even if a parent re-fetch flips extensionEligible off (a successful
+  // auto-grant makes the estimate viewable again, which does exactly that).
+  const [requestState, setRequestState] = useState('idle');
+  const [newExpiresAt, setNewExpiresAt] = useState(null);
+  // The server reports whether the estimate_extended SMS/email actually went
+  // out (no phone or email on file / opt-out / suppression / gates / template
+  // inactive all block them) — only claim channels that really fired.
+  const [smsSent, setSmsSent] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+
+  const requestExtension = async () => {
+    if (requestState !== 'idle' && requestState !== 'failed') return;
+    setRequestState('sending');
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/extension-request`, { method: 'POST' });
+      if (!r.ok) throw new Error(`extension_request_failed_${r.status}`);
+      const body = await r.json().catch(() => ({}));
+      if (body.autoExtended === true) {
+        setNewExpiresAt(body.expiresAt || null);
+        setSmsSent(body.smsSent === true);
+        setEmailSent(body.emailSent === true);
+        setRequestState('extended');
+      } else {
+        setRequestState('requested');
+      }
+    } catch {
+      setRequestState('failed');
+    }
+  };
+
+  const freshLinkSentence = smsSent && emailSent
+    ? ' We also texted and emailed you a fresh link.'
+    : smsSent
+      ? ' We also texted you a fresh link.'
+      : emailSent
+        ? ' We also emailed you a fresh link.'
+        : '';
+
+  // ET, matching the SMS and every other estimate-expiry surface — a
+  // West-Coast browser must not show a "through" date a day earlier than
+  // the deadline the text message quotes.
+  const expiryLabel = newExpiresAt
+    ? new Date(newExpiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' })
+    : null;
+
+  // A granted extension flips the whole card's story: the estimate is live
+  // again, so the "unavailable / call us" framing would contradict the
+  // outcome the customer just got.
+  const extendedNow = requestState === 'extended';
+
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
       <div style={{ fontSize: 34 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>Estimate unavailable</div>
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        This link may have expired or isn't valid. Call us at{' '}
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
-        and we'll get you sorted.
+      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+        {extendedNow ? "You're all set" : 'Estimate unavailable'}
       </div>
+      {!extendedNow ? (
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          This link may have expired or isn't valid. Call us at{' '}
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ color: COLORS.blueDark }}>{WAVES_PHONE_DISPLAY}</a>{' '}
+          and we'll get you sorted.
+        </div>
+      ) : null}
+      {token && (extensionEligible || requestState !== 'idle') ? (
+        requestState === 'extended' ? (
+          <>
+            <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+              Your estimate has been extended{expiryLabel ? ` through ${expiryLabel}` : ' by 7 days'}.
+              {freshLinkSentence}
+            </div>
+            {onExtended ? (
+              <button
+                type="button"
+                onClick={onExtended}
+                style={{
+                  minHeight: 48,
+                  border: 0,
+                  borderRadius: 10,
+                  padding: '0 24px',
+                  marginTop: 16,
+                  background: ESTIMATE_BUTTON_BG,
+                  color: COLORS.white,
+                  fontSize: 15,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                }}
+              >
+                View your estimate
+              </button>
+            ) : null}
+          </>
+        ) : requestState === 'requested' ? (
+          <div style={{ fontSize: 15, color: ESTIMATE_BODY, marginTop: 20, lineHeight: 1.5, fontWeight: 600 }}>
+            Request sent — we've let our office know you'd like more time on this estimate. We'll reach out shortly.
+          </div>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={requestExtension}
+              disabled={requestState === 'sending'}
+              style={{
+                minHeight: 48,
+                border: 0,
+                borderRadius: 10,
+                padding: '0 24px',
+                marginTop: 20,
+                background: ESTIMATE_BUTTON_BG,
+                color: COLORS.white,
+                fontSize: 15,
+                fontWeight: 800,
+                cursor: requestState === 'sending' ? 'not-allowed' : 'pointer',
+                opacity: requestState === 'sending' ? 0.8 : 1,
+              }}
+            >
+              {requestState === 'sending' ? 'Extending…' : 'Request an extension'}
+            </button>
+            {requestState === 'failed' ? (
+              <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 10, lineHeight: 1.5 }}>
+                We couldn't extend that just now — give us a call and we'll get it done over the phone.
+              </div>
+            ) : null}
+          </>
+        )
+      ) : null}
     </div>
   );
 }
@@ -2808,6 +2932,9 @@ export default function EstimateViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // Set from the /data 404 body — true only when the server confirms this
+  // token is a real published estimate that expired (see NotFoundCard).
+  const [extensionEligible, setExtensionEligible] = useState(false);
   // Staff draft preview (?adminPreview=1 — opened from the estimate tool's
   // "Customer View" / the estimates list's Preview). Makes the /data fetch
   // attach the staff session's Bearer token so the server will serve an
@@ -3021,6 +3148,8 @@ export default function EstimateViewPage() {
     }
     const r = await fetch(`${API_BASE}/estimates/${token}/data${params.length ? `?${params.join('&')}` : ''}`, fetchOpts);
     if (r.status === 404) {
+      const notFoundBody = await r.json().catch(() => ({}));
+      setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
       setNotFound(true);
       setLoading(false);
       return;
@@ -3030,6 +3159,11 @@ export default function EstimateViewPage() {
       throw new Error(`estimate fetch failed: ${r.status}`);
     }
     initialViewCountedRef.current = true;
+    // A load can succeed AFTER a 404 set notFound — the expired-screen
+    // extension auto-grant revives the estimate and re-fetches — so clear
+    // the dead-end state or the loaded data would render the NotFoundCard.
+    setNotFound(false);
+    setExtensionEligible(false);
     const body = await r.json();
     // Glass COPY default: set the module state BEFORE setData so every
     // glassCopyActive() consumer sees it on the render that paints the loaded
@@ -3551,7 +3685,28 @@ export default function EstimateViewPage() {
     );
   }
   if (notFound || !data) {
-    return <Page><NotFoundCard /></Page>;
+    return (
+      <Page>
+        <NotFoundCard
+          token={token}
+          extensionEligible={extensionEligible}
+          onExtended={() => {
+            // Refresh semantics, NOT a first load: the initial 404 never
+            // marked the view counted, so a bare loadEstimate() would flip
+            // loading=true — swapping this card for the skeleton, stranding
+            // the skeleton forever on a network rejection, and losing the
+            // "You're all set" state on a 5xx. As a refresh the card stays
+            // up until /data actually 200s (then the live estimate renders
+            // in place); on failure nothing changes and the card—with its
+            // success copy and retry button—survives. The server counts the
+            // revived estimate's first real view regardless (?refresh=1 is
+            // only honored once viewed_at is set).
+            initialViewCountedRef.current = true;
+            loadEstimate().catch(() => {});
+          }}
+        />
+      </Page>
+    );
   }
 
   const { estimate, pricing, cta } = data;

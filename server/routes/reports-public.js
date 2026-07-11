@@ -373,11 +373,12 @@ router.get('/project/:token/data', async (req, res, next) => {
         ? { accessKeyId: config.s3.accessKeyId, secretAccessKey: config.s3.secretAccessKey }
         : undefined,
     });
+    const { CUSTOMER_DWELL_TTL_SECONDS } = require('../services/photos');
     const photosWithUrls = await Promise.all(photos.map(async (ph) => {
       let url = null;
       if (config.s3?.bucket && ph.s3_key) {
         try {
-          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: 3600 });
+          url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: config.s3.bucket, Key: ph.s3_key }), { expiresIn: CUSTOMER_DWELL_TTL_SECONDS });
         } catch { /* fall through — photo will render as missing */ }
       }
       return { id: ph.id, category: ph.category, caption: ph.caption, visit: ph.visit, url };

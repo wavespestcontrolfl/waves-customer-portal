@@ -90,6 +90,21 @@ const addServiceRequestLimiter = rateLimit({
   message: { error: 'Too many service requests submitted. Please wait before sending another or call our office.' },
 });
 
+const extensionRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Dark-launch contract: with the gate off this endpoint must be an
+  // indistinguishable generic 404 — a 429 on the sixth probe would reveal it
+  // exists. The limiter only engages once the feature is live.
+  skip: () => !featureGates.isEnabled('estimateExtensionRequest'),
+  // Shared key generator: /64-collapsed IPv6 fallback, so a client can't
+  // rotate addresses within their subnet to evade the 5/hour ceiling.
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
+});
+
 function scheduledDateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().split('T')[0];
@@ -1879,6 +1894,17 @@ function rawQuoteRequiredReason(item = {}) {
 function fmtMoney(n) {
   const v = Math.round(Number(n || 0) * 100) / 100;
   return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+}
+
+// Price label for the "Estimate viewed" admin notification. One-time-only
+// estimates (pre-slab, WDO) have monthly_total 0/null — rendering them with
+// monthly framing produced "$0/mo as proposed" in the bell.
+function proposalPriceLabel(estimate) {
+  const monthly = Number(estimate?.monthly_total || 0);
+  if (monthly > 0) return `${fmtMoney(monthly)}/mo as proposed`;
+  const oneTime = Number(estimate?.onetime_total || 0);
+  if (oneTime > 0) return `${fmtMoney(oneTime)} one-time as proposed`;
+  return `${fmtMoney(0)}/mo as proposed`;
 }
 
 function roundPositiveMoney(value) {
@@ -6786,7 +6812,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -9109,6 +9135,174 @@ router.post('/:token/bundle-inquiry', addServiceRequestLimiter, async (req, res,
   }
 });
 
+// Same accepted formats as the estimate-slots-public router's TOKEN_RE:
+// legacy admin slug tokens (nameSlug-8hex) AND the 64-hex format every
+// post-estimate-versions token uses. Malformed tokens 404 before any DB read.
+const EXTENSION_REQUEST_TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
+
+// POST /api/estimates/:token/extension-request — one-click "my link expired
+// but I still want this" from the React expired/not-found screen.
+// Contract (AGENTS.md public-by-token allowlist): estimate token format gate,
+// generic 404 (unknown token, malformed token, ineligible row, and gate-off
+// are indistinguishable), 5 req/hr rate limit, dark behind
+// GATE_ESTIMATE_EXTENSION_REQUEST.
+//
+// First click per estimate AUTO-GRANTS a 7-day extension (owner directive
+// 2026-07-10): the shared estimate-extension service pushes expires_at,
+// revives the sweep-expired status, and texts the customer the refreshed
+// link via the `estimate_extended` template (consent/opt-out/gate
+// enforcement inside sendCustomerMessage). The auto-grant is capped at ONE
+// per estimate for the row's lifetime (`estimate_data.extensionAutoGrantedAt`
+// — a public endpoint must not be an infinite self-serve snooze button);
+// later requests fall back to notify-office-only, and the office extends
+// manually via POST /api/admin/estimates/:id/extend on their own judgment.
+// Every path raises an in-app admin notification.
+router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateExtensionRequest')) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    const NotificationService = require('../services/notification-service');
+    const expiredLine = estimate.expires_at
+      ? `link expired ${new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`
+      : 'link expired';
+
+    // Both stamps live in DEDICATED estimates columns (migration
+    // 20260711000001), NOT estimate_data — the blob has full read-modify-
+    // write writers (e.g. the membership-snapshot reconciler) that could
+    // silently erase jsonb stamps and un-burn the lifetime cap. Columns are
+    // immune to blob races and need no shape/format/cast guards.
+    const DEDUPE_OPEN = (b) => b.whereNull('extension_requested_at')
+      .orWhere('extension_requested_at', '<', db.raw("NOW() - interval '24 hours'"));
+
+    // Step 1 — try to claim THE lifetime auto-grant. One conditional UPDATE
+    // checks the 24h dedupe AND the unburned cap AND records BOTH stamps, so
+    // the burn is atomic with the claim: concurrent POSTs can't double-grant,
+    // and there is no window where an extension exists without its burn.
+    // Burn-BEFORE-grant is the fail-closed direction.
+    const autoClaimed = await db('estimates')
+      .where({ id: estimate.id })
+      .whereNull('extension_auto_granted_at')
+      .where(DEDUPE_OPEN)
+      .update({
+        extension_requested_at: db.fn.now(),
+        extension_auto_granted_at: db.fn.now(),
+      });
+
+    if (autoClaimed) {
+      // Auto-grant path: the EXTENSION is the deliverable.
+      let granted;
+      try {
+        const { extendEstimate } = require('../services/estimate-extension');
+        granted = await extendEstimate({
+          estimate,
+          days: 7,
+          entryPoint: 'public_estimate_extension_request',
+          workflow: 'public_estimate_extension_request',
+          smsMetadata: { original_message_type: 'estimate_extended_auto' },
+        });
+      } catch (err) {
+        // Errors known to be pre-write — validation 400s and the guarded
+        // write's 409, both thrown before or instead of any mutation
+        // (post-write SMS plumbing inside extendEstimate never throws; see
+        // its POST-WRITE INVARIANT) — release BOTH stamps: nothing happened,
+        // a later retry may auto-grant. Any other error is ambiguous (the
+        // expiry write may have committed), so the BURN stays — un-burning
+        // over a granted extension would let this token self-serve another
+        // "first" grant once it lapses — but the DEDUPE stamp is released so
+        // the customer's retry reaches the notify-office path below and a
+        // human sees it, instead of a false "alreadyRequested" for 24h with
+        // nothing delivered.
+        const knownPreWrite = err.statusCode === 400 || err.statusCode === 409;
+        if (!knownPreWrite) {
+          logger.error(`[estimate-extension-request] ambiguous auto-grant failure for estimate ${estimate.id} — keeping burn (fail closed)`);
+        }
+        await db('estimates').where({ id: estimate.id }).update(
+          knownPreWrite
+            ? { extension_requested_at: null, extension_auto_granted_at: null }
+            : { extension_requested_at: null },
+        ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
+        return res.status(500).json({ error: 'extension_request_failed' });
+      }
+
+      // The office must hear about every self-serve grant (AGENTS.md
+      // contract). notifyAdmin swallows insert errors and returns null, so
+      // retry once; on a double failure the grant stands (the customer
+      // already has it and the row carries extensionAutoGrantedAt), so log
+      // loudly rather than confusing the customer with a failure they can't
+      // act on.
+      const smsLine = granted.smsResult.sent
+        ? 'confirmation SMS sent'
+        : `SMS not sent (${granted.smsResult.reason || 'blocked'})`;
+      const emailLine = granted.emailResult?.sent
+        ? 'confirmation email sent'
+        : `email not sent (${granted.emailResult?.reason || 'blocked'})`;
+      const notifyAutoGrant = () => NotificationService.notifyAdmin(
+        'estimate',
+        `Extension auto-granted: ${estimate.customer_name}`,
+        `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}; ${emailLine}`,
+        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+      );
+      const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
+      if (!autoNotification) {
+        logger.error(`[estimate-extension-request] auto-grant admin notification failed twice for estimate ${estimate.id} — grant stands, office unnotified`);
+        // Free the 24h dedupe window (the burn stays) so a retry during a
+        // notification outage reaches the notify-only fallback below and
+        // pages the office about the grant, instead of `alreadyRequested`
+        // hiding a self-serve extension nobody heard about for a day.
+        await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
+          .catch((e) => logger.warn(`[estimate-extension-request] dedupe release after alert failure failed for estimate ${estimate.id}: ${e.message}`));
+      }
+
+      return res.status(201).json({
+        success: true,
+        autoExtended: true,
+        expiresAt: granted.newExpiry.toISOString(),
+        smsSent: !!granted.smsResult.sent,
+        emailSent: !!granted.emailResult?.sent,
+      });
+    }
+
+    // Step 2 — cap already burned (or the auto claim lost a race and burned
+    // the dedupe window): try the plain 24h notify-only claim.
+    const claimed = await db('estimates')
+      .where({ id: estimate.id })
+      .where(DEDUPE_OPEN)
+      .update({ extension_requested_at: db.fn.now() });
+    if (!claimed) {
+      return res.json({ success: true, alreadyRequested: true });
+    }
+
+    // Notify-office-only fallback. Here the notification IS the deliverable —
+    // check the value (NotificationService.create swallows errors into null).
+    // On failure, release the claim (else the retry is suppressed for 24h
+    // with nothing delivered) and 500 so the customer gets the "call us"
+    // fallback instead of a false "request sent".
+    const notification = await NotificationService.notifyAdmin(
+      'estimate',
+      `Extension requested (again): ${estimate.customer_name}`,
+      `${estimate.address || 'no address'} — ${expiredLine}; customer already used their self-serve extension and asked for more time`,
+      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+    );
+    if (!notification) {
+      await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
+        .catch((e) => logger.warn(`[estimate-extension-request] claim release failed for estimate ${estimate.id}: ${e.message}`));
+      return res.status(500).json({ error: 'extension_request_failed' });
+    }
+
+    res.status(201).json({ success: true, autoExtended: false });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', async (req, res, next) => {
   try {
@@ -10528,6 +10722,28 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
+}
+
+// Whether this estimate may receive a customer "extension request" from the
+// React expired/not-found screen. Deliberately the complement of the narrow
+// expired slice of isEstimateCustomerViewable: a real, PUBLISHED estimate the
+// customer once legitimately held, now dead only because time ran out (past
+// expires_at, or the daily sweep already flipped status to 'expired').
+// Publication is proven by sent_at/viewed_at, NOT by status: the expiration
+// sweep flips ANY past-due non-terminal row to 'expired' — including drafts
+// and scheduled sends that never went out — so a bare status check would
+// expose the extension UI for estimates the customer never held. (This also
+// means a send_failed row only qualifies if some channel actually delivered
+// enough to stamp sent_at.) Everything else stays ineligible:
+// accepted/declined still render in full (no expired screen to ask from), and
+// archived rows are office-retired. Gate + rate limit live at the call sites.
+function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
+  if (!estimate || estimate.archived_at) return false;
+  if (['accepted', 'declined'].includes(estimate.status)) return false;
+  if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
+  if (!estimate.sent_at && !estimate.viewed_at) return false;
+  if (estimate.status === 'expired') return true;
+  return !!(estimate.expires_at && new Date(estimate.expires_at) < now);
 }
 
 function resolveEstimateDeclineGuard(estimate, now = new Date()) {
@@ -14740,6 +14956,19 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
       && Boolean(await verifyStaffBearer(req));
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
+      // Carries exactly one extra bit beyond the bare 404: this token maps to
+      // a real, published estimate that died of expiry (never a draft), so the
+      // SPA's not-found screen may offer the "Request an extension" button.
+      // The legacy SSR path already reveals more for the same rows (a
+      // personalized expired page), and POST /:token/extension-request
+      // re-checks eligibility + gate server-side regardless. The flag is only
+      // ever INCLUDED when true — an explicit `false` here would distinguish
+      // real-but-ineligible tokens (drafts, archived, send_failed) from
+      // unknown ones and break the generic-404 contract.
+      if (featureGates.isEnabled('estimateExtensionRequest')
+        && isEstimateExtensionRequestEligible(estimate)) {
+        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      }
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -14804,7 +15033,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         await NotificationService.notifyAdmin(
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — ${fmtMoney(estimate.monthly_total || 0)}/mo as proposed`,
+          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
           { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
@@ -15243,6 +15472,7 @@ module.exports.recurringServiceKey = recurringServiceKey;
 module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTierDiscount;
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
+module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;

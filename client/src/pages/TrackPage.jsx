@@ -338,6 +338,7 @@ function TechBlock({ tech, size = 'md' }) {
         <img
           src={tech.photoUrl}
           alt={tech.firstName || ''}
+          referrerPolicy="no-referrer"
           style={{ width: px, height: px, borderRadius: '50%', objectFit: 'cover', border: `2px solid ${TRACK_SURFACE.border}` }}
         />
       ) : (

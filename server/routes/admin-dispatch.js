@@ -1602,6 +1602,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // A pending outbound-callback booking must be office-CONFIRMED before any
+    // day-of transition — advancing it straight to en_route texts the customer a
+    // tracking link, bypassing the review (and its reminder-arming confirm hook).
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && svc.status === 'pending' && !svc.customer_confirmed
+        && DAY_OF_LIFECYCLE_STATUSES.has(toStatus)) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
+
     // A no-show is terminal. Once a row is no_show this route must not flip
     // it anywhere: re-sending no_show is idempotent success; any other
     // target (cancelled/completed/...) would erase the missed-visit state
@@ -1757,6 +1772,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // columns (no constraint conflict).
         const lifecycleUpdates = {};
         const lifecycleAt = new Date();
+        if (toStatus === 'confirmed') {
+          // Same lifecycle semantics as the admin-schedule status route. For a
+          // pending outbound-review booking this is the flag the shared-writer
+          // guard and the customer self-service filters key on — without it a
+          // dispatch-side confirm left the row permanently review-locked.
+          lifecycleUpdates.customer_confirmed = true;
+        }
         if (toStatus === 'on_site') {
           Object.assign(lifecycleUpdates, buildOnSiteLifecycleUpdates(svc, lifecycleAt));
         }
@@ -1787,12 +1809,31 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // transitionJobStatus throws when fromStatus mismatch — surface
       // as 409 so the client can refetch and retry. Other errors
       // bubble to the outer next(err).
+      if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
       if (err && err.message && err.message.includes('not in state')) {
         return res.status(409).json({
           error: `Job is no longer in state ${fromStatus} (concurrent transition). Refresh and try again.`,
         });
       }
       throw err;
+    }
+
+    // Office confirmation of a pending outbound-review booking from THIS route
+    // must run the same side effects as the admin-schedule confirm path (arm
+    // deferred reminders, convert the originating call lead, resolve the
+    // outbound_booking_review card) — shared hook so the two can't drift.
+    // Post-commit + best-effort, same as every other block below.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      if (toStatus === 'confirmed' && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION) {
+        const { runOutboundReviewConfirmHook } = require('../services/outbound-review-confirm');
+        await runOutboundReviewConfirmHook(db, svc, 'admin-dispatch');
+      }
     }
 
     // Customer-visible track_state is owned by services/track-transitions.js.
@@ -3946,6 +3987,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
           preCommitCompletionPhotoRows = [];
         }
+        if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+          // Completing a pending outbound-review booking is an expected block
+          // from the shared writer — record the failed attempt and conflict.
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
+          return res.status(409).json({
+            error: 'This outbound-callback booking is pending office review — confirm it before dispatching.',
+            code: 'outbound_review_unconfirmed',
+          });
+        }
         if (err && err.message && err.message.includes('not in state')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err);
           return res.status(409).json({
@@ -5144,6 +5194,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const reviewSuffix = bundledReviewUrl
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
+
+    // Digital business card: mint the customer's card off their first
+    // completed visit, tied to the tech on record (services/customer-card.js).
+    // Fire-and-forget — a mint failure never blocks the completion, and the
+    // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
+    // Internal-only completion profiles (e.g. Waves Assessment) suppress all
+    // customer comms/public tokens above, so they must not mint a
+    // customer-facing card either (Codex P1 on PR #2588). Non-performed
+    // outcomes also skip: no service was delivered, and minting would tie
+    // the lifetime card to the wrong first visit/tech. 'incomplete' does NOT
+    // return early in this handler — it records the alert and continues — so
+    // it belongs here too, matching the referral-credit non-performed guard
+    // (Codex P2 #2588 r2 + r5).
+    const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
+    if (!isInternalOnlyCompletion && cardMintOutcomePerformed) {
+      try {
+        const CustomerCardService = require('../services/customer-card');
+        void CustomerCardService.ensureCardForCompletion({
+          customerId: svc.customer_id,
+          serviceRecordId: record.id,
+          scheduledServiceId: svc.id,
+        }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
+      } catch (e) {
+        logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);
+      }
+    }
 
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
@@ -6666,6 +6742,23 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newDate, newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+
+    // A pending outbound-callback booking must be office-CONFIRMED before it can
+    // be rescheduled — SmartRebooker would flip it to 'confirmed' and fire comms
+    // without the confirmation hook's reminder/lead/triage side effects. Confirm
+    // it first, then reschedule.
+    {
+      const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+      const reviewRow = await db('scheduled_services').where({ id: req.params.serviceId })
+        .first('source_action', 'status', 'customer_confirmed');
+      if (reviewRow && reviewRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+        && reviewRow.status === 'pending' && !reviewRow.customer_confirmed) {
+        return res.status(409).json({
+          error: 'This outbound-callback booking is pending office review — confirm it before rescheduling.',
+          code: 'outbound_review_unconfirmed',
+        });
+      }
+    }
 
     // Series scope shifts every future occurrence — skip the customer-confirm
     // SMS path (which only handles a single appt) and commit directly.

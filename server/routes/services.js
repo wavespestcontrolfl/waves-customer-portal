@@ -184,12 +184,13 @@ router.get('/:id', async (req, res, next) => {
         .where({ service_record_id: service.id })
         .orderBy('sort_order');
 
-    // Generate signed URLs for photos
+    // Generate signed URLs for photos — customer-dwell TTL, not the 5-minute
+    // getViewUrl default (portal pages sit open far longer than that).
     const photosWithUrls = await Promise.all(photos.map(async (photo) => ({
       id: photo.id,
       type: photo.photo_type,
       caption: photo.caption,
-      url: await PhotoService.getViewUrl(photo.s3_key),
+      url: await PhotoService.getViewUrl(photo.s3_key, PhotoService.CUSTOMER_DWELL_TTL_SECONDS),
     })));
 
     res.json({

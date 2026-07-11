@@ -190,6 +190,7 @@ function GraduationNote({ g }) {
   const context = [];
   if (j.judged > 0) context.push(`${j.judged} live judged (${Math.round((j.unsafeRate || 0) * 100)}% unsafe)`);
   if (j.backfillJudged > 0) context.push(`${j.backfillJudged} backfill excluded`);
+  if (j.priorVersionJudged > 0) context.push(`${j.priorVersionJudged} prior-version excluded`);
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
@@ -198,6 +199,18 @@ function GraduationNote({ g }) {
       )}
       {g.eligibleFor === "auto_send" && (
         <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
+      )}
+      {/* Intent is AT auto_send but the send-time gate is blocking (e.g. a
+          prompt bump reset the cohort evidence) — mirror the executor. */}
+      {g.autoSendHealth && !g.autoSendHealth.sendReady && (
+        <>
+          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 800, borderRadius: 6, padding: "2px 8px" }}>
+            ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
+          </span>
+          <span style={{ color: D.muted }}>
+            Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.
+          </span>
+        </>
       )}
       {!g.eligibleFor && rungLabel && (
         <span style={{ color: D.muted }}>
@@ -291,11 +304,86 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
   );
 }
 
+// Loop 2 review surface: the weekly distilled voice profile parks here as
+// PENDING until the owner approves or rejects it. Approving is what makes it
+// live (the dark phone agent reads only the approved row) — style guidance
+// only, so the whole review is a read + one click.
+function VoiceProfileSection({ profiles, busy, onReview }) {
+  const pending = profiles?.pending || null;
+  const approved = profiles?.approved || null;
+  const [expanded, setExpanded] = useState(false);
+  if (!pending && !approved) return null;
+  const row = pending || approved;
+  const flags = (() => {
+    try {
+      const s = typeof row.source_stats === "string" ? JSON.parse(row.source_stats) : row.source_stats;
+      return s?.flags || [];
+    } catch { return []; }
+  })();
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>Voice profile</div>
+        <div style={{ fontSize: 12, color: D.muted }}>
+          Distilled weekly from real Waves calls + texts. Approved profile feeds the phone agent; style only, never facts.
+        </div>
+      </div>
+      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, fontWeight: 850, color: D.heading }}>v{row.version}</span>
+          {pending ? (
+            <Chip tone={{ bg: "#FEF3C7", fg: "#92400E", label: "Pending review" }}>Pending review</Chip>
+          ) : (
+            <Chip tone={{ bg: "#DCFCE7", fg: D.green, label: "Approved" }}>Approved{row.reviewed_by ? ` by ${row.reviewed_by}` : ""}</Chip>
+          )}
+          {flags.length > 0 && (
+            <span style={{ background: "#FEE2E2", color: D.red, fontWeight: 750, borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>
+              ⚠ style-only check flagged: {flags.join(", ")}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${D.border}`, color: D.text, borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+          >
+            {expanded ? "Collapse" : "Read profile"}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: D.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: expanded ? "none" : 90, overflow: "hidden" }}>
+          {row.profile_text}
+        </div>
+        {pending && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onReview(pending, "approve")}
+              style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+            >
+              Approve — make this the live voice
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onReview(pending, "reject")}
+              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 750, cursor: "pointer" }}
+            >
+              Reject
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AgentShadowDraftsPage({ embedded = false }) {
   const [data, setData] = useState(null);
   const [scores, setScores] = useState(null);
   const [modes, setModes] = useState(null);
+  const [profiles, setProfiles] = useState(null);
   const [modeBusy, setModeBusy] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
   const [intentFilter, setIntentFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -313,12 +401,44 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
       setData(drafts);
       setScores(scoreRows);
       setModes(modeRows);
+      // The voice-profile card is additive — a failure here (e.g. the
+      // voice_profiles migration not yet run) must not blank the whole
+      // established Shadow Drafts tab, so it loads outside the shared
+      // Promise.all and degrades to "no card".
+      try {
+        setProfiles(await adminFetch("/admin/agents/voice-profiles"));
+      } catch {
+        setProfiles(null);
+      }
     } catch (err) {
       setError(err.message || "Failed to load shadow drafts.");
     } finally {
       setLoading(false);
     }
   }, [intentFilter]);
+
+  const reviewProfile = useCallback(async (row, action) => {
+    if (action === "approve") {
+      const ok = window.confirm(
+        `Approve voice profile v${row.version}?\n\nIt becomes the live voice guidance for the phone agent (and any future consumer). The previous approved version is superseded.`
+      );
+      if (!ok) return;
+    }
+    setProfileBusy(true);
+    setError("");
+    try {
+      await adminFetch(`/admin/agents/voice-profiles/${row.id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+      const fresh = await adminFetch("/admin/agents/voice-profiles");
+      setProfiles(fresh);
+    } catch (err) {
+      setError(err.message || "Failed to review the voice profile.");
+    } finally {
+      setProfileBusy(false);
+    }
+  }, []);
 
   useEffect(() => {
     load();
@@ -440,6 +560,8 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
             </div>
           </div>
         )}
+
+        <VoiceProfileSection profiles={profiles} busy={profileBusy} onReview={reviewProfile} />
 
         {(scores?.intents || []).length > 0 && (
           <div className="shadow-scores-grid">

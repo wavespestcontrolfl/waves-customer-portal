@@ -54,12 +54,11 @@ const TRACK_PUBLIC_GEOCODE_TIMEOUT_MS = 1500;
 // vehicle coords + ETA between transitions.
 const EN_ROUTE_POLL_SECONDS = 30;
 
-// Customer track page TTL — long enough that the page can be left open
-// on a phone for a tech's full visit window without 403'ing on photo
-// thumbnails, short enough that a leaked URL doesn't have indefinite
-// reach. resolveTechPhotoUrl defaults to 900 (15min); we match it here
-// so a single page-load presigns the whole bundle on one cadence.
-const SERVICE_PHOTO_TTL_SECONDS = 15 * 60;
+// Customer track page TTL — the page gets left open on a phone well past a
+// visit window (backgrounded tabs), and 15-minute links 403'd thumbnails on
+// re-render. Shared customer-dwell TTL (24h): long enough for any realistic
+// session, still bounded if a URL leaks.
+const SERVICE_PHOTO_TTL_SECONDS = PhotoService.CUSTOMER_DWELL_TTL_SECONDS;
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -365,7 +364,7 @@ router.get('/:token', async (req, res, next) => {
     // Business). Read-time presigning replaces the deleted public
     // proxy from PR #344 (P0 fix per Codex).
     const techPhotoUrl = row.technician_id
-      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url)
+      ? await resolveTechPhotoUrl(row.tech_photo_s3_key, row.tech_photo_url, SERVICE_PHOTO_TTL_SECONDS)
       : null;
 
     // A no-show is an operational-status flip (admin-dispatch) that does

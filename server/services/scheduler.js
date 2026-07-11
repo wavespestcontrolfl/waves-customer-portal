@@ -533,6 +533,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // Customer duplicate auto-merge — 4:40 AM daily. Green-tier only (shell
+  // rows: same phone, compatible identity, zero billing/portal artifacts);
+  // everything ambiguous stays in the /admin/customers/duplicates review
+  // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
+  // opt-in in every environment). Every merge is journaled + admin-notified.
+  // =========================================================================
+  cron.schedule('40 4 * * *', async () => {
+    if (!isEnabled('customerDedupeAutoMerge')) return;
+    logger.info('Running: Customer duplicate auto-merge sweep');
+    try {
+      // runExclusive: read-then-act — an overlapping tick could pick the same
+      // loser row before the first merge soft-deletes it.
+      await runExclusive('customer-dedupe-auto-merge', async () => {
+        const { runAutoMergeSweep } = require('./customer-dedupe');
+        const result = await runAutoMergeSweep();
+        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+      });
+    } catch (err) {
+      logger.error(`Customer dedupe sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY VENDOR PRICE SCAN (gated: cronJobs AND priceScanWeekly)
   // Scans top-spend products for a cheaper competitor per-unit price and stages a
   // price-match draft for the SiteOne rep in /admin/price-match. Never auto-sends.
@@ -997,6 +1020,27 @@ function initScheduledJobs() {
       await runExclusive('voice-corpus-miner', () => mineVoiceCorpus({ sinceDays: 3 }));
     } catch (err) {
       logger.error(`Voice-corpus miner failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY SUN 3:15AM ET — Voice-profile distiller (brand-voice loop,
+  // Loop 2). Distills the redacted corpus into a style-only voice profile,
+  // parked as a PENDING voice_profiles row for one-click approval in the
+  // Agents hub — nothing auto-applies. One DEEP call per run; skips itself
+  // when a pending profile awaits review or no new corpus accrued.
+  // =========================================================================
+  cron.schedule('15 3 * * 0', async () => {
+    if (!isEnabled('voiceProfileDistiller')) return;
+    logger.info('Running: Voice-profile distiller');
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { distillVoiceProfile } = require('./voice-profile-distiller');
+      const result = await runExclusive('voice-profile-distiller', () => distillVoiceProfile());
+      if (result?.skipped) logger.info(`[voice-profile] run skipped: ${result.skipped}`);
+      else if (result?.version) logger.info(`[voice-profile] run complete: v${result.version} pending review`);
+    } catch (err) {
+      logger.error(`Voice-profile distiller failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3693,6 +3737,27 @@ function initScheduledJobs() {
       await runUnassignedOverdueCheck();
     } catch (err) {
       logger.error(`[unassigned-overdue-detector] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // Call-ingest completeness watchdog — every 30 min, diff Twilio's own call
+  // ledger against call_log and ring an admin bell for any answered inbound
+  // call the pipeline never received (webhook outage / misrouted number).
+  // Born from the 2026-07 reconciliation that found 391 Feb–Mar calls (and
+  // 11 later stragglers, incl. real booked jobs) silently never ingested.
+  // Dark behind GATE_CALL_INGEST_WATCHDOG; read-only against Twilio.
+  // See server/services/call-ingest-watchdog.js.
+  // =========================================================================
+  cron.schedule('7,37 * * * *', async () => {
+    try {
+      const { runCallIngestWatchdog } = require('./call-ingest-watchdog');
+      const result = await runCallIngestWatchdog();
+      if (!result.skipped && (result.missed > 0 || result.alerted > 0)) {
+        logger.warn(`[call-ingest-watchdog] scanned=${result.scanned} missed=${result.missed} alerted=${result.alerted}${result.aggregate ? ' (aggregate)' : ''}`);
+      }
+    } catch (err) {
+      logger.error(`Call-ingest watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

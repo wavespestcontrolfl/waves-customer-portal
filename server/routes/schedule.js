@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString } = require('../utils/datetime-et');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 
 router.use(authenticate);
 
@@ -34,7 +35,7 @@ router.get('/', async (req, res, next) => {
       // source_action, and `NOT (NULL = x)` would filter them out.
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
-        .orWhereNot('scheduled_services.source_action', 'ai_call_pipeline_followup')
+        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
         .orWhereNot('scheduled_services.status', 'pending')
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
@@ -86,7 +87,7 @@ router.post('/:id/confirm', async (req, res, next) => {
     // A call-created follow-up (visit 2) is dispatch-owned until the office
     // confirms the exact time — the row is hidden from the customer list
     // above; refuse a direct confirm too (same 404 shape, no info leak).
-    if (service.source_action === 'ai_call_pipeline_followup'
+    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
       && service.status === 'pending'
       && !service.customer_confirmed) {
       return res.status(404).json({ error: 'Appointment not found or already confirmed' });
@@ -140,7 +141,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
     // dispatch hasn't confirmed yet is hidden from the customer, so a
     // direct reschedule against its id must refuse too (same 404 shape,
     // no info leak).
-    if (service.source_action === 'ai_call_pipeline_followup'
+    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
       && service.status === 'pending'
       && !service.customer_confirmed) {
       return res.status(404).json({ error: 'Appointment not found' });
@@ -183,7 +184,7 @@ router.get('/next', async (req, res, next) => {
       // customer's next appointment (NULL-safe De Morgan legs).
       .where((qb) => qb
         .whereNull('scheduled_services.source_action')
-        .orWhereNot('scheduled_services.source_action', 'ai_call_pipeline_followup')
+        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
         .orWhereNot('scheduled_services.status', 'pending')
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())

@@ -16,7 +16,7 @@
 const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
-const { wrapNewsletter, wrapServiceEmail, ensureLegalTextFooter } = require('./email-template');
+const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
 
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
 const GLOBAL_SUPPRESSION_TYPES = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -100,10 +100,17 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
   const rawHtml = substitute(htmlBody || '', customer);
   const rawText = substitute(textBody || '', customer);
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
+  // Every automation renders the service chrome — "The Waves Newsletter"
+  // header is reserved for actual newsletter sends (owner call 2026-07-10;
+  // the new_lead intro was going out dressed as the newsletter). Marketing-
+  // stream automations (asm_group='newsletter') stay on the marketing ASM/
+  // suppression group, so the visible unsubscribe link must survive the
+  // wrapper swap — same pattern as referral.invite in email-template-library.
+  const unsubFooter = isNewsletterAutomation(template) && unsubscribeUrl
+    ? `<a href="${unsubscribeUrl}" style="color:${blockPalette().footerLink};text-decoration:underline;">Unsubscribe</a> from these emails.`
+    : null;
   const html = rawHtml
-    ? isNewsletterAutomation(template)
-      ? wrapNewsletter({ body: rawHtml, unsubscribeUrl })
-      : wrapServiceEmail({ body: rawHtml })
+    ? wrapServiceEmail({ body: rawHtml, footerNote: unsubFooter })
     : '';
   const text = isNewsletterAutomation(template)
     ? ensureLegalTextFooter(rawText, { unsubscribeUrl })

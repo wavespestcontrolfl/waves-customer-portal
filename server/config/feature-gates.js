@@ -46,6 +46,15 @@ const gates = {
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
 
+  // Customer duplicate auto-merge (customer-dedupe.js green tier). An
+  // auto-WRITER — merges shell duplicate rows into their real customer on the
+  // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
+  // environment; dev/staging pointed at prod snapshots must never merge rows
+  // silently. Detection + the /admin/customers/duplicates review queue are
+  // read-only and NOT behind this gate. Kill switch: unset or set to any
+  // non-'true' value; every merge is journaled and hand-reversible.
+  customerDedupeAutoMerge: process.env.GATE_CUSTOMER_DEDUPE_AUTO_MERGE === 'true',
+
   // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
   // /pest-identifier). Public, unauthenticated, and every accepted upload is a
   // paid dual-model vision call — explicit opt-in in EVERY environment, and the
@@ -73,6 +82,15 @@ const gates = {
   // text/email real customers. Still subject to twilioSms + per-customer pref.
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
+  // Digital business card — the card.issued email a customer gets after their
+  // FIRST completed visit (services/customer-card.js). The card row and the
+  // /card/:token page are NOT behind this gate (tokenized, unlisted,
+  // customer-initiated — same contract as the other public token pages); the
+  // gate covers ONLY the outbound email. Customer-facing auto-send → explicit
+  // opt-in in EVERY environment per house rule, so a dev/preview env with real
+  // SendGrid creds can't email real customers on a completion.
+  digitalBusinessCard: process.env.GATE_DIGITAL_BUSINESS_CARD === 'true',
 
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
@@ -115,6 +133,13 @@ const gates = {
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
   // No sends, no customer-visible effect; prod opt-in per house pattern.
   voiceCorpusMiner: isProd ? process.env.GATE_VOICE_CORPUS_MINER === 'true' : true,
+
+  // Voice-Profile Distiller (brand-voice loop, Loop 2) — weekly distillation
+  // of the redacted corpus into a style-only voice profile, PARKED as a
+  // pending voice_profiles row for one-click approval in the Agents hub.
+  // Nothing auto-applies; no sends, no customer-visible effect; prod opt-in
+  // per house pattern.
+  voiceProfileDistiller: isProd ? process.env.GATE_VOICE_PROFILE_DISTILLER === 'true' : true,
 
   // Shadow Judge (brand-voice loop, Phase C) — nightly scoring of
   // message_drafts status='shadow' rows against the reply a human actually
@@ -356,6 +381,29 @@ const gates = {
   // (established business relationship). do-not-contact always overrides.
   // Sends customer SMS — owner-flip only.
   callInboundImpliedConsent: process.env.GATE_CALL_INBOUND_IMPLIED_CONSENT === 'true',
+  // Payer (third-party Bill-To) linkage from a call: when a caller names a
+  // DISTINCT paying party (e.g. "the owner Jim pays by credit card", "bill the
+  // management company"), find-or-create a `payers` Bill-To from that contact
+  // and stamp payer_id on the booking so the completion invoice routes to the
+  // payer's AP inbox. Reuses the existing (live) payer subsystem; only fires
+  // alongside GATE_CALL_SECONDARY_CONTACT (the payer IS a secondary party).
+  callPayerLinking: process.env.GATE_CALL_PAYER_LINKING === 'true',
+  // Review-gated OUTBOUND-callback bookings: a confirmed booking taken on an
+  // outbound call (a return call to an inbound lead) creates the appointment
+  // PENDING/needs-review — customer_confirmed=false, NO auto-SMS, a distinct
+  // source_action so the customer can't self-confirm it, and an
+  // outbound_booking_review triage item — instead of being skipped as
+  // 'outbound_call'. The office confirms it in dispatch (which arms reminders).
+  // Requires a real catalog service (no generic-placeholder fallback for
+  // outbound). Off → outbound bookings stay manual (current behavior).
+  callOutboundBooking: process.env.GATE_CALL_OUTBOUND_BOOKING === 'true',
+  // Call-ingest completeness watchdog: a 30-min cron that diffs Twilio's own
+  // call ledger against call_log and rings an admin bell for any answered
+  // inbound call (completed, >=20s) the pipeline never received — born from
+  // the 2026-07 reconciliation that found 391 Feb–Mar calls silently never
+  // ingested. Read-only against Twilio; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
 
   // Voicemail lead text-back — when a NEW prospect's voicemail produces a
   // workable lead, text them a prefilled quote-wizard link ("got your message
@@ -465,6 +513,18 @@ const gates = {
   // Off in prod until the rendered section is verified on a live estimate.
   // Enable with GATE_ESTIMATE_SHOW_YOUR_WORK=true.
   estimateShowYourWork: isProd ? process.env.GATE_ESTIMATE_SHOW_YOUR_WORK === 'true' : true,
+
+  // Estimate extension request — "Request an extension" button on the React
+  // estimate page's expired/not-found screen. First click per estimate
+  // AUTO-GRANTS +7 days (shared estimate-extension service: expiry push,
+  // status revival, `estimate_extended` SMS with the refreshed link — SMS
+  // sending still requires the Twilio gate and passes the consent/opt-out
+  // checks inside sendCustomerMessage). The auto-grant is capped at one per
+  // estimate lifetime; repeat requests only notify the office. Gates BOTH
+  // the /data 404 eligibility flag (which is what makes the button render)
+  // and the POST endpoint itself.
+  // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
+  estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to

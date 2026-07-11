@@ -27,6 +27,13 @@ function cleanEmail(value) {
   return email || '';
 }
 
+// Strict by design — NO domain repair here. A repaired address must pass the
+// call processor's ownership gate (correctedAddressOwnedByOther, fails closed)
+// before it may be adopted, and that gate only sees corrections proposed by
+// deriveEmailReview from the RAW value. Repairing inline would hand the
+// customer/lead upserts a corrected address that could belong to a different
+// customer. Invalid captures demote to email_raw below, where the (now
+// missing_tld-aware) correction fires inside the gated review path.
 function cleanValidEmailOrNull(value) {
   const email = cleanEmail(value);
   return EMAIL_RE.test(email) ? email : null;
@@ -211,7 +218,7 @@ function normalizeAdditionalProperties(value) {
 // the role, and drop the object entirely when nothing identifying survives —
 // a hallucinated empty shell must not fan out into service-contact writes.
 const SECONDARY_CONTACT_ROLES = new Set([
-  'home_buyer', 'home_seller', 'tenant', 'landlord', 'spouse_partner',
+  'home_buyer', 'home_seller', 'tenant', 'landlord', 'lender', 'spouse_partner',
   'family_member', 'real_estate_agent', 'property_manager', 'other', 'unknown',
 ]);
 function normalizeSecondaryContact(value) {
@@ -226,6 +233,7 @@ function normalizeSecondaryContact(value) {
     email: usableEmail,
     role: SECONDARY_CONTACT_ROLES.has(role) ? role : 'unknown',
     wants_notifications: normalizeStrictBoolean(value.wants_notifications),
+    is_billing_party: normalizeStrictBoolean(value.is_billing_party),
     notes: cleanNullableText(value.notes),
   };
   if (!contact.first_name && !contact.last_name && !contact.phone && !contact.email) return null;
