@@ -2693,6 +2693,58 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
   }
 }
 
+// ── Recurring-intent default for matched_service ──
+//
+// Owner rule (2026-07-11, the Detwiler call): a NEW-LEAD caller who voices
+// ANY recurring interest — a package, a membership, treatments "every X
+// months", quarterly/monthly — wants the recurring pest PROGRAM; the single
+// pest that prompted the call (a wasp nest, an ant trail) is the entry
+// point, not the service. The extraction prompt carries the same rule; this
+// deterministic pass backstops model drift. Scope is deliberately narrow:
+// general-pest singular services only (termite/rodent/WDO/lawn lanes have
+// their own recurring semantics), the caller's own words only (an agent's
+// ignored upsell must not flip the classification), and never when the
+// caller explicitly declines a plan.
+const RECURRING_OVERRIDE_SOURCES = new Set([
+  'one-time pest control service',
+  'bee / wasp nest removal service',
+  'mud dauber nest removal service',
+  'fire ant treatment service',
+  'general pest control',
+]);
+const RECURRING_INTENT_RE = /\b(recurring|re-?occurring|ongoing|year[- ]?round|(?:service|maintenance|pest|treatment) plan|package|membership|quarterly|bi[- ]?monthly|semi[- ]?annual(?:ly)?|twice a year|every (?:other )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?|monthly)\b/i;
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b[^.?!]{0,50}\b(?:recurring|plan|package|membership|ongoing)|\bjust (?:a |the )?one[- ]?time\b/i;
+
+// The caller's own lines when the transcript is speaker-labelled; the whole
+// transcript otherwise (fail-open — better a rare agent-word trigger than
+// silently losing the rule on unlabelled transcripts).
+function callerOnlyText(transcription) {
+  const lines = String(transcription || '').split('\n').filter((l) => /^\s*(caller|customer)\s*:/i.test(l));
+  return lines.length ? lines.join('\n') : String(transcription || '');
+}
+
+function applyRecurringIntentDefault(extracted, transcription) {
+  if (!extracted || extracted.is_lead !== true) return extracted;
+  const matched = String(extracted.matched_service || '').trim().toLowerCase();
+  if (!RECURRING_OVERRIDE_SOURCES.has(matched)) return extracted;
+  const callerText = callerOnlyText(transcription);
+  if (!RECURRING_INTENT_RE.test(callerText) || RECURRING_DECLINED_RE.test(callerText)) return extracted;
+  // Cadence: honor the ONE cadence the caller actually chose; when they
+  // float several ("quarterly or every six months? I don't know") or name
+  // none, pest defaults to quarterly — same default as the estimate engine
+  // (estimate-converter.js).
+  const families = [
+    { name: 'Monthly Pest Control Service', re: /\bmonthly\b/i, veto: /\bbi[- ]?monthly\b/i },
+    { name: 'Semiannual Pest Control Service', re: /\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:six|6) months\b/i },
+    { name: 'Quarterly Pest Control Service', re: /\bquarterly\b|\bevery (?:three|3) months\b/i },
+  ];
+  const hits = families.filter((f) => f.re.test(callerText) && !(f.veto && f.veto.test(callerText)));
+  const target = hits.length === 1 ? hits[0].name : 'Quarterly Pest Control Service';
+  if (target === extracted.matched_service) return extracted;
+  logger.info(`[call-proc] recurring-intent default: matched_service "${extracted.matched_service}" -> "${target}"`);
+  return { ...extracted, matched_service: target };
+}
+
 // ── AI extraction via Gemini ──
 //
 // Same JSON schema as the prior Claude implementation — only the model
@@ -2837,6 +2889,12 @@ IMPORTANT — appointment_confirmed rules:
   - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
+
+IMPORTANT — matched_service: recurring interest beats the single presenting pest:
+- When the caller voices ANY interest in recurring/ongoing service — a "package", a "plan", a "membership", treatments "every X months/weeks", "quarterly", "monthly", "twice a year", keeping bugs away year-round, or asking what cadence you usually do — matched_service MUST be the recurring pest program, even when the visible complaint is a single pest (a wasp nest, an ant trail, one roach sighting). The single-pest service (Bee / Wasp Nest Removal Service, One-Time Pest Control Service, Fire Ant Treatment Service, …) is correct ONLY when no recurring interest is voiced.
+- Cadence: use the one the CALLER chose — "Monthly Pest Control Service", "Quarterly Pest Control Service", or "Semiannual Pest Control Service". When they float options without choosing ("quarterly or every six months? I don't know what you usually do") or name no cadence, use "Quarterly Pest Control Service" — pest defaults to quarterly.
+- This rule reads the CALLER's interest, not the agent's pitch: an agent offering a plan the caller ignores or declines does not trigger it. A caller who explicitly wants one-time only ("just the one treatment, no plan") keeps the single service.
+- The specific pest still belongs in requested_service and pain_points — only matched_service defaults to the program.
 
 IMPORTANT — quoted_price and follow-up visit:
 - quoted_price: the TOTAL price in US dollars the agent quoted AND the caller accepted for the service being booked (agent: "that runs around 350 total", caller agrees -> 350). Use the total package price when quoted as a total across multiple treatments. null when no price was quoted, the caller didn't accept, or the amount is uncertain or a range. Never estimate or invent a price.
@@ -3571,6 +3629,10 @@ const CallRecordingProcessor = {
       await fileExtractionExhaustedTriage(call.id, attempts, err, callSid);
       return { success: false, error: `AI extraction failed: ${err.message}` };
     }
+
+    // Owner rule: recurring interest beats the single presenting pest — a
+    // deterministic backstop on top of the same instruction in the prompt.
+    extracted = applyRecurringIntentDefault(extracted, transcription);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -7033,6 +7095,7 @@ CallRecordingProcessor._test = {
   phoneNearMissOfAni,
   isUsableContactPhone,
   labeledTranscriptPreservesWords,
+  applyRecurringIntentDefault,
 };
 
 // Production contract for the re-transcription backfill (NOT test-only):
