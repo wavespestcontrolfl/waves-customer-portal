@@ -301,21 +301,16 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     })
     .returning(['id', 'version']);
 
-  if (pending) {
-    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
-      status: 'superseded',
-      reviewed_by: 'auto:distiller',
-      reviewed_at: dbi.fn.now(),
-    });
-  }
-
   // Exception-based review: green auto-applies (audit-logged, no bell —
   // nothing for a human to do); anything else parks + bells, the old flow.
   const verdict = evaluateAutoApproval({ profileText, stats, flags });
   // A human decision landing WHILE the LLM ran (Adam revoking the live
   // profile mid-run is the case that matters) moves the review watermark —
   // auto-approving over it would override a kill switch pressed seconds
-  // ago. Any movement → park as an exception instead.
+  // ago. Any movement → park as an exception instead. This check MUST run
+  // before the pending-row supersede below: that stamp is self-authored and
+  // would read as a phantom mid-run decision, parking every green
+  // replacement in the pending-exception + new-corpus path.
   if (verdict.approve) {
     const wmNow = await dbi('voice_profiles')
       .select(dbi.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
@@ -327,6 +322,17 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
       verdict.approve = false;
       verdict.reasons.push('a review decision landed while this run was distilling');
     }
+  }
+
+  if (pending) {
+    // status:'pending' guard: if a human already resolved this row mid-run,
+    // their decision stands and this is a no-op (the watermark check above
+    // has already parked the replacement in that case).
+    await dbi('voice_profiles').where({ id: pending.id, status: 'pending' }).update({
+      status: 'superseded',
+      reviewed_by: 'auto:distiller',
+      reviewed_at: dbi.fn.now(),
+    });
   }
   if (verdict.approve) {
     const applied = await reviewVoiceProfile({
