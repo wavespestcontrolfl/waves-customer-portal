@@ -1579,8 +1579,11 @@ router.get('/month', async (req, res, next) => {
     const gridStart = new Date(firstDay);
     gridStart.setDate(gridStart.getDate() - firstDay.getDay()); // Back to Sunday
     const gridEnd = new Date(lastDay);
-    const remaining = 6 - lastDay.getDay();
-    if (remaining < 6) gridEnd.setDate(gridEnd.getDate() + remaining); // Forward to Saturday
+    // Always extend to the rendered Saturday: the weeks builder below paints
+    // full 7-day rows past gridEnd, so a month ending on Sunday (remaining=6)
+    // used to render its trailing next-month cells with no services queried —
+    // six visible days that always showed empty (e.g. Jun 1–6 on May 2026).
+    gridEnd.setDate(gridEnd.getDate() + (6 - lastDay.getDay())); // Forward to Saturday
 
     // Fetch all services for the full grid range
     const services = await db('scheduled_services')

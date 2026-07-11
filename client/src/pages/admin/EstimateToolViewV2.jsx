@@ -3073,6 +3073,14 @@ export default function EstimateToolViewV2({
         }
         return next;
       });
+      // Invalidate again at apply time (mirrors doSatelliteAnalysis): a
+      // Generate run while the lookup was in flight would otherwise mount a
+      // price from pre-lookup inputs — and Save would persist that stale
+      // engineRequest, which the server replays verbatim and *confirms*, so
+      // no drift notice ever fires.
+      setEstimate(null);
+      setSavedId(null);
+      setSavedViewUrl(null);
 
       try {
         const addrSearch = address.split(",")[0].trim();
@@ -3105,6 +3113,13 @@ export default function EstimateToolViewV2({
               customerPhone: match.phone || f.customerPhone || "",
               customerEmail: match.email || f.customerEmail || "",
             }));
+            // isRecurringCustomer is a pricing input and this apply lands
+            // after a second awaited fetch — invalidate so a Generate started
+            // after the property apply (but before this match) can't mount a
+            // price computed without the loyalty flag.
+            setEstimate(null);
+            setSavedId(null);
+            setSavedViewUrl(null);
           } else {
             setExistingCustomerMatch(null);
           }
