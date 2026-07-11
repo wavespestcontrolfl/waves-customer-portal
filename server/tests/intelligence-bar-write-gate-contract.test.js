@@ -209,6 +209,7 @@ const READ_ONLY = [
   'get_fee_analysis', 'get_unreconciled_payouts', 'export_payouts',
   'lookup_property', 'compute_estimate', 'read_pricing_config', 'recent_pricing_changes',
   'find_similar_estimates', 'match_existing_customer', 'get_waveguard_tiers',
+  'get_railway_status', 'get_railway_deployments', 'get_railway_logs', 'get_railway_variable_names',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
