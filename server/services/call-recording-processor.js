@@ -2539,7 +2539,10 @@ async function transcribeRecording(mp3Url, opts = {}) {
       result?.transcription
       && bufferRef.buffer
       && process.env.CONTACT_DICTATION_ENABLED !== 'false'
-      && detectContactDictationSignals(result.transcription).any
+      // forceContactPass (bounce re-verify): the primary transcript may have
+      // normalized a misheard address into a shape that no longer trips the
+      // dictation signals — the caller knows an email was dictated.
+      && (opts.forceContactPass === true || detectContactDictationSignals(result.transcription).any)
     ) {
       const contactModel = process.env.OPENAI_CONTACT_PASS_MODEL || 'gpt-4o-transcribe';
       const second = await transcribeWithOpenAI(bufferRef.buffer, {

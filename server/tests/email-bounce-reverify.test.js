@@ -10,6 +10,8 @@ const {
   nameAnchoredEmailCandidates,
   buildReadbackQuestion,
   mergeCandidates,
+  filterDecoderCandidatesToBounced,
+  escapeLike,
   reverifyBouncedEmailFromCall,
 } = require('../services/email-bounce-reverify');
 
@@ -91,6 +93,25 @@ describe('triage lane', () => {
     });
     expect(item.category).toBe('name_review');
     expect(JSON.parse(item.payload).bounced_email).toBe('apitz6958@yahoo.com');
+  });
+});
+
+describe('filterDecoderCandidatesToBounced', () => {
+  test('an unrelated address dictated on the same call never competes', () => {
+    const kept = filterDecoderCandidatesToBounced([
+      { value: 'apitts6958@yahoo.com', confidence: 0.9 },   // the correction
+      { value: 'lferraro@hotmail.com', confidence: 0.95 },  // someone else's email, higher confidence
+      { value: 'apitts6958@gmail.com', confidence: 0.9 },   // wrong domain
+    ], 'apitz6958@yahoo.com');
+    expect(kept.map((c) => c.value)).toEqual(['apitts6958@yahoo.com']);
+  });
+});
+
+describe('escapeLike', () => {
+  test('underscores and percents are escaped (first_last@… must not match firstXlast@…)', () => {
+    expect(escapeLike('first_last@example.com')).toBe('first\\_last@example.com');
+    expect(escapeLike('100%@x.com')).toBe('100\\%@x.com');
+    expect(escapeLike('plain@x.com')).toBe('plain@x.com');
   });
 });
 

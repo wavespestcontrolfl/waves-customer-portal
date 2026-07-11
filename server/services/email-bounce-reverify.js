@@ -90,6 +90,34 @@ function nameAnchoredEmailCandidates({ bouncedEmail, firstName = null, lastName 
   return out;
 }
 
+/**
+ * Only decoder candidates PLAUSIBLY ABOUT the bounced address may compete —
+ * a call can dictate several emails (spouse's, a buyer's), and an unrelated
+ * one must never outrank the correction for the recipient that bounced.
+ * Relevant = same domain AND local part within edit distance 3.
+ */
+function filterDecoderCandidatesToBounced(decoderCandidates, bouncedEmail) {
+  const bounced = String(bouncedEmail || '').trim().toLowerCase();
+  const at = bounced.indexOf('@');
+  if (at <= 0) return [];
+  const bLocal = bounced.slice(0, at);
+  const bDomain = bounced.slice(at + 1);
+  return (decoderCandidates || []).filter((c) => {
+    const v = String(c?.value || '').trim().toLowerCase();
+    const vAt = v.indexOf('@');
+    if (vAt <= 0) return false;
+    if (v.slice(vAt + 1) !== bDomain) return false;
+    return levenshtein(v.slice(0, vAt), bLocal) <= 3;
+  });
+}
+
+// LIKE-pattern escaping: '_' matches any char and '%' any run — and '_' is a
+// COMMON email character (first_last@…), so an unescaped predicate can match
+// a different address and burn a re-transcription on the wrong call.
+function escapeLike(value) {
+  return String(value || '').replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
 /** "apitts6958@yahoo.com" → "A-P-I-T-T-S-6-9-5-8 at yahoo — is that right?" */
 function buildReadbackQuestion(email) {
   const e = String(email || '').trim().toLowerCase();
@@ -144,7 +172,7 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
   const q = db('call_log')
     .whereNotNull('recording_url')
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
-    .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${bounced}%`])
+    .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${escapeLike(bounced)}%`])
     .select('id', 'recording_url', 'recording_duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
     .modify((qb) => {
       if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
@@ -189,7 +217,10 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
     // transcript is the wrong artifact here — it's where the mis-heard
     // letter lives; the contact-dictation pass re-listens letter-by-letter.
     const CallProc = require('./call-recording-processor');
-    const result = await CallProc.transcribeRecording(call.recording_url);
+    // forceContactPass: the primary transcript may have normalized the
+    // misheard address into something that no longer trips the dictation
+    // signals — for a bounce re-verify the letter-fidelity pass IS the point.
+    const result = await CallProc.transcribeRecording(call.recording_url, { forceContactPass: true });
     // Same hallucination guard the live pipeline applies before trusting a
     // transcript — a near-silent recording can yield a long invented one,
     // and candidates decoded from it would be confidently wrong.
@@ -205,7 +236,10 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
       transcript: result.transcription,
       contactPassTranscript: result.contactPassTranscript || null,
     });
-    const decoderCandidates = (decoded?.emails || []).flatMap((e) => e.candidates || []);
+    const decoderCandidates = filterDecoderCandidatesToBounced(
+      (decoded?.emails || []).flatMap((e) => e.candidates || []),
+      bounced,
+    );
 
     const v1 = (() => { try { return JSON.parse(call.ai_extraction) || {}; } catch { return {}; } })();
     const nameCandidates = nameAnchoredEmailCandidates({
@@ -255,5 +289,7 @@ module.exports = {
   nameAnchoredEmailCandidates,
   buildReadbackQuestion,
   mergeCandidates,
+  filterDecoderCandidatesToBounced,
+  escapeLike,
   findSourceCall,
 };
