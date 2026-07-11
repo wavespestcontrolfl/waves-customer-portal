@@ -563,7 +563,19 @@ const FAIL_OPEN_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk'])
 // from nothing. PII-light and compact by design; spam/voicemail priors are
 // excluded (robocall context would only mislead). Read-only; fails open null.
 const PRIOR_CALL_LOOKBACK_DAYS = 7;
-async function summarizePriorCall(contactPhone, currentCallId = null, conn = db) {
+// Prior-call text is UNTRUSTED prompt data: it originated from a caller's
+// speech (via transcription + extraction), so it gets flattened (no newlines,
+// no backticks/quotes that could fake a delimiter) and hard-capped before it
+// is interpolated — and the prompt block labels it as data, never
+// instructions.
+function sanitizePriorText(value, max = 300) {
+  return String(value || '')
+    .replace(/[\r\n`"]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null) {
   try {
     const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
     if (digits.length < 10) return null;
@@ -574,6 +586,9 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db)
       .whereNotIn('processing_status', ['spam', 'voicemail'])
       .orderBy('created_at', 'desc');
     if (currentCallId) q.whereNot('id', currentCallId);
+    // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
+    // drain must never hand call 1 the extraction of call 2 as its past.
+    if (currentCallCreatedAt) q.where('created_at', '<', currentCallCreatedAt);
     const row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
     if (!row) return null;
     const v1 = typeof row.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : (row.ai_extraction || {});
@@ -585,15 +600,15 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db)
     const hoursAgo = Math.max(1, Math.round((Date.now() - new Date(row.created_at).getTime()) / 3600000));
     return {
       hoursAgo,
-      summary: String(row.call_summary || v1.call_summary || '').slice(0, 300) || null,
+      summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
       captured: {
-        name: name || null,
-        phone: v1.phone || null,
-        email: v1.email || null,
-        address: address || null,
-        requested_service: v1.requested_service || v1.matched_service || null,
-        secondary_contact: scName ? `${scName}${sc.role ? ` (${sc.role})` : ''}${sc.email ? `, ${sc.email}` : ''}${sc.phone ? `, ${sc.phone}` : ''}` : null,
-        appointment: (v1.appointment_confirmed && v1.preferred_date_time) ? v1.preferred_date_time : null,
+        name: sanitizePriorText(name, 80) || null,
+        phone: sanitizePriorText(v1.phone, 24) || null,
+        email: sanitizePriorText(v1.email, 120) || null,
+        address: sanitizePriorText(address, 160) || null,
+        requested_service: sanitizePriorText(v1.requested_service || v1.matched_service, 80) || null,
+        secondary_contact: scName ? sanitizePriorText(`${scName}${sc.role ? ` (${sc.role})` : ''}${sc.email ? `, ${sc.email}` : ''}${sc.phone ? `, ${sc.phone}` : ''}`, 200) : null,
+        appointment: (v1.appointment_confirmed && v1.preferred_date_time) ? sanitizePriorText(v1.preferred_date_time, 40) : null,
       },
     };
   } catch (err) {
@@ -3460,7 +3475,7 @@ const CallRecordingProcessor = {
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
     // without it.
-    const priorCall = await summarizePriorCall(contactPhone, call.id);
+    const priorCall = await summarizePriorCall(contactPhone, call.id, db, call.created_at);
 
     // Bookable service catalog: fed to both extraction prompts (so the model
     // can name a specific bookable service) and to the booking block below
