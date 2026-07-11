@@ -198,6 +198,7 @@ const READ_ONLY = [
   'search_reviews', 'get_review_trends', 'get_velocity_pipeline',
   'get_unanswered_threads', 'get_conversation_thread', 'search_messages', 'get_sms_stats',
   'get_call_log', 'draft_sms_reply', 'get_csr_overview', 'get_todays_activity',
+  'list_call_partners', 'get_partner_call_history',
   'get_tax_dashboard', 'get_expenses', 'get_equipment_depreciation', 'get_filing_deadlines',
   'get_quarterly_estimate', 'get_pnl', 'get_advisor_alerts', 'get_mileage_summary', 'get_ar_aging',
   'get_lead_overview', 'query_leads', 'get_stale_leads', 'get_lead_funnel',

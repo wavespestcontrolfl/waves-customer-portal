@@ -96,6 +96,32 @@ Use for: "what calls came in this morning?", "show me today's calls", "any misse
     },
   },
   {
+    name: 'list_call_partners',
+    description: `Aggregate the B2B ARRANGERS who call to book service for other people — realtors/buyer's agents, lenders and title/closing coordinators, property managers — from the AI call extractions (caller relationship real_estate_agent/lender/property_manager, or an organization name on the call). Returns per-partner: name, organization, relationship, total calls, first/last call, WDO-related call count, latest call summary.
+Use for: "who are my top realtor partners?", "which lenders keep calling us?", "show repeat WDO arrangers", "partner channel overview"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        days_back: { type: 'number', description: 'Lookback window, default 180' },
+        relationship: { type: 'string', enum: ['real_estate_agent', 'lender', 'property_manager', 'all'], description: 'Filter to one arranger type. Default all.' },
+        limit: { type: 'number', description: 'Default 25' },
+      },
+    },
+  },
+  {
+    name: 'get_partner_call_history',
+    description: `Every call from one arranger/partner phone number: date, summary, requested service, and any other parties (buyers/sellers/tenants) captured on each call. Use after list_call_partners to drill into one partner.
+Use for: "show me all of Melissa from Coldwell Banker's calls", "what has New Day USA booked with us?"`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string', description: 'The partner phone number (any format)' },
+        limit: { type: 'number', description: 'Default 20' },
+      },
+      required: ['phone'],
+    },
+  },
+  {
     name: 'send_sms',
     description: `Send an SMS to a customer. ALWAYS show the draft message and ask for confirmation before sending.
 Use for: "text Henderson that we're running late", "send a reminder to Smith about tomorrow's service"`,
@@ -157,6 +183,8 @@ const COMMS_READ_TOOL_NAMES = new Set([
   'get_sms_stats',
   'get_call_log',
   'get_todays_activity',
+  'list_call_partners',
+  'get_partner_call_history',
 ]);
 const COMMS_READ_TOOLS = COMMS_TOOLS.filter(t => COMMS_READ_TOOL_NAMES.has(t.name));
 
@@ -171,6 +199,8 @@ async function executeCommsTool(toolName, input) {
       case 'search_messages': return await searchMessages(input);
       case 'get_sms_stats': return await getSmsStats(input.days || 30);
       case 'get_call_log': return await getCallLog(input);
+      case 'list_call_partners': return await listCallPartners(input);
+      case 'get_partner_call_history': return await getPartnerCallHistory(input);
       case 'send_sms': return await sendSms(input);
       case 'draft_sms_reply': return await draftSmsReply(input);
       case 'get_csr_overview': return await getCsrOverview(input.days || 30);
@@ -766,5 +796,228 @@ async function getTodaysActivity() {
   };
 }
 
+
+// ─── Partner channel (B2B arrangers) ───────────────────────────
+//
+// Born from the 2026-07 call audit: WDO/real-estate calls come from REPEAT
+// arrangers (realtors, lenders, property managers) booking for other people,
+// every one urgent, price never negotiated — a channel, not walk-ins. Schema
+// 1.7.0 gave arranger identity real enum values; these tools aggregate it.
+// Sources BOTH extraction generations: the V2 enriched payload
+// (caller.relationship_to_property / organization_name) and — because most
+// history predates 1.7.0, when realtors were forced into "other" — a
+// deterministic transcript/summary signal (WDO/realtor/lender phrasing).
+// Read-only; wrapped per-query try/catch via executeCommsTool.
+
+const ARRANGER_RELATIONSHIPS = ['real_estate_agent', 'lender', 'property_manager'];
+
+// FULL phrases (no truncated stems — 'compan\\y' never matches 'company').
+const ARRANGER_PHRASE_RE = /\b(realtor|real estate agent|buyer'?s agent|seller'?s agent|lender|loan officer|title company|closing coordinator|property manager|property management)\b/i;
+
+// Legacy rows predate schema 1.7.0, when arranger callers were forced into
+// relationship "other" — infer the enum from the summary phrasing so the
+// relationship filter can still find pre-1.7.0 partners.
+function inferArrangerRelationship(text) {
+  const t = String(text || '');
+  if (/\b(realtor|real estate agent|buyer'?s agent|seller'?s agent)\b/i.test(t)) return 'real_estate_agent';
+  if (/\b(lender|loan officer|title company|closing coordinator)\b/i.test(t)) return 'lender';
+  if (/\b(property manager|property management)\b/i.test(t)) return 'property_manager';
+  return null;
+}
+
+// ai_extraction / ai_extraction_enriched are TEXT columns with legacy
+// malformed values on old rows — a SQL ::jsonb cast anywhere in the query
+// makes ONE bad row throw the whole tool. All JSON parsing happens here,
+// per-row, fail-open.
+function safeJson(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function phoneKeyExpr(col) {
+  return `RIGHT(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 10)`;
+}
+
+async function listCallPartners(input = {}) {
+  const daysBack = Math.min(Number(input.days_back) || 180, 730);
+  const limit = Math.min(Number(input.limit) || 25, 100);
+  const relationship = ARRANGER_RELATIONSHIPS.includes(input.relationship) ? input.relationship : null;
+
+  // Cheap SQL predicates only — no ::jsonb casts (legacy malformed rows would
+  // throw the whole query). Arranger detection + JSON parsing happen in JS,
+  // so the fetch pages the ENTIRE window in keyset batches — a flat LIMIT
+  // before the JS filter would silently drop partners on busy windows.
+  const BATCH = 2000;
+  const MAX_BATCHES = 10; // 20k calls ≫ any realistic window; log if hit
+  const rows = [];
+  let cursor = null;
+  for (let i = 0; i < MAX_BATCHES; i += 1) {
+    const q = db('call_log')
+      .whereRaw("created_at >= now() - (?::int * interval '1 day')", [daysBack])
+      .where('direction', 'inbound')
+      .whereRaw(`${phoneKeyExpr('from_phone')} <> ''`)
+      // Legacy rows (pre-V2, or a failed V2 run) have NO enriched payload but
+      // a usable summary — they must reach the ARRANGER_PHRASE_RE fallback.
+      // safeJson fails open on the null enriched.
+      .where(function () {
+        this.whereNotNull('ai_extraction_enriched').orWhereRaw("COALESCE(call_summary, '') <> ''");
+      })
+      .select('from_phone', 'created_at', 'call_summary', 'ai_extraction_enriched')
+      .orderBy('created_at', 'desc')
+      .limit(BATCH);
+    if (cursor) q.where('created_at', '<', cursor);
+    const batch = await q;
+    rows.push(...batch);
+    if (batch.length < BATCH) break;
+    cursor = batch[batch.length - 1].created_at;
+    if (i === MAX_BATCHES - 1) {
+      logger.warn(`[intelligence-bar:comms] list_call_partners hit the ${MAX_BATCHES * BATCH}-row scan cap for days_back=${daysBack}; oldest calls not aggregated`);
+    }
+  }
+
+  const WDO_RE = /\b(wdo|wood[- ]destroying|termite (letter|inspection))\b/i;
+  // Pass 1: identify ARRANGER phone keys. A partner is identified by ANY of
+  // their calls carrying the signal; pass 2 then aggregates EVERY call from
+  // those keys — a follow-up whose individual summary never repeats
+  // "realtor" still belongs to the partner's totals.
+  const parsed = rows.map((r) => {
+    const en = safeJson(r.ai_extraction_enriched) || {};
+    return { r, en, key: String(r.from_phone || '').replace(/\D/g, '').slice(-10), summary: String(r.call_summary || '') };
+  });
+  const arrangerKeys = new Set();
+  for (const { en, key, summary } of parsed) {
+    const caller = en.caller || {};
+    const isArranger = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
+      || !!String(caller.organization_name || '').trim()
+      || ARRANGER_PHRASE_RE.test(summary);
+    if (isArranger) arrangerKeys.add(key);
+  }
+
+  const partners = new Map();
+  for (const { r, en, key, summary } of parsed) {
+    if (!arrangerKeys.has(key)) continue;
+    const caller = en.caller || {};
+    const rel = ARRANGER_RELATIONSHIPS.includes(caller.relationship_to_property)
+      ? caller.relationship_to_property : null;
+    const org = String(caller.organization_name || '').trim() || null;
+    let p = partners.get(key);
+    if (!p) {
+      p = {
+        phone: r.from_phone,
+        name: null,
+        organization: null,
+        relationship: null,
+        calls: 0,
+        wdo_calls: 0,
+        first_call: r.created_at,
+        last_call: r.created_at,
+        latest_summary: summary.slice(0, 200) || null,
+      };
+      partners.set(key, p);
+    }
+    p.calls += 1;
+    // WDO detection reads the STRUCTURED extraction first, then the prose.
+    // Real WDO calls usually persist as category 'termite' with a WDO
+    // specific service name — and an arranger's termite call with
+    // inspection-only intent IS the real-estate WDO pattern even when
+    // neither name nor prose says "WDO".
+    const svc = en.service_request || {};
+    const category = String(svc.primary_service_category || '');
+    const wdoStructured = category === 'wdo'
+      || WDO_RE.test(String(svc.specific_service_name || ''))
+      || (category === 'termite' && String(svc.service_intent || '') === 'inspection_only');
+    if (wdoStructured || WDO_RE.test(summary)) p.wdo_calls += 1;
+    // Order-independent bounds (keyset batches preserve DESC, but nothing
+    // downstream should depend on it).
+    if (r.created_at < p.first_call) p.first_call = r.created_at;
+    if (r.created_at > p.last_call) p.last_call = r.created_at;
+    // Rows arrive newest-first: keep the first non-null identity fields.
+    // name_full may be absent while first/last survive (persisted schema
+    // allows it) — an identified partner must not list as unnamed.
+    const callerName = caller.name_full
+      || [caller.first_name, caller.last_name].filter(Boolean).join(' ')
+      || null;
+    if (!p.name && callerName) p.name = callerName;
+    if (!p.organization && org) p.organization = org;
+    if (!p.relationship && rel) p.relationship = rel;
+    // Legacy fallback: infer the enum from phrasing so pre-1.7.0 partners
+    // survive the relationship filter below.
+    if (!p.relationship) p.relationship = inferArrangerRelationship(summary);
+  }
+
+  let list = [...partners.values()];
+  if (relationship) list = list.filter((p) => p.relationship === relationship);
+  list.sort((a, b) => b.calls - a.calls || new Date(b.last_call) - new Date(a.last_call));
+
+  return {
+    days_back: daysBack,
+    partner_count: list.length,
+    partners: list.slice(0, limit),
+    note: 'Identity fields come from AI call extractions; pre-1.7.0 history often lacks relationship values (matched by transcript phrasing instead).',
+  };
+}
+
+async function getPartnerCallHistory(input = {}) {
+  const digits = String(input.phone || '').replace(/\D/g, '').slice(-10);
+  if (digits.length < 10) return { error: 'phone must contain at least 10 digits' };
+  const limit = Math.min(Number(input.limit) || 20, 100);
+
+  // Both directions: an inbound partner call lands in from_phone, staff
+  // calling the partner back lands in to_phone. No ::jsonb casts (legacy
+  // malformed rows would throw the whole tool) — JSON parses per-row in JS.
+  const rows = await db('call_log')
+    .whereRaw(`(${phoneKeyExpr('from_phone')} = ? OR ${phoneKeyExpr('to_phone')} = ?)`, [digits, digits])
+    .select('id', 'created_at', 'direction', 'duration_seconds', 'call_summary', 'disposition', 'ai_extraction', 'ai_extraction_enriched')
+    .orderBy('created_at', 'desc')
+    .limit(limit);
+
+  const contactLabel = (c) => {
+    if (!c || typeof c !== 'object') return null;
+    // A party captured with only contact info (the extraction contract allows
+    // name OR contact detail) still belongs in the drilldown — label by email
+    // or phone when the name is absent.
+    const name = [c.first_name, c.last_name].filter(Boolean).join(' ')
+      || c.name_full
+      || c.email
+      || c.phone_e164
+      || c.phone
+      || null;
+    return name ? `${name}${c.role ? ` (${c.role})` : ''}` : null;
+  };
+
+  return {
+    phone: input.phone,
+    call_count: rows.length,
+    calls: rows.map((r) => {
+      const v1 = safeJson(r.ai_extraction) || {};
+      const v2 = safeJson(r.ai_extraction_enriched) || {};
+      // Multi-party context from BOTH generations: legacy V1 secondary_contact
+      // plus the 1.4.0+ V2 secondary_contacts array — the whole point of the
+      // drilldown is who each arranger call was FOR.
+      const parties = [];
+      const seen = new Set();
+      for (const c of [v1.secondary_contact, v2.secondary_contact, ...(Array.isArray(v2.secondary_contacts) ? v2.secondary_contacts : [])]) {
+        const label = contactLabel(c);
+        if (label && !seen.has(label)) { seen.add(label); parties.push(label); }
+      }
+      return {
+        id: r.id,
+        at: r.created_at,
+        direction: r.direction,
+        duration_seconds: r.duration_seconds,
+        summary: String(r.call_summary || '').slice(0, 300) || null,
+        // Most specific first: V1 requested_service is often the flattened
+        // COARSE category copy, so the V2 specific service name must win.
+        requested_service: v2.service_request?.specific_service_name
+          || v1.requested_service
+          || v2.service_request?.primary_service_category
+          || null,
+        other_party: parties.length ? parties.join('; ') : null,
+        disposition: r.disposition || null,
+      };
+    }),
+  };
+}
 
 module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool };
