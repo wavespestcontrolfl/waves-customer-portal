@@ -1,31 +1,36 @@
 /**
  * Re-transcription backfill — query contract + run-loop semantics.
  * No DB, no OpenAI: a capturing fake knex pins the consent/eligibility
- * filters, and an injected transcriber exercises the one-attempt-per-call
- * and guarded-upgrade rules.
+ * filters, and injected transcriber/implausibility fns exercise the
+ * verdict-vs-retry attempt discipline and the guarded-upgrade rules.
  */
-const { candidateQuery, runRetranscriptionBackfill, BATCH_LIMIT } = require('../services/call-retranscription-backfill');
+const { candidateQuery, runRetranscriptionBackfill, BATCH_LIMIT, MAX_ATTEMPTS } = require('../services/call-retranscription-backfill');
 
-function makeFakeDbi(candidates) {
+function makeFakeDbi(candidates, { attemptsAfterFailure = 1 } = {}) {
   const calls = [];
   const updates = [];
   let firstSelect = true;
   const builder = {};
   const record = (name) => (...args) => {
     if (name === 'where' && typeof args[0] === 'function') {
-      args[0].call(builder);
+      args[0].call(builder, builder); // knex grouped where: builder is both `this` and the arg
     } else {
       calls.push([name, args]);
     }
     return builder;
   };
-  for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'select', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhereNotIn', 'select', 'orderBy', 'limit']) {
     builder[m] = record(m);
   }
-  builder.update = async (patch) => { updates.push(patch); return 1; };
+  builder.update = (patch) => {
+    updates.push(patch);
+    const thenable = {
+      returning: async () => [{ retranscribe_attempts: attemptsAfterFailure }],
+      then: (resolve, reject) => Promise.resolve(1).then(resolve, reject),
+    };
+    return thenable;
+  };
   builder.then = (resolve, reject) => {
-    // First awaited builder = the candidate select; later awaits are updates
-    // (which resolve via .update above, not then).
     const rows = firstSelect ? candidates : [];
     firstSelect = false;
     return Promise.resolve(rows).then(resolve, reject);
@@ -38,17 +43,28 @@ function makeFakeDbi(candidates) {
   return dbi;
 }
 
-describe('candidateQuery — mirrors the miner consent posture, one attempt ever', () => {
-  test('filters: inbound + consent + recording + never-attempted + undiarized', () => {
+const CALL = {
+  id: 'c1',
+  recording_url: 'https://x/rec.mp3',
+  transcription: 'legacy text',
+  recording_duration_seconds: 120,
+};
+const DIARIZED = 'Agent: Hi!\nCaller: I have ants.';
+const notImplausible = () => false;
+
+describe('candidateQuery — mirrors the miner posture, clear of the live processor', () => {
+  test('filters: inbound + consent + recording + never-stamped + attempts cap + age + undiarized + outcome', () => {
     const dbi = makeFakeDbi([]);
     candidateQuery(dbi, { limit: 7 });
     const flat = JSON.stringify(dbi.__calls);
     expect(flat).toContain('["where",["direction","inbound"]]');
     expect(flat).toContain('["where",["call_recording_consent_disclaimer_played",true]]');
-    expect(flat).toContain('["whereNotNull",["recording_url"]]');
     expect(flat).toContain('["whereNull",["retranscribed_at"]]');
+    expect(flat).toContain(`["where",["retranscribe_attempts","<",${MAX_ATTEMPTS}]]`);
+    expect(flat).toMatch(/INTERVAL '1 day'/);
     expect(flat).toMatch(/NOT ILIKE '%agent:%'/);
-    expect(flat).toMatch(/NOT ILIKE '%caller:%'/);
+    expect(flat).toContain('["whereNull",["call_outcome"]]');
+    expect(flat).toContain('["orWhereNotIn",["call_outcome",["wrong_number","spam"]]]');
     expect(flat).toContain('["limit",[7]]');
   });
 
@@ -58,35 +74,61 @@ describe('candidateQuery — mirrors the miner consent posture, one attempt ever
   });
 });
 
-describe('runRetranscriptionBackfill — run-loop semantics', () => {
-  const CALL = { id: 'c1', recording_url: 'https://x/rec.mp3', transcription: 'legacy text' };
-
-  test('a diarized result upgrades the row (original preserved, guarded stamp)', async () => {
+describe('runRetranscriptionBackfill — verdict vs retry discipline', () => {
+  test('a plausible diarized result upgrades the row (original preserved, undiarized re-check in the guard)', async () => {
     const dbi = makeFakeDbi([CALL]);
     const out = await runRetranscriptionBackfill({
       dbi,
-      transcribe: async () => ({ transcription: 'Agent: Hi!\nCaller: I have ants.' }),
+      transcribe: async () => ({ transcription: DIARIZED }),
+      implausible: notImplausible,
     });
-    expect(out).toMatchObject({ attempted: 1, upgraded: 1, unusable: 0, failed: 0 });
+    expect(out).toMatchObject({ attempted: 1, upgraded: 1, unusable: 0, retried: 0 });
     expect(dbi.__updates).toHaveLength(1);
     expect(dbi.__updates[0].transcription).toContain('Agent:');
     expect(dbi.__updates[0].transcription_pre_backfill).toMatch(/COALESCE/);
-    expect(dbi.__updates[0].retranscribed_at).toBe('NOW');
+    const flat = JSON.stringify(dbi.__calls);
+    expect(flat.match(/NOT ILIKE '%agent:%'/g).length).toBeGreaterThanOrEqual(2); // select AND guarded update
   });
 
-  test('an undiarized/empty result stamps the attempt WITHOUT touching the transcript', async () => {
+  test('an undiarized result is a per-recording VERDICT: stamped once, transcript untouched', async () => {
     const dbi = makeFakeDbi([CALL]);
-    const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => ({ transcription: 'no labels here' }) });
+    const out = await runRetranscriptionBackfill({
+      dbi,
+      transcribe: async () => ({ transcription: 'no labels here' }),
+      implausible: notImplausible,
+    });
     expect(out).toMatchObject({ attempted: 1, upgraded: 0, unusable: 1 });
-    expect(dbi.__updates).toHaveLength(1);
-    expect(dbi.__updates[0]).toEqual({ retranscribed_at: 'NOW' });
+    expect(dbi.__updates).toEqual([{ retranscribed_at: 'NOW' }]);
   });
 
-  test('a transcriber throw stamps the attempt too — dead recordings are never retried', async () => {
+  test('an IMPLAUSIBLE diarized transcript is rejected — same hallucination guard as the live path (Codex P2)', async () => {
     const dbi = makeFakeDbi([CALL]);
-    const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => { throw new Error('boom'); } });
-    expect(out).toMatchObject({ attempted: 1, failed: 1 });
+    const seen = [];
+    const out = await runRetranscriptionBackfill({
+      dbi,
+      transcribe: async () => ({ transcription: DIARIZED }),
+      implausible: (text, seconds) => { seen.push(seconds); return true; },
+    });
+    expect(out).toMatchObject({ unusable: 1, upgraded: 0 });
+    expect(seen).toEqual([120]); // real recording duration reaches the guard
     expect(dbi.__updates).toEqual([{ retranscribed_at: 'NOW' }]);
+  });
+
+  test('a transcriber THROW is an infrastructure failure: attempt counted, NOT stamped (Codex P2)', async () => {
+    const dbi = makeFakeDbi([CALL], { attemptsAfterFailure: 1 });
+    const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => { throw new Error('rate limited'); } });
+    expect(out).toMatchObject({ attempted: 1, retried: 1, exhausted: 0, unusable: 0 });
+    expect(dbi.__updates).toHaveLength(1);
+    expect(JSON.stringify(dbi.__updates[0])).toMatch(/retranscribe_attempts/);
+    expect(dbi.__updates[0].retranscribed_at).toBeUndefined();
+  });
+
+  test('the attempts cap converts repeated failures into a permanent stamp', async () => {
+    const dbi = makeFakeDbi([CALL], { attemptsAfterFailure: MAX_ATTEMPTS });
+    const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => { throw new Error('still down'); } });
+    expect(out).toMatchObject({ exhausted: 1, retried: 0 });
+    expect(dbi.__updates).toHaveLength(2); // attempt increment + verdict stamp
+    expect(dbi.__updates[1]).toEqual({ retranscribed_at: 'NOW' });
   });
 
   test('zero candidates → clean no-op (the backlog is self-terminating)', async () => {
@@ -94,5 +136,13 @@ describe('runRetranscriptionBackfill — run-loop semantics', () => {
     const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => ({}) });
     expect(out).toMatchObject({ attempted: 0, upgraded: 0 });
     expect(dbi.__updates).toHaveLength(0);
+  });
+});
+
+describe('production export contract (Codex P1: the _test-only trap)', () => {
+  test('call-recording-processor exposes transcribeRecording + isImplausibleTranscript at top level', () => {
+    const processor = require('../services/call-recording-processor');
+    expect(typeof processor.transcribeRecording).toBe('function');
+    expect(typeof processor.isImplausibleTranscript).toBe('function');
   });
 });

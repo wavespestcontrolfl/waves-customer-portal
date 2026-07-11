@@ -10,18 +10,25 @@
  * finite backlog flagged as the highest-ROI training gap back in June.
  *
  * Hourly, batched: re-transcribe those recordings through the SAME
- * `transcribeRecording` pipeline new calls use (gpt-4o-transcribe-diarize,
- * plausibility guard included), then upgrade call_log.transcription in place
- * so the miner picks the call up on its next run. The original transcript is
- * preserved in transcription_pre_backfill; retranscribed_at stamps exactly
- * one attempt per call (success OR failure — a broken recording is not worth
- * retrying every hour), and doubles as the miner's recency signal for these
- * old calls.
+ * `transcribeRecording` pipeline new calls use, apply the SAME
+ * `isImplausibleTranscript` hallucination guard the live path applies, then
+ * upgrade call_log.transcription in place so the miner picks the call up on
+ * its next run. The original transcript is preserved in
+ * transcription_pre_backfill.
  *
- * Consent posture mirrors the miner exactly: inbound +
- * call_recording_consent_disclaimer_played === true only. Self-terminating:
- * zero candidates → no-op forever. Spend is bounded by the batch cap
- * (default 20 recordings/run).
+ * Attempt discipline:
+ *   - Per-recording VERDICTS (no speech, implausible for the duration, still
+ *     undiarized) stamp retranscribed_at on the first try — re-paying for the
+ *     same audio can't change the audio.
+ *   - INFRASTRUCTURE failures (provider 5xx/timeouts/credentials) increment
+ *     retranscribe_attempts and retry on later runs, stamping permanently
+ *     only after MAX_ATTEMPTS — an OpenAI outage must not burn the backlog.
+ *
+ * Candidates mirror the miner exactly: inbound, consent disclaimer played,
+ * not wrong_number/spam — and at least a day old, far clear of the live
+ * processor's 10-minute-delayed window, with a still-undiarized re-check in
+ * the guarded UPDATE so a live result is never clobbered. Self-terminating:
+ * zero candidates → no-op. Spend bounded by the batch cap.
  *
  * PII: never log transcript bodies or full phone numbers.
  */
@@ -33,13 +40,9 @@ const { hasAgentCallerLabels } = require('./sms-voice-corpus-miner');
 const BATCH_LIMIT = Number(process.env.RETRANSCRIBE_BATCH_LIMIT) > 0
   ? Number(process.env.RETRANSCRIBE_BATCH_LIMIT)
   : 20;
+const MAX_ATTEMPTS = 3;
+const UNDIARIZED_SQL = "(transcription IS NULL OR transcription NOT ILIKE '%agent:%' OR transcription NOT ILIKE '%caller:%')";
 
-/**
- * Candidates: consented inbound calls with a recording, never attempted, and
- * a transcript the corpus can't use (missing, or lacking either speaker
- * label). Newest first — recent calls reflect the current team's voice, and
- * the backlog drains toward history.
- */
 function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
   return dbi('call_log')
     .where('direction', 'inbound')
@@ -47,66 +50,102 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     .whereNotNull('recording_url')
     .whereNot('recording_url', '')
     .whereNull('retranscribed_at')
-    .whereRaw("(transcription IS NULL OR transcription NOT ILIKE '%agent:%' OR transcription NOT ILIKE '%caller:%')")
-    .select('id', 'recording_url', 'transcription', 'from_phone', 'to_phone', 'customer_id', 'created_at')
+    .where('retranscribe_attempts', '<', MAX_ATTEMPTS)
+    // At least a day old: legacy calls by definition, and safely clear of the
+    // live processor's delayed window so the two never race on one row.
+    .whereRaw("created_at < NOW() - INTERVAL '1 day'")
+    .whereRaw(UNDIARIZED_SQL)
+    // The miner drops wrong_number/spam — don't pay to transcribe them.
+    // NULL outcome stays eligible (NOT IN is UNKNOWN on NULL).
+    .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
+    .select('id', 'recording_url', 'transcription', 'from_phone', 'to_phone', 'customer_id',
+      'created_at', 'recording_duration_seconds', 'duration_seconds')
     .orderBy('created_at', 'desc')
     .limit(limit);
 }
 
-async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, transcribe } = {}) {
+async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, transcribe, implausible } = {}) {
   const startedAt = Date.now();
   const calls = await candidateQuery(dbi, { limit: batchLimit });
   if (!calls.length) {
     logger.info('[retranscribe] no candidates — backlog drained');
-    return { attempted: 0, upgraded: 0, unusable: 0, failed: 0, ms: Date.now() - startedAt };
+    return { attempted: 0, upgraded: 0, unusable: 0, retried: 0, exhausted: 0, ms: Date.now() - startedAt };
   }
 
-  const transcribeFn = transcribe
-    || ((call) => require('./call-recording-processor').transcribeRecording(call.recording_url, { call }));
+  const processor = () => require('./call-recording-processor');
+  const transcribeFn = transcribe || ((call) => processor().transcribeRecording(call.recording_url, { call }));
+  const implausibleFn = implausible || ((text, seconds) => processor().isImplausibleTranscript(text, seconds));
 
-  const summary = { attempted: 0, upgraded: 0, unusable: 0, failed: 0 };
+  const summary = { attempted: 0, upgraded: 0, unusable: 0, retried: 0, exhausted: 0 };
+
+  const stampVerdict = (id) => dbi('call_log').where({ id }).whereNull('retranscribed_at').update({
+    retranscribed_at: dbi.fn.now(),
+  });
+  // Infrastructure failure: count the attempt, stamp permanently only once
+  // MAX_ATTEMPTS is reached — a provider outage retries on later runs.
+  const recordFailure = async (id) => {
+    const [row] = await dbi('call_log')
+      .where({ id })
+      .whereNull('retranscribed_at')
+      .update({ retranscribe_attempts: dbi.raw('COALESCE(retranscribe_attempts, 0) + 1') })
+      .returning(['retranscribe_attempts']);
+    const attempts = Number(row?.retranscribe_attempts) || 0;
+    if (attempts >= MAX_ATTEMPTS) {
+      await stampVerdict(id);
+      return 'exhausted';
+    }
+    return 'retried';
+  };
+
   for (const call of calls) {
     summary.attempted += 1;
-    let outcome = 'failed';
     try {
       const result = await transcribeFn(call);
       const text = result?.transcription || null;
-      if (text && hasAgentCallerLabels(text)) {
-        // Guarded on retranscribed_at IS NULL: a concurrent run (or the live
-        // processor finishing late) must not double-write. COALESCE keeps the
-        // FIRST original if anything ever re-stamps.
-        const changed = await dbi('call_log')
-          .where({ id: call.id })
-          .whereNull('retranscribed_at')
-          .update({
-            transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
-            transcription: text,
-            retranscribed_at: dbi.fn.now(),
-          });
-        outcome = changed ? 'upgraded' : 'failed';
+      if (!text) {
+        // Indistinguishable from a provider problem — treat as retryable.
+        summary[await recordFailure(call.id)] += 1;
+        continue;
+      }
+      const seconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
+      if (!hasAgentCallerLabels(text) || implausibleFn(text, seconds)) {
+        // A real per-recording verdict: the audio itself can't yield a usable
+        // diarized transcript. One attempt, ever.
+        await stampVerdict(call.id);
+        summary.unusable += 1;
+        continue;
+      }
+      // Guarded upgrade: retranscribed_at still NULL AND the transcript is
+      // still undiarized — if the live processor (or a concurrent run) wrote
+      // a diarized transcript meanwhile, leave it alone and just stamp.
+      const changed = await dbi('call_log')
+        .where({ id: call.id })
+        .whereNull('retranscribed_at')
+        .whereRaw(UNDIARIZED_SQL)
+        .update({
+          transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
+          transcription: text,
+          retranscribed_at: dbi.fn.now(),
+        });
+      if (changed) {
+        summary.upgraded += 1;
       } else {
-        outcome = 'unusable'; // no speech, implausible, or still undiarized
+        await stampVerdict(call.id);
+        summary.unusable += 1; // someone else already diarized it — done either way
       }
     } catch (err) {
       logger.warn(`[retranscribe] call ${call.id} failed: ${err.message}`);
-      outcome = 'failed';
+      summary[await recordFailure(call.id)] += 1;
     }
-    if (outcome !== 'upgraded') {
-      // One attempt per call, success or not — stamp so the hourly cron never
-      // burns spend retrying a dead recording. The original transcript stays.
-      await dbi('call_log').where({ id: call.id }).whereNull('retranscribed_at').update({
-        retranscribed_at: dbi.fn.now(),
-      });
-    }
-    summary[outcome === 'upgraded' ? 'upgraded' : outcome] += 1;
   }
 
-  logger.info(`[retranscribe] run complete: attempted=${summary.attempted} upgraded=${summary.upgraded} unusable=${summary.unusable} failed=${summary.failed} ms=${Date.now() - startedAt}`);
+  logger.info(`[retranscribe] run complete: attempted=${summary.attempted} upgraded=${summary.upgraded} unusable=${summary.unusable} retried=${summary.retried} exhausted=${summary.exhausted} ms=${Date.now() - startedAt}`);
   return { ...summary, ms: Date.now() - startedAt };
 }
 
 module.exports = {
   BATCH_LIMIT,
+  MAX_ATTEMPTS,
   candidateQuery,
   runRetranscriptionBackfill,
 };

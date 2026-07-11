@@ -1030,7 +1030,10 @@ function initScheduledJobs() {
   // attempt per call ever; no-ops once the backlog drains.
   // =========================================================================
   cron.schedule('40 * * * *', async () => {
-    if (!isEnabled('callRetranscribeBackfill')) return;
+    // Both gates: this job exists ONLY to feed the corpus miner — paying to
+    // re-transcribe while the miner is dark would upgrade transcripts nobody
+    // consumes.
+    if (!isEnabled('callRetranscribeBackfill') || !isEnabled('voiceCorpusMiner')) return;
     try {
       const { runExclusive } = require('../utils/cron-lock');
       const { runRetranscriptionBackfill } = require('./call-retranscription-backfill');
