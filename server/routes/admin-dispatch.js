@@ -5145,6 +5145,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
       : '';
 
+    // Digital business card: mint the customer's card off their first
+    // completed visit, tied to the tech on record (services/customer-card.js).
+    // Fire-and-forget — a mint failure never blocks the completion, and the
+    // card.issued email inside is dark behind GATE_DIGITAL_BUSINESS_CARD.
+    try {
+      const CustomerCardService = require('../services/customer-card');
+      void CustomerCardService.ensureCardForCompletion({
+        customerId: svc.customer_id,
+        serviceRecordId: record.id,
+        scheduledServiceId: svc.id,
+      }).catch((e) => logger.warn(`[dispatch] card mint failed (customerId=${svc.customer_id}): ${e.message}`));
+    } catch (e) {
+      logger.warn(`[dispatch] card mint dispatch failed: ${e.message}`);
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit) {
       try {
         const displayServiceType = normalizeServiceTypeForTemplate(svc.service_type);

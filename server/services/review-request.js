@@ -2147,4 +2147,10 @@ ReviewService.__private = {
   calculateReviewSendTime,
 };
 
+// The digital-card mint (services/customer-card.js) routes its review QR with
+// the SAME city→GBP map as review asks — including the review-only overrides
+// above (palmetto → bradenton etc.) — instead of forking another copy of the
+// location list. Returns a location id string ('bradenton' | ...).
+ReviewService.resolveReviewLocationId = resolveLocation;
+
 module.exports = ReviewService;

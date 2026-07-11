@@ -83,6 +83,15 @@ const gates = {
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
 
+  // Digital business card — the card.issued email a customer gets after their
+  // FIRST completed visit (services/customer-card.js). The card row and the
+  // /card/:token page are NOT behind this gate (tokenized, unlisted,
+  // customer-initiated — same contract as the other public token pages); the
+  // gate covers ONLY the outbound email. Customer-facing auto-send → explicit
+  // opt-in in EVERY environment per house rule, so a dev/preview env with real
+  // SendGrid creds can't email real customers on a completion.
+  digitalBusinessCard: process.env.GATE_DIGITAL_BUSINESS_CARD === 'true',
+
   // Twilio — handles real inbound voice calls
   twilioVoice: isProd ? process.env.GATE_TWILIO_VOICE === 'true' : true,
 
