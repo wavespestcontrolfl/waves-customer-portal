@@ -102,7 +102,9 @@ function buildReadbackQuestion(email) {
 
 /**
  * Merge decoder + name-anchored candidates: dedupe by value, union sources,
- * and rank agreement (both sources) above single-source, high above medium.
+ * and rank agreement (both sources) above single-source, then by confidence.
+ * Confidence is NUMERIC 0–1 to match the Needs Review renderer
+ * (ConfirmEvidence prints `${value} (NN%)` from payload.email_candidates).
  * The bounced address itself never survives.
  */
 function mergeCandidates({ bouncedEmail, decoderCandidates = [], nameCandidates = [] }) {
@@ -111,33 +113,43 @@ function mergeCandidates({ bouncedEmail, decoderCandidates = [], nameCandidates 
   const add = (value, source, confidence) => {
     const v = String(value || '').trim().toLowerCase();
     if (!v || v === bounced || !EMAIL_RE.test(v)) return;
-    const cur = byValue.get(v) || { value: v, sources: [], confidence: 'medium' };
+    const conf = Math.max(0, Math.min(1, Number(confidence) || 0));
+    const cur = byValue.get(v) || { value: v, sources: [], confidence: 0 };
     if (!cur.sources.includes(source)) cur.sources.push(source);
-    if (confidence === 'high') cur.confidence = 'high';
+    cur.confidence = Math.max(cur.confidence, conf);
     byValue.set(v, cur);
   };
-  for (const c of decoderCandidates) add(c.value, 'audio_decoder', Number(c.confidence) >= 0.8 ? 'high' : 'medium');
-  for (const c of nameCandidates) add(c.value, 'name_anchor', c.confidence);
-  const rank = (c) => (c.sources.length > 1 ? 0 : 1) * 10 + (c.confidence === 'high' ? 0 : 1);
-  return [...byValue.values()].sort((a, b) => rank(a) - rank(b)).slice(0, 3);
+  for (const c of decoderCandidates) add(c.value, 'audio_decoder', c.confidence);
+  for (const c of nameCandidates) add(c.value, 'name_anchor', c.edit_distance === 1 ? 0.85 : 0.6);
+  const merged = [...byValue.values()];
+  for (const c of merged) {
+    // Independent agreement (audio + name anchor) is the strongest evidence —
+    // exactly how the original Pitts case was settled.
+    if (c.sources.length > 1) c.confidence = Math.min(0.98, c.confidence + 0.1);
+  }
+  merged.sort((a, b) => (b.sources.length - a.sources.length) || (b.confidence - a.confidence));
+  return merged.slice(0, 3);
 }
 
 // ── Orchestration ────────────────────────────────────────────────────────
 
 async function findSourceCall({ bouncedEmail, customerId = null }) {
   const bounced = String(bouncedEmail || '').trim().toLowerCase();
+  // The extraction must actually CONTAIN the bounced address (text-level —
+  // no ::jsonb casts on legacy rows). A bare customer fallback would pick the
+  // customer's latest recorded call even when this address never came from a
+  // call at all (manual entry, old variant) and burn a re-transcription on
+  // unrelated audio that can only yield misleading candidates. No match →
+  // no evidence → skip. customerId only ranks among multiple matches.
   const q = db('call_log')
     .whereNotNull('recording_url')
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
-    .where(function () {
-      // Text-level match — no ::jsonb casts (legacy malformed rows). The
-      // exact-email hit is the strongest link; a customer link is the
-      // fallback when the extraction stored a variant.
-      this.whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${bounced}%`]);
-      if (customerId) this.orWhere('customer_id', customerId);
+    .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) LIKE ?', [`%${bounced}%`])
+    .select('id', 'recording_url', 'recording_duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
+    .modify((qb) => {
+      if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
+      else qb.orderBy('created_at', 'desc');
     })
-    .select('id', 'recording_url', 'created_at', 'customer_id', 'ai_extraction')
-    .orderByRaw('(LOWER(COALESCE(ai_extraction, \'\')) LIKE ?) DESC, created_at DESC', [`%${bounced}%`])
     .limit(1);
   return (await q)[0] || null;
 }
@@ -152,21 +164,41 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
     const call = await findSourceCall({ bouncedEmail: bounced, customerId });
     if (!call) return { skipped: 'no_source_call' };
 
-    // One card per call: skip BEFORE spending on re-transcription (bounces of
-    // the report + invoice + receipt for the same bad address arrive together).
-    const openCard = await db('triage_items')
-      .where({ call_log_id: call.id, reason_code: 'email_bounce_reverify' })
-      .whereIn('status', ['open', 'in_progress'])
-      .first('id')
-      .catch(() => null);
-    if (openCard) return { skipped: 'card_open' };
+    // CLAIM FIRST, transcribe second: bounces of the report + invoice +
+    // receipt for the same bad address arrive together, and each
+    // fire-and-forget invocation would pass a read-only check before the
+    // first inserts — all paying for provider work. The partial unique index
+    // on (call_log_id, reason_code) WHERE open makes this insert the mutex:
+    // exactly one caller gets a row back and proceeds.
+    const { buildTriageItem } = require('./call-routing-gates');
+    const claimed = await db('triage_items')
+      .insert(buildTriageItem({
+        callLogId: call.id,
+        flag: 'email_bounce_reverify',
+        extraction: { meta: { call_summary: `Hard bounce on ${bounced} — re-listening to the source recording…` } },
+        severity: 'advisory',
+        extraPayload: { bounced_email: bounced, analyzing: true, customer_id: customerId || call.customer_id || null },
+      }))
+      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .ignore()
+      .returning('id');
+    if (!claimed.length) return { skipped: 'card_open' };
+    const cardId = claimed[0].id || claimed[0];
 
     // Re-run the AUDIO through the full transcription pipeline. The stored
     // transcript is the wrong artifact here — it's where the mis-heard
     // letter lives; the contact-dictation pass re-listens letter-by-letter.
     const CallProc = require('./call-recording-processor');
     const result = await CallProc.transcribeRecording(call.recording_url);
-    if (!result?.transcription) return { skipped: 'retranscribe_failed' };
+    // Same hallucination guard the live pipeline applies before trusting a
+    // transcript — a near-silent recording can yield a long invented one,
+    // and candidates decoded from it would be confidently wrong.
+    // Guard signature is (transcription, recordingSeconds) — fails open on
+    // unknown duration, same as the live pipeline.
+    if (!result?.transcription || CallProc.isImplausibleTranscript(result.transcription, Number(call.recording_duration_seconds) || 0)) {
+      await db('triage_items').where({ id: cardId }).del().catch(() => {});
+      return { skipped: !result?.transcription ? 'retranscribe_failed' : 'implausible_transcript' };
+    }
 
     const { decodeDictatedContacts } = require('./contact-dictation');
     const decoded = await decodeDictatedContacts({
@@ -183,25 +215,32 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null })
     });
 
     const candidates = mergeCandidates({ bouncedEmail: bounced, decoderCandidates, nameCandidates });
-    if (!candidates.length) return { skipped: 'no_candidates' };
+    if (!candidates.length) {
+      // The claim row was only the mutex — an empty card would ask the office
+      // to confirm nothing.
+      await db('triage_items').where({ id: cardId }).del().catch(() => {});
+      return { skipped: 'no_candidates' };
+    }
 
-    const { buildTriageItem } = require('./call-routing-gates');
+    // Payload keys match the Needs Review renderer's contract
+    // (ConfirmEvidence): email_as_heard → "Heard", email_candidates →
+    // value+(NN%), confirmation_question → the read-back script. NEVER
+    // 'candidates' — that key renders as shared-phone customer matches.
     await db('triage_items')
-      .insert(buildTriageItem({
-        callLogId: call.id,
-        flag: 'email_bounce_reverify',
-        extraction: { meta: { call_summary: `Hard bounce on ${bounced} — audio re-verification proposes ${candidates[0].value}` } },
-        severity: 'advisory',
-        extraPayload: {
+      .where({ id: cardId })
+      .update({
+        summary: `Hard bounce on ${bounced} — audio re-verification proposes ${candidates[0].value}`,
+        payload: JSON.stringify({
+          flag: 'email_bounce_reverify',
           bounced_email: bounced,
-          candidates,
-          readback_question: buildReadbackQuestion(candidates[0].value),
+          email_as_heard: bounced,
+          email_candidates: candidates,
+          confirmation_question: buildReadbackQuestion(candidates[0].value),
           transcriber: { provider: result.provider || null, contact_pass: !!result.contactPassTranscript },
           customer_id: customerId || call.customer_id || null,
-        },
-      }))
-      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .ignore();
+        }),
+        updated_at: new Date(),
+      });
 
     logger.info(`[bounce-reverify] Carded ${candidates.length} candidate(s) for bounced address (call ${call.id})`);
     return { carded: true, callId: call.id, candidates };

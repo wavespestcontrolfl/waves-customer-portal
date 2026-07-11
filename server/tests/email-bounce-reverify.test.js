@@ -63,7 +63,7 @@ describe('buildReadbackQuestion', () => {
 });
 
 describe('mergeCandidates', () => {
-  test('decoder+name agreement outranks single-source; bounced address excluded', () => {
+  test('decoder+name agreement outranks single-source; bounced address excluded; confidence numeric for the UI', () => {
     const merged = mergeCandidates({
       bouncedEmail: 'apitz6958@yahoo.com',
       decoderCandidates: [
@@ -71,10 +71,13 @@ describe('mergeCandidates', () => {
         { value: 'apits6958@yahoo.com', confidence: 0.55 },
         { value: 'apitz6958@yahoo.com', confidence: 0.4 },
       ],
-      nameCandidates: [{ value: 'apitts6958@yahoo.com', source: 'name_anchor', confidence: 'high', edit_distance: 1 }],
+      nameCandidates: [{ value: 'apitts6958@yahoo.com', source: 'name_anchor', edit_distance: 2 }],
     });
     expect(merged[0].value).toBe('apitts6958@yahoo.com');
     expect(merged[0].sources.sort()).toEqual(['audio_decoder', 'name_anchor']);
+    // Numeric (ConfirmEvidence renders `${value} (NN%)`), boosted by agreement.
+    expect(merged[0].confidence).toBeCloseTo(0.98, 2);
+    expect(typeof merged[1].confidence).toBe('number');
     expect(merged.map((c) => c.value)).not.toContain('apitz6958@yahoo.com');
   });
 });

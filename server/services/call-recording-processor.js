@@ -3126,8 +3126,10 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
 // ══════════════════════════════════════════════════════════════
 const CallRecordingProcessor = {
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
-  // full pipeline incl. the letter-fidelity contact-dictation second pass.
+  // full pipeline incl. the letter-fidelity contact-dictation second pass,
+  // plus the same hallucination guard the live pipeline applies.
   transcribeRecording,
+  isImplausibleTranscript,
   /**
    * Process a call recording end-to-end.
    * Called from recording-status webhook or manually from admin.
