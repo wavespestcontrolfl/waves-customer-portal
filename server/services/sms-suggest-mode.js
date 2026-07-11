@@ -57,7 +57,7 @@ function hasRedactionPlaceholder(text) {
 // Matches "$50", "$ 1,200.50", "USD 50", "50 dollars", "2 bucks". False
 // positives are acceptable — they fail toward human review, never toward a
 // customer send.
-const PRICE_QUOTE_RE = /\$\s?\d|\bUSD\s?\d|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks)\b/i;
+const PRICE_QUOTE_RE = /\$\s*\d|\bUSD\s*\d|\b\d[\d,]*(?:\.\d+)?\s*(?:dollars|bucks)\b/i;
 function hasPriceQuote(text) {
   return PRICE_QUOTE_RE.test(String(text || ''));
 }
