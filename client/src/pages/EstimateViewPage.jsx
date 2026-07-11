@@ -2624,6 +2624,23 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
         </div>
       ) : (
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {/* Direct view — opens the same tokenized PDF the send flows
+              deliver, in a new tab where the browser's own print / download
+              / share (incl. the mobile share sheet) take over. Rendered
+              first so customers aren't forced through a send to read it. */}
+          <a
+            href={`${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              padding: '10px 16px', borderRadius: 999, border: `1px solid ${W.border}`,
+              background: W.white, color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700,
+              textDecoration: 'none', display: 'inline-block',
+              pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
+            }}
+          >
+            View the PDF
+          </a>
           {customerEmail ? (
             <button
               type="button"
