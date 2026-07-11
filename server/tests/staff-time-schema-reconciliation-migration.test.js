@@ -136,4 +136,19 @@ describe('Staff time schema reconciliation migration', () => {
     expect(service.match(/staff_write_generation: ACTIVE_WRITE_GENERATION/g)).toHaveLength(3);
     expect(notifications).toMatch(/status: 'active',[\s\S]*staff_write_generation: ACTIVE_WRITE_GENERATION/);
   });
+
+  test('job replacement closes and creates the timer in one transaction', () => {
+    const service = fs.readFileSync(
+      path.join(__dirname, '../services/time-tracking.js'),
+      'utf8',
+    );
+    const startJob = service.match(
+      /async function startJob[\s\S]*?\n}\n\n\/\*\*\n \* End the active job entry/,
+    )?.[0];
+
+    expect(startJob).toMatch(/db\.transaction\(async \(trx\)/);
+    expect(startJob).toMatch(/entry_type: 'shift',[\s\S]*?\.forUpdate\(\)/);
+    expect(startJob).toMatch(/await trx\('time_entries'\)[\s\S]*?\.update\(/);
+    expect(startJob).toMatch(/await trx\('time_entries'\)[\s\S]*?\.insert\(/);
+  });
 });

@@ -11,6 +11,7 @@
 const db = require('../models/db');
 
 const SAMPLE_LIMIT = 25;
+const SCHEMA_DEPENDENCY_ERROR_CODES = new Set(['42P01', '42703']);
 
 function rowsFrom(result) {
   return Array.isArray(result) ? result : (result?.rows || []);
@@ -35,6 +36,26 @@ async function runCheck(trx, check) {
     count,
     rows,
   };
+}
+
+async function runDataCheck(trx, check) {
+  try {
+    // A nested Knex transaction is a SAVEPOINT. If a legacy schema makes one
+    // query fail, rolling back to it keeps the outer repeatable-read snapshot
+    // usable so the audit can report every remaining blocker.
+    return await trx.transaction((savepoint) => runCheck(savepoint, check));
+  } catch (error) {
+    if (!SCHEMA_DEPENDENCY_ERROR_CODES.has(error.code)) throw error;
+    return {
+      key: check.key,
+      description: `${check.description} (not evaluated because required schema is missing)`,
+      blocking: true,
+      count: 1,
+      rows: [],
+      incomplete: true,
+      errorCode: error.code,
+    };
+  }
 }
 
 const checks = [
@@ -566,17 +587,19 @@ async function main() {
     for (const check of dataChecks) {
       // Deliberately sequential so one repeatable-read snapshot backs the report.
       // eslint-disable-next-line no-await-in-loop
-      results.push(await runCheck(trx, check));
+      results.push(await runDataCheck(trx, check));
     }
     return { target, results };
   });
   const { target, results: report } = snapshot;
 
   const blockers = report.filter((item) => item.blocking && item.count > 0);
+  const incomplete = report.filter((item) => item.incomplete);
   if (json) {
     process.stdout.write(`${JSON.stringify({
-      ok: blockers.length === 0,
+      ok: blockers.length === 0 && incomplete.length === 0,
       blockers: blockers.length,
+      incomplete: incomplete.length,
       environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.NODE_ENV || 'development',
       target,
       checks: report.map((item) => (
@@ -589,7 +612,9 @@ async function main() {
       + `(user=${target.database_user}, env=${process.env.RAILWAY_ENVIRONMENT_NAME || process.env.NODE_ENV || 'development'}, read-only)\n`,
     );
     for (const item of report) {
-      const label = item.count === 0 ? 'PASS' : (item.blocking ? 'BLOCK' : 'WARN');
+      const label = item.incomplete
+        ? 'ERROR'
+        : (item.count === 0 ? 'PASS' : (item.blocking ? 'BLOCK' : 'WARN'));
       process.stdout.write(`${label} ${item.key}: ${item.count} — ${item.description}\n`);
       if (details && item.count > 0) {
         process.stdout.write(`${JSON.stringify(item.rows, null, 2)}\n`);
@@ -598,10 +623,16 @@ async function main() {
     if (!details && report.some((item) => item.count > 0)) {
       process.stdout.write('Finding samples withheld; re-run with --details only in a restricted operator terminal.\n');
     }
-    process.stdout.write(`\n${blockers.length === 0 ? 'Staff rollout preflight passed.' : `Staff rollout blocked by ${blockers.length} check(s).`}\n`);
+    const verdict = incomplete.length > 0
+      ? `Staff rollout audit incomplete: ${incomplete.length} check(s) could not be evaluated.`
+      : (blockers.length === 0
+        ? 'Staff rollout preflight passed.'
+        : `Staff rollout blocked by ${blockers.length} check(s).`);
+    process.stdout.write(`\n${verdict}\n`);
   }
 
-  if (blockers.length > 0) process.exitCode = 1;
+  if (incomplete.length > 0) process.exitCode = 2;
+  else if (blockers.length > 0) process.exitCode = 1;
 }
 
 if (require.main === module) {
@@ -620,4 +651,5 @@ module.exports = {
   main,
   rowsFrom,
   runCheck,
+  runDataCheck,
 };

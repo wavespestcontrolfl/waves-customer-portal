@@ -88,51 +88,59 @@ async function clockOut(technicianId, { lat, lng, notes } = {}) {
  * Start a job entry (tech must be clocked in).
  */
 async function startJob(technicianId, jobId, { lat, lng } = {}) {
-  const activeShift = await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
-    .first();
+  // Keep replacement atomic across writer-generation cutovers. If this app
+  // generation is stale, its insert is rejected by the active-write CHECK;
+  // the transaction then rolls back the preceding close instead of leaving
+  // the technician without an active job timer.
+  const entry = await db.transaction(async (trx) => {
+    const activeShift = await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
+      .forUpdate()
+      .first();
 
-  if (!activeShift) {
-    throw new Error('Must be clocked in to start a job.');
-  }
-
-  // Close any other active job entry
-  const now = new Date();
-  await db('time_entries')
-    .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
-    .update({
-      status: 'completed',
-      clock_out: now,
-      duration_minutes: db.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
-      updated_at: now,
-    });
-
-  // Lookup job details
-  let customerId = null;
-  let serviceType = null;
-  if (jobId) {
-    const job = await db('scheduled_services').where({ id: jobId }).first();
-    if (job) {
-      customerId = job.customer_id;
-      serviceType = job.service_type;
+    if (!activeShift) {
+      throw new Error('Must be clocked in to start a job.');
     }
-  }
 
-  const [entry] = await db('time_entries')
-    .insert({
-      technician_id: technicianId,
-      entry_type: 'job',
-      status: 'active',
-      clock_in: now,
-      clock_in_lat: lat || null,
-      clock_in_lng: lng || null,
-      job_id: jobId || null,
-      customer_id: customerId,
-      service_type: serviceType,
-      source: 'app',
-      staff_write_generation: ACTIVE_WRITE_GENERATION,
-    })
-    .returning('*');
+    // Close any other active job entry.
+    const now = new Date();
+    await trx('time_entries')
+      .where({ technician_id: technicianId, entry_type: 'job', status: 'active' })
+      .update({
+        status: 'completed',
+        clock_out: now,
+        duration_minutes: trx.raw("EXTRACT(EPOCH FROM (? - clock_in)) / 60", [now]),
+        updated_at: now,
+      });
+
+    // Lookup job details.
+    let customerId = null;
+    let serviceType = null;
+    if (jobId) {
+      const job = await trx('scheduled_services').where({ id: jobId }).first();
+      if (job) {
+        customerId = job.customer_id;
+        serviceType = job.service_type;
+      }
+    }
+
+    const [created] = await trx('time_entries')
+      .insert({
+        technician_id: technicianId,
+        entry_type: 'job',
+        status: 'active',
+        clock_in: now,
+        clock_in_lat: lat || null,
+        clock_in_lng: lng || null,
+        job_id: jobId || null,
+        customer_id: customerId,
+        service_type: serviceType,
+        source: 'app',
+        staff_write_generation: ACTIVE_WRITE_GENERATION,
+      })
+      .returning('*');
+    return created;
+  });
 
   logger.info(`[time-tracking] Tech ${technicianId} started job`, { entryId: entry.id, jobId });
   if (jobId) {

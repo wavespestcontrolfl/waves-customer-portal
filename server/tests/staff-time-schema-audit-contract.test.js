@@ -6,6 +6,7 @@ jest.mock('../models/db', () => ({
 const {
   checks,
   runCheck,
+  runDataCheck,
 } = require('../scripts/audit-staff-rollout-readiness');
 
 describe('Staff time schema rollout audit contract', () => {
@@ -41,5 +42,75 @@ describe('Staff time schema rollout audit contract', () => {
     expect(result.count).toBe(32);
     expect(result.rows).toEqual([{ invariant: 'missing' }]);
     expect(trx.raw).toHaveBeenCalledWith(expect.stringMatching(/LIMIT \?/), [25]);
+  });
+
+  test.each(['42P01', '42703'])(
+    'reports unavailable data checks after PostgreSQL schema error %s',
+    async (code) => {
+      const schemaError = Object.assign(new Error('legacy schema'), { code });
+      const trx = {
+        transaction: jest.fn(async (callback) => callback({
+          raw: jest.fn(async () => { throw schemaError; }),
+        })),
+      };
+
+      await expect(runDataCheck(trx, {
+        key: 'example',
+        description: 'Example data invariant',
+        sql: 'SELECT missing_column FROM missing_table',
+      })).resolves.toEqual({
+        key: 'example',
+        description: 'Example data invariant (not evaluated because required schema is missing)',
+        blocking: true,
+        count: 1,
+        rows: [],
+        incomplete: true,
+        errorCode: code,
+      });
+    },
+  );
+
+  test('does not hide non-schema audit failures', async () => {
+    const queryError = Object.assign(new Error('connection lost'), { code: '08006' });
+    const trx = {
+      transaction: jest.fn(async () => { throw queryError; }),
+    };
+
+    await expect(runDataCheck(trx, {
+      key: 'example',
+      description: 'Example data invariant',
+      sql: 'SELECT 1',
+    })).rejects.toBe(queryError);
+  });
+
+  test('continues with the next data check after a schema-dependent check fails', async () => {
+    const schemaError = Object.assign(new Error('missing relation'), { code: '42P01' });
+    let savepointNumber = 0;
+    const trx = {
+      transaction: jest.fn(async (callback) => {
+        savepointNumber += 1;
+        return callback({
+          raw: jest.fn(async () => {
+            if (savepointNumber === 1) throw schemaError;
+            return { rows: [] };
+          }),
+        });
+      }),
+    };
+
+    const first = await runDataCheck(trx, {
+      key: 'missing_dependency',
+      description: 'Missing dependency',
+      sql: 'SELECT * FROM absent_table',
+    });
+    const second = await runDataCheck(trx, {
+      key: 'compatible_check',
+      description: 'Compatible check',
+      sql: 'SELECT 1 WHERE false',
+    });
+
+    expect(first.incomplete).toBe(true);
+    expect(second).toMatchObject({ key: 'compatible_check', count: 0 });
+    expect(trx.transaction).toHaveBeenCalledTimes(2);
   });
 });
