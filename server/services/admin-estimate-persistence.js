@@ -10,6 +10,8 @@ const {
   attachLeadToEstimate,
   assertLeadCanAttachEstimate,
   leadMatchesEstimateContact,
+  normalizeContactPhone,
+  normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
@@ -750,7 +752,7 @@ const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 // consumed by the revise write below and by GET /:id/edit-source so the
 // builder can explain a non-editable row instead of failing on save.
 // Returns null when editable, otherwise { message, statusCode }.
-function estimateReviseBlock(estimate, estimateData) {
+function estimateReviseBlock(estimate, estimateData, now = new Date()) {
   const parsed = estimateData === undefined
     ? parseStoredEstimateData(estimate?.estimate_data)
     : estimateData;
@@ -769,6 +771,14 @@ function estimateReviseBlock(estimate, estimateData) {
   }
   if (REVISE_BLOCKED_STATUSES.includes(status)) {
     return { message: `A ${status} estimate can no longer be edited.`, statusCode: 409 };
+  }
+  // Date-expired rows the daily expiration worker hasn't flipped yet are
+  // expired all the same: the public route serves the expired page off the
+  // timestamp, so a revise would report saved while the customer's link keeps
+  // showing nothing new. Same verdict as status='expired'.
+  const expiresAt = estimate?.expires_at ? new Date(estimate.expires_at) : null;
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= now) {
+    return { message: 'This estimate has passed its expiration date and can no longer be edited. Extend it first, then edit.', statusCode: 409 };
   }
   return null;
 }
@@ -796,7 +806,7 @@ async function reviseAdminEstimate({
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
-  const block = estimateReviseBlock(estimate);
+  const block = estimateReviseBlock(estimate, undefined, now());
   if (block) throw errorWithStatus(block.message, block.statusCode);
   // A revise is a full quote rewrite — without a payload it would null the
   // stored blob (and silently orphan the linkage keys preserved below).
@@ -870,6 +880,34 @@ async function reviseAdminEstimate({
         'This estimate is linked to a lead whose contact does not match the revised customer. Update the lead first, or create a new estimate for the other customer.',
         409,
       );
+    }
+
+    // Customer-linkage revalidation, same idea as the lead guard: public
+    // acceptance converts/schedules/invoices against estimate.customer_id
+    // (estimate-public accept flow), so a revise that moves the contact while
+    // the preserve above keeps the link would show one contact's quote and
+    // commit the accepted work to the previous customer's account. Match with
+    // the same normalized phone/email rule the lead guard uses; a preserved
+    // id pointing at a missing customer row fails the same way.
+    if (writeFields.customer_id) {
+      const linkedCustomer = await database('customers')
+        .where({ id: writeFields.customer_id })
+        .first();
+      const revised = { ...estimate, ...writeFields };
+      const customerPhone = normalizeContactPhone(linkedCustomer?.phone);
+      const revisedPhone = normalizeContactPhone(revised.customer_phone);
+      const customerEmail = normalizeContactEmail(linkedCustomer?.email);
+      const revisedEmail = normalizeContactEmail(revised.customer_email);
+      const matchesCustomer = !!linkedCustomer && (
+        (customerPhone && revisedPhone && customerPhone === revisedPhone)
+        || (customerEmail && revisedEmail && customerEmail === revisedEmail)
+      );
+      if (!matchesCustomer) {
+        throw errorWithStatus(
+          'This estimate is linked to a customer whose contact does not match the revised contact. Update the customer record first, or create a new estimate for the other customer.',
+          409,
+        );
+      }
     }
   }
 

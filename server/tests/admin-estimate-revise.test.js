@@ -11,10 +11,42 @@ const { clearAllEstimatePricingCache } = require('../services/estimate-pricing-c
 // syncable pricing engine or a real customer-services lookup.
 const noRecompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
 
-function makeReviseDatabase({ estimate, lead = null, updateReturnsEmpty = false }) {
+// Pin the clock inside the fixture's validity window (sent 07-09, expires
+// 07-16) — the expiry guard compares against `now`, so real-clock tests would
+// start failing the day the fixture's expires_at passes.
+const fixedNow = () => new Date('2026-07-10T12:00:00Z');
+
+// Default linked-customer row matches the sentEstimate fixture's contact, so
+// contact-preserving revises pass the customer revalidation guard untouched.
+const matchingCustomer = {
+  id: 'cust-9',
+  phone: '9415550102',
+  email: 'beverly@example.com',
+};
+
+function makeReviseDatabase({
+  estimate,
+  lead = null,
+  customer = matchingCustomer,
+  updateReturnsEmpty = false,
+}) {
   const updates = [];
   const rawGuards = [];
   const database = (table) => {
+    if (table === 'customers') {
+      let clause = null;
+      const customerChain = {
+        where: (c) => {
+          clause = c;
+          return customerChain;
+        },
+        first: async () => {
+          if (!customer) return null;
+          return String(customer.id) === String(clause?.id) ? customer : null;
+        },
+      };
+      return customerChain;
+    }
     if (table === 'leads') {
       // FK lookup passes { estimate_id }; the mirror lookup passes { id }.
       let clause = null;
@@ -156,6 +188,25 @@ describe('estimateReviseBlock', () => {
     expect(block.message).toMatch(/commercial proposal/i);
   });
 
+  test('date-expired rows block with 409 even before the worker flips status', () => {
+    const block = estimateReviseBlock(
+      { status: 'sent', price_locked_at: null, archived_at: null, expires_at: '2026-07-09T14:00:00Z' },
+      undefined,
+      new Date('2026-07-10T12:00:00Z'),
+    );
+    expect(block).not.toBeNull();
+    expect(block.statusCode).toBe(409);
+    expect(block.message).toMatch(/expiration/i);
+  });
+
+  test('a future expiry stays editable', () => {
+    expect(estimateReviseBlock(
+      { status: 'sent', price_locked_at: null, archived_at: null, expires_at: '2026-07-16T14:00:00Z' },
+      undefined,
+      new Date('2026-07-10T12:00:00Z'),
+    )).toBeNull();
+  });
+
   test('parses stringified estimate_data when no parsed blob is supplied', () => {
     const block = estimateReviseBlock({
       status: 'sent',
@@ -181,6 +232,7 @@ describe('reviseAdminEstimate', () => {
       body: reviseBody,
       technicianId: 'tech-2',
       recompute: noRecompute,
+      now: fixedNow,
     });
 
     expect(updates).toHaveLength(1);
@@ -212,6 +264,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: { ...reviseBody, customerId: null, satelliteUrl: null },
       recompute: noRecompute,
+      now: fixedNow,
     });
     expect(updates[0].customer_id).toBe('cust-9');
     expect(updates[0].satellite_url).toBe('https://maps.example.com/sat.png');
@@ -224,6 +277,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'missing',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 404 });
   });
 
@@ -236,6 +290,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
   });
@@ -249,6 +304,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 400 });
     expect(updates).toHaveLength(0);
   });
@@ -265,6 +321,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 400 });
     expect(updates).toHaveLength(0);
   });
@@ -276,6 +333,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
   });
 
@@ -286,6 +344,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: { ...reviseBody, estimateData: null },
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 400 });
     expect(updates).toHaveLength(0);
   });
@@ -310,6 +369,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     });
     const data = JSON.parse(updates[0].estimate_data);
     expect(data.lead_id).toBe('lead-7');
@@ -325,6 +385,7 @@ describe('reviseAdminEstimate', () => {
       estimateId: 'est-1',
       body: reviseBody,
       recompute: noRecompute,
+      now: fixedNow,
     });
     expect(rawGuards.some((sql) => String(sql).includes("'COMMERCIAL'"))).toBe(true);
   });
@@ -344,6 +405,7 @@ describe('reviseAdminEstimate', () => {
         customerEmail: 'someone.else@example.com',
       },
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
   });
@@ -360,8 +422,69 @@ describe('reviseAdminEstimate', () => {
       // to the same phone — must not 409.
       body: { ...reviseBody, customerPhone: '941-555-0102' },
       recompute: noRecompute,
+      now: fixedNow,
     });
     expect(updates).toHaveLength(1);
+  });
+
+  test('409s a date-expired row the worker has not flipped yet, without writing', async () => {
+    const { database, updates } = makeReviseDatabase({
+      estimate: { ...sentEstimate, expires_at: '2026-07-01T14:00:00Z' },
+    });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: reviseBody,
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('409s when the revise moves the contact away from the linked customer', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      // customer_id 'cust-9' is preserved by the revise, but neither the new
+      // phone nor the new email matches that customer's contact.
+      body: {
+        ...reviseBody,
+        customerName: 'Someone Else',
+        customerPhone: '9415559999',
+        customerEmail: 'someone.else@example.com',
+      },
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('allows a contact change that still matches the linked customer on one channel', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      // Phone moves to a new number, but the email still matches cust-9 —
+      // same one-channel match rule as the lead guard.
+      body: { ...reviseBody, customerPhone: '9415559999' },
+      recompute: noRecompute,
+      now: fixedNow,
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].customer_id).toBe('cust-9');
+  });
+
+  test('409s when the preserved customer link points at a missing customer row', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate, customer: null });
+    await expect(reviseAdminEstimate({
+      database,
+      estimateId: 'est-1',
+      body: { ...reviseBody, customerPhone: '9415559999', customerEmail: 'other@example.com' },
+      recompute: noRecompute,
+      now: fixedNow,
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
   });
 
   test('blocks a mirror-linked (no-FK) lead the same way', async () => {
@@ -387,6 +510,7 @@ describe('reviseAdminEstimate', () => {
         customerEmail: 'other@example.com',
       },
       recompute: noRecompute,
+      now: fixedNow,
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(updates).toHaveLength(0);
   });

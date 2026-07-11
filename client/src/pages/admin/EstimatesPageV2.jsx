@@ -2905,6 +2905,9 @@ function mobileStatusClass(status) {
 // Mirrors the server's revise guard (estimateReviseBlock): archived, terminal
 // (accepted/declined/expired), mid-send, and commercial-proposal rows can't be
 // edited in place — proposals have their own editor (CommercialProposalModal).
+// Tokenless rows (quote-wizard mirrors / legacy imports, the same set
+// canSendEstimate hides) are excluded too: "edit in place" means updating the
+// customer's existing link, and these rows have no link to keep stable.
 const EDITABLE_ESTIMATE_STATUSES = [
   "draft",
   "scheduled",
@@ -2915,6 +2918,7 @@ const EDITABLE_ESTIMATE_STATUSES = [
 function canEditEstimateInPlace(estimate) {
   return (
     EDITABLE_ESTIMATE_STATUSES.includes(estimate.status) &&
+    !!String(estimate.token || "").trim() &&
     !estimate.isCommercialProposal &&
     !estimate.archivedAt
   );
