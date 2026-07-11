@@ -187,6 +187,52 @@ describe('ServiceSection', () => {
     expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
   });
 
+  it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
+    // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
+    // itemizes only the pest slice as a treatment row. The card must lead with
+    // the combined recurring total ($130/mo), NOT the lone pest per-application
+    // price ($94) — accept/billing charges the bundle total.
+    render(
+      <ServiceSection
+        section={{
+          key: 'bundle',
+          label: 'Recurring services',
+          isRecurring: true,
+          isPest: true,
+          memberKeys: ['pest_control', 'lawn_care'],
+          frequencies: [{
+            key: 'monthly',
+            label: 'Monthly',
+            monthly: 130,
+            annual: 1560,
+            perServiceTreatments: [{
+              service: 'pest_control',
+              label: 'Pest Control',
+              perTreatment: 94,
+              displayPrice: 94,
+              visitsPerYear: 6,
+            }],
+            included: [{ key: 'bundle', label: 'Recurring services' }],
+          }],
+          copy: { priceWording: {} },
+        }}
+        selectedFrequencyKey="monthly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: false }}
+      />,
+    );
+
+    // Combined cadence total leads with a standalone "/mo" suffix. Were the
+    // bundle wrongly treated per-application, the headline would be the lone
+    // pest price ("/ application" suffix) plus a "Billed $130/mo, spread across
+    // the year" note — so the note's absence is the real discriminator.
+    expect(screen.getByText('$130')).toBeInTheDocument();
+    expect(screen.getByText('/mo')).toBeInTheDocument();
+    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
+  });
+
   it('shows the selected quote-required frequency reason', () => {
     render(
       <ServiceSection
