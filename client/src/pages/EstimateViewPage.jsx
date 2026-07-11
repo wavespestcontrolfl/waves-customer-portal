@@ -1919,17 +1919,26 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // a no-credit multi-service plan stays summary-free and unchanged.
 export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null }) {
   if (!combined) return null;
-  const manual = combined.manualDiscount && Number(combined.manualDiscount.amount) > 0
-    ? combined.manualDiscount
-    : null;
+  // The plan credit that gates rendering and supplies the label + the ranged
+  // fallback amount — the itemized amounts come from the selected-cadence
+  // difference below. Prefer the SELECTED row's discount: the server nulls
+  // combined.manualDiscount whenever the DEFAULT cadence floor-suppresses the
+  // credit, but another selected cadence can still carry it, and the summary
+  // must not vanish on that selection.
+  const liveDiscount = (discount) => (discount && Number(discount.amount) > 0 ? discount : null);
+  const manual = liveDiscount(selectedFrequency?.manualDiscount) || liveDiscount(combined.manualDiscount);
   if (!manual) return null;
   // Quote-required selection: the rest of the estimate hides exact dollars for a
   // quote-required row, so there's no exact subtotal/net to itemize here either.
   if (selectedFrequency?.quoteRequired === true) return null;
 
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  // A $0 net is real — a credit can fully comp the plan, and that's exactly when
+  // the subtotal → credit → "Your price $0" story matters — so only a
+  // negative/non-finite net bails. A zero net must additionally be corroborated
+  // by the credit itself before rendering (below).
   const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
-  if (!Number.isFinite(netMonthly) || netMonthly <= 0) return null;
+  if (!Number.isFinite(netMonthly) || netMonthly < 0) return null;
 
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
   const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
@@ -1958,18 +1967,30 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   // per-service sum. Both branches below use this so a ranged plan doesn't show a
   // stale default-cadence credit either.
   const subtotalMonthly = round2(Number(preCreditMonthly));
-  const creditFromDiff = subtotalMonthly > 0 && subtotalMonthly > netMonthly
+  const hasServiceSum = subtotalMonthly > 0;
+  const creditFromDiff = hasServiceSum && subtotalMonthly > netMonthly
     ? round2(subtotalMonthly - netMonthly)
     : null;
+  // A $0 net renders only when the plan credit corroborates covering the whole
+  // subtotal (1-cent tolerance, same as the split reconciliation): a legacy
+  // payload with a zeroed/missing subtotal and an ordinary credit must not
+  // render as "fully comped".
+  if (netMonthly === 0 && manualDiscountMonthlyAmount(manual) < subtotalMonthly - 0.011) return null;
 
   // Ranged low-confidence (commercial) plan: the page quotes a confirmed-on-site
   // range, not one exact number — but the credit is applied by accept regardless,
   // so keep it visible as a credit-only line rather than printing an exact
   // subtotal/net the rest of the page deliberately avoids. Prefer the selected
-  // cadence's difference; fall back to the default credit when there's no sum.
+  // cadence's difference. Fall back to the plan credit's own amount ONLY when
+  // the per-service sum is genuinely unavailable — with a sum in hand, a zero
+  // difference means the selected cadence caps/suppresses the credit away, and
+  // the fallback would advertise a credit accept won't apply. Same when the
+  // selected row itself marks the credit suppressed.
   const lowConfidencePct = Number(selectedFrequency?.lowConfidenceRangePct ?? combined.lowConfidenceRangePct) || 0;
   if (lowConfidencePct > 0) {
-    const rangedCredit = creditFromDiff ?? manualDiscountMonthlyAmount(manual);
+    const rangedCredit = hasServiceSum
+      ? creditFromDiff
+      : (selectedFrequency?.manualDiscountSuppressed === true ? null : manualDiscountMonthlyAmount(manual));
     if (!(rangedCredit > 0)) return null;
     return (
       <section style={estimateCard()}>

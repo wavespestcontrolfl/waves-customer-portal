@@ -839,6 +839,85 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     );
     expect(container).toBeEmptyDOMElement();
   });
+
+  it('renders the summary for a fully-comped plan — subtotal → credit → Your price $0', () => {
+    // The credit covers the whole plan: net is $0 but the story (what it would
+    // have cost and why it's free) matters most here, so the block still renders.
+    const comped = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      waveGuardTierLabel: 'Silver',
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 },
+    };
+    const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$84.08');
+    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toContain('Your price');
+    expect(text).toContain('$0');
+  });
+
+  it('does not treat a zeroed/missing subtotal as a full comp when the credit cannot cover it', () => {
+    // Legacy payloads can stamp monthlySubtotal 0 when no total resolved; a
+    // $2.08 credit obviously doesn't comp an $84.08 plan, so nothing renders.
+    const broken = {
+      monthlySubtotal: 0,
+      annualSubtotal: 0,
+      manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+    };
+    expect(render(<PlanTotalSummary combined={broken} preCreditMonthly={84.08} />).container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan: no fallback credit when the sum exists but the selected cadence has no reduction', () => {
+    // The selected cadence fully caps/suppresses the credit (net equals the
+    // per-service sum). Falling back to the default $2.08 would advertise a
+    // credit accept won't apply, so nothing renders.
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 112.08, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('ranged plan with no per-service sum still falls back to the plan credit amount', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toContain('Plan subtotal');
+  });
+
+  it('ranged plan with no per-service sum: no fallback when the selected row suppresses the credit', () => {
+    const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
+    const { container } = render(
+      <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 110, lowConfidenceRangePct: 0.2, manualDiscountSuppressed: true }} />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders from the SELECTED row's credit when the default cadence suppresses it", () => {
+    // The server nulls combined.manualDiscount when the DEFAULT cadence
+    // floor-suppresses the credit — but the selected cadence still carries it,
+    // and its reduction is real, so the summary must not vanish.
+    const suppressedDefault = { monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' };
+    const text = render(
+      <PlanTotalSummary
+        combined={suppressedDefault}
+        selectedFrequency={{
+          key: 'alt',
+          monthly: 110,
+          annual: 1320,
+          manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
+        }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).toContain('Plan subtotal');
+    expect(text).toContain('$112.08');
+    expect(text).toContain('Referral Credit');
+    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('$110');
+  });
 });
 
 describe('ReviewPhase — site-confirmation hold copy', () => {
