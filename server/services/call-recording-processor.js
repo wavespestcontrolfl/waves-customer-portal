@@ -33,7 +33,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { buildExtractionPrompt, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
 const modelOutputSchema = require('../schemas/call-extraction.model-output.schema.json');
@@ -554,6 +554,91 @@ function classifyCallerAccount(pipelineStage) {
 // Stages whose on-file data fail-open booking may trust (see
 // summarizeKnownCaller.isExistingCustomer).
 const FAIL_OPEN_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
+// Cross-call threading: the most recent OTHER call from this number whose
+// extraction is worth handing to the model as continuation context. Callers
+// finish one arrangement across several calls (a realtor whose first call cut
+// off mid-dictation, three calls in one morning completing one WDO booking,
+// "my coworker called Monday") — without this, call 2's extraction restarts
+// from nothing. PII-light and compact by design; spam/voicemail priors are
+// excluded (robocall context would only mislead). Read-only; fails open null.
+const PRIOR_CALL_LOOKBACK_DAYS = 7;
+// Prior-call text is UNTRUSTED prompt data: it originated from a caller's
+// speech (via transcription + extraction), so it gets flattened (no newlines,
+// no backticks/quotes that could fake a delimiter) and hard-capped before it
+// is interpolated — and the prompt block labels it as data, never
+// instructions.
+function sanitizePriorText(value, max = 300) {
+  return String(value || '')
+    // The block's own data delimiters must never survive inside the data —
+    // a prior caller speaking the literal marker could close the boundary
+    // early and drop the rest of their text outside the NOT-instructions
+    // fence. Strip the token and any angle-bracket runs that could rebuild it.
+    .replace(/PRIOR_CALL_DATA/gi, ' ')
+    .replace(/[<>]{2,}/g, ' ')
+    .replace(/[\r\n`"]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+async function summarizePriorCall(contactPhone, currentCallId = null, conn = db, currentCallCreatedAt = null) {
+  try {
+    const digits = String(contactPhone || '').replace(/\D/g, '').slice(-10);
+    if (digits.length < 10) return null;
+    // Both directions: an office CALLBACK stores the contact's number in
+    // to_phone (Waves line in from_phone) — that conversation is prior
+    // context for the contact's next inbound call too.
+    const q = conn('call_log')
+      .whereRaw(
+        "(right(regexp_replace(coalesce(from_phone,''),'\\D','','g'),10) = ? OR right(regexp_replace(coalesce(to_phone,''),'\\D','','g'),10) = ?)",
+        [digits, digits],
+      )
+      .whereNotNull('ai_extraction')
+      .whereNotIn('processing_status', ['spam', 'voicemail'])
+      .orderBy('created_at', 'desc');
+    // The 7-day window anchors to the CALL's own time when known (falls back
+    // to now()) — a force-reprocess or backfill days later must still find
+    // the continuation that happened minutes before the call.
+    if (currentCallCreatedAt) {
+      q.whereRaw(`created_at >= ?::timestamptz - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`, [currentCallCreatedAt]);
+    } else {
+      q.where('created_at', '>=', conn.raw(`now() - interval '${PRIOR_CALL_LOOKBACK_DAYS} days'`));
+    }
+    if (currentCallId) q.whereNot('id', currentCallId);
+    // "Prior" means STRICTLY EARLIER: a force-reprocess or out-of-order queue
+    // drain must never hand call 1 the extraction of call 2 as its past.
+    if (currentCallCreatedAt) q.where('created_at', '<', currentCallCreatedAt);
+    const row = await q.first('id', 'created_at', 'call_summary', 'ai_extraction');
+    if (!row) return null;
+    const v1 = typeof row.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : (row.ai_extraction || {});
+    if (v1.is_spam === true) return null;
+    const name = [v1.first_name, v1.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ');
+    const address = [v1.address_line1, v1.city, v1.zip].map((s) => String(s || '').trim()).filter(Boolean).join(', ');
+    const sc = v1.secondary_contact && typeof v1.secondary_contact === 'object' ? v1.secondary_contact : null;
+    const scName = sc ? [sc.first_name, sc.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ') : '';
+    // Age is relative to the CALL being processed, not to wall-clock — a
+    // reprocess/backfill days later must still describe "18h before this
+    // call", not "9 days ago".
+    const anchorMs = currentCallCreatedAt ? new Date(currentCallCreatedAt).getTime() : Date.now();
+    const hoursAgo = Math.max(1, Math.round((anchorMs - new Date(row.created_at).getTime()) / 3600000));
+    return {
+      hoursAgo,
+      summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
+      captured: {
+        name: sanitizePriorText(name, 80) || null,
+        phone: sanitizePriorText(v1.phone, 24) || null,
+        email: sanitizePriorText(v1.email, 120) || null,
+        address: sanitizePriorText(address, 160) || null,
+        requested_service: sanitizePriorText(v1.requested_service || v1.matched_service, 80) || null,
+        secondary_contact: scName ? sanitizePriorText(`${scName}${sc.role ? ` (${sc.role})` : ''}${sc.email ? `, ${sc.email}` : ''}${sc.phone ? `, ${sc.phone}` : ''}`, 200) : null,
+        appointment: (v1.appointment_confirmed && v1.preferred_date_time) ? sanitizePriorText(v1.preferred_date_time, 40) : null,
+      },
+    };
+  } catch (err) {
+    logger.warn(`[call-proc] prior-call lookup skipped: ${err.message}`);
+    return null;
+  }
+}
 
 // Short, PII-light caller hint for the extraction prompt. Returns null when the
 // inbound number doesn't map to a single known customer.
@@ -2607,6 +2692,7 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
         knownCaller.accountType === 'established_customer' ? 'customer' : 'contact'
       }${knownCaller.name ? ` (${knownCaller.name})` : ''}. They are already in our system — treat coordination of an existing/scheduled visit, "are you coming today?", arrival check-ins, complaints about work already done, reschedules, and billing/invoice questions as NOT a new lead (is_lead=false). Only treat a brand-new service request they haven't bought yet as a lead.\n`
     : '';
+  const priorCallBlock = buildPriorCallBlock(opts.priorCall);
 
   const prompt = `Analyze this phone call transcript for Waves Pest Control (pest control + lawn care, SW Florida). Waves is an established company with many existing customers, so not every call is a new sales lead — some are existing customers coordinating service, complaints, or billing.
 
@@ -2614,7 +2700,7 @@ Waves only schedules pest control, lawn care, mosquito, termite, rodent, bed bug
 
 Caller phone: ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}
-${knownCallerBlock}
+${knownCallerBlock}${priorCallBlock}
 Transcript:
 ${transcription}
 
@@ -2858,6 +2944,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
     knownCaller: opts.knownCaller,
+    // Cross-call threading: prior call from this number, so a continuation
+    // completes the earlier record instead of restarting from nothing.
+    priorCall: opts.priorCall,
   });
 
   let rawText;
@@ -3409,6 +3498,11 @@ const CallRecordingProcessor = {
     } catch (e) {
       logger.warn(`[call-proc] known-caller pre-lookup skipped for ${maskSid(callSid)}: ${e.message}`);
     }
+    // Cross-call threading context: the latest other call from this number in
+    // the last week, so a continuation call completes the earlier record
+    // instead of restarting from nothing. Fail-open — extraction proceeds
+    // without it.
+    const priorCall = await summarizePriorCall(contactPhone, call.id, db, call.created_at);
 
     // Bookable service catalog: fed to both extraction prompts (so the model
     // can name a specific bookable service) and to the booking block below
@@ -3421,7 +3515,7 @@ const CallRecordingProcessor = {
 
     let extracted;
     try {
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall });
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
       // Increment in SQL, not from the in-memory row: the stale-reclaim path
@@ -3448,6 +3542,7 @@ const CallRecordingProcessor = {
           callId: call.id,
           bookableServiceNames,
           knownCaller,
+          priorCall,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -6872,6 +6967,7 @@ CallRecordingProcessor._test = {
   findExistingCallAppointment,
   classifyCallerAccount,
   summarizeKnownCaller,
+  summarizePriorCall,
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,
