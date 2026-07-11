@@ -2992,7 +2992,7 @@ async function fileExtractionExhaustedTriage(callLogId, attempts, err, callSid) 
 // disposition layer stamps the terminal enum on call_log.disposition; the
 // enrichment writer persists gate codes / pets / internal color. Order
 // matters: the classifier verdict feeds the disposition decision.
-async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null }) {
+async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult = null, customerId = null, transcript = null }) {
   try {
     const v2ForDisposition = v2Result?.status === 'valid' ? v2Result.extraction : null;
     let spamVerdictResult = null;
@@ -3005,6 +3005,10 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         // classifier treats CNAM as unknown (never as known-nameless) and
         // falls back to the AddOns envelope.
         lineType: lineTypeRow ? { type: lineTypeRow.line_type } : null,
+        // Raw transcript for the deterministic robocall-script signature —
+        // the independent second signal for script families whose rotating
+        // local numbers carry no vendor/line risk.
+        transcript,
       });
       await recordVerdict(call.id, spamVerdictResult);
     }
@@ -3577,7 +3581,7 @@ const CallRecordingProcessor = {
       // verdicts + terminal dispositions — it's the population the live
       // accrual exists to measure. Customer resolution hasn't run on this
       // path; enrichment keys on the webhook's pre-linked customer if any.
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -6599,7 +6603,7 @@ const CallRecordingProcessor = {
     // peer reclaimed the processing_token — this attempt's extraction is
     // stale and must not record verdicts, stamp a disposition, or enrich.
     if (finalized > 0) {
-      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId });
+      await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
     }
 
     logger.info(`[call-proc] Completed processing for ${callSid}: customer=${customerId}, appointment=${!!extracted.appointment_confirmed}`);

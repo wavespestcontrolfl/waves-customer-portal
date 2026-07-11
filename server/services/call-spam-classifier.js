@@ -18,9 +18,47 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const CLASSIFIER_VERSION = 'layered-v1';
+const CLASSIFIER_VERSION = 'layered-v2';
 const TRUESPAM_THRESHOLD = Number(process.env.CALL_SPAM_TRUESPAM_THRESHOLD || 50);
 const TOLLFREE_RE = /^\+1(800|833|844|855|866|877|888)/;
+
+// Verbatim-script robocall signature (the "Google listing / press 9 /
+// toll-free callback" family). Confirmed against live transcripts: the
+// 2026-07 call audit named five triage-landing numbers running this script
+// (+19417026646, +12404268098, +19412100592, +19416622127, +19417408169) and
+// the 04-01 straggler voicemail (+19412053987) read the whole script
+// verbatim: "…press 9 at any time. You may also call our toll-free number at
+// 877-922-4011 to be removed from our call list. Again, please press 0 to
+// speak with a support specialist."
+//
+// Each entry is a marker CATEGORY; a signature match requires >= 2 DISTINCT
+// categories, so a legitimate caller mentioning their Google listing — or an
+// agent reading back a toll-free number — can never trip it alone. This
+// keeps the classifier's zero-false-positive ethos: the signature is a
+// mechanical script match, not an inference.
+const ROBOCALL_SCRIPT_MARKERS = [
+  // The pitch: "your Google/business listing", "verify your listing",
+  // "front page of Google".
+  { key: 'listing_pitch', re: /\b(google|business|online)\s+listing\b|\bfront\s+page\s+of\s+google\b|\bverify\s+your\s+(business|listing)\b/i },
+  // IVR prompt spoken AT the callee — live humans don't say "press 9".
+  { key: 'ivr_prompt', re: /\bpress\s+(zero|one|two|three|nine|[0-9])\b/i },
+  // Opt-out boilerplate.
+  { key: 'call_list_removal', re: /\bremoved?\s+from\s+(our|the|this)\s+call(ing)?\s+list\b|\bdo[\s-]not[\s-]call\s+list\b/i },
+  // A dictated toll-free callback number.
+  { key: 'tollfree_callback', re: /\b8(00|33|44|55|66|77|88)[\s.-]?\d{3}[\s.-]?\d{4}\b/ },
+];
+
+/**
+ * Deterministic script-signature check on the raw transcript. Returns
+ * { match, markers } — match only when >= 2 distinct marker categories hit.
+ * Pure; safe on null/empty transcripts.
+ */
+function detectRobocallScriptSignature(transcript) {
+  const text = String(transcript || '');
+  if (!text.trim()) return { match: false, markers: [] };
+  const markers = ROBOCALL_SCRIPT_MARKERS.filter((m) => m.re.test(text)).map((m) => m.key);
+  return { match: markers.length >= 2, markers };
+}
 
 // Twilio Marketplace AddOns envelope (persisted on call_log.metadata.addons
 // since #2556) → per-vendor signals. Fail-open: unparseable → nulls.
@@ -52,9 +90,11 @@ function vendorSignalsFromAddOns(addons) {
  * @param {object|null} args.extraction  V2 extraction (1.5.0 spam_verdict used when present)
  * @param {object|null} args.legacy      V1 extraction (is_spam fallback content signal)
  * @param {object|null} args.lineType    { type, caller_name } from phone_line_types/Lookup, optional
+ * @param {string|null} args.transcript  raw transcript for the deterministic
+ *                                        script-signature check, optional
  * @returns {{ verdict: 'spam'|'not_spam'|'insufficient_signals', signals: object }}
  */
-async function classifyCall({ call, extraction = null, legacy = null, lineType = null }) {
+async function classifyCall({ call, extraction = null, legacy = null, lineType = null, transcript = null }) {
   const meta = typeof call.metadata === 'string' ? safeParse(call.metadata) : (call.metadata || {});
   const risk = vendorSignalsFromAddOns(meta?.addons);
   const tollfree = TOLLFREE_RE.test(call.from_phone || '');
@@ -78,20 +118,28 @@ async function classifyCall({ call, extraction = null, legacy = null, lineType =
   const contentAvailable = !!(sv || legacy);
   const contentSpam = sv ? sv.is_spam_content === true : (legacy ? legacy.is_spam === true : null);
 
+  // Deterministic script-signature: a verbatim robocall-script match is a
+  // signal INDEPENDENT of the model's content judgment (mechanical regex vs
+  // inference), so it can serve as the second leg the asymmetric-cost rule
+  // requires — this is what catches the Google-listing family, whose rotating
+  // LOCAL numbers carry no vendor or line risk and were landing in triage as
+  // insufficient_signals despite reading the same script every time.
+  const script = detectRobocallScriptSignature(transcript);
+
   // History override: any prior legitimate relationship on this number wins.
   const history = await callerHistory(call.from_phone);
 
   let verdict;
   if (history.override) verdict = 'not_spam';
   else if (!contentAvailable) verdict = 'insufficient_signals';
-  else if (contentSpam && (risk.vendor_risk || line.line_risk)) verdict = 'spam';
+  else if (contentSpam && (risk.vendor_risk || line.line_risk || script.match)) verdict = 'spam';
   else if (contentSpam) verdict = 'insufficient_signals'; // content alone never discards
   else verdict = 'not_spam';
 
   return {
     verdict,
     signals: {
-      risk, line,
+      risk, line, script,
       content: { available: contentAvailable, content_spam: contentSpam, source: sv ? 'v2_spam_verdict' : (legacy ? 'v1_is_spam' : null) },
       history,
       stir_verstat: meta?.stir_verstat || null,
@@ -153,4 +201,4 @@ function cnamFromEnvelope(addons) {
 
 function safeParse(s) { try { return JSON.parse(s); } catch { return {}; } }
 
-module.exports = { classifyCall, recordVerdict, CLASSIFIER_VERSION };
+module.exports = { classifyCall, recordVerdict, detectRobocallScriptSignature, CLASSIFIER_VERSION };
