@@ -226,19 +226,16 @@ async function generateForToken(token) {
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 
-  let referralUrl = `${publicPortalUrl()}/?tab=refer`;
-  try {
-    const promoter = await db('referral_promoters')
-      .where({ customer_id: customer.id })
-      .first('referral_link');
-    if (promoter?.referral_link) referralUrl = promoter.referral_link;
-  } catch { /* table optional in older envs */ }
+  // Shared with the card payload so the surfaces can't drift (Codex P2/P3
+  // #2592): same promoter → referral_code → generic attribution order, and
+  // the customer-since year reads the ET calendar, not server UTC.
+  const CardService = require('./customer-card');
+  const referralUrl = await CardService.referralShareUrl(customer);
 
-  const memberSince = customer.member_since || customer.created_at;
   const passJson = buildPassJson({
     card,
     customerFirstName: customer.first_name,
-    memberSinceYear: memberSince ? new Date(memberSince).getFullYear() : null,
+    memberSinceYear: CardService.memberSinceYearET(customer),
     techName,
     location,
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,

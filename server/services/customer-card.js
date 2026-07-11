@@ -33,6 +33,53 @@ function firstNameOf(fullName) {
 }
 
 /**
+ * Customer-since year on the ET calendar (Codex P3 #2592): member_since is a
+ * pg DATE (arrives as a UTC-midnight Date or 'YYYY-MM-DD' string — the ISO
+ * year IS the calendar year), but the created_at fallback is timestamptz —
+ * a Dec 31 evening ET signup is a Jan 1 UTC instant, so getFullYear() on the
+ * server would show next year.
+ */
+function memberSinceYearET(customer = {}) {
+  const ms = customer.member_since;
+  if (ms) {
+    const iso = ms instanceof Date ? ms.toISOString() : String(ms);
+    const m = /^(\d{4})/.exec(iso);
+    if (m) return Number(m[1]);
+  }
+  if (customer.created_at) {
+    try {
+      const { etParts } = require('../utils/datetime-et');
+      return etParts(new Date(customer.created_at)).year;
+    } catch { /* fall through */ }
+  }
+  return null;
+}
+
+/**
+ * Share/referral destination for a customer — shared by the card payload and
+ * the Wallet pass so the two surfaces can't drift (Codex P2 #2592).
+ * Attribution order: promoter row → rebuild from customers.referral_code →
+ * only then the generic portal refer tab. Never the personal card token.
+ */
+async function referralShareUrl(customer) {
+  let referralUrl = null;
+  try {
+    const promoter = await db('referral_promoters')
+      .where({ customer_id: customer.id })
+      .first('referral_link');
+    if (promoter?.referral_link) referralUrl = promoter.referral_link;
+  } catch { /* table optional in older envs */ }
+  if (!referralUrl && customer.referral_code) {
+    try {
+      const { getPromoterReferralLink, getSettings } = require('./referral-engine');
+      const settings = await getSettings().catch(() => ({}));
+      referralUrl = getPromoterReferralLink({ referral_code: customer.referral_code }, settings) || null;
+    } catch { /* settings/table unavailable — generic fallback below */ }
+  }
+  return referralUrl || `${publicPortalUrl()}/?tab=refer`;
+}
+
+/**
  * Office for a customer: geodata first (nearest GBP), then the review-routing
  * city map (review-request.js — includes its review-only overrides like
  * palmetto → bradenton), which itself defaults to Bradenton.
@@ -264,31 +311,12 @@ async function getCardData(token) {
     }
   }
 
-  // Share = the customer's referral link, never their personal card token.
-  // Attribution order (Codex P2 #2588 r4): promoter row → rebuild from the
-  // customer's own referral_code → only then the generic portal link.
-  let referralUrl = null;
-  try {
-    const promoter = await db('referral_promoters')
-      .where({ customer_id: customer.id })
-      .first('referral_link');
-    if (promoter?.referral_link) referralUrl = promoter.referral_link;
-  } catch { /* table optional in older envs */ }
-  if (!referralUrl && customer.referral_code) {
-    try {
-      const { getPromoterReferralLink, getSettings } = require('./referral-engine');
-      const settings = await getSettings().catch(() => ({}));
-      referralUrl = getPromoterReferralLink({ referral_code: customer.referral_code }, settings) || null;
-    } catch { /* settings/table unavailable — generic fallback below */ }
-  }
-  if (!referralUrl) referralUrl = `${publicPortalUrl()}/?tab=refer`;
-
-  const memberSince = customer.member_since || customer.created_at;
+  const referralUrl = await referralShareUrl(customer);
 
   return {
     customer: {
       firstName: customer.first_name || null,
-      memberSinceYear: memberSince ? new Date(memberSince).getFullYear() : null,
+      memberSinceYear: memberSinceYearET(customer),
       hasLeftGoogleReview: !!customer.has_left_google_review,
     },
     tech,
@@ -348,5 +376,7 @@ module.exports = {
   ensureCardForCompletion,
   getCardData,
   buildVcard,
+  referralShareUrl,
+  memberSinceYearET,
   __private: { pickCardLocation, vcardEscape, firstNameOf },
 };
