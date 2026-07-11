@@ -616,7 +616,11 @@ async function summarizePriorCall(contactPhone, currentCallId = null, conn = db,
     const address = [v1.address_line1, v1.city, v1.zip].map((s) => String(s || '').trim()).filter(Boolean).join(', ');
     const sc = v1.secondary_contact && typeof v1.secondary_contact === 'object' ? v1.secondary_contact : null;
     const scName = sc ? [sc.first_name, sc.last_name].map((s) => String(s || '').trim()).filter(Boolean).join(' ') : '';
-    const hoursAgo = Math.max(1, Math.round((Date.now() - new Date(row.created_at).getTime()) / 3600000));
+    // Age is relative to the CALL being processed, not to wall-clock — a
+    // reprocess/backfill days later must still describe "18h before this
+    // call", not "9 days ago".
+    const anchorMs = currentCallCreatedAt ? new Date(currentCallCreatedAt).getTime() : Date.now();
+    const hoursAgo = Math.max(1, Math.round((anchorMs - new Date(row.created_at).getTime()) / 3600000));
     return {
       hoursAgo,
       summary: sanitizePriorText(row.call_summary || v1.call_summary) || null,
