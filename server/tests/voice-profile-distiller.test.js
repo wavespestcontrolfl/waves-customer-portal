@@ -110,6 +110,26 @@ describe('evaluateAutoApproval — exception-based review (green auto, exception
   test('frame delimiters are an exception', () => {
     expect(evaluateAutoApproval({ profileText: `${CLEAN}\n<<<sneaky>>>`, stats: GOOD_STATS, flags: [] }).approve).toBe(false);
   });
+
+  test('schedule/availability/product CLAIMS are exceptions; style mentions of scheduling pass (Codex r2 P1)', () => {
+    for (const claim of [
+      'Saturday appointments are usually available',
+      'We are open until 5pm most days',
+      'we spray Termidor on every visit',
+      'slots open every Tuesday',
+    ]) {
+      const v = evaluateAutoApproval({ profileText: `${CLEAN}\n${claim}`, stats: GOOD_STATS, flags: [] });
+      expect(v.approve).toBe(false);
+      expect(v.reasons.join(' ')).toMatch(/claim line/);
+    }
+    // Style guidance ABOUT scheduling talk is fine — it asserts no fact.
+    const style = evaluateAutoApproval({
+      profileText: `${CLEAN}\nWhen scheduling comes up, they confirm the day plainly and never overpromise.`,
+      stats: GOOD_STATS,
+      flags: [],
+    });
+    expect(style.approve).toBe(true);
+  });
 });
 
 describe('reviewVoiceProfile — the human gate state machine', () => {

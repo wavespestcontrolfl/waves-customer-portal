@@ -126,23 +126,31 @@ function composeSystemPrompt(base, profileText) {
 // turns/calls pick up the profile.
 let _profileCache = { text: null, at: 0 };
 let _profileRefresh = null;
+// Generation marker: an invalidation must also DISCARD any refresh already
+// in flight — a DB read started seconds before a revoke would otherwise
+// finish afterward and write the just-revoked profile back into the cache
+// for another TTL. Refreshes capture the generation at start and only
+// publish if it hasn't moved.
+let _profileGen = 0;
 // Called by reviewVoiceProfile on approve/revoke: the flip must reach the
 // NEXT call, not the next TTL lapse — revoke is the operator kill switch.
-// Dropping to base immediately and letting the background refresh repopulate
-// is the fail-safe direction for both actions.
+// Dropping to base immediately and letting the next refresh repopulate is
+// the fail-safe direction for both actions.
 function invalidateVoiceProfileCache() {
+  _profileGen += 1;
   _profileCache = { text: null, at: 0 };
 }
 function getVoiceProfileTextNonBlocking() {
   if (Date.now() - _profileCache.at >= PROFILE_CACHE_TTL_MS && !_profileRefresh) {
+    const genAtStart = _profileGen;
     _profileRefresh = (async () => {
       try {
         const { getApprovedVoiceProfile } = require('../voice-profile-distiller');
         const row = await getApprovedVoiceProfile();
-        _profileCache = { text: row?.profile_text || null, at: Date.now() };
+        if (_profileGen === genAtStart) _profileCache = { text: row?.profile_text || null, at: Date.now() };
       } catch (err) {
         logger.warn(`[voice-relay] voice-profile refresh failed (keeping ${_profileCache.text ? 'stale' : 'base'} prompt): ${err.message}`);
-        _profileCache = { text: _profileCache.text, at: Date.now() };
+        if (_profileGen === genAtStart) _profileCache = { text: _profileCache.text, at: Date.now() };
       } finally {
         _profileRefresh = null;
       }

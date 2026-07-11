@@ -33,6 +33,11 @@ const logger = require('./logger');
 
 const SCHEMA_VERSION = 'voice-profile.v1';
 
+// Known-bad outcome exclusion (optedOut / complaintWithin7d) — shared by the
+// corpus fetch AND every "is there new corpus?" check, so an excluded row can
+// never count as a reason to re-distill or replace an exception.
+const USABLE_CORPUS_SQL = "COALESCE((outcome->>'optedOut')::boolean, false) = false AND COALESCE((outcome->>'complaintWithin7d')::boolean, false) = false";
+
 // Corpus sampling caps — the DEEP tier has a large context, but transcripts
 // are long; cap per-row and per-source so a runaway corpus can't blow the
 // call. Newest rows win (they reflect the current team).
@@ -147,6 +152,17 @@ function styleOnlyFlags(profileText) {
  * The only consumer is the owner-activation-gated phone agent, and its
  * consumption-side sanitizer still runs on whatever is approved.
  */
+const DAY_WORDS = '(?:mon|tues?|wednes|thurs?|fri|satur|sun)days?';
+const AVAIL_WORDS = '(?:available|availability|appointments?|open|slots?)';
+const PROFILE_SCHEDULE_CLAIM_RE = new RegExp(
+  `\\b${DAY_WORDS}\\b[^.\\n]{0,40}\\b${AVAIL_WORDS}\\b` // "Saturday appointments are available"
+  + `|\\b${AVAIL_WORDS}\\b[^.\\n]{0,40}\\b${DAY_WORDS}\\b`
+  + '|\\b(?:open|close[sd]?)\\s+(?:at|until|from|by)\\b' // "open until 5pm"
+  + '|\\b\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b[^.\\n]{0,20}\\b(?:to|until|through)\\b[^.\\n]{0,20}\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)\\b' // "9am to 5pm"
+  + '|\\bwe\\s+(?:use|spray|apply|treat\\s+with)\\s+\\w+', // "we spray Termidor"
+  'i',
+);
+
 function evaluateAutoApproval({ profileText, stats, flags } = {}) {
   const reasons = [];
   const text = String(profileText || '');
@@ -158,6 +174,12 @@ function evaluateAutoApproval({ profileText, stats, flags } = {}) {
   const { PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE } = require('./voice-agent/relay-conversation');
   const offending = text.split('\n').filter((l) => PROFILE_INJECTION_LINE_RE.test(l) || PROFILE_FACTUAL_LINE_RE.test(l)).length;
   if (offending) reasons.push(`${offending} line(s) would be stripped at consumption`);
+  // Schedule/availability/product claims are FACTS the style prompt forbids
+  // but the price/guarantee sanitizer can't see ("Saturday appointments are
+  // usually available", "open until 5pm", "we spray Termidor"). Any hit
+  // parks for a human — over-parking is the safe direction.
+  const factualClaims = text.split('\n').filter((l) => PROFILE_SCHEDULE_CLAIM_RE.test(l)).length;
+  if (factualClaims) reasons.push(`${factualClaims} schedule/availability/product claim line(s)`);
   if (/<<<|>>>/.test(text)) reasons.push('contains frame delimiters');
   if (!stats || !Number(stats.transcripts)) reasons.push('no call-transcript evidence in this distillation');
   return { approve: reasons.length === 0, reasons };
@@ -176,6 +198,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   if (pending) {
     const newSincePending = await dbi('voice_corpus_examples')
       .where('created_at', '>', pending.created_at)
+      .whereRaw(USABLE_CORPUS_SQL)
       .count('* as count')
       .first();
     if ((Number(newSincePending?.count) || 0) === 0) {
@@ -188,16 +211,20 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
     logger.info('[voice-profile] unreviewed pending exception + new corpus — distilling a replacement');
   }
 
-  // Watermark = the latest distillation attempt of ANY status. Rejected and
-  // REVOKED rows count on purpose: a revoke must hold — if the revoked row
-  // fell out of the watermark, the next 3:30am run would re-distill the same
-  // corpus and auto-approve an equivalent profile, silently undoing the kill
-  // switch. New corpus is the only thing that restarts distillation.
+  // Watermark = the latest EFFECTIVE timestamp across every distillation
+  // attempt of ANY status, where effective = GREATEST(created_at,
+  // reviewed_at). Rejected and REVOKED rows count on purpose, and a revoke
+  // anchors at the REVOKE time — otherwise corpus mined between a profile's
+  // creation and its revoke would read as "new" the next morning and
+  // re-approve a replacement, silently undoing the kill switch. Only corpus
+  // collected AFTER the last human/auto decision restarts distillation.
   const lastProfile = await dbi('voice_profiles')
-    .orderBy('created_at', 'desc')
-    .first('created_at');
+    .select(dbi.raw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) as watermark'))
+    .orderByRaw('GREATEST(created_at, COALESCE(reviewed_at, created_at)) DESC')
+    .first();
   const newCorpus = await dbi('voice_corpus_examples')
-    .modify((q) => { if (lastProfile?.created_at) q.where('created_at', '>', lastProfile.created_at); })
+    .modify((q) => { if (lastProfile?.watermark) q.where('created_at', '>', lastProfile.watermark); })
+    .whereRaw(USABLE_CORPUS_SQL)
     .count('* as count')
     .first();
   const newRows = Number(newCorpus?.count) || 0;
@@ -217,7 +244,7 @@ async function distillVoiceProfile({ dbi = db, anthropicClient } = {}) {
   // can avoid distilling the voice that made a customer opt out or complain.
   // NULL/absent outcomes count as fine (most rows predate some outcome
   // fields); the exclusion is SQL-side so the per-source caps apply AFTER it.
-  const negativeOutcome = "COALESCE((outcome->>'optedOut')::boolean, false) = false AND COALESCE((outcome->>'complaintWithin7d')::boolean, false) = false";
+  const negativeOutcome = USABLE_CORPUS_SQL;
   const bySource = (source, limit) => dbi('voice_corpus_examples')
     .where({ source })
     .whereRaw(negativeOutcome)
@@ -369,7 +396,10 @@ async function reviewVoiceProfile({ id, action, reviewedBy, audit, dbi = db } = 
     // approve/revoke must take effect on the NEXT call, not the next TTL
     // lapse — revoke is the kill switch. Lazy require (module cycle) and
     // fail-soft: a cache miss self-heals at the TTL anyway.
-    if (result?.ok) {
+    if (result?.ok && action !== 'reject') {
+      // approve/revoke change what the phone agent should read; rejecting an
+      // unrelated pending exception does NOT — clearing the cache there would
+      // needlessly bounce live calls to the base prompt for a refresh beat.
       try {
         require('./voice-agent/relay-conversation').invalidateVoiceProfileCache();
       } catch (err) {
