@@ -74,6 +74,41 @@ function looksLikeEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim().toLowerCase());
 }
 
+// True when at least one of the appointment's SMS recipients (the same set
+// getAppointmentContacts routes sends to) has a delivered SMS in the last 60
+// days AND could still receive one today: SMS not disabled at the customer
+// level and no active suppression (STOP / wrong number / DNC / carrier
+// landline) on that number. Checking the recipient set — not just the primary
+// phone — matters when the notice routes to a distinct service contact; the
+// owner's phone being reachable doesn't reach the person the appointment
+// notifies. Best-effort — DB misses fail open per leg but never throw.
+async function hasTextReachableApptRecipient(customer) {
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  // sms_enabled=false blocks every SMS to this customer at send time, so a
+  // past delivery can't make them text-reachable today.
+  if (prefs?.sms_enabled === false) return false;
+
+  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+    const digits = lastTenDigits(contact.phone);
+    if (!digits) continue;
+    const delivered = await db('sms_log')
+      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('status', 'delivered')
+      .where('created_at', '>=', db.raw("now() - interval '60 days'"))
+      .first('id')
+      .catch(() => null);
+    if (!delivered) continue;
+    // An active suppression blocks every send now, regardless of history.
+    const suppressed = await db('messaging_suppression')
+      .whereRaw("right(regexp_replace(coalesce(phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
+      .where('active', true)
+      .first('phone')
+      .catch(() => null);
+    if (!suppressed) return true;
+  }
+  return false;
+}
+
 // Raise a single admin alert when an appointment notice can reach the customer
 // by neither SMS nor email, so a human can call them or add an email. Deduped to
 // one bell entry per customer+occurrence per 24h.
@@ -96,23 +131,13 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     // primary phone as landline, and a suppressed email (hard bounce / spam
     // complaint) blocks the email leg — so a customer whose mobile actually
     // DELIVERS texts can wrongly trip this bell. Before ringing it, confirm there
-    // is genuinely no working text channel: if we've delivered an SMS to their
-    // primary phone recently, they ARE text-reachable and the alert is spurious
-    // (a suppressed/absent email alone is not "no reachable channel").
-    if (customer?.phone) {
-      const digits = lastTenDigits(customer.phone);
-      const recentDelivered = digits
-        ? await db('sms_log')
-          .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [digits])
-          .where('status', 'delivered')
-          .where('created_at', '>=', db.raw("now() - interval '60 days'"))
-          .first('id')
-          .catch(() => null)
-        : null;
-      if (recentDelivered) {
-        logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS proves text-reachable`);
-        return;
-      }
+    // is genuinely no working text channel — judged against the numbers this
+    // appointment actually notifies AND their current eligibility, so an old
+    // delivery to an opted-out number (or to the owner when the notice routes
+    // to a service contact) doesn't swallow a real alert.
+    if (customer && await hasTextReachableApptRecipient(customer)) {
+      logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS to an appointment recipient proves text-reachable`);
+      return;
     }
 
     const name = customer
