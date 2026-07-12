@@ -119,6 +119,14 @@ function scanLadderGrid() {
 // inventory COGS (service_product_usage × products_catalog) at the reference
 // sqft. Only the stale-LOW direction alerts — a budget below real material
 // cost silently erodes the cost floor's margin guarantee.
+//
+// The mapped Lawn Care rows include annual/conditional products (Prodiamine
+// runs fall/winter, Celsius maxes 3x/yr), so summing them and multiplying by
+// visits would count seasonal products at every visit and massively overstate
+// live annual COGS. usage rows carry no per-product application frequency, so
+// the honest comparable is the LOWER BOUND: the full mapped rotation applied
+// once per year. If even that exceeds the budget by the drift ratio, the
+// budget is stale-low regardless of real application frequencies.
 async function checkBudgetDrift() {
   const { loadInventoryCostRows, inventoryCostFromRows } = require('./estimate-pricing-audit');
   const { lawnMaterialBudget, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
@@ -127,29 +135,29 @@ async function checkBudgetDrift() {
   if (!inventory.available) {
     return { status: 'skipped', reason: 'inventory COGS tables unavailable', violations: [] };
   }
-  const perVisit = inventoryCostFromRows('lawn_care', { lawnSqFt: MATERIAL_REFERENCE_SQFT }, inventory);
-  if (perVisit.status === 'missing_cogs' || !Number(perVisit.totalPerVisit)) {
+  const cogs = inventoryCostFromRows('lawn_care', { lawnSqFt: MATERIAL_REFERENCE_SQFT }, inventory);
+  if (cogs.status === 'missing_cogs' || !Number(cogs.totalPerVisit)) {
     return { status: 'skipped', reason: 'no live COGS rows mapped for Lawn Care', violations: [] };
   }
+  const annualLowerBound = Math.round(Number(cogs.totalPerVisit) * 100) / 100;
 
   const violations = [];
   for (const visits of SOLD_VISITS) {
-    const liveAnnual = Math.round(Number(perVisit.totalPerVisit) * visits * 100) / 100;
     for (const track of TRACKS) {
       const budget = lawnMaterialBudget(track, visits);
-      if (liveAnnual > budget * BUDGET_DRIFT_RATIO) {
+      if (annualLowerBound > budget * BUDGET_DRIFT_RATIO) {
         violations.push({
           check: 'material_budget_stale_low',
           cell: `${track} ${visits}x @ ${MATERIAL_REFERENCE_SQFT.toLocaleString()}sf`,
-          detail: `live inventory COGS $${liveAnnual}/yr exceeds hardcoded budget $${budget}/yr by >${Math.round((BUDGET_DRIFT_RATIO - 1) * 100)}%`,
+          detail: `one full product rotation costs $${annualLowerBound} live (annual lower bound) vs hardcoded budget $${budget}/yr — over by >${Math.round((BUDGET_DRIFT_RATIO - 1) * 100)}%`,
         });
       }
     }
   }
   return {
     status: 'ok',
-    livePerVisit: Number(perVisit.totalPerVisit),
-    cogsWarnings: perVisit.warnings || [],
+    liveAnnualLowerBound: annualLowerBound,
+    cogsWarnings: cogs.warnings || [],
     violations,
   };
 }
@@ -181,7 +189,7 @@ async function upsertSweepAlert(violations, metadata) {
     dedupe_key: ALERT_DEDUPE_KEY,
     type: ALERT_TYPE,
     status: 'open',
-    severity: violations.some((v) => v.check === 'below_program_minimum' || v.check === 'material_budget_stale_low')
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',
@@ -206,12 +214,41 @@ async function upsertSweepAlert(violations, metadata) {
 }
 
 async function runLawnPricingInvariantSweep() {
-  // Sweep the LIVE ladder — DB config over code defaults.
+  // Sweep the LIVE ladder — DB config over code defaults. If the sync fails
+  // (throws OR returns false on parse/validation failure), the sweep must not
+  // scan code defaults and vouch for a ladder it never saw: a clean default
+  // grid would RESOLVE an open alert while live config is malformed. Config
+  // failure is itself a red result.
+  let syncError = null;
   try {
     const engine = require('./pricing-engine');
-    if (typeof engine.syncConstantsFromDB === 'function') await engine.syncConstantsFromDB();
+    const synced = await engine.syncConstantsFromDB();
+    if (!synced) syncError = 'syncConstantsFromDB returned false (missing/empty/invalid pricing_config)';
   } catch (err) {
-    logger.warn(`[lawn-pricing-sweep] constants sync failed, sweeping code defaults: ${err.message}`);
+    syncError = err.message;
+  }
+  if (syncError) {
+    logger.error(`[lawn-pricing-sweep] constants sync failed, sweep cannot vouch for the live ladder: ${syncError}`);
+    const violations = [{
+      check: 'config_sync_failed',
+      cell: 'pricing_config',
+      detail: `live pricing config failed to load: ${syncError}`,
+    }];
+    const metadata = {
+      cellsChecked: 0,
+      budgetCheck: 'skipped',
+      budgetCheckReason: 'config sync failed',
+      violationCount: violations.length,
+      violationSample: violations,
+      ranAt: new Date().toISOString(),
+    };
+    let alertResult = null;
+    try {
+      alertResult = await upsertSweepAlert(violations, metadata);
+    } catch (err) {
+      logger.error(`[lawn-pricing-sweep] alert upsert failed: ${err.message}`);
+    }
+    return { cellsChecked: 0, violations: violations.length, budgetCheck: 'skipped', alert: alertResult, violationDetails: violations };
   }
 
   const ladder = scanLadderGrid();
@@ -229,7 +266,7 @@ async function runLawnPricingInvariantSweep() {
     shapeChecks: ladder.shapeChecks,
     budgetCheck: budget.status,
     budgetCheckReason: budget.reason || null,
-    liveMaterialPerVisit: budget.livePerVisit ?? null,
+    liveMaterialAnnualLowerBound: budget.liveAnnualLowerBound ?? null,
     violationCount: violations.length,
     violationSample: violations.slice(0, 20),
     ranAt: new Date().toISOString(),

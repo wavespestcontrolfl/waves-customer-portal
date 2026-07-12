@@ -46,9 +46,15 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
       expect(t.perApp).toBeCloseTo(Math.round((t.annual / t.visits) * 100) / 100, 2);
       // No sold cadence below the program minimum.
       expect(t.monthly).toBeGreaterThanOrEqual(programMin);
-      // The engine never prices below its own cost floor unless the market
-      // table already covers it (annual = max(market, floor-ceil, minimum)).
-      expect(t.annual).toBeGreaterThanOrEqual(Math.min(t.marketAnnual, Math.ceil(t.costFloorAnnual / t.visits) * t.visits));
+      // The engine never prices below its own cost floor — including the
+      // cells where the floor BINDS (floor > market), which a min(market,
+      // floor) comparison would wave through.
+      expect(t.annual).toBeGreaterThanOrEqual(t.costFloorAnnual - 1e-9);
+      if (t.costFloorApplied) {
+        expect(t.annual).toBeGreaterThanOrEqual(Math.ceil(t.costFloorAnnual / t.visits) * t.visits);
+      } else {
+        expect(t.annual).toBeGreaterThanOrEqual(t.marketAnnual);
+      }
       // Every price carries a known provenance mechanism.
       expect(KNOWN_SOURCES).toContain(t.pricingSource);
       // Monthly must increase (or hold, at the clamp) with more visits.
