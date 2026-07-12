@@ -1418,6 +1418,12 @@ export default function QuotePage({ serviceSlug = '' }) {
                       const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                       const perApp = Number(result.per_application) || 0;
                       const monthly = Number(result.monthly_total) || 0;
+                      // Multi-service recurring quotes have no single
+                      // per-application price and must not fall back to the
+                      // combined monthly total (codex 2642 r3) — they get a
+                      // neutral per-visit headline; the estimate itself
+                      // carries the per-service breakdown.
+                      const multiRecurring = perApp <= 0 && result.multi_recurring === true;
                       // The variance band is computed on the monthly rate —
                       // scale it onto the per-application figure so the range
                       // brackets the number the customer is actually reading.
@@ -1430,11 +1436,21 @@ export default function QuotePage({ serviceSlug = '' }) {
                       return (
                         <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
                           <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
-                          <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                            ${money(perApp > 0 ? perApp : monthly)}
-                            <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>{perApp > 0 ? '/application' : '/mo'}</span>
-                          </div>
-                          <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${money(rangeLow)} – ${money(rangeHigh)}</strong> {perApp > 0 ? 'per application' : 'per month'}</div>
+                          {multiRecurring ? (
+                            <div style={{ fontSize: 34, fontWeight: 800, color: COLORS.blueDeeper, marginTop: 8, lineHeight: 1.15 }}>
+                              Priced per visit
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
+                              ${money(perApp > 0 ? perApp : monthly)}
+                              <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>{perApp > 0 ? '/application' : '/mo'}</span>
+                            </div>
+                          )}
+                          {multiRecurring ? (
+                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Each service bills per visit — your estimate breaks down every price.</div>
+                          ) : (
+                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${money(rangeLow)} – ${money(rangeHigh)}</strong> {perApp > 0 ? 'per application' : 'per month'}</div>
+                          )}
                           {result.confidence === 'low' && (
                             <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
                           )}

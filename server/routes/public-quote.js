@@ -149,24 +149,39 @@ function buildQuoteRequiredEstimateResult(estimate = {}, manualQuoteLines = []) 
 // its `frequency` is a string like 'quarterly') or numeric `frequency`
 // (lawn exposes apps/year there and has no visitsPerYear). Anything
 // underivable falls back to the annual caption client-side.
-function derivePerApplication(estimate) {
-  const recurring = (estimate?.lineItems || []).filter(
+// Recurring lines on a quote (shared by derivePerApplication and the
+// multi-service check — a quote with 2+ recurring lines has no single
+// per-application price, and its surfaces must not fall back to a combined
+// monthly total either; codex 2642 r3).
+function recurringQuoteLines(estimate) {
+  return (estimate?.lineItems || []).filter(
     (item) => Number(item?.monthlyAfterDiscount ?? item?.monthly) > 0
   );
+}
+
+function derivePerApplication(estimate) {
+  const recurring = recurringQuoteLines(estimate);
   if (recurring.length !== 1) return null;
   const line = recurring[0];
-  if (!(Number(line.perApp) > 0)) return null;
+  // Mosquito engine lines expose perVisit/visits, not perApp/visitsPerYear
+  // (codex 2642 r3) — accept both shapes.
+  const perAppRaw = Number(line.perApp) > 0
+    ? Number(line.perApp)
+    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
+  if (!(perAppRaw > 0)) return null;
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
-    : Number(line.frequency) > 0
-      ? Number(line.frequency)
-      : null;
+    : Number(line.visits) > 0
+      ? Number(line.visits)
+      : Number(line.frequency) > 0
+        ? Number(line.frequency)
+        : null;
   if (!visits) return null;
   // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
   // from the monthly/annual math), preferring the DISCOUNTED annual over the
   // list per-application rate.
   const discountedAnnual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual) || 0;
-  const exact = discountedAnnual > 0 ? discountedAnnual / visits : Number(line.perApp);
+  const exact = discountedAnnual > 0 ? discountedAnnual / visits : perAppRaw;
   return {
     amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
@@ -1278,15 +1293,21 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
 
     // Per-application phrasing when the quote resolves to one (owner
     // 2026-07-11: recurring emails lead per-application, never /mo where a
-    // per-application figure exists; every amount shows cents).
+    // per-application figure exists; every amount shows cents). Multi-service
+    // recurring quotes have no single per-application price AND must not
+    // fall back to a combined monthly total (codex 2642 r3) — they defer to
+    // the estimate the same way residential delivery emails do.
     const emailPerApp = quoteRequired ? null : derivePerApplication(estimate);
+    const emailMultiRecurring = !quoteRequired && recurringQuoteLines(estimate).length > 1;
     const priceSummary = quoteRequired
       ? 'Manual review needed'
       : isOneTimeOnly
         ? `$${oneTimeTotal.toFixed(2)} one-time`
         : emailPerApp
           ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
-          : `$${monthly.toFixed(2)}/mo`;
+          : emailMultiRecurring
+            ? 'Priced per visit — full breakdown inside'
+            : `$${monthly.toFixed(2)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
@@ -1451,6 +1472,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.per_application = perApplication.amount;
       response.visits_per_year = perApplication.visitsPerYear;
     }
+    // Multi-service recurring quotes have no single per-application price;
+    // the result page uses this to avoid falling back to the combined
+    // monthly total (codex 2642 r3).
+    response.multi_recurring = recurringQuoteLines(estimate).length > 1;
     if (commercialDisclaimer) {
       response.estimated_pricing = true;
       response.disclaimer = commercialDisclaimer;

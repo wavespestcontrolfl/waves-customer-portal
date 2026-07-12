@@ -819,11 +819,14 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             // blank for a one-time-only proposal — so summarize from the same
             // totals the PDF prints.
             const pt = computeProposalTotals(normalizeProposal(freshEstimate));
+            // Cents on every figure (owner 2026-07-11; codex 2642 r3 — the
+            // whole-dollar Math.round here bypassed the cents rule).
+            const centsMoney = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             const parts = [];
-            if (pt.monthlyEquivalent > 0) parts.push(`$${Math.round(pt.monthlyEquivalent).toLocaleString()}/mo`);
-            if (pt.annualRecurring > 0) parts.push(`$${Math.round(pt.annualRecurring).toLocaleString()}/yr recurring`);
-            if (pt.oneTime > 0) parts.push(`$${Math.round(pt.oneTime).toLocaleString()} one-time`);
-            if (pt.firstYearTotal > 0) parts.push(`first-year total $${Math.round(pt.firstYearTotal).toLocaleString()}`);
+            if (pt.monthlyEquivalent > 0) parts.push(`${centsMoney(pt.monthlyEquivalent)}/mo`);
+            if (pt.annualRecurring > 0) parts.push(`${centsMoney(pt.annualRecurring)}/yr recurring`);
+            if (pt.oneTime > 0) parts.push(`${centsMoney(pt.oneTime)} one-time`);
+            if (pt.firstYearTotal > 0) parts.push(`first-year total ${centsMoney(pt.firstYearTotal)}`);
             freshPriceLine = parts.join(' · ');
           } else {
             const fm = parseFloat(freshEstimate.monthly_total || 0);
