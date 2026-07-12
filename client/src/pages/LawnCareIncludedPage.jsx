@@ -80,7 +80,7 @@ export default function LawnCareIncludedPage() {
     // Standard marketing chrome (owner 2026-07-08): WavesShell top bar +
     // trust footer replace the old bare text header — same presentation as
     // /book. No glass; this is a public marketing surface.
-    <WavesShell variant="customer" topBar="solid">
+    <WavesShell variant="customer" topBar="solid" mainLandmark={false}>
     <div className="min-h-screen bg-waves-page text-waves-blue-deeper">
       <main>
         <section data-glass-clear="" className="bg-white">
