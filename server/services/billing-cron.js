@@ -469,6 +469,7 @@ const BillingCron = {
               templateKey: 'payment_failed',
               customerId: customer.id,
               dedupe: 14,
+              recipient: 'billing',
               source: 'autopay_failure',
             });
             emailed = enrollResult.reason !== 'error';
@@ -1160,13 +1161,32 @@ const BillingCron = {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
           }
 
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: payment.id,
-            retryDate: nextRetry,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
-          });
+          // Same gate swap as the initial-failure path: with the sequence
+          // covering this failure episode (14-day dedupe means this call is a
+          // no-op re-enroll, which is the point — one email per episode), the
+          // per-retry transactional notice stays quiet. The retry SMS above
+          // is unchanged. Enroll errors fall back to the notice.
+          let retryEmailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              recipient: 'billing',
+              source: 'autopay_retry_failure',
+            });
+            retryEmailed = enrollResult.reason !== 'error';
+          }
+          if (!retryEmailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: payment.id,
+              retryDate: nextRetry,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
+            });
+          }
         }
         continue;
       }

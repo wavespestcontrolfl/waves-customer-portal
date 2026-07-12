@@ -578,6 +578,9 @@ class GoogleBusinessService {
           templateKey: thankYouKey,
           customerId: row.customer_id,
           dedupe: 'ever',
+          // One thank-you per customer across ALL locations — a customer who
+          // reviews two GBP listings is thanked once.
+          dedupeAcross: Object.values(REVIEW_THANKYOU_BY_LOCATION),
           source: 'google_review',
         });
       }
@@ -705,6 +708,7 @@ class GoogleBusinessService {
             templateKey: thankYouKey,
             customerId: effectiveCustomerId,
             dedupe: 'ever',
+            dedupeAcross: Object.values(REVIEW_THANKYOU_BY_LOCATION),
             source: 'google_review_places',
           });
         }

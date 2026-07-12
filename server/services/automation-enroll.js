@@ -43,14 +43,32 @@ async function isSequenceSendable(templateKey) {
   }
 }
 
-async function enrollSequenceFromEvent({ templateKey, customerId, dedupe = 'ever', source = 'event' } = {}) {
+async function enrollSequenceFromEvent({
+  templateKey,
+  customerId,
+  dedupe = 'ever',
+  // Extra template keys whose prior enrollments ALSO suppress this one —
+  // for sibling sequences that must fire at most once as a family (the four
+  // per-location review thank-yous: a customer who reviewed two GBP listings
+  // still gets one thank-you).
+  dedupeAcross = null,
+  // 'primary' (customers.email) or 'billing' (notification_prefs.billing_email
+  // via getBillingContact, falling back to primary) — payment sequences must
+  // reach the same billing contact the transactional emails they replace did.
+  recipient = 'primary',
+  source = 'event',
+} = {}) {
   try {
     if (!templateKey || !customerId) return { enrolled: false, reason: 'bad_args' };
 
     if (!(await isSequenceSendable(templateKey))) return { enrolled: false, reason: 'not_sendable' };
 
+    const dedupeKeys = Array.isArray(dedupeAcross) && dedupeAcross.length
+      ? Array.from(new Set([templateKey, ...dedupeAcross]))
+      : [templateKey];
     const priorQuery = db('automation_enrollments')
-      .where({ template_key: templateKey, customer_id: customerId });
+      .whereIn('template_key', dedupeKeys)
+      .where({ customer_id: customerId });
     if (dedupe === 'ever') {
       priorQuery.where(function priorDelivered() {
         this.whereNot('status', 'failed').orWhereNotNull('last_sent_at');
@@ -62,7 +80,27 @@ async function enrollSequenceFromEvent({ templateKey, customerId, dedupe = 'ever
 
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return { enrolled: false, reason: 'no_customer' };
-    const email = String(customer.email || '').trim();
+
+    let email = String(customer.email || '').trim();
+    let firstName = customer.first_name || null;
+    let lastName = customer.last_name || null;
+    if (recipient === 'billing') {
+      try {
+        const { getInvoiceEmailRecipients } = require('./customer-contact');
+        const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+        const [billing] = getInvoiceEmailRecipients(customer, prefs || {});
+        if (billing?.email) {
+          email = String(billing.email).trim();
+          const parts = String(billing.name || '').trim().split(/\s+/).filter(Boolean);
+          if (parts.length) {
+            firstName = parts[0];
+            lastName = parts.slice(1).join(' ') || null;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[automation-enroll] billing-recipient resolve failed for customer ${customerId}: ${err.message} — using primary email`);
+      }
+    }
     if (!email || !email.includes('@')) return { enrolled: false, reason: 'no_email' };
 
     const AutomationRunner = require('./automation-runner');
@@ -71,8 +109,8 @@ async function enrollSequenceFromEvent({ templateKey, customerId, dedupe = 'ever
       customer: {
         id: customer.id,
         email,
-        first_name: customer.first_name || null,
-        last_name: customer.last_name || null,
+        first_name: firstName,
+        last_name: lastName,
       },
     });
     if (result?.enrolled) {

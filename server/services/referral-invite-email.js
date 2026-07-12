@@ -40,6 +40,13 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     // already invited via referral.invite pre-flip who submits another
     // promoter rating post-flip has no enrollment row yet and gets the
     // sequence once — accepted, noted on the PR.
+    //
+    // OPERATIONAL COUPLING (accepted trade of tab-editable copy): the
+    // sequence's reward line is static copy, unlike the transactional
+    // invite's live referral_program_settings lookup. Changing the referral
+    // reward in admin REQUIRES editing the referral_nudge step copy to
+    // match — same as any other fact baked into an editable automation.
+    // Copy verified in sync at wiring time ($25, #2621).
     const { isEnabled } = require('../config/feature-gates');
     if (isEnabled('referralNudgeEnroll')) {
       const { enrollSequenceFromEvent } = require('./automation-enroll');
