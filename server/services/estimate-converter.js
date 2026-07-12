@@ -169,21 +169,11 @@ function recurringServiceKey(svc = {}) {
 // is scheduled. Route order is precedence: a pest line combines with at
 // most ONE companion (rodent bait first), the other stays standalone.
 const COMBINED_SERVICE_ROUTES = [
-  {
-    primaryKey: 'pest_control',
-    companionKey: 'rodent_bait',
-    catalogServiceKey: 'pest_rodent_quarterly',
-    name: 'Pest & Rodent Control',
-    // Rodent bait stations are a quarterly program platform-wide
-    // (rodent_bait_quarterly); server-priced estimates persist the line
-    // with no cadence of its own.
-    companionDefaultPattern: 'quarterly',
-    // For PEST plans the accepted customerSelection.frequency IS the visit
-    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
-    // beats stale quote-time line cadence. NOT true for lawn, where the
-    // selection stores the BILLING cadence.
-    primaryUsesAcceptFrequency: true,
-  },
+  // The pest+rodent route ("Pest & Rodent Control" / pest_rodent_quarterly)
+  // was REMOVED by owner decision 2026-07-12: rodent bait stations ride
+  // their own standalone visit instead of combining into the pest visit —
+  // see STANDALONE_SUPPLEMENT_ROUTES below. The catalog row + completion
+  // profile are retired by 20260712600000.
   {
     primaryKey: 'pest_control',
     companionKey: 'termite_bait',
@@ -192,6 +182,10 @@ const COMBINED_SERVICE_ROUTES = [
     // Termite bait station checks are quarterly (termite_active_bait_*);
     // the v1 mapper persists "Termite Bait" with no frequency/visits.
     companionDefaultPattern: 'quarterly',
+    // For PEST plans the accepted customerSelection.frequency IS the visit
+    // cadence the customer chose (quarterly/bimonthly/monthly plan) and
+    // beats stale quote-time line cadence. NOT true for lawn, where the
+    // selection stores the BILLING cadence.
     primaryUsesAcceptFrequency: true,
   },
   {
@@ -206,6 +200,21 @@ const COMBINED_SERVICE_ROUTES = [
     requireVisitsMatch: true,
   },
 ];
+
+// Sold lines/supplements that schedule as their OWN standalone visit when
+// no combined route consumes them. Without this, server-priced estimates
+// that persist rodent bait OUTSIDE recurring.services (rodentBaitMo — see
+// supplementalCompanionLines) would schedule NOTHING for the bait stations
+// after the pest+rodent route removal. The catalog identity is used for
+// the scheduled row so completion resolves the typed rodent_bait_station
+// profile by service_id/name.
+const STANDALONE_SUPPLEMENT_ROUTES = {
+  rodent_bait: {
+    name: 'Quarterly Rodent Bait Station Service',
+    catalogServiceKey: 'rodent_bait_quarterly',
+    defaultPattern: 'quarterly',
+  },
+};
 
 // EXPLICIT service-level cadence only: frequency-ish fields, visit counts,
 // or pattern text in the display name. Deliberately NO platform defaults —
@@ -322,7 +331,42 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
       },
     });
   }
-  return { remaining, combos };
+  // Standalone rewrites (owner decision 2026-07-12): sold rodent bait that
+  // no route consumed schedules as its own catalog visit — both when it is
+  // a recurring.services line (in `remaining`) and when it rides only as a
+  // server-priced supplement (never in `remaining` at all). The catalog
+  // identity replaces the raw line name so the scheduled row resolves the
+  // typed profile instead of the generic fallback.
+  const standalone = [];
+  const consumedSupplementKeys = new Set(
+    combos.flatMap((combo) => combo.combinedFrom.map((line) => recurringServiceKey(line))),
+  );
+  for (let i = remaining.length - 1; i >= 0; i -= 1) {
+    const line = remaining[i];
+    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[recurringServiceKey(line)];
+    if (!standaloneRoute) continue;
+    remaining.splice(i, 1);
+    standalone.push({
+      catalogServiceKey: standaloneRoute.catalogServiceKey,
+      service: {
+        name: standaloneRoute.name,
+        frequency: explicitServiceCadence(line) || standaloneRoute.defaultPattern,
+      },
+    });
+  }
+  for (const supplement of supplements) {
+    const key = recurringServiceKey(supplement);
+    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
+    if (!standaloneRoute || consumedSupplementKeys.has(key)) continue;
+    standalone.push({
+      catalogServiceKey: standaloneRoute.catalogServiceKey,
+      service: {
+        name: standaloneRoute.name,
+        frequency: explicitServiceCadence(supplement) || standaloneRoute.defaultPattern,
+      },
+    });
+  }
+  return { remaining, combos, standalone };
 }
 
 // A reserved (customer-picked) first appointment must reflect the same
@@ -1183,11 +1227,17 @@ const EstimateConverter = {
     const supplementalCompanions = supplementalCompanionLines(estimateData);
     const soloRecurringKey = recurringServicesForConversion.length === 1
       ? recurringServiceKey(recurringServicesForConversion[0]) : null;
-    const absorbedCompanions = soloRecurringKey
-      ? supplementalCompanions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
-        soloRecurringKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
-      : [];
-    const recurringUnitCount = recurringServicesForConversion.length + absorbedCompanions.length;
+    // A supplement counts as a recurring unit when it will schedule at all:
+    // absorbed into a combined route, OR as its own standalone visit
+    // (STANDALONE_SUPPLEMENT_ROUTES — e.g. rodent bait after the pest+rodent
+    // combined route's removal). Either way annual prepay can't span it.
+    const schedulableCompanions = supplementalCompanions.filter((companion) => {
+      const key = recurringServiceKey(companion);
+      if (STANDALONE_SUPPLEMENT_ROUTES[key]) return true;
+      return !!soloRecurringKey && COMBINED_SERVICE_ROUTES.some((route) =>
+        soloRecurringKey === route.primaryKey && key === route.companionKey);
+    });
+    const recurringUnitCount = recurringServicesForConversion.length + schedulableCompanions.length;
     if (billingTerm === 'prepay_annual' && recurringUnitCount > 1) {
       const err = new Error(
         `Annual prepay isn't supported for multi-service plans (${recurringUnitCount} recurring services) yet — convert this estimate as monthly, or bill the annual prepay manually.`
@@ -1499,25 +1549,27 @@ const EstimateConverter = {
       termStartDate = firstServiceDate;
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
-      // combined service; everything else flows through unchanged.
-      const { remaining, combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+      // combined service; standalone rewrites (e.g. rodent bait) schedule
+      // as their own catalog visit; everything else flows through unchanged.
+      const { remaining, combos, standalone } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
         acceptFrequency: acceptedPlanFrequency,
         supplementalCompanions: supplementalCompanionLines(estimateData),
       });
       const scheduleUnits = [
-        ...combos.map((combo) => ({ svc: combo.service, combo })),
+        ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
+        ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
         ...remaining.map((svc) => ({ svc })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
         let combinedServiceId = null;
-        if (unit.combo) {
+        if (unit.catalogServiceKey) {
           // service_id makes profile resolution sturdy against later
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
             const catalogRow = await database('services')
-              .where({ service_key: unit.combo.route.catalogServiceKey })
+              .where({ service_key: unit.catalogServiceKey })
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
@@ -1525,10 +1577,10 @@ const EstimateConverter = {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
             } else {
-              logger.warn(`[estimate-converter] combined catalog row ${unit.combo.route.catalogServiceKey} absent — scheduling by name only`);
+              logger.warn(`[estimate-converter] catalog row ${unit.catalogServiceKey} absent — scheduling by name only`);
             }
           } catch (lookupErr) {
-            logger.warn(`[estimate-converter] combined catalog lookup failed for ${unit.combo.route.catalogServiceKey}: ${lookupErr.message}`);
+            logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
           }
         }
         const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
