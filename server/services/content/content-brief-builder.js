@@ -230,7 +230,7 @@ function applyListicleTreatment({ enabled, pageType, query, requiredSections, sc
     'listicle structure: exact item count in the title (e.g. "7 Signs of Termite Damage in Bradenton Homes"), one numbered H2 per item, and the same internal shape for every item (what it is → why it matters in SWFL → what to do)',
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     '"how we put this list together" note (2–3 sentences citing the facts-pack / UF-IFAS / FDACS sources actually used — never an invented methodology)',
-    'visible "Last updated: [Month Year]" line under the title (must match the frontmatter modified date)',
+    'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
   ];
   const voice = {
     ...voiceConstraints,
