@@ -1114,6 +1114,30 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-37 findings (#2633) ──
+
+  test('Codex r37: that-complementizer self-accusations and past denials behave', () => {
+    for (const prose of ['Waves says that it has hidden fees.', 'Waves says that its billing includes hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    for (const prose of ["Bug Busters didn't charge hidden fees.", 'Waves didn’t get complaints about hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+  });
+
+  test('Codex r37: educational superlatives and titles stay clean beside a table; winner titles block', () => {
+    for (const body of [`Gel bait is the best option for German roaches.\n\n${CATEGORY_TABLE}`, `We are not the best choice for every home, and we say so.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+    const eduTitle = gate.evaluate({ title: 'The #1 hidden breeding site in SWFL homes', body: `Standing water wins every time.\n\n${CATEGORY_TABLE}` }, {});
+    expect(eduTitle.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    const winnerTitle = gate.evaluate({ title: 'The #1 pest control company in Venice', body: `Pick well.\n\n${CATEGORY_TABLE}` }, {});
+    expect(winnerTitle.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
   // ── Codex round-36 findings (#2633) ──
 
   test('Codex r36: reported self-accusations and pronoun/possessive variants block', () => {

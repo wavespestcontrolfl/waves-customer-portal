@@ -221,7 +221,7 @@ const OWN_BRAND_POSSESSION_SUBJECT = "(?:\\bwaves\\b(?:['’]s?)?|\\bwe\\b|\\bou
 // the industry, it is not a self-accusation (Codex r35). The stop does NOT
 // apply when the reported subject is still the brand via it/its — "Waves
 // says it has hidden fees" is self-disparagement (Codex r36).
-const OWN_BRAND_CLAUSE_GAP = `(?:\\s*,?\\s+(?!(?:that|whether|if|how|why|explains?|explained|notes?|noted|says?|said|warns?|warned|reports?|reported|teach(?:es)?|taught|shows?|showed|covers?|covered|lists?|listed)\\b(?!\\s+(?:it|its)\\b))${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
+const OWN_BRAND_CLAUSE_GAP = `(?:\\s*,?\\s+(?!(?:that|whether|if|how|why|explains?|explained|notes?|noted|says?|said|warns?|warned|reports?|reported|teach(?:es)?|taught|shows?|showed|covers?|covered|lists?|listed)\\b(?!\\s+(?:that\\s+)?(?:it|its)\\b))${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
   // adding NEG_ADJ here would newly block prose like "waves of termites are
@@ -260,6 +260,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // Negator immediately before the verb is a denial — "Customers do not
   // call Waves a scam" (Codex r22 on #2633).
   `(?<!\\b(?:not|never|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|rarely|hardly|seldom)\\s)\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:waves|us)\\b\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source})`,
+  // Reported it/its-possessive self-accusations — "Waves says that its
+  // billing includes hidden fees" (Codex r37): the pronoun re-anchors the
+  // subject past the gap limit, so it gets its own bridge arm.
+  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,60}?\\b(?:it\\s+|its\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+)(?:ha(?:s|ve|d)|includes?|included|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
   // Codex r7 on #2633.
   `${OWN_BRAND_SUBJECT}${OWN_BRAND_CLAUSE_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -658,7 +662,7 @@ function finding(severity, code, message) {
 // Emphatic idioms are not denials — "Without a doubt, hidden fees from X
 // are common" asserts the claim (Codex r27 on #2633). "no(?!\.)": the
 // "No. 1" ordinal abbreviation is never a negator.
-const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 // Accusation vocabulary used by the conjunction-reset scope check.
 const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b`, 'i');
 function sentenceHasNegator(text, index, length) {
@@ -790,6 +794,31 @@ function scanOwnBrandDisparagementArms(scanText) {
     // not real" (Codex r36).
     if (trailingDenial(scanText, av.index, av[0].length)) continue;
     return [av[0]];
+  }
+  return null;
+}
+
+// Subject-scoped, negation-checked superlative scan shared by both paths
+// (Codex r35/r37): "We are the best choice in Venice" blocks; "Gel bait is
+// the best option for German roaches" is treatment advice; "We are not the
+// best choice for every home" is a denial.
+function scopedSelfRankingMatch(text) {
+  const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
+  let sm;
+  while ((sm = selfRe.exec(text)) !== null) {
+    const sentStart = Math.max(
+      text.lastIndexOf('.', sm.index),
+      text.lastIndexOf('!', sm.index),
+      text.lastIndexOf('?', sm.index),
+      text.lastIndexOf('\n', sm.index),
+    ) + 1;
+    const lead = text.slice(sentStart, sm.index + sm[0].length);
+    if (SENTENCE_NEGATOR_RE.test(lead)) continue;
+    const subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
+    if (/\b(?:we|our|us)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
+      || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
+      return sm;
+    }
   }
   return null;
 }
@@ -1569,8 +1598,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // title/meta, or a provider/brand near it in prose — "the #1 entry point" /
   // "#1 hidden breeding site" is educational idiom, not a declared winner
   // (PROD 2026-07-11 false positives).
-  let rank = scanText.match(SELF_RANKING_RE)
-    || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
+  // Superlatives and title/meta #1 take the same subject/winner scoping as
+  // the prose scans — an educational category-table draft titled "The #1
+  // hidden breeding site in SWFL homes" is the original prod FP class
+  // (Codex r37). In-block #1 stays unconditional: cells are comparison
+  // context by construction.
+  let rank = scopedSelfRankingMatch(scanText)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
   if (!rank) {
     // Sentence-guarded and iterated — "No one rated us #1" is a denial
@@ -1609,6 +1642,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const numAdjacentProviderRe = new RegExp(
       `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest[\\s-]+control|lawn[\\s-]+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
     );
+    // Title/meta #1 takes the same winner-syntax requirement (Codex r37):
+    // "The #1 hidden breeding site in SWFL homes" is an educational title;
+    // "#1 pest control company in Venice" declares a winner.
+    if (metaText) {
+      const metaNumRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
+      let mnum;
+      while ((mnum = metaNumRe.exec(metaText)) !== null) {
+        if (sentenceHasNegator(metaText, mnum.index, mnum[0].length)) continue;
+        const mtail = metaText.slice(mnum.index, mnum.index + 60);
+        const hasName = targetNames.some((n) => metaText.toLowerCase().includes(n.toLowerCase()));
+        if (numAdjacentProviderRe.test(mtail) || hasName) { rank = mnum; break; }
+      }
+    }
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
       // "We are not the #1 pest control company in Venice" is honest
