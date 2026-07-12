@@ -349,33 +349,50 @@ router.post('/templates/:key/trigger', async (req, res) => {
 // always confirms the number that actually sends.
 
 const { whereLiveCustomer } = require('../services/customer-stages');
+const { CITY_TO_LOCATION } = require('../config/locations');
 
 const SEGMENT_SCOPES = new Set(['customers', 'program']);
 const SEGMENT_LOCATIONS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
 const SEGMENT_SEND_CAP = 2000;
-// waveguard_tier values that are NOT program membership (prod carries
-// 'One-Time' placeholder rows) — a bare NOT NULL over-counts.
-const NON_PROGRAM_TIERS = ['One-Time'];
+
+// SQL mirror of the canonical hasMembership predicate
+// (routes/admin-customers.js): a NON-membership tier key excludes the row
+// outright (even with a positive rate), any other tier includes it, and only
+// tierless rows fall back to monthly_rate > 0. The key normalization
+// (lowercase, strip non-alphanumerics: 'One-Time' → 'onetime') and the
+// exclusion list must stay in lockstep with NON_MEMBERSHIP_TIER_KEYS there.
+const MEMBERSHIP_SQL = `
+  CASE
+    WHEN regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g')
+      IN ('none', 'onetime', 'na', 'no', 'notset', 'commercial') THEN false
+    WHEN regexp_replace(lower(coalesce(waveguard_tier, '')), '[^a-z0-9]+', '', 'g') <> '' THEN true
+    ELSE coalesce(monthly_rate, 0) > 0
+  END`;
 
 // Live customers with an email, per the canonical real-customer predicate
 // (customer-stages.js — pipeline_stage, NOT the always-true `active` flag
-// alone). scope 'program' = recurring membership: a real WaveGuard tier OR a
-// positive monthly rate (prod-verified 2026-07-12: a handful of monthly
-// payers carry no tier — they're program customers for announcements like a
-// price increase, while 'One-Time' tier rows are not).
+// alone). scope 'program' = hasMembership (above).
 function segmentQuery({ scope, locationId }) {
   let q = db('customers')
     .modify(whereLiveCustomer)
     .whereNotNull('email')
     .whereRaw("TRIM(email) <> ''");
-  if (scope === 'program') {
-    q = q.where(function programMembership() {
-      this.where(function realTier() {
-        this.whereNotNull('waveguard_tier').whereNotIn('waveguard_tier', NON_PROGRAM_TIERS);
-      }).orWhere('monthly_rate', '>', 0);
+  if (scope === 'program') q = q.whereRaw(MEMBERSHIP_SQL);
+  if (locationId) {
+    // nearest_location_id is nullable; the rest of the app falls back to
+    // city routing (config/locations CITY_TO_LOCATION), so a location-scoped
+    // send must too or null-location customers silently drop out.
+    const cities = Object.entries(CITY_TO_LOCATION)
+      .filter(([, locId]) => locId === locationId)
+      .map(([city]) => city);
+    q = q.where(function locationMatch() {
+      this.where('nearest_location_id', locationId)
+        .orWhere(function cityFallback() {
+          this.whereNull('nearest_location_id')
+            .whereRaw('LOWER(TRIM(city)) = ANY(?)', [cities]);
+        });
     });
   }
-  if (locationId) q = q.where('nearest_location_id', locationId);
   return q;
 }
 
@@ -421,20 +438,20 @@ router.post('/templates/:key/segment-send', async (req, res) => {
       return res.status(400).json({ error: 'No enabled step has content yet — there is nothing to send.' });
     }
 
-    const countRow = await segmentQuery(segment).count('* as count').first();
-    const liveCount = Number(countRow?.count || 0);
-    if (liveCount !== expectedCount) {
-      // Segment moved between preview and confirm — make the operator look at
-      // the real number before a mass send.
-      return res.status(409).json({ error: `Segment is now ${liveCount} customers (you previewed ${expectedCount}). Preview again to confirm the current count.`, count: liveCount });
-    }
-    if (liveCount > SEGMENT_SEND_CAP) {
-      return res.status(400).json({ error: `Segment (${liveCount}) exceeds the ${SEGMENT_SEND_CAP}-customer cap for one send.` });
-    }
-
+    // ONE statement defines both the confirmed count and the enrolled set —
+    // a separate count-then-select pair leaves a window where the row set can
+    // shift between the two while the request proceeds under the old number.
     const customers = await segmentQuery(segment)
       .select('id', 'email', 'first_name', 'last_name')
       .orderBy('id', 'asc');
+    if (customers.length !== expectedCount) {
+      // Segment moved between preview and confirm — make the operator look at
+      // the real number before a mass send.
+      return res.status(409).json({ error: `Segment is now ${customers.length} customers (you previewed ${expectedCount}). Preview again to confirm the current count.`, count: customers.length });
+    }
+    if (customers.length > SEGMENT_SEND_CAP) {
+      return res.status(400).json({ error: `Segment (${customers.length}) exceeds the ${SEGMENT_SEND_CAP}-customer cap for one send.` });
+    }
 
     // enrollCustomer per customer: idempotent (active enrollment = no-op),
     // reactivates completed rows (a repeat announcement SHOULD reach past
