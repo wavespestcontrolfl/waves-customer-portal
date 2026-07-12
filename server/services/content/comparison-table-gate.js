@@ -60,6 +60,7 @@ const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\
 // Hyphenated service phrases count everywhere — "pest-control companies"
 // (Codex r21 on #2633).
 const PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?|competitors?|competition|rivals?';
+const STRONG_PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:care|service)|compan(?:y|ies)|providers?|chains?|businesses?|operators?|outfits?|competitors?|competition|rivals?';
 // "service area(s)" is literal geography, not a provider — "our service
 // area is shady and humid" is educational copy (Codex r17 guard on #2633).
 // The optional "service" hop covers compound forms — "pest control service
@@ -161,7 +162,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // control" is consumer-protection education about the industry, not an
   // accusation at a provider (Codex r20 on #2633); "hidden fees from pest
   // control companies" stays directed.
-  `(?:${DISPARAGEMENT_RE.source})(?:\\s+(?!(?:in|within|across|throughout|among|around)\\b)\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
+  // The pre-noun shape requires a STRONG provider noun: bare "services?"
+  // matched buyer guidance like "hidden fees when comparing service plans"
+  // (Codex r31). Subject-verb/possession arms keep the full noun set.
+  `(?:${DISPARAGEMENT_RE.source})(?:\\s+(?!(?:in|within|across|throughout|among|around)\\b)\\w+){0,2}\\s+\\b(?:${STRONG_PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
   // Linking verbs incl. modal/hedged and sensory forms ("companies may be
   // dishonest", "providers sound shady" — Codex r10/r11 on #2633; same set
   // as the own-brand arm). Standalone appear counts as a copula too —
@@ -300,7 +304,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1" statistical statements ("Florida is ranked #1 for termite pressure"
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
-  `(?<!\\b(?:is|are|was|were)\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `(?<!\\b(?:is|are|was|were|been|remains?|remained|stays?|stayed)\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // (The own-brand-subject ranking arm — "Waves, after years of serving …,
   // is #1", Codex r5 — lives outside this joined regex behind the
   // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
@@ -349,7 +353,7 @@ const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_D
 // end — "Waves Pest Control: #1 entry point for ants" ranks the tip, not
 // the company (Codex r29 on #2633).
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
-  `^(?:(?:the|your|a|an)\\s+)?(?:[\\w'’]+['’]s\\s+)?${NUMERIC_ONE_ALT}(?:(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?|spots?|overall|rank(?:ing)?s?|positions?)\\b|\\s*(?:[.!?]|$))`, 'i',
+  `^(?:(?:the|your|a|an)\\s+)?(?:[\\w'’]+['’]s\\s+)?${NUMERIC_ONE_ALT}(?:(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?|overall|rank(?:ing)?s?|positions?)\\b|\\s*(?:[.!?]|$))`, 'i',
 );
 // Waves-subject linking-verb disparagement, case-sensitive anchor + case-
 // insensitive tail ("Waves is dishonest", "Waves may be dishonest") — pulled
@@ -365,7 +369,10 @@ const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
 // (Codex r19 on #2633).
 // Named group: DISPARAGEMENT_RE.source carries its own capture group, so a
 // positional index would grab the vocabulary token instead of the brand.
-const OWN_BRAND_REVERSE_SRC = `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\b(?<brandTok>waves)\\b`;
+// The compound lookbehind and (at the call sites) the sentence-negation
+// guard apply here too — "Lousy Heat Waves stress turf" is weather copy
+// and "No hidden fees from Waves" is a denial (Codex r31).
+const OWN_BRAND_REVERSE_SRC = `(?:${DISPARAGEMENT_RE.source})\\s+(?:(?!(?:[Hh][Ee][Aa][Tt]|[Cc][Oo][Ll][Dd]|[Tt][Ii][Dd][Aa][Ll]|[Oo][Cc][Ee][Aa][Nn]|[Ss][Oo][Uu][Nn][Dd]|[Ss][Hh][Oo][Cc][Kk]|[Tt][Rr][Oo][Pp][Ii][Cc][Aa][Ll]|[Ss][Tt][Oo][Rr][Mm]|[Rr][Oo][Gg][Uu][Ee]|[Rr][Aa][Dd][Ii][Oo])\\s)\\w+\\s+)?\\b(?<brandTok>waves)\\b`;
 const OWN_BRAND_CASE_RE = /^W(?:aves|AVES)$/;
 // Accusation-object ASSOCIATION with Waves in object position — "Customers
 // report hidden fees after choosing Waves" (Codex r21 on #2633). Brand token
@@ -629,10 +636,14 @@ function finding(severity, code, message) {
 // "No. 1" ordinal abbreviation is never a negator.
 const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 function sentenceHasNegator(text, index, length) {
+  // Clause boundaries count: "No hidden fees here; Waves charges hidden
+  // fees." must not let the first clause deny the second (Codex r31).
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
     text.lastIndexOf('!', index),
     text.lastIndexOf('?', index),
+    text.lastIndexOf(';', index),
+    text.lastIndexOf(':', index),
     text.lastIndexOf('\n', index),
   ) + 1;
   return SENTENCE_NEGATOR_RE.test(text.slice(sentStart, index + length));
@@ -701,7 +712,9 @@ function scanOwnBrandDisparagementArms(scanText) {
   const revRe = new RegExp(OWN_BRAND_REVERSE_SRC, 'gi');
   let rv;
   while ((rv = revRe.exec(scanText)) !== null) {
-    if (OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) return [rv[0]];
+    if (!OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, rv.index, rv[0].length)) continue;
+    return [rv[0]];
   }
   // Object association ("Customers report hidden fees after choosing
   // Waves") — case-verified + sentence-level denial guard (Codex r21).
@@ -732,7 +745,11 @@ function scanOwnBrandRankingArms(scanText) {
   while ((sa2 = subjAnchorRe.exec(scanText)) !== null) {
     const tail = scanText.slice(sa2.index + sa2[0].length);
     const tm = OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.exec(tail) || OWN_BRAND_MARKETING_TAIL_RE.exec(tail);
-    if (tm) return [scanText.slice(sa2.index, sa2.index + sa2[0].length + tm[0].length)];
+    // Span-guarded: the free prefix window can hop a negator — "Waves does
+    // not rank #1" is honest anti-ranking copy (Codex r31).
+    if (tm && !SENTENCE_NEGATOR_RE.test(tm[0])) {
+      return [scanText.slice(sa2.index, sa2.index + sa2[0].length + tm[0].length)];
+    }
   }
   // #1-before-the-brand framing ("The #1 overall is Waves") — case-verified
   // brand token (Codex r21).

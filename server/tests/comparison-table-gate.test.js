@@ -1114,6 +1114,41 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-31 findings (#2633) ──
+
+  test('Codex r31: auxiliary statistical rankings and negated brand rankings stay clean', () => {
+    for (const prose of ['Florida has been ranked #1 for termite pressure.', 'Florida remains ranked #1 for termite pressure.', 'Waves does not rank #1 and says so.', 'Waves never markets itself as #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
+  test('Codex r31: buyer guidance with weak service nouns stays clean', () => {
+    const r = gate.evaluate({ body: `Watch out for hidden fees when comparing service plans.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+  });
+
+  test('Codex r31: clause-boundary denials do not shadow live accusations', () => {
+    for (const prose of ['No hidden fees here; Waves charges hidden fees.', 'No scams to avoid here; pest control companies are dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r31: reverse-arm denials and title-cased weather stay clean', () => {
+    for (const body of ['No hidden fees from Waves.', `Lousy Heat Waves stress St. Augustinegrass.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+    }
+  });
+
+  test('Codex r31: brand tip-spot headings stay educational; market spot claims still block', () => {
+    const tip = gate.evaluate({ body: `Waves: #1 hiding spot is cardboard.\n\n${CATEGORY_TABLE}` }, {});
+    expect(tip.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    const market = gate.evaluate({ body: `The #1 spot belongs to Bug Busters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(market.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
   // ── Codex round-30 findings (#2633) ──
 
   test('Codex r30: location-possessive #1 and plain-insult separator claims block', () => {
