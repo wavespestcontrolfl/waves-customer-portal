@@ -60,7 +60,9 @@ const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\
 const PROVIDER_NOUN = 'pest control|exterminators?|lawn (?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
 // "service area(s)" is literal geography, not a provider — "our service
 // area is shady and humid" is educational copy (Codex r17 guard on #2633).
-const NOT_SERVICE_AREA = '(?!\\s+areas?\\b)';
+// The optional "service" hop covers compound forms — "pest control service
+// areas are shady" (Codex r19).
+const NOT_SERVICE_AREA = '(?!\\s+(?:service\\s+)?areas?\\b)';
 const PROVIDER_DISPARAGEMENT_RE = new RegExp([
   `\\b(?:${NEG_ADJ})\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
@@ -194,7 +196,9 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
   `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
-  `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
+  // (The reverse "…dishonest Waves" arm lives outside this joined regex —
+  // it needs a case-VERIFIED brand token so "Lousy heat waves stress St.
+  // Augustinegrass" stays clean; see OWN_BRAND_REVERSE_RE / Codex r19.)
   // Object-position insult idiom against the own brand ("homeowners call
   // Waves a scam", "customers describe us as dishonest") — verb-anchored,
   // DISPARAGEMENT_RE vocabulary only: NEG_ADJ here would collide with the
@@ -230,11 +234,14 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
   `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
-  // Marketing verbs with a reflexive object — "Waves advertises itself as
-  // #1", "we market ourselves as the #1 choice" (Codex r17 on #2633). The
-  // reflexive is REQUIRED: "we advertise the #1-rated mosquito trap" is a
-  // product mention, not self-ranking.
-  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // Marketing verbs with a reflexive object — "we market ourselves as the
+  // #1 choice" (Codex r17 on #2633). The reflexive is REQUIRED: "we
+  // advertise the #1-rated mosquito trap" is a product mention, not
+  // self-ranking. (The Waves-subject variants — linking "Waves is #1" and
+  // marketing "Waves advertises itself as #1" — live outside this joined
+  // regex behind the case-sensitive brand anchor; lowercase "waves" is the
+  // common noun ("summer heat waves are #1 on the list of turf stressors")
+  // — Codex r19.)
   `\\bwe\\s+(?:advertise|market|promote|position|tout|brand|bill|present|describe)(?:s|d)?\\s+ourselves\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own brand in OBJECT position ("customers rated us #1", "voted us the
   // #1 choice") — "us" makes it own-brand by construction, so the verb
@@ -247,11 +254,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
   `(?<!\\b(?:is|are|was|were)\\s)\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
-  // Own-brand subject with the ranking verb anywhere in the same sentence —
-  // "Waves, after years of serving …, is #1" sits outside any proximity
-  // window (Codex r5 on #2633). The verb must still be adjacent to the
-  // number, so "in heat waves, the #1 breeding site is …" stays clean.
-  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // (The own-brand-subject ranking arm — "Waves, after years of serving …,
+  // is #1", Codex r5 — lives outside this joined regex behind the
+  // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
   // Provider-noun subject: "pest control companies are #1", "providers
   // rank #1" (Codex r11 on #2633). Negator-free adverb slot, same as the
   // we-arm ("companies are currently #1" — Codex r16 parity).
@@ -287,6 +292,24 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMER
 // for turf" hard-blocked; Codex r18 on #2633).
 const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
   `^${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`, 'i',
+);
+// Reverse form ("…dishonest Waves"): the vocabulary needs 'i' but the brand
+// token must be case-VERIFIED in code (capture group checked against
+// Waves/WAVES) — "Lousy heat waves stress St. Augustinegrass" is lawn copy
+// (Codex r19 on #2633).
+// Named group: DISPARAGEMENT_RE.source carries its own capture group, so a
+// positional index would grab the vocabulary token instead of the brand.
+const OWN_BRAND_REVERSE_SRC = `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\b(?<brandTok>waves)\\b`;
+const OWN_BRAND_CASE_RE = /^W(?:aves|AVES)$/;
+// Waves-subject #1 arms, case-sensitive anchor + 'i' tails, same split as
+// the linking/separator arms (Codex r5/r17/r19 on #2633). The verb must be
+// adjacent to the number so "in heat waves, the #1 breeding site is …"
+// stays clean; the marketing form requires the reflexive.
+const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
+  `^[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+);
+const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
+  `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
 );
 
 // Linking/behavioral verbs that tie a subject name to a following negative
@@ -376,7 +399,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -458,7 +481,13 @@ const PROSE_HEADER_SHAPE_RE = new RegExp(
 );
 const PERSONIFIED_SUFFIX_RE = /\b(?:Busters?|Squad|Patrol|Brigade|Pros?|Experts?|Specialists?|Defenders?|Exterminators?)\s*$/i;
 const GENERIC_LEAD_SET = new Set(GENERIC_LEAD_EXCLUSIONS.split('|').map((w) => w.toLowerCase()));
-function collectHeaderShapedProseTargets(text) {
+// Service-area geography: a capture whose every lead token is a place name
+// reads as "<category> in <place>" ("Sarasota lawn care"), not a company.
+// Used by the TABLE-LESS collection only (Codex r19 vs the locked r4 geo
+// guard) — the table path keeps its broader capture, where comparison
+// context raises the provider prior.
+const GEO_LEAD_SET = new Set(('sarasota|bradenton|venice|parrish|palmetto|north|port|charlotte|punta|gorda|englewood|nokomis|osprey|ellenton|myakka|lakewood|ranch|manatee|florida|fl|swfl|tampa|naples|fort|myers').split('|'));
+function collectHeaderShapedProseTargets(text, { excludeGeoLeads = false } = {}) {
   const out = new Set();
   for (const m of String(text || '').matchAll(PROSE_HEADER_SHAPE_RE)) {
     const nm = splitAtNegativity(`${m[1]}${m[2]}`);
@@ -467,6 +496,9 @@ function collectHeaderShapedProseTargets(text) {
     const leadTokens = String(m[1]).split(/\s+/).filter(Boolean);
     const hasNonGenericLead = leadTokens.some((t) => !GENERIC_LEAD_SET.has(t.toLowerCase()));
     if (!hasNonGenericLead && !PERSONIFIED_SUFFIX_RE.test(m[2])) continue;
+    if (excludeGeoLeads && leadTokens.length
+      && leadTokens.every((t) => GEO_LEAD_SET.has(t.toLowerCase()))
+      && !PERSONIFIED_SUFFIX_RE.test(m[2])) continue;
     out.add(nm);
   }
   return out;
@@ -496,7 +528,9 @@ function finding(severity, code, message) {
 // (Codex r12/r17/r18 on #2633): a negator anywhere earlier in the same
 // sentence makes the match a denial ("There are no reports of hidden fees
 // from Acme"), not an accusation.
-const SENTENCE_NEGATOR_RE = /\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i;
+// Contrastive "not only" is emphasis, not negation — "Not only that, hidden
+// fees from Acme are common" stays an accusation (Codex r19 on #2633).
+const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+only\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -505,6 +539,14 @@ function sentenceHasNegator(text, index, length) {
     text.lastIndexOf('\n', index),
   ) + 1;
   return SENTENCE_NEGATOR_RE.test(text.slice(sentStart, index + length));
+}
+
+// Span-scoped denial check for subject-verb arms whose verb list includes
+// negative auxiliaries ("X isn't dishonest", "X never scams customers" are
+// denials — Codex r19 on #2633). Only the MATCHED SPAN is checked, so
+// contrastive lead-ins ("Not only that, X is dishonest") stay accusations.
+function spanUnnegated(m) {
+  return m && !SENTENCE_NEGATOR_RE.test(m[0]) ? m : null;
 }
 
 function normalize(s) {
@@ -754,6 +796,12 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     const nm = splitAtNegativity(m[1]);
     if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
   }
+  // Header-shaped names too ("Bug Busters", "Acme Rodent Removal") — the
+  // table path treats them as business-shaped targets, so the table-less
+  // path must as well ("Bug Busters scams customers" in plain prose —
+  // Codex r19 on #2633). Geo-led captures are skipped here: "Sarasota lawn
+  // care is unreliable without irrigation" is educational (locked r4 guard).
+  for (const nm of collectHeaderShapedProseTargets(nameScanText, { excludeGeoLeads: true })) genericNames.add(nm);
   const curatedNames = [...known, ...unknown];
   for (const nm of curatedNames) genericNames.delete(nm);
 
@@ -821,7 +869,9 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
     );
     const fromP0 = new RegExp(`(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
-    let disparaged = directedP0.test(nameScanText)
+    // Span-guarded like the table path: "Acme Pest Solutions isn't
+    // dishonest" is a denial (Codex r19).
+    let disparaged = Boolean(spanUnnegated(nameScanText.match(directedP0)))
       || activeP0.test(nameScanText) || possessionP0.test(nameScanText);
     if (!disparaged) {
       // Association shapes take the sentence-level denial guard, same as
@@ -1038,6 +1088,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     }
   }
   if (!disp) {
+    // Reverse arm with the case-verified brand token (Codex r19).
+    const revRe = new RegExp(OWN_BRAND_REVERSE_SRC, 'gi');
+    let rv;
+    while ((rv = revRe.exec(scanText)) !== null) {
+      if (OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) { disp = [rv[0]]; break; }
+    }
+  }
+  if (!disp) {
     // Directed grammar for the looser name classes (see extraProseNames):
     // name-as-subject before a negative, negative immediately modifying the
     // name, or an active disparaging predicate — the same three shapes the
@@ -1108,7 +1166,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const objInsultP0 = new RegExp(
         `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
-      let dm = proseNameText.match(directedP0)
+      // directedP0's SUBJECT_VERBS include negative auxiliaries (isn't/
+      // never), so its match SPAN is negation-checked — "Bug Busters isn't
+      // dishonest" is a denial. Span-scoped, not sentence-scoped: "Not only
+      // that, X is dishonest" keeps text before the name out of the check
+      // (Codex r19 on #2633).
+      let dm = spanUnnegated(proseNameText.match(directedP0))
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
         || proseNameText.match(objInsultP0)
@@ -1157,6 +1220,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     while ((na = numAnchorRe.exec(scanText)) !== null) {
       if (OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(na.index + na[0].length))) {
         rank = [scanText.slice(na.index, na.index + na[0].length + 20)];
+        break;
+      }
+    }
+  }
+  if (!rank) {
+    // Waves-subject linking/marketing #1 arms behind the case-sensitive
+    // anchor (Codex r19) — every anchor checked, like the separator loop.
+    const subjAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
+    let sa2;
+    while ((sa2 = subjAnchorRe.exec(scanText)) !== null) {
+      const tail = scanText.slice(sa2.index + sa2[0].length);
+      const tm = OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.exec(tail) || OWN_BRAND_MARKETING_TAIL_RE.exec(tail);
+      if (tm) {
+        rank = [scanText.slice(sa2.index, sa2.index + sa2[0].length + tm[0].length)];
         break;
       }
     }

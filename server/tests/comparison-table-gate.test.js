@@ -1114,6 +1114,53 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-19 findings (#2633) ──
+
+  test('Codex r19: header-shaped names are table-less targets', () => {
+    for (const prose of ['Bug Busters scams customers.', 'Mosquito Squad charges hidden fees.', 'Acme Rodent Removal scams customers.']) {
+      const r = gate.evaluate({ body: prose }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r19: lowercase heat-waves #1 and reverse-disparagement copy stay clean; capitalized forms block', () => {
+    for (const prose of ['Summer heat waves are #1 on the list of turf stressors.', 'Lousy heat waves stress St. Augustinegrass.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(false);
+    }
+    const rank = gate.evaluate({ body: `Waves, after years of serving Sarasota, is #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    const marketing = gate.evaluate({ body: `Waves advertises itself as #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(marketing.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    const rev = gate.evaluate({ body: `Steer clear of dishonest Waves.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rev.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r19: negated subject-verb claims are denials in both paths', () => {
+    for (const body of ["Acme Pest Solutions isn't dishonest.", 'Acme Pest Solutions is not dishonest.', 'Acme Pest Solutions never scams customers.', `Bug Busters isn't dishonest.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+  });
+
+  test('Codex r19: compound service-area geography stays clean', () => {
+    const r = gate.evaluate({ body: `Pest control service areas are shady in summer.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('Codex r19: contrastive "not only" lead-ins stay accusations', () => {
+    for (const prose of ['Not only that, hidden fees from Acme Pest Solutions are common.', 'Not only that, dishonest pricing from Acme Pest Solutions is common.']) {
+      const r = gate.evaluate({ body: prose }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r19: "in pest control" is not a business name', () => {
+    const r = gate.evaluate({ body: 'How to avoid hidden fees in pest control.' }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
   // ── Codex round-18 findings (#2633) ──
 
   test('Codex r18: table-less modal and possession accusations block; denials stay clean', () => {
