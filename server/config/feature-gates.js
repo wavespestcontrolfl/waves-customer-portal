@@ -472,16 +472,19 @@ const gates = {
   // trigger has been verified with run history and idempotency checks.
   emailTemplateAutomations: isProd ? process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS === 'true' : true,
 
-  // Treatment Automation Enroll — first-time treatment bookings auto-enroll
-  // into the matching Automations-tab sequence (bed_bug only for now; the
-  // per-pest map in appointment-tagger.js controls which pests are wired, so
-  // flipping this gate never silently enables an unwired pest). Explicit
-  // opt-in in EVERY environment (like universalLinks): it emails customers,
-  // and non-prod environments run the same every-minute automation scheduler,
-  // so a dev/staging booking replay must never enroll anyone by default.
-  // Kill: unset stops NEW enrollments; toggling the automation off in the
-  // Automations tab holds in-flight enrollments (the runner only picks
-  // enabled templates), so the pair is the full stop.
+  // Treatment Automation Enroll — for wired pests (bed_bug only for now; the
+  // per-pest map in appointment-tagger.js controls which, so flipping this
+  // gate never silently enables an unwired pest), a first-time booking
+  // enrolls the Automations-tab sequence and that sequence REPLACES the
+  // transactional prep.<pest> email as the one guide email (owner directive
+  // 2026-07-11: exactly one email per booking, editable in the tab). The
+  // prep SMS legs key off the enrollment. Explicit opt-in in EVERY
+  // environment (like universalLinks): it emails customers, and non-prod runs
+  // the same every-minute scheduler, so a dev/staging booking replay must
+  // never enroll anyone by default.
+  // Kill: unset reverts wired pests to the transactional prep lane AND stops
+  // new enrollments; toggling the automation off in the Automations tab holds
+  // in-flight enrollments (the runner only picks enabled templates).
   treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
 
   // Field Content Module — master gate for the tech capture → review →

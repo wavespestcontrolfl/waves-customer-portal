@@ -30,6 +30,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/automation-runner', () => ({
   enrollCustomer: jest.fn(async () => ({ enrolled: true, enrollmentId: 'enr-1' })),
+  hasLocalContent: jest.fn(async () => true),
 }));
 
 const db = require('../models/db');
@@ -111,7 +112,9 @@ function priorBookingQuery() {
 describe('appointment tagger prep email automation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    isEnabled.mockReturnValue(true);
+    // This describe covers the TRANSACTIONAL prep lane — the behavior for all
+    // unwired pests, and for wired ones whenever the sequence gate is off.
+    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
     customerRow = {
       id: 'cust-1',
       first_name: 'Taylor',
@@ -433,15 +436,37 @@ describe('appointment tagger prep email automation', () => {
   });
 });
 
-describe('treatment automation enrollment (Automations-tab sequence)', () => {
+describe('treatment automation sequence (one guide email, Automations-tab source)', () => {
   const { enrollCustomer } = require('../services/automation-runner');
   let priorEnrollmentRow;
+  let templateRow;
+  let firstStepRow;
 
-  // automation_enrollments — the once-ever booking-hook dedupe lookup.
+  // automation_enrollments — the once-per-customer booking-hook dedupe lookup
+  // (.where().where(fn).first(); the fn models whereNot-failed OR delivered).
   function enrollmentsQuery() {
     const q = {
       where: jest.fn(() => q),
+      whereNot: jest.fn(() => q),
+      orWhereNotNull: jest.fn(() => q),
       first: jest.fn(async () => priorEnrollmentRow),
+    };
+    return q;
+  }
+  // automation_templates — isTreatmentSequenceSendable lookup.
+  function templatesQuery() {
+    const q = {
+      where: jest.fn(() => q),
+      first: jest.fn(async () => templateRow),
+    };
+    return q;
+  }
+  // automation_steps — first-enabled-step content check.
+  function stepsQuery() {
+    const q = {
+      where: jest.fn(() => q),
+      orderBy: jest.fn(() => q),
+      first: jest.fn(async () => firstStepRow),
     };
     return q;
   }
@@ -452,7 +477,10 @@ describe('treatment automation enrollment (Automations-tab sequence)', () => {
     isEnabled.mockReturnValue(true);
     enrollCustomer.mockResolvedValue({ enrolled: true, enrollmentId: 'enr-1' });
     priorBookingRow = null;
+    priorPrepInteraction = null;
     priorEnrollmentRow = null;
+    templateRow = { key: 'bed_bug', enabled: true };
+    firstStepRow = { step_order: 0, enabled: true, html_body: '<p>guide</p>', text_body: '' };
     customerRow = {
       id: 'cust-1',
       first_name: 'Taylor',
@@ -464,22 +492,135 @@ describe('treatment automation enrollment (Automations-tab sequence)', () => {
       if (table === 'customer_interactions') return interactionsQuery();
       if (table === 'email_template_automations') return automationsQuery();
       if (table === 'automation_enrollments') return enrollmentsQuery();
+      if (table === 'automation_templates') return templatesQuery();
+      if (table === 'automation_steps') return stepsQuery();
       return customersQuery();
     });
+    const trx = (table) => db(table);
+    trxRaw = jest.fn(async () => ({}));
+    trx.raw = trxRaw;
+    db.transaction = jest.fn(async (fn) => fn(trx));
   });
 
-  test('first-time bed bug booking enrolls the customer in the bed_bug sequence', async () => {
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+  test('gate on: the sequence replaces the transactional guide email and the companion SMS keys off the enrollment', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    // ONE email: the sequence enrolls; the transactional prep automation is
+    // never triggered.
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+    expect(enrollCustomer).toHaveBeenCalledTimes(1);
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'bed_bug',
+      customer: expect.objectContaining({ id: 'cust-1', email: 'taylor@example.com', first_name: 'Taylor' }),
+      dbh: expect.anything(), // runs on the advisory-lock transaction
+    }));
+    // Companion text still goes out — the guide email is coming via the runner.
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object),
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: the transactional prep lane runs unchanged and nothing enrolls', async () => {
+    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('unwired pests keep the transactional lane even with the gate on', async () => {
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('phone-only customer gets the standalone prep SMS when the sequence is sendable', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    customerRow = { ...customerRow, email: '' };
+    renderSmsTemplate.mockResolvedValueOnce('Bed bug prep steps...');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null, service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'auto_bed_bug_no_email', { first_name: 'Taylor' }, expect.any(Object),
+    );
+  });
+
+  test('phone-only customer stays silent when the sequence is paused or empty (kill-switch parity)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    customerRow = { ...customerRow, email: '' };
+    templateRow = { key: 'bed_bug', enabled: false };
+
+    await AppointmentTagger.triggerPestPrep(service({ email: null, service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+
+    templateRow = { key: 'bed_bug', enabled: true };
+    firstStepRow = { step_order: 0, enabled: true, html_body: '', text_body: '' }; // first step empty
+    await AppointmentTagger.triggerPestPrep(service({ email: null, service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a prior delivered/deliverable enrollment blocks re-enrollment AND the SMS (post-completion replay)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    priorEnrollmentRow = { id: 'enr-0' }; // active/completed/cancelled — non-failed
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a prior FAILED enrollment does not suppress prep — the new booking retries it', async () => {
+    // The dedupe lookup excludes failed rows (whereNot status failed), so the
+    // mock returning null models "only a failed row exists".
+    priorEnrollmentRow = null;
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
     expect(enrollCustomer).toHaveBeenCalledTimes(1);
-    expect(enrollCustomer).toHaveBeenCalledWith({
-      templateKey: 'bed_bug',
-      customer: expect.objectContaining({
-        id: 'cust-1',
-        email: 'taylor@example.com',
-        first_name: 'Taylor',
-      }),
-    });
+  });
+
+  test('empty FIRST step never enrolls, even if a later step has content (companion would lie)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    // The runner starts at step 0; a contentful later step doesn't make the
+    // guide send. isTreatmentSequenceSendable checks the FIRST enabled step.
+    firstStepRow = { step_order: 0, enabled: true, html_body: '   ', text_body: '' };
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('enrollment is serialized under a customer+template advisory lock', async () => {
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(trxRaw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?))',
+      ['treatment_enroll:cust-1:bed_bug'],
+    );
+  });
+
+  test('terminal or past visits never enroll (regenerate-brief replay safety)', async () => {
+    await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled', service_type: 'Bed Bug Treatment' }), 'bed_bug');
+    await AppointmentTagger.triggerPestPrep(service({ status: 'completed', service_type: 'Bed Bug Treatment' }), 'bed_bug');
+    await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE, service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(executor.processTrigger).not.toHaveBeenCalled();
   });
 
   test('service-contact account routes the enrollment to the on-site contact', async () => {
@@ -489,68 +630,24 @@ describe('treatment automation enrollment (Automations-tab sequence)', () => {
       service_contact_email: 'jamie@example.com',
     };
 
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+    const result = await AppointmentTagger.enrollTreatmentSequence(service(), 'bed_bug');
 
-    expect(enrollCustomer).toHaveBeenCalledWith({
+    expect(result).toEqual({ queued: true, reason: 'queued' });
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'bed_bug',
-      customer: expect.objectContaining({
-        email: 'jamie@example.com',
-        first_name: 'Jamie',
-      }),
-    });
+      customer: expect.objectContaining({ email: 'jamie@example.com', first_name: 'Jamie' }),
+    }));
   });
 
-  test('gate off → no enrollment', async () => {
-    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
-
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('terminal or past visits never enroll (regenerate-brief replay safety)', async () => {
-    await AppointmentTagger.enrollTreatmentAutomation(service({ status: 'cancelled' }), 'bed_bug');
-    await AppointmentTagger.enrollTreatmentAutomation(service({ status: 'completed' }), 'bed_bug');
-    await AppointmentTagger.enrollTreatmentAutomation(service({ scheduled_date: PAST_DATE }), 'bed_bug');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('repeat booking in the same infestation series → no enrollment', async () => {
-    priorBookingRow = { id: 'svc-0' };
-
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('a prior enrollment of any status blocks re-enrollment (post-completion replay)', async () => {
-    priorEnrollmentRow = { id: 'enr-0' }; // completed sequence from the original hook run
-
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('no email on file → no enrollment (sequences are email-only)', async () => {
-    customerRow = { ...customerRow, email: '' };
-
-    await AppointmentTagger.enrollTreatmentAutomation(service({ email: '' }), 'bed_bug');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('unwired pest types are not enrolled', async () => {
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'flea');
-    await AppointmentTagger.enrollTreatmentAutomation(service(), 'cockroach');
-
-    expect(enrollCustomer).not.toHaveBeenCalled();
-  });
-
-  test('enrollment failure is logged and does not throw', async () => {
+  test('enrollment failure fails closed: logged, no SMS, booking unaffected', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
     enrollCustomer.mockRejectedValueOnce(new Error('boom'));
 
-    await expect(AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug')).resolves.toBeUndefined();
-    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('bed_bug automation enroll failed'));
+    await expect(
+      AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug'),
+    ).resolves.toBeUndefined();
+
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('bed_bug sequence enroll failed'));
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 });
