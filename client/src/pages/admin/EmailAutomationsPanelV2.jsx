@@ -280,7 +280,14 @@ function SendAutomationModal({ template, onClose, onSent }) {
           body: JSON.stringify({ segment: { scope, locationId: locationId || undefined } }),
         },
       );
-      if (previewSeq.current === requestId) setPreview(data);
+      // Snapshot the SEGMENT with the count: the confirm must send exactly
+      // what was previewed. Reading the live scope/locationId at send time
+      // leaves a one-render window (before the clearing useEffect commits)
+      // where a click could pair the new segment with the old count — and
+      // the server's drift check can't catch two segments sharing a count.
+      if (previewSeq.current === requestId) {
+        setPreview({ ...data, scope, locationId });
+      }
     } catch (e) {
       if (previewSeq.current === requestId) {
         setResult({ ok: false, text: "Preview failed: " + e.message });
@@ -291,7 +298,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
   };
 
   const sendSegment = async () => {
-    if (!preview || preview.overCap || sending) return;
+    if (!preview || preview.overCap || !preview.count || sending) return;
     setSending(true);
     setResult(null);
     try {
@@ -300,12 +307,15 @@ function SendAutomationModal({ template, onClose, onSent }) {
         {
           method: "POST",
           body: JSON.stringify({
-            segment: { scope, locationId: locationId || undefined },
+            segment: { scope: preview.scope, locationId: preview.locationId || undefined },
             expectedCount: preview.count,
           }),
         },
       );
-      setResult({ ok: true, text: data.message || "Segment enrolled." });
+      // success:false = some enrollments THREW (server keeps 200 with the
+      // summary) — render the message in the alert tone so the retry note
+      // is impossible to miss.
+      setResult({ ok: data.success !== false, text: data.message || "Segment enrolled." });
       setPreview(null);
       onSent?.();
     } catch (e) {
@@ -468,10 +478,15 @@ function SendAutomationModal({ template, onClose, onSent }) {
                   ))}
                 </select>
               </div>
-              {preview && !preview.overCap && (
+              {preview && !preview.overCap && preview.count > 0 && (
                 <div className="text-13 text-zinc-900 border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
                   <span className="u-nums font-medium">{preview.count}</span>{" "}
                   customers will be enrolled. Emails drain at ~50/minute.
+                </div>
+              )}
+              {preview && !preview.overCap && preview.count === 0 && (
+                <div className="text-12 text-ink-secondary">
+                  No customers match this segment — nothing to send.
                 </div>
               )}
               {preview && preview.overCap && (
@@ -572,7 +587,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
               >
                 {sending ? "Sending…" : "Send"}
               </Button>
-            ) : preview && !preview.overCap ? (
+            ) : preview && !preview.overCap && preview.count > 0 ? (
               <Button onClick={sendSegment} disabled={sending}>
                 {sending
                   ? "Enrolling…"

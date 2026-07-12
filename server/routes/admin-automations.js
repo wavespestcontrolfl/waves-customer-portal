@@ -473,7 +473,12 @@ router.post('/templates/:key/segment-send', async (req, res) => {
     // request; 10 in flight keeps a 2,000-customer confirm to a few seconds
     // without stampeding the pool.
     const ENROLL_CONCURRENCY = 10;
-    const summary = { enrolled: 0, alreadyActive: 0, skipped: 0 };
+    // `skipped` = enrollCustomer REFUSED (its own reasons: no email, template
+    // disabled mid-run…). `failed` = the call THREW (transient DB timeout,
+    // deadlock, constraint surprise) — operational failures the operator must
+    // see, not launder into skips. Re-running the send is the retry path:
+    // enrollCustomer is idempotent, so already-enrolled customers no-op.
+    const summary = { enrolled: 0, alreadyActive: 0, skipped: 0, failed: 0 };
     for (let i = 0; i < customers.length; i += ENROLL_CONCURRENCY) {
       const batch = customers.slice(i, i + ENROLL_CONCURRENCY);
       await Promise.all(batch.map(async (customer) => {
@@ -483,8 +488,8 @@ router.post('/templates/:key/segment-send', async (req, res) => {
           else if (result.reason === 'already enrolled') summary.alreadyActive += 1;
           else summary.skipped += 1;
         } catch (err) {
-          summary.skipped += 1;
-          logger.warn(`[automations/segment-send] enroll failed for customer ${customer.id}: ${err.message}`);
+          summary.failed += 1;
+          logger.error(`[automations/segment-send] enroll THREW for customer ${customer.id}: ${err.message}`);
         }
       }));
     }
@@ -494,7 +499,7 @@ router.post('/templates/:key/segment-send', async (req, res) => {
       await db('activity_log').insert({
         admin_user_id: req.technicianId || null,
         action: 'automation_segment_send',
-        description: `${template.name}: segment send to ${segment.scope}${segment.locationId ? ` @ ${segment.locationId}` : ''} — ${summary.enrolled} enrolled, ${summary.alreadyActive} already active, ${summary.skipped} skipped.`,
+        description: `${template.name}: segment send to ${segment.scope}${segment.locationId ? ` @ ${segment.locationId}` : ''} — ${summary.enrolled} enrolled, ${summary.alreadyActive} already active, ${summary.skipped} skipped, ${summary.failed} failed.`,
         metadata: JSON.stringify({ template_key: req.params.key, segment, summary }),
       });
     } catch (auditErr) {
@@ -502,10 +507,13 @@ router.post('/templates/:key/segment-send', async (req, res) => {
     }
 
     logger.info(`[automations/segment-send] ${req.params.key} → ${segment.scope}${segment.locationId ? `@${segment.locationId}` : ''}: ${JSON.stringify(summary)}`);
+    const failureNote = summary.failed
+      ? ` ⚠️ ${summary.failed} FAILED (transient errors) — run this send again to retry them; customers already enrolled are skipped automatically.`
+      : '';
     res.json({
-      success: true,
+      success: summary.failed === 0,
       ...summary,
-      message: `${template.name} — ${summary.enrolled} enrolled${summary.alreadyActive ? `, ${summary.alreadyActive} already active` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no usable email / disabled)` : ''}. The runner sends ~50/minute.`,
+      message: `${template.name} — ${summary.enrolled} enrolled${summary.alreadyActive ? `, ${summary.alreadyActive} already active` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no usable email / disabled)` : ''}. The runner sends ~50/minute.${failureNote}`,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
