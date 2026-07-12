@@ -36,21 +36,25 @@ describe('quote-promised bell dedupes on callSid (call-recording-processor.js)',
   const src = read('../services/call-recording-processor.js');
 
   test('dedupe helper exists and fails open', () => {
-    expect(src).toMatch(/async function quotePromisedAlreadyNotified\(callSid\)/);
+    expect(src).toMatch(/async function quotePromisedAlreadyNotified\(callSid, \{ ignoreNoLead = false \} = \{\}\)/);
     // Fail-open: the catch path must return false (notify anyway), never throw.
     const helper = src.slice(
       src.indexOf('async function quotePromisedAlreadyNotified'),
-      src.indexOf('async function quotePromisedAlreadyNotified') + 900
+      src.indexOf('async function quotePromisedAlreadyNotified') + 1200
     );
     expect(helper).toMatch(/catch[\s\S]*return false/);
+    // Lane awareness: ignoreNoLead must exclude no_lead bells from the match.
+    expect(helper).toMatch(/no_lead'\) IS DISTINCT FROM 'true'/);
   });
 
-  test('BOTH notify sites consult the dedupe guard', () => {
-    const guarded = src.match(/await quotePromisedAlreadyNotified\(call\.twilio_call_sid\)/g) || [];
+  test('BOTH notify sites consult the dedupe guard, lane-aware', () => {
+    const guarded = src.match(/await quotePromisedAlreadyNotified\(call\.twilio_call_sid/g) || [];
     expect(guarded.length).toBe(2);
-    // Site 1: lead path; Site 2: no-lead path — both keep their original conditions.
-    expect(src).toMatch(/callQuotePromised && enriched && !\(await quotePromisedAlreadyNotified/);
-    expect(src).toMatch(/callQuotePromised && !leadId && !extracted\.is_spam\s*\n\s*&& !\(await quotePromisedAlreadyNotified/);
+    // Lead path dedupes ONLY against equivalent lead-path bells — a stale
+    // no-lead bell must not suppress the corrected lead-linked bell (codex P2).
+    expect(src).toMatch(/callQuotePromised && enriched\s*\n\s*&& !\(await quotePromisedAlreadyNotified\(call\.twilio_call_sid, \{ ignoreNoLead: true \}\)\)/);
+    // No-lead path dedupes against ANY prior quote-promised bell for the call.
+    expect(src).toMatch(/callQuotePromised && !leadId && !extracted\.is_spam\s*\n\s*&& !\(await quotePromisedAlreadyNotified\(call\.twilio_call_sid\)\)/);
   });
 });
 

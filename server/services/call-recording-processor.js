@@ -783,19 +783,26 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
   };
 }
 
-// One quote-promised bell per call. Reprocessing the same recording (stale-lock
-// reclaim, hung-fetch retry) re-enters both notify sites — one real call has
-// rung three bells, with the early runs on the no-lead path because lead
-// creation only succeeded on the final run. Fail-open: a dedupe-query error
-// must cost a duplicate bell, never the bell itself.
-async function quotePromisedAlreadyNotified(callSid) {
+// One quote-promised bell per call PER PATH. Reprocessing the same recording
+// (stale-lock reclaim, hung-fetch retry) re-enters both notify sites — one
+// real call has rung three bells, with the early runs on the no-lead path
+// because lead creation only succeeded on the final run.
+// Lane-aware on purpose: a stale no-lead bell ("no lead is tracking this
+// promise") must NOT suppress the corrected lead-linked bell a successful
+// retry produces — the lead path passes ignoreNoLead to dedupe only against
+// equivalent (lead-path) bells, while the no-lead path dedupes against any.
+// Fail-open: a dedupe-query error must cost a duplicate bell, never the bell.
+async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = {}) {
   if (!callSid) return false;
   try {
-    const existing = await db('notifications')
+    let query = db('notifications')
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'callSid' = ?", [callSid])
-      .whereRaw("metadata->>'quote_promised' = 'true'")
-      .first('id');
+      .whereRaw("metadata->>'quote_promised' = 'true'");
+    if (ignoreNoLead) {
+      query = query.whereRaw("(metadata->>'no_lead') IS DISTINCT FROM 'true'");
+    }
+    const existing = await query.first('id');
     return !!existing;
   } catch (e) {
     logger.warn(`[call-proc] quote-promised dedupe check failed (notifying anyway): ${e.message}`);
@@ -5607,7 +5614,8 @@ const CallRecordingProcessor = {
           // as an admin notification with the deadline. Without this the
           // promise lives only in the recording and dies if nobody remembers
           // (this is exactly what happened on real multi-property quote calls).
-          if (callQuotePromised && enriched && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
+          if (callQuotePromised && enriched
+            && !(await quotePromisedAlreadyNotified(call.twilio_call_sid, { ignoreNoLead: true }))) {
             try {
               const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
                 .filter(Boolean)
