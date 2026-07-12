@@ -36,7 +36,6 @@ const {
   computeDepositAmount,
 } = require('../services/estimate-deposits');
 const CardHolds = require('../services/estimate-card-holds');
-const RecurringCards = require('../services/recurring-card-on-file');
 const Experiments = require('../services/experimentation/growthbook');
 const {
   cleanupEstimatePricingCache,
@@ -6737,35 +6736,6 @@ async function handleEstimateView(req, res, next) {
     const cardHoldForcesReactView = CardHolds.isCardHoldEnabled()
       && !effectiveInvoiceMode
       && (estimate.show_one_time_option === true || isStructuralOneTimeOnlyEstimate(estData, estimate));
-    // Recurring card-on-file lives ONLY in the React view's capture UI (same
-    // deal as the one-time hold): when the flag is on and this estimate's
-    // recurring accept would owe an Auto Pay card, route to React — otherwise
-    // the legacy server-HTML page would accept without a card and the server
-    // would reject with RECURRING_CARD_REQUIRED, a dead end with no capture
-    // form. Policy-resolved (not just flag-gated) so exempt estimates — plan
-    // members, payer-billed, already-on-Auto-Pay — keep their legacy/holdback
-    // rendering. Dark by default: required is false until RECURRING_CARD_ON_FILE.
-    const recurringCardForcesReactView = RecurringCards.isRecurringCardOnFileEnabled()
-      && !effectiveInvoiceMode
-      && !isStructuralOneTimeOnlyEstimate(estData, estimate)
-      // Commercial manual-billing accepts owe no card (same predicate as the
-      // accept gate / /data / intent route) — don't yank them off the legacy
-      // renderer for a capture step they'll never see.
-      && !(() => {
-        const lc = commercialLowConfidenceRange(estData);
-        return commercialAcceptDepositExempt({
-          isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
-          siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
-          treatAsOneTime: false,
-          billByInvoice: effectiveInvoiceMode,
-        });
-      })()
-      && (await RecurringCards.resolveRecurringCardPolicyForEstimate({
-        estimate,
-        treatAsOneTime: false,
-        billByInvoice: effectiveInvoiceMode,
-        paymentMethodPreference: null,
-      })).required;
     // Staff can request the REAL React renderer for an unpublished row via
     // ?adminPreview=1 (the estimate tool's "Customer View" + the estimates
     // list's Preview). The param is NOT authorization — this route only
@@ -6776,8 +6746,7 @@ async function handleEstimateView(req, res, next) {
     const adminPreviewRequested = req.query.adminPreview === '1';
     let shouldUseReactEstimateView = (estimate.use_v2_view === true
       || effectiveInvoiceMode
-      || cardHoldForcesReactView
-      || recurringCardForcesReactView)
+      || cardHoldForcesReactView)
       // Unpublished estimates (draft/scheduled) stay on the legacy server-HTML
       // renderer so office staff can still preview a draft via /estimate/<token>
       // before it's sent — UNLESS the staff preview param asks for the React
@@ -6806,7 +6775,6 @@ async function handleEstimateView(req, res, next) {
       && estimate.use_v2_view === true
       && !effectiveInvoiceMode
       && !cardHoldForcesReactView
-      && !recurringCardForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -7467,78 +7435,6 @@ router.put('/:token/accept', async (req, res, next) => {
     if (paymentPreferenceError) {
       return res.status(400).json({ error: paymentPreferenceError });
     }
-
-    // ─────────────────────────────────────────────
-    // RECURRING CARD-ON-FILE (dark until RECURRING_CARD_ON_FILE). Owner
-    // decision 2026-07-12: new recurring customers save a card at accept —
-    // ALONGSIDE the deposit above, which is unchanged — and are enrolled in
-    // Auto Pay by default so every completed application auto-charges.
-    // Placed AFTER the payment-preference validation so a missing preference
-    // 400s before the client is asked for a card, and verified LIVE from
-    // Stripe (purpose + estimate pinned), never trusted from the client.
-    // Enrollment itself runs post-commit — see completeRecurringCardEnrollment
-    // below the accept transaction.
-    // ─────────────────────────────────────────────
-    const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
-      ? req.body.recurringCardSetupIntentId.trim() : '';
-    // Payer scope for the card policy (Codex #2668 round-5 P1): acceptLinkedSsId
-    // resolves fail-SOFT (null on lookup error) — the deposit's safe direction,
-    // where a missed per-job payer merely charges a refundable deposit. For the
-    // card policy a silently-missing scope can hide a per-job payer and enroll
-    // the homeowner, so the no-slot/no-existing-appointment fallback re-resolves
-    // STRICTLY; a failed lookup makes the payer scope uncertain → exempt the
-    // card entirely (same fail direction as payer_check_uncertain). Slot accepts
-    // keep scope null by construction (a fresh reservation carries no per-job
-    // payer) and existing-appointment accepts use the validated row id.
-    let recurringCardScopeUncertain = false;
-    let recurringCardScopeSsId = acceptLinkedSsId;
-    if (!slotId && !existingAppointmentId && !acceptLinkedSsId) {
-      try {
-        recurringCardScopeSsId = await linkedScheduledServiceId(estimate, null, { strict: true });
-      } catch (err) {
-        recurringCardScopeUncertain = true;
-        logger.warn(`[estimate-public] recurring-cof payer scope lookup failed — exempting card capture (fail closed): ${err.message}`);
-      }
-    }
-    const recurringCardPolicy = recurringCardScopeUncertain
-      ? { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }
-      : await RecurringCards.resolveRecurringCardPolicyForEstimate({
-        estimate,
-        membership: acceptMembership,
-        treatAsOneTime,
-        billByInvoice,
-        paymentMethodPreference,
-        // Scope resolved above to the accepted appointment — don't let the
-        // payer check re-derive an unrelated linked appointment.
-        scheduledServiceId: recurringCardScopeSsId,
-        useLinkedFallback: false,
-      });
-    // A site-confirmation-held commercial accept collects nothing at accept
-    // (manual billing after the on-site price confirmation) — same exemption
-    // shape the deposit applies above.
-    if (recurringCardPolicy.required && commercialAcceptDepositExempt({
-      isCommercialAccept,
-      siteConfirmationHold: holdFirstInvoiceForSiteConfirmation,
-      treatAsOneTime,
-      billByInvoice,
-    })) {
-      recurringCardPolicy.required = false;
-      recurringCardPolicy.exemptReason = 'commercial_manual_billing';
-    }
-    let recurringCardVerification = null;
-    if (recurringCardPolicy.required) {
-      recurringCardVerification = await RecurringCards.verifyRecurringCardIntent({
-        estimate,
-        setupIntentId: recurringCardSetupIntentId,
-      });
-      if (!recurringCardVerification.ok) {
-        return res.status(402).json({
-          error: 'Save a card for Auto Pay to confirm your recurring plan',
-          code: 'RECURRING_CARD_REQUIRED',
-        });
-      }
-    }
-
     if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
       return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
     }
@@ -8485,60 +8381,6 @@ router.put('/:token/accept', async (req, res, next) => {
         customerId,
         paymentMethodId: cardHoldVerification.paymentMethodId,
       }).catch(() => {});
-    }
-    // Recurring card-on-file: attach the captured card, record the consent
-    // snapshot, and enroll Auto Pay (post-commit, best-effort — the accept and
-    // its verified deposit stand either way; a failure parks an office
-    // exception inside completeRecurringCardEnrollment rather than blocking
-    // the booking). AWAITED — not fire-and-forget — so a deploy/restart right
-    // after the response can't strand an accepted estimate with no enrolled
-    // card and no exception (Codex #2668 P2); the routine still never throws,
-    // so a Stripe hiccup degrades to the office alert, not a failed accept.
-    // Residual crash-between-commit-and-here window: the setup_intent.succeeded
-    // webhook re-runs this idempotently when it delivers post-accept, and a
-    // still-unenrolled per_application customer surfaces in billing recovery.
-    if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
-      // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
-      // an unlinked estimate resolves/creates its customer INSIDE the accept
-      // transaction, so the pre-transaction policy could not see a
-      // customer-dependent payer exemption — a phone match can land on an
-      // existing payer-billed account, and enrolling the captured card would
-      // auto-charge the HOMEOWNER for invoices that route to the third-party
-      // payer. Only needed when the resolved customer differs from the id the
-      // policy resolved with; FAIL CLOSED on a lookup error (skip enrollment —
-      // the gap surfaces in billing recovery, the wrong enrollment charges the
-      // wrong party). The other customer-dependent exemptions stay safe
-      // post-commit without a re-check: enrollConsentedMethod defers to a
-      // healthy already-enrolled incumbent (autopay_already_active), and the
-      // plan-member exemption is undecidable here by design — the accept
-      // itself just converted this customer (same trap documented on the
-      // webhook backstop), and the customer explicitly checked the v8 consent.
-      let payerBilled = false;
-      if (String(estimate.customer_id || '') !== String(customerId)) {
-        try {
-          const PayerService = require('../services/payer');
-          // throwOnError: the default fail-soft contract returns self-pay on a
-          // lookup outage, which would silently defeat this fail-closed catch
-          // (Codex #2668 round-4 P1).
-          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: recurringCardScopeSsId, throwOnError: true });
-          payerBilled = !!resolvedPayer?.payerId;
-        } catch (err) {
-          payerBilled = true;
-          logger.warn(`[estimate-public] recurring-cof post-commit payer re-check failed — skipping enrollment (fail closed): ${err.message}`);
-        }
-      }
-      if (payerBilled) {
-        logger.info(`[estimate-public] recurring-cof enrollment skipped: resolved customer ${customerId} is payer-billed (estimate ${estimate.id})`);
-      } else {
-        await RecurringCards.completeRecurringCardEnrollment({
-          customerId,
-          stripePaymentMethodId: recurringCardVerification.paymentMethodId,
-          setupIntentId: recurringCardVerification.setupIntentId,
-          estimateId: estimate.id,
-          ip: req.ip,
-          userAgent: req.get('user-agent') || null,
-        }).catch(() => {});
-      }
     }
     let invoiceMode = txResult.invoiceMode === true;
     let invoiceId = txResult.invoiceId || null;
@@ -15442,34 +15284,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
-    // Recurring card-on-file policy for the React capture UI — the page only
-    // enforces it on a recurring accept with the pay-per-application choice
-    // (prepay is exempt; the accept gate re-resolves authoritatively with the
-    // actual preference). Inert ({enforced:false}) while RECURRING_CARD_ON_FILE
-    // is off. Structurally one-time-only estimates have no recurring lane to
-    // protect, so they resolve exempt via treatAsOneTime.
-    const recurringCardPolicyForData = await RecurringCards.resolveRecurringCardPolicyForEstimate({
-      estimate,
-      membership,
-      treatAsOneTime: depositStructuralOneTime,
-      billByInvoice: effectiveInvoiceMode,
-      paymentMethodPreference: null,
-    });
-    // Commercial manual-billing accepts collect nothing at accept — the SAME
-    // commercialAcceptDepositExempt predicate the accept gate applies. Without
-    // this, a commercial auto-priced recurring estimate would advertise
-    // required:true here, walk the customer through card capture, and then the
-    // accept-side exemption would skip enrollment — a captured card that never
-    // enrolls (Codex #2668 P2). Matches /recurring-card-intent's mirror.
-    if (recurringCardPolicyForData.required && commercialAcceptDepositExempt({
-      isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
-      siteConfirmationHold,
-      treatAsOneTime: depositStructuralOneTime,
-      billByInvoice: effectiveInvoiceMode,
-    })) {
-      recurringCardPolicyForData.required = false;
-      recurringCardPolicyForData.exemptReason = 'commercial_manual_billing';
-    }
 
     // A held estimate collects NO money at accept (the invoice comes after the
     // on-site confirmation), so the confirm flow must not require/mint a deposit
@@ -15490,8 +15304,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';
-      // (recurringCardPolicyForData is already exempted above — the
-      // commercialAcceptDepositExempt override covers the hold case too.)
     }
 
     // "Show your work" trust payload for the React estimate view. The key
@@ -15549,11 +15361,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         noShowFeeAmount: cardHoldOneTimePolicyForData.noShowFeeAmount || CardHolds.cardHoldNoShowFee(),
         cancelWindowHours: cardHoldOneTimePolicyForData.cancelWindowHours || CardHolds.cardHoldCancelWindowHours(),
       } : { enforced: false, requiredForOneTime: false },
-      recurringCardPolicy: {
-        enforced: recurringCardPolicyForData.enforced === true,
-        required: recurringCardPolicyForData.required === true,
-        exemptReason: recurringCardPolicyForData.exemptReason || null,
-      },
       estimate: {
         id: estimate.id,
         token: estimate.token,
