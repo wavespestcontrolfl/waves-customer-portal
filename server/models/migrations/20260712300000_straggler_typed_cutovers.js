@@ -21,13 +21,22 @@
  * completion renders/sends).
  *
  * Self-healing per-key (the 20260611000012 pattern — env catalogs are
- * admin-mutable, no fixed-count assertions): absent → loud skip; inactive →
- * loud skip; already at target → no-op; unexpected pointer → loud skip
- * (cutover must never clobber an admin's manual repoint).
+ * admin-mutable, no fixed-count assertions):
+ *  - services row absent → loud skip (nothing to cut over here)
+ *  - profile row absent but services row LIVE → HEAL: insert the target
+ *    typed profile (Codex round-1: admin-created catalog rows get no
+ *    profile, so a skip would leave them on the generic fallback forever)
+ *  - profile inactive → loud skip; unexpected pointer → loud skip (cutover
+ *    never clobbers an admin's manual repoint)
+ *  - already at target mode+pointer: delivery internal_only heals to
+ *    auto_send (Codex round-1 — partial-rollout drift); delivery
+ *    'disabled' loud-skips (kill switches stay fail-closed); auto_send
+ *    no-ops
  *
  * ROLLBACK FIDELITY: up() stamps [straggler_cutover_action=...] with the
- * prior mode/type/delivery into the row's notes; down() restores exactly
- * those rows and strips the marker.
+ * prior mode/type/delivery into the row's notes (healed inserts stamp
+ * `inserted` and are deleted by down()); down() restores exactly those
+ * rows and strips the marker.
  */
 
 const MARKER_RE = / ?\[straggler_cutover_action=[^\]]*\]/;
@@ -37,16 +46,17 @@ function withMarker(notes, action) {
   return `${base}${base ? ' ' : ''}[straggler_cutover_action=${action}]`;
 }
 
-// key → { fromMode, acceptedTypes, toType }. acceptedTypes are the pointers
-// we expect to find (prod-verified); anything else is admin drift → skip.
+// key → { fromMode, acceptedTypes, toType, category }. acceptedTypes are
+// the pointers we expect to find (prod-verified); anything else is admin
+// drift → skip. category feeds the heal-insert when the profile is missing.
 const CUTOVERS = [
-  { key: 'wildlife_trapping', fromMode: 'project_required', acceptedTypes: ['wildlife_trapping'], toType: 'wildlife_trapping' },
-  { key: 'cockroach_control', fromMode: 'project_required', acceptedTypes: ['cockroach'], toType: 'cockroach' },
-  { key: 'bed_bug_treatment', fromMode: 'project_required', acceptedTypes: ['bed_bug'], toType: 'bed_bug' },
-  { key: 'one_time_pest_control', fromMode: 'project_required', acceptedTypes: ['one_time_pest_treatment'], toType: 'one_time_pest_treatment' },
+  { key: 'wildlife_trapping', fromMode: 'project_required', acceptedTypes: ['wildlife_trapping'], toType: 'wildlife_trapping', category: 'specialty' },
+  { key: 'cockroach_control', fromMode: 'project_required', acceptedTypes: ['cockroach'], toType: 'cockroach', category: 'pest_control' },
+  { key: 'bed_bug_treatment', fromMode: 'project_required', acceptedTypes: ['bed_bug'], toType: 'bed_bug', category: 'specialty' },
+  { key: 'one_time_pest_control', fromMode: 'project_required', acceptedTypes: ['one_time_pest_treatment'], toType: 'one_time_pest_treatment', category: 'pest_control' },
   // palm_treatment is already service_report but generic (NULL pointer) —
   // fromMode reflects that; a non-null pointer means someone already decided.
-  { key: 'palm_treatment', fromMode: 'service_report', acceptedTypes: [null], toType: 'palm_injection' },
+  { key: 'palm_treatment', fromMode: 'service_report', acceptedTypes: [null], toType: 'palm_injection', category: 'tree_shrub' },
 ];
 
 exports.up = async function up(knex) {
@@ -55,10 +65,39 @@ exports.up = async function up(knex) {
     console.warn('[straggler-cutover] service_completion_profiles table absent — skipping');
     return;
   }
+  const hasServices = await knex.schema.hasTable('services');
   for (const target of CUTOVERS) {
     const row = await knex('service_completion_profiles').where({ service_key: target.key }).first();
     if (!row) {
-      console.warn(`[straggler-cutover] ${target.key}: profile row ABSENT in this environment — skipping`);
+      // Heal: an admin-created catalog row (service-library createService
+      // inserts only into services) has no profile — without one the
+      // resolver falls back to the generic no-findingsType profile and the
+      // typed billing pre-gate never engages. Insert the target profile
+      // when the services row is live; skip only when the service itself
+      // is absent.
+      const service = hasServices
+        ? await knex('services').where({ service_key: target.key }).first('name', 'billing_type', 'is_active', 'is_archived')
+        : null;
+      if (!service) {
+        console.warn(`[straggler-cutover] ${target.key}: no services row and no profile in this environment — skipping`);
+        continue;
+      }
+      await knex('service_completion_profiles').insert({
+        service_key: target.key,
+        service_name_snapshot: service.name,
+        category: target.category,
+        billing_type: service.billing_type || 'one_time',
+        completion_mode: 'service_report',
+        project_type: target.toType,
+        delivery_mode: 'auto_send',
+        creates_service_record: true,
+        portal_visibility: 'customer_portal',
+        portal_attach_policy: 'active_portal_customer',
+        followup_policy: 'none',
+        active: true,
+        notes: withMarker('', 'inserted'),
+      });
+      console.log(`[straggler-cutover] ${target.key}: profile inserted → service_report/${target.toType}/auto_send`);
       continue;
     }
     if (!row.active) {
@@ -66,7 +105,22 @@ exports.up = async function up(knex) {
       continue;
     }
     if (row.completion_mode === 'service_report' && row.project_type === target.toType) {
-      console.log(`[straggler-cutover] ${target.key}: already at target — no-op`);
+      // Mode + pointer already at target — heal drifted delivery posture
+      // (Codex round-1), but never lift a 'disabled' kill switch.
+      if (row.delivery_mode === 'auto_send') {
+        console.log(`[straggler-cutover] ${target.key}: already at target — no-op`);
+      } else if (row.delivery_mode === 'internal_only') {
+        await knex('service_completion_profiles')
+          .where({ service_key: target.key })
+          .update({
+            delivery_mode: 'auto_send',
+            notes: withMarker(row.notes, `updated:service_report:${row.project_type}:internal_only`),
+            updated_at: knex.fn.now(),
+          });
+        console.log(`[straggler-cutover] ${target.key}: pointer already at target, delivery internal_only → auto_send (prior recorded)`);
+      } else {
+        console.warn(`[straggler-cutover] ${target.key}: delivery_mode='${row.delivery_mode || 'NULL'}' — skipping (kill switches stay fail-closed)`);
+      }
       continue;
     }
     if (row.completion_mode !== target.fromMode || !target.acceptedTypes.includes(row.project_type)) {
@@ -94,9 +148,16 @@ exports.down = async function down(knex) {
     .whereIn('service_key', CUTOVERS.map((c) => c.key))
     .select('service_key', 'notes');
   for (const row of rows) {
-    const match = String(row.notes || '').match(/\[straggler_cutover_action=updated:([^\]]*)\]/);
+    const match = String(row.notes || '').match(/\[straggler_cutover_action=([^\]]*)\]/);
     if (!match) continue;
-    const [mode, type, delivery] = match[1].split(':').map((v) => (v === '-' ? null : v));
+    if (match[1] === 'inserted') {
+      await knex('service_completion_profiles').where({ service_key: row.service_key }).del();
+      console.log(`[straggler-cutover:down] ${row.service_key}: healed insert removed`);
+      continue;
+    }
+    const updateMatch = match[1].match(/^updated:(.*)$/);
+    if (!updateMatch) continue;
+    const [mode, type, delivery] = updateMatch[1].split(':').map((v) => (v === '-' ? null : v));
     await knex('service_completion_profiles')
       .where({ service_key: row.service_key })
       .update({
