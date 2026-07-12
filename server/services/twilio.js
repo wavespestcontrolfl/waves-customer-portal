@@ -280,6 +280,30 @@ const TwilioService = {
       );
       return { success: check.status === "approved", status: check.status };
     } catch (err) {
+      // Twilio Verify throws 20404 (verification not found) when the code
+      // is EXPIRED (10-min TTL), already consumed, or was never sent — a
+      // wrong-code outcome for the caller, not an infrastructure failure.
+      // 60202 is max check attempts reached. Both must come back as
+      // success:false so the route answers 401 "Invalid or expired
+      // verification code" instead of throwing into the 500 handler
+      // (customers retrying stale codes were getting server errors).
+      // Only the Twilio-coded 20404 is suppressed — a 404 without a Twilio
+      // error code is not a RestException and still throws. A misconfigured
+      // Verify service SID also surfaces as 20404 here (Twilio's response is
+      // identical), but that misconfig breaks the SEND leg first, which
+      // throws loudly — the warn below keeps the check-side pattern visible.
+      if (err.code === 20404) {
+        logger.warn(
+          `Verification check for ${maskPhone(phone)}: 20404 expired_or_not_found (${err.message})`,
+        );
+        return { success: false, status: "expired_or_not_found" };
+      }
+      if (err.code === 60202) {
+        logger.info(
+          `Verification check for ${maskPhone(phone)}: max_attempts_reached`,
+        );
+        return { success: false, status: "max_attempts_reached" };
+      }
       logger.error(`Twilio verification check failed: ${err.message}`);
       throw new Error("Verification check failed");
     }
