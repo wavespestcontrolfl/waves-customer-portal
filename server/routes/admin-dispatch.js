@@ -4950,17 +4950,42 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         : (svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
           ? Number(svc.cust_per_application_fee) : null);
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+      // Manual-discount accepts gross the service line up and bring it back
+      // with a negative discount line — invoices.subtotal is the PRE-discount
+      // gross (positive lines only), so the cap comparator is subtotal net of
+      // the recorded discount. Deposit credits are prior payment, never part
+      // of discount_amount, so they don't relax the cap (Codex #2680 r3).
+      const invoiceDiscount = Math.max(0, Number(invoice.discount_amount) || 0);
+      const netInvoiceSubtotal = Math.round((invoiceSubtotal - invoiceDiscount) * 100) / 100;
       // The setup/first-application invoice minted INSIDE the accept
       // transaction legitimately exceeds the per-visit amount (setup fee),
       // but a notes-marker EXEMPTION would survive office edits that
       // retotal the draft upward (Codex #2680 r2) — so accept-minted
-      // invoices get a bounded ALLOWANCE (accepted per-visit + the setup
-      // fee) instead of a free pass, and everything still fails closed
-      // when no accepted amount exists to anchor the cap.
+      // invoices get a bounded ALLOWANCE instead of a free pass, and only
+      // when the invoice actually carries the setup-fee line (a
+      // first-application-only accept invoice gets NO allowance — r3);
+      // everything still fails closed when no accepted amount exists.
       const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
       const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      let setupFeeAllowance = 0;
+      if (acceptMintedInvoice) {
+        try {
+          const rawLines = invoice.line_items;
+          const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+          const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+            /one-time setup fee/i.test(String(li?.description || ''))
+            && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
+          ));
+          if (setupLine) {
+            const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+            // Cap at the real fee: an office-inflated setup line must not
+            // widen the allowance.
+            setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
+          }
+        } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
+      }
       const capCeiling = acceptedPerVisit != null
-        ? acceptedPerVisit + (acceptMintedInvoice ? WAVEGUARD_SETUP_FEE_ALLOWANCE : 0)
+        ? acceptedPerVisit + setupFeeAllowance
         : null;
       if (acceptedPerVisit == null) {
         // No accepted amount to cap against (multi-service plan with no
@@ -4975,14 +5000,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
-      } else if (invoiceSubtotal > capCeiling + 0.005) {
-        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${invoiceSubtotal} exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
+      } else if (netInvoiceSubtotal > capCeiling + 0.005) {
+        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
             'Auto Pay charge above accepted amount — review',
-            `A completed visit's invoice ($${invoiceSubtotal.toFixed(2)} before tax) exceeds the accepted per-application amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal, acceptedPerVisit } },
+            `A completed visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the accepted per-application amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
           );
         } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
       } else try {

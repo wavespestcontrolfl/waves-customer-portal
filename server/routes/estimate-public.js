@@ -201,6 +201,28 @@ function pickAcceptCustomerMatch(candidates, estimate) {
   return null;
 }
 
+// The accept-time customer resolution for UNLINKED estimates, shared with the
+// recurring-card resolver (Codex #2680 r3: /data and /recurring-card-intent
+// must see the same customer accept will land on, or an existing customer
+// with a saved consented card / active Auto Pay is re-asked for a card the
+// auto-satisfy contract says they never re-enter). Read-only; pass the accept
+// transaction as `database` to keep the in-trx behavior identical.
+async function matchAcceptCustomerByPhone(estimate, database = db) {
+  if (!estimate?.customer_phone) return { match: null, candidateCount: 0 };
+  const matchDigits = phoneLast10(estimate.customer_phone);
+  const candidates = await database('customers')
+    .where((q) => {
+      q.where({ phone: estimate.customer_phone });
+      if (matchDigits) {
+        q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${matchDigits}`]);
+      }
+    })
+    .whereNull('deleted_at')
+    .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
+    .orderBy('updated_at', 'desc');
+  return { match: pickAcceptCustomerMatch(candidates, estimate), candidateCount: candidates.length };
+}
+
 // Tiny cookie-header parser — avoids pulling in cookie-parser for one read.
 function readCookie(req, name) {
   const header = req.headers.cookie;
@@ -7967,25 +7989,14 @@ router.put('/:token/accept', async (req, res, next) => {
         // rows, and order deterministically: exact raw match first, then the
         // most recently updated profile. Reuse a profile only when the match
         // is unambiguous (pickAcceptCustomerMatch).
-        const matchDigits = phoneLast10(estimate.customer_phone);
-        const candidates = await trx('customers')
-          .where((q) => {
-            q.where({ phone: estimate.customer_phone });
-            if (matchDigits) {
-              q.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${matchDigits}`]);
-            }
-          })
-          .whereNull('deleted_at')
-          .orderByRaw('(phone = ?) DESC NULLS LAST', [estimate.customer_phone])
-          .orderBy('updated_at', 'desc');
-        // No row cap: a property manager can hold many profiles on one
-        // phone, and truncating by recency could drop the one profile
-        // whose email/address uniquely matches — splitting the estimate
-        // off the existing account. pickAcceptCustomerMatch needs the
+        // No row cap inside the helper: a property manager can hold many
+        // profiles on one phone, and truncating by recency could drop the one
+        // profile whose email/address uniquely matches — splitting the
+        // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        const existing = pickAcceptCustomerMatch(candidates, estimate);
-        if (!existing && candidates.length > 1) {
-          logger.warn(`[estimate-accept] ${candidates.length} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
+        const { match: existing, candidateCount } = await matchAcceptCustomerByPhone(estimate, trx);
+        if (!existing && candidateCount > 1) {
+          logger.warn(`[estimate-accept] ${candidateCount} live customers share phone for estimate ${estimate.id}; no unique email/address match — creating a new profile`);
         }
         if (existing) {
           customerId = existing.id;
@@ -8341,6 +8352,7 @@ router.put('/:token/accept', async (req, res, next) => {
       // the commercial-schedule admin notification.
       let standardConversionResult = null;
       let standardInvoiceMinted = false;
+      let standardInvoiceAttached = false;
       if (customerId && !treatAsOneTime && !annualPrepaySelected) {
         const EstimateConverter = require('../services/estimate-converter');
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
@@ -8485,25 +8497,50 @@ router.put('/:token/accept', async (req, res, next) => {
               }
             }
             standardInvoiceMinted = true;
+            standardInvoiceAttached = !!attachScheduledServiceId;
             invoiceIdResult = inv.id;
             // The customer-facing amount is the invoice's actual after-tax,
             // after-credit total — the same figure the /pay page collects.
             invoiceAmountResult = Number(inv.total) || 0;
-            if (recurringCardLaneActive) {
+            if (recurringCardLaneActive && standardInvoiceAttached) {
               // Card-on-file lane (spec §3.1, Codex #2680): the invoice is
               // still minted — it anchors the setup fee + first application
               // amount and the deposit credit — but NOTHING is due at
               // booking. No pay URL, no pay_invoice next step, no invoice
               // SMS; the enrolled card auto-charges it at first-visit
-              // completion via the existing pre-minted-invoice reuse.
+              // completion via the existing pre-minted-invoice reuse, WHICH
+              // ONLY FINDS INVOICES ATTACHED TO THE SCHEDULED SERVICE — so
+              // suppression is strictly attachment-gated.
               invoiceModeResult = false;
               invoicePayUrlResult = null;
             } else {
+              // Includes the card-lane SETUP-ONLY shape (no first-application
+              // amount -> unattached): completion reuse would never find it,
+              // and attaching it instead would hijack the visit's own
+              // per-application bill — keep it on the normal payable path
+              // (Codex #2680 r3).
               invoiceModeResult = true;
               invoicePayUrlResult = inv.token ? `/pay/${inv.token}` : null;
             }
           }
         }
+      }
+
+      // Persist the lane decision on the estimate (Codex #2680 r3): the
+      // already-accepted retry payload must key "completion auto-charges the
+      // anchor invoice" off what THIS accept actually did — never off the
+      // flag's current state, which would also suppress pay links for
+      // pre-rollout or exempt accepts whose invoice genuinely needs paying.
+      // Stamped only when the lane suppressed the payable invoice (or minted
+      // none), inside the same transaction as the accept itself.
+      if (recurringCardLaneActive && !invoiceModeResult) {
+        const freshRow = await trx('estimates').where({ id: estimate.id }).first('estimate_data');
+        let stampBase = freshRow?.estimate_data;
+        if (typeof stampBase === 'string') {
+          try { stampBase = JSON.parse(stampBase); } catch { stampBase = null; }
+        }
+        const stamped = { ...(stampBase && typeof stampBase === 'object' ? stampBase : {}), recurringCardLaneAccepted: true };
+        await trx('estimates').where({ id: estimate.id }).update({ estimate_data: JSON.stringify(stamped) });
       }
 
       return {
@@ -8519,6 +8556,7 @@ router.put('/:token/accept', async (req, res, next) => {
         annualPrepayConversion: annualPrepayConversionResult,
         standardConversion: standardConversionResult,
         standardInvoiceMinted,
+        standardInvoiceAttached,
       };
     });
 
@@ -8543,6 +8581,12 @@ router.put('/:token/accept', async (req, res, next) => {
     // Residual crash-between-commit-and-here window: the setup_intent.succeeded
     // webhook re-runs this idempotently when it delivers post-accept, and a
     // still-unenrolled per_application customer surfaces in billing recovery.
+    // Card-lane invoice suppression assumed the enrolled card auto-charges
+    // the anchor invoice at completion — when the post-commit payer re-check
+    // SKIPS enrollment (payer-billed match), nobody would ever collect it.
+    // This flag re-opens the standard delivery path so the invoice routes to
+    // the payer AP inbox like any payer-billed accept (Codex #2680 r3).
+    let recurringCardPayerFallback = false;
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -8561,6 +8605,8 @@ router.put('/:token/accept', async (req, res, next) => {
       // webhook backstop), and the customer explicitly checked the v8 consent.
       let payerBilled = false;
       if (String(estimate.customer_id || '') !== String(customerId)) {
+        // (recurringCardPayerFallback below re-opens invoice delivery when
+        // this re-check skips enrollment — Codex #2680 r3.)
         try {
           const PayerService = require('../services/payer');
           // throwOnError: the default fail-soft contract returns self-pay on a
@@ -8574,6 +8620,7 @@ router.put('/:token/accept', async (req, res, next) => {
         }
       }
       if (payerBilled) {
+        recurringCardPayerFallback = true;
         logger.info(`[estimate-public] recurring-cof enrollment skipped: resolved customer ${customerId} is payer-billed (estimate ${estimate.id})`);
       } else {
         await RecurringCards.completeRecurringCardEnrollment({
@@ -8593,9 +8640,23 @@ router.put('/:token/accept', async (req, res, next) => {
       // fresh capture would have. Idempotent + ACH-guarded inside; a
       // refusal parks an office exception via the autopay log rather than
       // blocking the accept. Payer safety: the resolver's payer check ran
-      // BEFORE this exemption, and the exemption only fires for estimates
-      // already linked to this customer (no phone-match ambiguity).
+      // BEFORE this exemption against the same resolved customer. The
+      // exemption can fire for PHONE-MATCHED estimates too (r3), so verify
+      // the saved method actually belongs to the customer the accept
+      // resolved — a divergent match must never enroll another account's
+      // card (skip + office alert instead).
       try {
+        const savedMethodRow = await db('payment_methods').where({ id: recurringCardPolicy.savedMethodRowId }).first('id', 'customer_id');
+        if (!savedMethodRow || String(savedMethodRow.customer_id) !== String(customerId)) {
+          logger.warn(`[estimate-public] saved-method auto-enroll skipped: method ${recurringCardPolicy.savedMethodRowId} does not belong to resolved customer ${customerId} (estimate ${estimate.id})`);
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Recurring accept: saved-card Auto Pay enrollment skipped',
+            'A recurring accept auto-satisfied with a saved card, but the accept resolved a different customer than the card owner — Auto Pay was NOT enrolled. Review the account and re-add a payment method or the visits will invoice unprotected.',
+            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id, savedMethodRowId: recurringCardPolicy.savedMethodRowId } },
+          ).catch(() => {});
+          throw Object.assign(new Error('saved-method owner mismatch'), { alreadyAlerted: true });
+        }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
         const enrollment = await enrollConsentedMethod({
           customerId,
@@ -8616,16 +8677,19 @@ router.put('/:token/accept', async (req, res, next) => {
           ).catch(() => {});
         }
       } catch (err) {
-        logger.warn(`[estimate-public] saved-method auto-enroll failed for customer ${customerId}: ${err.message}`);
-        await require('../services/notification-service').notifyAdmin(
-          'billing',
-          'Recurring accept: saved-card Auto Pay enrollment failed',
-          `A recurring accept auto-satisfied with a saved card but enrollment errored (${err.message}) — re-add a payment method or the visits will invoice unprotected.`,
-          { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id } },
-        ).catch(() => {});
+        // Owner-mismatch skip above already alerted — don't double-notify.
+        if (!err?.alreadyAlerted) {
+          logger.warn(`[estimate-public] saved-method auto-enroll failed for customer ${customerId}: ${err.message}`);
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Recurring accept: saved-card Auto Pay enrollment failed',
+            `A recurring accept auto-satisfied with a saved card but enrollment errored (${err.message}) — re-add a payment method or the visits will invoice unprotected.`,
+            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id } },
+          ).catch(() => {});
+        }
       }
     }
-    let invoiceMode = txResult.invoiceMode === true;
+    let invoiceMode = txResult.invoiceMode === true || (recurringCardPayerFallback && txResult.standardInvoiceMinted === true);
     let invoiceId = txResult.invoiceId || null;
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
@@ -8990,7 +9054,14 @@ router.put('/:token/accept', async (req, res, next) => {
     // Card-on-file lane: the standard setup/first-application invoice is
     // minted as the amount anchor but NEVER advertised — completion
     // auto-charges it. Invoice-mode and prepay accepts keep their delivery.
-    if (invoiceId && (billByInvoice || annualPrepaySelected || (standardInvoiceMinted && !recurringCardLaneActive))) {
+    if (invoiceId && (billByInvoice || annualPrepaySelected
+      || (standardInvoiceMinted && (
+        !recurringCardLaneActive
+        // Setup-only invoices never attached, so completion reuse can't
+        // auto-charge them — they stay payable + delivered (r3).
+        || txResult.standardInvoiceAttached !== true
+        // Payer-billed enrollment skip: deliver to the payer AP inbox (r3).
+        || recurringCardPayerFallback)))) {
       try {
         const InvoiceService = require('../services/invoice');
         const delivery = await InvoiceService.sendViaSMSAndEmail(invoiceId, {
@@ -11343,16 +11414,14 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
 
   const payerBilled = !!invoice?.payer_id;
   const invoiceAmount = invoice ? (Number(invoice.total) || 0) : null;
-  // Card-on-file lane suppression must survive RETRIES (Codex #2680 r2): a
-  // double-tap after a card-lane accept re-enters here, and rebuilding the
-  // accept-mint invoice into a pay link would resurrect the retired pay-now
-  // step the fresh response suppressed. Same lane derivation the webhook
-  // backstop uses: recurring, non-invoice-mode, no prepay term — the
-  // accept-mint invoice waits for completion auto-charge.
-  const recurringCardLaneRetry = RecurringCards.isRecurringCardOnFileEnabled()
-    && !treatAsOneTime
-    && !billByInvoice
-    && !prepayTerm;
+  // Card-on-file lane suppression must survive RETRIES (Codex #2680 r2) —
+  // but only for accepts that actually WENT through the lane: the fresh
+  // accept stamps recurringCardLaneAccepted into estimate_data (same
+  // transaction) exactly when it suppressed the payable invoice. Deriving
+  // from the flag's CURRENT state would also suppress pay links for
+  // pre-rollout and exempt accepts whose open invoice genuinely needs
+  // paying (Codex #2680 r3).
+  const recurringCardLaneRetry = rawEstData?.recurringCardLaneAccepted === true;
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
@@ -15605,6 +15674,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const recurringCardLaneActiveForData = recurringCardPolicyForData.required
       || ['saved_method_consented', 'autopay_already_active'].includes(recurringCardPolicyForData.exemptReason || '');
     if (recurringCardLaneActiveForData && depositPolicy.required) {
+      // Prepay accepts sit OUTSIDE the card lane (the resolver exempts
+      // prepay_annual before any customer checks), so their deposit is
+      // still owed at accept — preserve the pre-supersede requirement for
+      // the client's prepay branch or it skips /deposit-intent and loops
+      // on DEPOSIT_REQUIRED 402s (Codex #2680 r3).
+      depositPolicy.requiredForPrepay = true;
       depositPolicy.required = false;
       depositPolicy.exemptReason = 'recurring_card_supersedes';
     }
@@ -15673,6 +15748,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // one-time mode switch still owes its deposit class (see the override
         // above). Absent/false everywhere else.
         requiredForOneTime: depositPolicy.requiredForOneTime === true,
+        // Card-lane supersede only: the deposit the customer STILL owes if
+        // they pick annual prepay (the lane never covers prepay accepts).
+        requiredForPrepay: depositPolicy.requiredForPrepay === true,
         slotRequired: depositPolicy.slotRequired,
         exemptReason: depositPolicy.exemptReason || null,
         amount: depositPolicy.amount || null,
@@ -15935,4 +16013,5 @@ module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
+module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;

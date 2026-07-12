@@ -4026,7 +4026,12 @@ export default function EstimateViewPage() {
     // r2).
     const oneTimeHoldSupersedes = serviceMode === 'one_time' && !!data?.cardHoldPolicy?.requiredForOneTime;
     const depositRequired = !recurringCardLaneActive && !oneTimeHoldSupersedes && (depositPolicy?.required
-      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime));
+      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime)
+      // Card-lane supersede zeroes `required` on /data, but a prepay accept
+      // sits OUTSIDE the lane and still owes its deposit — requiredForPrepay
+      // preserves it (Codex #2680 r3; /deposit-intent re-resolves with the
+      // prepay preference and mints normally).
+      || (paymentPreference === 'prepay_annual' && depositPolicy?.requiredForPrepay));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.
     if (depositRequired && !depositPaymentIntentIdRef.current) {

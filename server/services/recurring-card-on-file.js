@@ -74,14 +74,34 @@ async function resolveRecurringCardPolicyForEstimate({
     return { enforced: true, required: false, exemptReason: 'prepay_annual' };
   }
 
+  // Customer-dependent exemptions need the customer accept will actually
+  // land on. Sent estimates often carry only customer_phone — the accept
+  // transaction phone-matches an existing profile — so run the SAME
+  // unambiguous match here (Codex #2680 r3): an existing customer with an
+  // enrollment-qualified saved card or active Auto Pay must not be forced
+  // through a fresh SetupIntent (auto-satisfy contract, spec §3.2). A
+  // failed lookup keeps the card required (fail toward protection).
+  let resolvedCustomerId = estimate?.customer_id || null;
+  if (!resolvedCustomerId && estimate?.customer_phone) {
+    try {
+      const gates = require('../routes/estimate-public');
+      if (typeof gates.matchAcceptCustomerByPhone === 'function') {
+        const { match } = await gates.matchAcceptCustomerByPhone(estimate);
+        resolvedCustomerId = match?.id || null;
+      }
+    } catch (err) {
+      logger.warn('[recurring-cof] phone-match customer lookup failed — card stays required', { error: err.message });
+    }
+  }
+
   // Existing plan customer — snapshot first, then the LIVE fallback the
   // deposit resolver uses (legacy customer-linked estimates have no
   // membershipSnapshot). A failed live check keeps the card required.
   let isPlanMember = !!membership?.isExistingCustomer;
-  if (!isPlanMember && estimate?.customer_id) {
+  if (!isPlanMember && resolvedCustomerId) {
     try {
       const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+      const rows = await loadExistingRecurringQualifyingRows(db, resolvedCustomerId);
       isPlanMember = Array.isArray(rows) && rows.length > 0;
     } catch (err) {
       logger.warn('[recurring-cof] live plan-customer check failed — card stays required', { error: err.message });
@@ -91,7 +111,7 @@ async function resolveRecurringCardPolicyForEstimate({
     return { enforced: true, required: false, exemptReason: 'existing_plan_customer' };
   }
 
-  if (estimate?.customer_id) {
+  if (resolvedCustomerId) {
     // Payer-billed: match the eventual invoice's payer precedence
     // (scheduled_services.payer_id ?? customers.payer_id), scoped to the
     // appointment actually being accepted when the caller resolved one.
@@ -111,7 +131,7 @@ async function resolveRecurringCardPolicyForEstimate({
           linkedSsId = appt?.id ? String(appt.id) : null;
         } catch { /* scope narrowing only — customer-default still checked below */ }
       }
-      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId, throwOnError: true });
+      const resolved = await PayerService.resolveForInvoice({ customerId: resolvedCustomerId, scheduledServiceId: linkedSsId, throwOnError: true });
       if (resolved?.payerId) {
         return { enforced: true, required: false, exemptReason: 'payer_billed' };
       }
@@ -123,7 +143,7 @@ async function resolveRecurringCardPolicyForEstimate({
     // Already protected: enrolled AND a chargeable method in charge.
     try {
       const { customerOnAutopay } = require('./autopay-eligibility');
-      const customer = await db('customers').where({ id: estimate.customer_id }).first();
+      const customer = await db('customers').where({ id: resolvedCustomerId }).first();
       if (customer && await customerOnAutopay(customer)) {
         return { enforced: true, required: false, exemptReason: 'autopay_already_active' };
       }
@@ -138,7 +158,7 @@ async function resolveRecurringCardPolicyForEstimate({
     // failure keeps the card required (fail toward protection).
     try {
       const ConsentService = require('./payment-method-consents');
-      const savedCard = await ConsentService.findConsentedChargeableCard(estimate.customer_id);
+      const savedCard = await ConsentService.findConsentedChargeableCard(resolvedCustomerId);
       if (savedCard) {
         return {
           enforced: true,
