@@ -1,7 +1,7 @@
 # Universal One-Time Services — UI & Reports Scope
 
-Scoping proposal (2026-07-12, drafted for owner review — not yet ratified; no
-DECISIONS.md entry until PRs ship). Owner direction: "move into a universal UI
+**RATIFIED 2026-07-12** — all 16 interview questions answered by the owner
+(see "Ratified decisions" at bottom; no DECISIONS.md entry until PRs ship). Owner direction: "move into a universal UI
 and flow for one-time services — rodent control, everything except WDO
 inspections — and maybe even include WDO in the same type of UI experience,
 but still capture what we've set up with the FDACS form. The project lookup UI
@@ -841,3 +841,8 @@ review.
   $150/$200/$250 by structure sq ft; stale SPECIALTY.wdo.brackets
   $175/$200/$225 by lawn sq ft). Convergence ships via the pricing-config
   checklist as its own PR.
+- **Q16 (commercial):** one visit per building (no per-building section
+  machinery); explicit commercial designation ships with the first
+  commercial delta; compliance-logbook export stays a roadmap candidate.
+
+All 16 questions answered — plan header flipped to RATIFIED.
