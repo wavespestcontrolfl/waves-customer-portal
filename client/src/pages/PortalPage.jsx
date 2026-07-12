@@ -12753,7 +12753,10 @@ export default function PortalPage() {
       </div>
 
       {/* Content — bottom padding clears the mobile nav so fixed UI doesn't hide the last section. */}
-      <main id="portal-main" style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
+      {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
+          that are programmatically focusable — without it the skip link
+          scrolls but Tab keeps walking the header. */}
+      <main id="portal-main" tabIndex={-1} style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
             Home · Plan · Visits · Billing · Refer · Documents · My Property ·

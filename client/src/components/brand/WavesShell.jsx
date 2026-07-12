@@ -93,7 +93,10 @@ export default function WavesShell({
         {/* The ONE main landmark for every shell-wrapped page, in every
             state (loading/error included) — wrapped pages must not render
             their own <main>. Also the .waves-skip-link target. */}
-        <main id="waves-shell-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        {/* tabIndex=-1: WebKit/Safari only moves focus to fragment targets
+            that are programmatically focusable — without it the skip link
+            scrolls but Tab keeps walking the header. */}
+        <main id="waves-shell-main" tabIndex={-1} style={{ flex: 1, display: 'flex', flexDirection: 'column', outline: 'none' }}>
           {children}
         </main>
         {showFooter && (
