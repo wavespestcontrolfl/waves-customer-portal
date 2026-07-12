@@ -281,6 +281,22 @@ async function computeDashboardAlertsUncached() {
           href: forecast.href || '/admin/inventory?tab=forecast',
         });
       }
+
+      const lawnSweep = await db('admin_alerts')
+        .where({ status: 'open', type: 'lawn_pricing_invariant_sweep' })
+        .orderBy('last_seen_at', 'desc')
+        .first('severity', 'title', 'href', 'metadata');
+      if (lawnSweep) {
+        const metadata = lawnSweep.metadata || {};
+        const count = Number(metadata?.violationCount || 0);
+        alerts.push({
+          id: 'admin_lawn_pricing_invariant_sweep',
+          severity: lawnSweep.severity === 'critical' ? 'critical' : 'warn',
+          count: count || 1,
+          label: lawnSweep.title || `${count || 1} lawn pricing invariant violation${count === 1 ? '' : 's'}`,
+          href: lawnSweep.href || '/admin/pricing-logic',
+        });
+      }
     }
   } catch (err) { logger.error(`[dashboard-alerts] admin_lawn_protocol_readiness: ${err.message}`); }
 

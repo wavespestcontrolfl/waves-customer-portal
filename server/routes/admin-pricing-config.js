@@ -345,7 +345,7 @@ router.put('/lawn-brackets/:track', async (req, res, next) => {
         configKey: `lawn_brackets:${req.params.track}`,
         oldValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.old })),
         newValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.new })),
-        changedBy: req.admin?.name,
+        changedBy: req.technician?.name,
         reason,
       });
     }
@@ -393,7 +393,7 @@ router.put('/discount-rules/:serviceKey', async (req, res, next) => {
           configKey: `discount_rules:${req.params.serviceKey}`,
           oldValue: Object.fromEntries(changedFields.map((k) => [k, existing[k]])),
           newValue: Object.fromEntries(changedFields.map((k) => [k, updates[k]])),
-          changedBy: req.admin?.name,
+          changedBy: req.technician?.name,
           reason: req.body.reason,
         });
       }
@@ -597,7 +597,7 @@ router.put('/:key', async (req, res, next) => {
         configKey: req.params.key,
         oldValue: oldConfig.data,
         newValue: normalizedData,
-        changedBy: req.admin?.name,
+        changedBy: req.technician?.name,
         reason,
       });
     }

@@ -56,7 +56,9 @@ function scanLadderGrid() {
   for (const track of TRACKS) {
     const prevMonthlyBySizeTier = {};
     for (let sqft = GRID_MIN_SQFT; sqft <= GRID_MAX_SQFT; sqft += GRID_STEP_SQFT) {
-      const result = priceLawnCare({ lawnSqFt: sqft, grassType: track });
+      // Track rides the OPTIONS arg — priceLawnCare ignores property.grassType,
+      // so passing it there silently sweeps st_augustine four times.
+      const result = priceLawnCare({ lawnSqFt: sqft }, { track });
       const tiers = (result.tiers || [])
         .filter((t) => SOLD_VISITS.includes(t.visits))
         .sort((a, b) => a.visits - b.visits);
@@ -183,6 +185,9 @@ async function upsertSweepAlert(violations, metadata) {
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',
+    // NOT NULL column; the sweep is a singleton so the dedupe key doubles as
+    // the record id.
+    source_record_id: ALERT_DEDUPE_KEY,
     title: `Lawn pricing sweep: ${violations.length} invariant violation${violations.length === 1 ? '' : 's'}`,
     description: `First failing cell: ${first.cell} — ${first.detail}. Counts by check: ${Object.entries(byCheck).map(([k, n]) => `${k}=${n}`).join(', ')}.`,
     href: '/admin/pricing-logic',
@@ -225,6 +230,7 @@ async function runLawnPricingInvariantSweep() {
     budgetCheck: budget.status,
     budgetCheckReason: budget.reason || null,
     liveMaterialPerVisit: budget.livePerVisit ?? null,
+    violationCount: violations.length,
     violationSample: violations.slice(0, 20),
     ranAt: new Date().toISOString(),
   };
@@ -254,4 +260,5 @@ module.exports = {
   // Exported for tests.
   scanLadderGrid,
   checkBudgetDrift,
+  SIZE_MONOTONE_TOLERANCE,
 };

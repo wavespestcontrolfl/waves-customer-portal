@@ -11,7 +11,7 @@ const { priceLawnCare } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
-const { scanLadderGrid } = require('../services/lawn-pricing-invariant-sweep');
+const { scanLadderGrid, SIZE_MONOTONE_TOLERANCE } = require('../services/lawn-pricing-invariant-sweep');
 const {
   lawnFrequenciesFromResultStats,
   lawnFrequenciesFromEngineResult,
@@ -23,7 +23,9 @@ const SIZES = [2000, 3000, 4250, 5500, 6000, 8000, 12000, 18000, 22000];
 const KNOWN_SOURCES = ['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR', 'PROGRAM_MINIMUM'];
 
 function soldTiers(track, sqft) {
-  const res = priceLawnCare({ lawnSqFt: sqft, grassType: track });
+  // Track must ride the options arg (property.grassType is ignored) — with it
+  // in the property, this grid silently tested st_augustine four times over.
+  const res = priceLawnCare({ lawnSqFt: sqft }, { track });
   return (res.tiers || [])
     .filter((t) => SOLD_VISITS.includes(t.visits))
     .sort((a, b) => a.visits - b.visits);
@@ -59,7 +61,10 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
     for (let sqft = 2000; sqft <= 22000; sqft += 250) {
       for (const t of soldTiers(track, sqft)) {
         if (prev[t.visits] !== undefined) {
-          expect(t.monthly).toBeGreaterThanOrEqual(prev[t.visits]);
+          // Same tolerance the sweep uses: ceil-to-per-app re-rounding can dip
+          // monthly by cents between adjacent sizes (e.g. bermuda $50.25 →
+          // $50.00); anything past it is real drift.
+          expect(t.monthly).toBeGreaterThanOrEqual(prev[t.visits] - SIZE_MONOTONE_TOLERANCE);
         }
         prev[t.visits] = t.monthly;
       }
