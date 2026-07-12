@@ -380,16 +380,26 @@ function segmentQuery({ scope, locationId }) {
   if (scope === 'program') q = q.whereRaw(MEMBERSHIP_SQL);
   if (locationId) {
     // nearest_location_id is nullable; the rest of the app falls back to
-    // city routing (config/locations CITY_TO_LOCATION), so a location-scoped
-    // send must too or null-location customers silently drop out.
-    const cities = Object.entries(CITY_TO_LOCATION)
-      .filter(([, locId]) => locId === locationId)
-      .map(([city]) => city);
+    // city routing (config/locations resolveLocation), so a location-scoped
+    // send must too or null-location customers silently drop out. Mirror
+    // resolveLocation exactly: a mapped city routes to its office, and
+    // anything else — unmapped city, blank, or NULL — defaults to bradenton.
     q = q.where(function locationMatch() {
       this.where('nearest_location_id', locationId)
         .orWhere(function cityFallback() {
-          this.whereNull('nearest_location_id')
-            .whereRaw('LOWER(TRIM(city)) = ANY(?)', [cities]);
+          this.whereNull('nearest_location_id');
+          if (locationId === 'bradenton') {
+            // Default bucket: exclude only cities mapped to OTHER offices.
+            const otherCities = Object.entries(CITY_TO_LOCATION)
+              .filter(([, locId]) => locId !== 'bradenton')
+              .map(([city]) => city);
+            this.whereRaw("LOWER(TRIM(COALESCE(city, ''))) <> ALL(?)", [otherCities]);
+          } else {
+            const ownCities = Object.entries(CITY_TO_LOCATION)
+              .filter(([, locId]) => locId === locationId)
+              .map(([city]) => city);
+            this.whereRaw("LOWER(TRIM(COALESCE(city, ''))) = ANY(?)", [ownCities]);
+          }
         });
     });
   }
