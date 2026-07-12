@@ -892,3 +892,16 @@ un-archives it.
   another); "No action needed" chip rejected on package visit 1.
 - **WDO fee convergence shipped as PR #2678** ($250 flat; also wires the
   previously-dead onetime_wdo pricing_config row into db-bridge).
+- **OWNER REVERSAL (2026-07-12, during build): the pest+rodent combined
+  service is REMOVED** (PR #2679) — "no, let's remove this." Rodent bait
+  stations are their own standalone service (rodent_bait_quarterly /
+  rodent_bait_setup, both active + bookable); the converter never combines
+  pest+rodent; sold bait (line or rodentBaitMo supplement) schedules as a
+  standalone "Quarterly Rodent Bait Station Service" visit. Q11's
+  pest+rodent pair is rescinded; pest+termite and lawn+T&S combos stand.
+  #2673's companion flip becomes a harmless no-op (loud-skips the
+  inactive profile). NEVER re-propose pest+rodent combining.
+  OWNER FOLLOW-UPS surfaced by the data: Gisela Herschdorfer + Tiki Curry
+  (active customers, all future quarterlies CANCELLED since late 2025 —
+  lapsed or mistake?); Camila Champion's bait stations have no scheduled
+  checks (book her a standalone bait service if stations are deployed).
