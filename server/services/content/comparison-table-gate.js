@@ -68,7 +68,7 @@ const STRONG_PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:ca
 const NOT_SERVICE_AREA = '(?!\\s+(?:service\\s+)?areas?\\b)';
 const PROVIDER_DISPARAGEMENT_RE = new RegExp([
   `\\b(?:${NEG_ADJ})\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|looks?|sounds?|appear(?:s|ed)?|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
 ].join('|'), 'i');
 
 // Negative service-reliability claims about a provider. Flagged inside table
@@ -109,7 +109,7 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   'runs?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
   // Unambiguous predicate accusations — "run scams", "commit fraud"
   // (Codex r40).
-  'run(?:s|ning)?\\s+(?:a\\s+)?scams?\\b',
+  'r(?:un(?:s|ning)?|an)\\s+(?:a\\s+)?scams?\\b',
   'commit(?:s|ted|ting)?\\s+fraud\\b',
   // Verb form with a victim object — "companies bait-and-switch homeowners
   // with teaser prices" (Codex r17 on #2633) — or with an instrumental
@@ -200,6 +200,9 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
   // pest control companies look cheap; they are dishonest." (Codex r40).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  // Pronoun-subject ACTIVE accusations after a provider antecedent —
+  // "companies look cheap; they scam customers" (Codex r41).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they|it)\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
   // Pronoun-possessive LINKING insults with a provider antecedent — "Some
   // pest control companies look cheap; their billing is dishonest."
   // (Codex r39). NEG_ADJ is hyphen-guarded like the first-person arms.
@@ -341,7 +344,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1" statistical statements ("Florida is ranked #1 for termite pressure"
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
-  `(?<![\\w'’]\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `(?<![\\w'’]\\s)(?<!,)(?<!,\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // (The own-brand-subject ranking arm — "Waves, after years of serving …,
   // is #1", Codex r5 — lives outside this joined regex behind the
   // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
@@ -698,24 +701,21 @@ function sentenceHasNegator(text, index, length) {
     text.lastIndexOf('\n', index),
   ) + 1;
   let clause = text.slice(sentStart, index + length);
-  // Coordinating conjunctions reset the negation scope — "X is not cheap
-  // because it has hidden fees" asserts the fees (Codex r34). The reset
-  // uses the LAST conjunction before the accusation match, so a negator in
-  // an earlier coordinate clause cannot deny a later one.
-  // Comma-led coordinators or subordinating markers only — a bare "and"
-  // inside a list must not drop a leading denial ("No hidden fees and
-  // transparent billing from Waves" — Codex r35); temporal "since <year>"
-  // excluded.
-  const conjRe = /,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
-  let lastConj = -1;
+  // Clause markers INSIDE the scope reset negation — conjunctions
+  // ("X is not cheap because it has hidden fees", Codex r34), and
+  // dash/semicolon/colon splits that bridge arms may span ("No hidden
+  // fees — Waves charges hidden fees", "companies are not cheap; they
+  // have hidden fees" — Codex r41). Comma-led coordinators only (a bare
+  // list "and" must not drop a leading denial, Codex r35); temporal
+  // "since <year>" excluded. The reset only applies when the post-marker
+  // clause carries the accusation vocabulary itself — "No hidden fees
+  // because Waves keeps pricing transparent" keeps its denial (Codex r36).
+  const markerRe = /[;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
+  let lastMarker = -1;
   let cm;
-  while ((cm = conjRe.exec(clause)) !== null) lastConj = cm.index + cm[0].length;
-  // The reset only applies when the post-conjunction clause carries the
-  // accusation vocabulary itself — "No hidden fees because Waves keeps
-  // pricing transparent" keeps its leading denial (Codex r36); "not cheap
-  // because they have hidden fees" resets and blocks.
-  if (lastConj !== -1 && ACCUSATION_VOCAB_RE.test(clause.slice(lastConj))) {
-    clause = clause.slice(lastConj);
+  while ((cm = markerRe.exec(clause)) !== null) lastMarker = cm.index + cm[0].length;
+  if (lastMarker !== -1 && ACCUSATION_VOCAB_RE.test(clause.slice(lastMarker))) {
+    clause = clause.slice(lastMarker);
   }
   return SENTENCE_NEGATOR_RE.test(clause);
 }
@@ -904,13 +904,27 @@ function scopedSelfRankingMatch(text) {
     // The pronoun/brand must GOVERN the ranking phrase — "Our guide says
     // gel bait is the best option" embeds it under a reporting verb
     // (Codex r38).
-    subjLead = subjLead.replace(/^[\s\S]*\b(?:says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|wonders?|recommends?|recommended|suggests?|suggested|advises?|advised|teach(?:es)?|taught|shows?|showed|whether|if|that|when)\b/i, '');
+    // Track WHICH marker was stripped: a strict reporting verb keeps the
+    // brand antecedent for a following it/they ("Waves says it is the best
+    // choice"), while advice/temporal markers do not ("Waves teaches
+    // homeowners to use gel bait when it is the best option" — Codex r41).
+    let reportedBrandIt = false;
+    const repMatch = subjLead.match(/^([\s\S]*)\b(says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|claims?|claimed|admits?|admitted|insists?|insisted|wonders?|recommends?|recommended|suggests?|suggested|advises?|advised|teach(?:es)?|taught|shows?|showed|whether|if|that|when)\b/i);
+    if (repMatch) {
+      const marker = repMatch[2].toLowerCase();
+      reportedBrandIt = /^(?:says?|said|reports?|reported|claims?|claimed|notes?|noted|admits?|admitted|insists?|insisted)$/.test(marker)
+        && /\bW(?:aves|AVES)\b/.test(lead);
+      subjLead = subjLead.slice(repMatch[0].length);
+    }
     // Bare editorial "our" is not a provider subject — "Our guide to
     // German roaches: gel bait is the best option" (Codex r40); "our"
     // counts only with a business/people noun.
     if (/\b(?:we|us|itself|ourselves)\b/i.test(subjLead)
       || /\bour\s+(?:billing|pricing|team|teams|company|technicians?|techs?|staff|crews?|services?|business)\b/i.test(subjLead)
       || /\bW(?:aves|AVES)\b/.test(subjLead)
+      // A reported it/they subject keeps its brand antecedent — "Waves
+      // says it is the best choice" (Codex r41).
+      || (reportedBrandIt && /\b(?:it|they)\b/i.test(subjLead))
       || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
       return sm;
     }
@@ -1237,7 +1251,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // (Codex r35/r38); generic names get the shared winner arms too
   // ("The winner is Bug Busters." — Codex r39).
   let ownRank = scopedSelfRankingMatch(scanText)
-    || scanNameRankingArms(nameScanText, genericNames);
+    || scanNameRankingArms(nameScanText, [...genericNames, ...curatedNames]);
   if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
     const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
@@ -1755,7 +1769,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // prevention" into a rigged ranking (Codex r4 on #2633).
     if (!rank) {
       // Shared name-anchored winner arms (Codex r39).
-      rank = scanNameRankingArms(proseNameText, extraProseNames);
+      // Curated competitors count too — an operator brief authorizes the
+      // MENTION, never winner framing ("Orkin is #1" — Codex r41).
+      rank = scanNameRankingArms(proseNameText, [...extraProseNames, ...known, ...unknown]);
     }
   }
   if (rank) {

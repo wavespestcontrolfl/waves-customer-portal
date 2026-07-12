@@ -1114,6 +1114,29 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-41 findings (#2633) ──
+
+  test('Codex r41: pronoun-active, ran-scams, sensory-reliability, and dash-clause accusations block', () => {
+    for (const prose of ['Some pest control companies look cheap; they scam customers.', 'Some providers ran scams.', 'National chains look unreliable.', 'No hidden fees — Waves charges hidden fees.', 'Some pest control companies are not cheap; they have hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r41: reported brand superlatives and curated-competitor winner claims block', () => {
+    for (const prose of ['Waves says it is the best choice.', 'Waves reports it is the clear winner.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r41: appositive statistics and dash denials stay clean', () => {
+    for (const body of ['Florida, ranked #1 for termite pressure, needs better prevention.', `No hidden fees — Waves delivers transparent pricing.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-40 findings (#2633) ──
 
   test('Codex r40: header-shaped reliability and association parity beside tables', () => {
