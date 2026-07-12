@@ -78,7 +78,7 @@ export default function ReviewPage() {
     <div data-glass-clear="" style={{ minHeight: '100vh', background: COLORS.offWhite, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: 48, marginBottom: 16 }}></div>
-        <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: COLORS.blueDeeper, letterSpacing: '-0.01em' }}>Link Expired</div>
+        <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: COLORS.glassNavy, letterSpacing: '-0.01em' }}>Link Expired</div>
         <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 8 }}>This review link is no longer available. Call us at <a href="tel:+19412975749" style={{ color: COLORS.blueDark }}>(941) 297-5749</a>.</div>
       </div>
     </div>
@@ -92,7 +92,7 @@ export default function ReviewPage() {
   return (
     <div data-glass-clear="" style={{ minHeight: '100vh', background: COLORS.offWhite, fontFamily: FONTS.body }}>
       {/* Header — brand fonts loaded globally via client/index.html */}
-      <div data-glass-ink="light" style={{ background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.blueDeeper} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+      <div data-glass-ink="light" style={{ background: `linear-gradient(135deg, ${COLORS.wavesBlue} 0%, ${COLORS.glassNavy} 100%)`, padding: '28px 24px 36px', textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
         {/* Hero video — waves-hero-service.mp4 */}
         <video autoPlay muted loop playsInline preload="none" poster="/brand/waves-hero-service.webp"
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: 0.3, zIndex: 0, pointerEvents: 'none' }}
@@ -131,7 +131,7 @@ export default function ReviewPage() {
             )}
           </div>
 
-          <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: COLORS.blueDeeper }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 700, color: COLORS.glassNavy }}>
             {techName || 'Your Technician'}
           </div>
           <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 4 }}>
@@ -149,7 +149,7 @@ export default function ReviewPage() {
         {/* ── Rating Phase ── */}
         {phase === 'rate' && (
           <div data-glass="card" style={{ background: COLORS.white, borderRadius: 20, border: `1px solid ${COLORS.grayLight}`, padding: '28px 24px', textAlign: 'center', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 4 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 4 }}>
               How was your experience?
             </div>
             <div style={{ fontSize: 14, color: COLORS.textCaption, marginBottom: 20 }}>
@@ -200,7 +200,7 @@ export default function ReviewPage() {
         {phase === 'redirecting' && (
           <div style={{ background: COLORS.white, borderRadius: 20, padding: 32, textAlign: 'center', border: `1px solid ${COLORS.green}` }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}></div>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8 }}>
               Thank you, {customerFirstName}!
             </div>
             <div style={{ fontSize: 16, color: COLORS.textBody, lineHeight: 1.6, marginBottom: 16 }}>
@@ -219,7 +219,7 @@ export default function ReviewPage() {
         {phase === 'feedback' && (
           <div data-glass="card" style={{ background: COLORS.white, borderRadius: 20, padding: 28, textAlign: 'center', border: `1px solid ${COLORS.grayLight}` }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}></div>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper, marginBottom: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8 }}>
               We appreciate your honesty
             </div>
             <div style={{ fontSize: 16, color: COLORS.textBody, marginBottom: 16, lineHeight: 1.6 }}>

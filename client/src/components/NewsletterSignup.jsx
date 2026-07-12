@@ -45,14 +45,14 @@ export default function NewsletterSignup({
   const [error, setError] = useState('');
 
   const onDark = variant === 'dark';
-  const headingColor = onDark ? '#fff' : B.blueDeeper;
+  const headingColor = onDark ? '#fff' : B.glassNavy;
   const blurbColor = onDark ? 'rgba(255,255,255,0.78)' : B.slate600;
   const fieldBg = onDark ? 'rgba(255,255,255,0.95)' : '#fff';
   const fieldBorder = onDark ? 'transparent' : B.grayLight;
   const fieldText = B.navy;
   const successFg = onDark ? B.yellow : B.green;
   const errorFg = onDark ? '#FFB4B4' : B.red;
-  const buttonBg = onDark ? B.wavesBlue : B.blueDeeper;
+  const buttonBg = onDark ? B.wavesBlue : B.glassNavy;
 
   const submit = async (e) => {
     e.preventDefault();

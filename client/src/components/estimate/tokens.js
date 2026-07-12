@@ -27,7 +27,7 @@ export const W = {
   blue: COLORS.blueDark,          // #065A8C
   blueDark: COLORS.blueDark,      // alias (Report/App showcase naming)
   blueBright: COLORS.wavesBlue,   // #009CDE
-  blueDeeper: COLORS.blueDeeper,  // #1B2C5B — headings on light bg
+  blueDeeper: COLORS.glassNavy,   // #04395E — headings on light bg (reconciled to glass navy, owner 2026-07-12)
   blueLight: COLORS.blueLight,    // #E3F5FD — soft wash
   navyDeep: '#04395E',            // glass brand navy (site-wide, owner-locked)
   navy: COLORS.navy,              // #0F172A — slate-900 strongest text
@@ -78,5 +78,5 @@ const WAVEGUARD_CHIP_STYLES = {
 };
 export function waveGuardChipStyle(tier) {
   const key = String(tier || '').replace(/^WaveGuard\s+/i, '').trim().toLowerCase();
-  return WAVEGUARD_CHIP_STYLES[key] || { background: '#EEF2FF', color: COLORS.blueDeeper };
+  return WAVEGUARD_CHIP_STYLES[key] || { background: '#EEF2FF', color: COLORS.glassNavy };
 }
