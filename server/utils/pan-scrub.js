@@ -79,7 +79,7 @@ function maskFor(digits) {
 // "4242, 4242, 4242, 4242" or period/newline-separated groups — commas,
 // periods, and whitespace must join a run or each group is an unmatchable
 // <13-digit island (Codex #2676 round-2 P1).
-const NUMERIC_RUN_RE = /(?<![\d-])\d(?:[\s,.-]{1,2}?\d|\d)*(?![\d-])/g;
+const NUMERIC_RUN_RE = /(?<![\d-])\d(?:[\s,.-]{1,3}?\d|\d)*(?![\d-])/g;
 const MAX_RUN_DIGITS = 40;
 
 // Real-world PAN length priority: 16 (Visa/MC dominant), 15 (Amex), 19
@@ -87,8 +87,16 @@ const MAX_RUN_DIGITS = 40;
 // Priority order — NOT longest-first — so a 16-digit PAN followed by a
 // code-shaped tail whose concatenation happens to also pass Luhn masks as
 // the real card and the tail is absorbed, instead of the tail's digits
-// leaking into the last4 mask (Codex #2676 round-2 P1).
+// leaking into the last4 mask (Codex #2676 round-2 P1). IIN-aware
+// (round-3 P2): an Amex (34/37) prefers its native 15 and Diners (30/36/
+// 38/39) its native 14 BEFORE 16, so "<Amex> <code digit>" can't mask as a
+// 16 that swallows one code digit into the displayed last4.
 const PAN_LENGTH_PRIORITY = [16, 15, 19, 14, 13, 18, 17];
+function panLengthPriority(prefix) {
+  if (/^3[47]/.test(prefix)) return [15, 16, 14, 13, 19, 18, 17];
+  if (/^3[0689]/.test(prefix)) return [14, 16, 15, 13, 19, 18, 17];
+  return PAN_LENGTH_PRIORITY;
+}
 
 // NANP phone shape: consecutive groups of (3,3,4) digits (optionally led by
 // a lone "1") are a dictated phone number — locked out of span candidates
@@ -137,7 +145,11 @@ function scrubNumericRun(run) {
       if (sum > 19) break;
       if (sum >= 13 && !byLen.has(sum)) byLen.set(sum, j);
     }
-    for (const len of PAN_LENGTH_PRIORITY) {
+    let spanPrefix = '';
+    for (let j = i; j < groups.length && spanPrefix.length < 2; j += 1) {
+      spanPrefix += groups[j].digits;
+    }
+    for (const len of panLengthPriority(spanPrefix)) {
       if (!byLen.has(len)) continue;
       const j = byLen.get(len);
       const spanDigits = groups.slice(i, j + 1).map((grp) => grp.digits).join('');
@@ -189,13 +201,48 @@ const WORD_RUN_RE = new RegExp(
 // leads the run; expiry/CVV words trail it. Windows are tried in
 // PAN-length-priority order (see the numeric twin) so a Luhn-colliding
 // tail never leaks into the last4 mask.
+// A digit string that decomposes ENTIRELY into NANP phone numbers
+// ([2-9]xx [2-9]xx xxxx, optionally led by a lone "1") — dictated callback
+// numbers read as words have no group boundaries, so this is the spoken
+// twin of the numeric phone-lock (Codex #2676 round-3 P2).
+const NANP10 = /^[2-9]\d\d[2-9]\d{6}$/;
+function looksLikeSpokenPhoneRun(digits) {
+  let rest = digits;
+  let found = false;
+  while (rest.length) {
+    if (rest[0] === '1' && NANP10.test(rest.slice(1, 11))) { rest = rest.slice(11); found = true; continue; }
+    if (NANP10.test(rest.slice(0, 10))) { rest = rest.slice(10); found = true; continue; }
+    return false;
+  }
+  return found;
+}
+
+// Does the leftover after a candidate PAN window look like the expiry/CVV a
+// card readback trails with? Empty, a 3-digit CVV, or MMYY(+CVV) with a
+// real month. Used to break the phone-vs-card ambiguity: two dictated
+// phones ending "…9876" fail the MMYY check, a real "…12 28" expiry passes.
+function isValidCodeTail(tail) {
+  if (tail.length === 0 || tail.length === 3) return true;
+  if (tail.length === 4 || tail.length === 7 || tail.length === 8) {
+    const mm = Number(tail.slice(0, 2));
+    return mm >= 1 && mm <= 12;
+  }
+  return false;
+}
+
 function scrubSpokenRun(run) {
   const words = run.split(/[ ,.]+/);
   const digits = words.map((w) => DIGIT_WORDS[w.toLowerCase()] ?? '').join('');
   if (digits.length > MAX_RUN_DIGITS) return { text: run, count: 0 };
-  for (const len of PAN_LENGTH_PRIORITY) {
+  const phoneRun = looksLikeSpokenPhoneRun(digits);
+  for (const len of panLengthPriority(digits.slice(0, 2))) {
     if (len > digits.length) continue;
     const candidate = digits.slice(0, len);
+    // Phone-shaped runs only mask when the leftover is genuinely
+    // code-shaped — a Luhn coincidence on two dictated callbacks must not
+    // eat the numbers the contact decoder needs, while a real card + valid
+    // expiry that HAPPENS to also parse as phones still masks.
+    if (phoneRun && !isValidCodeTail(digits.slice(len))) continue;
     if (panCandidateValid(candidate)) {
       // Mask the first `len` words. A short spoken tail (≤8 digit words) is
       // the expiry/CVV that followed the readback — absorb it; a longer
@@ -213,8 +260,10 @@ function scrubSpokenRun(run) {
 // Read-aloud CVV with context ("cvv 123", "security code is one two three").
 // Bare 3–4 digit runs stay untouched — context is what disambiguates.
 const CVV_KEYWORD = '(?:cvv2?|cvc|csc|security\\s+code|card\\s+(?:security\\s+)?code|verification\\s+(?:code|number))';
-const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:\\d[ -]?){2,3}\\d)(?!\\d)`, 'gi');
-const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+// Digit separators mirror the PAN path — providers punctuate pauses, so
+// "cvv is 1, 2, 3" must match as readily as "cvv 123" (round-3 P1).
+const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:\\d[\\s,.-]{0,2}){2,3}\\d)(?![\\d])`, 'gi');
+const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
 
 function scrubCvvContext(text) {
   let count = 0;

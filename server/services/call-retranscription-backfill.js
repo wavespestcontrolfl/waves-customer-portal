@@ -134,22 +134,26 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
       // Guarded upgrade: retranscribed_at still NULL AND the transcript is
       // still undiarized — if the live processor (or a concurrent run) wrote
       // a diarized transcript meanwhile, leave it alone and just stamp.
+      // PAN redaction guard (card-on-file spec Phase 0) — this backfill
+      // writes fresh provider text outside the live pipeline's scrub, and
+      // the preserved original must be scrubbed too (round-1 P1). Detailed
+      // counts feed the quarantine below: a masked transcript with the
+      // recording still attached would leave the card replayable from the
+      // audio (round-3 P1).
+      const panScrubModule = require('../utils/pan-scrub');
+      const freshScrub = panScrubModule.scrubPansDetailed(text);
+      const preservedScrub = panScrubModule.scrubPansDetailed(call.transcription ?? null);
       const changed = await dbi('call_log')
         .where({ id: call.id })
         .whereNull('retranscribed_at')
         .whereRaw(UNDIARIZED_SQL)
         .update({
-          // The preserved original must be scrubbed too — copying a legacy
-          // PAN-bearing transcript into transcription_pre_backfill would
-          // store the card number indefinitely in a second artifact (Codex
-          // #2676 round-1 P1). An already-populated pre_backfill value is
-          // kept as-is (first stamp wins, matching the original COALESCE).
+          // An already-populated pre_backfill value is kept as-is (first
+          // stamp wins, matching the original COALESCE).
           transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, ?)', [
-            require('../utils/pan-scrub').scrubPans(call.transcription) ?? null,
+            preservedScrub.text ?? null,
           ]),
-          // PAN redaction guard (card-on-file spec Phase 0) — this backfill
-          // writes fresh provider text outside the live pipeline's scrub.
-          transcription: require('../utils/pan-scrub').scrubPans(text),
+          transcription: freshScrub.text,
           retranscribed_at: dbi.fn.now(),
           // processing_status is deliberately untouched: candidates are
           // restricted to states the live pipeline is done with, so there is
@@ -157,6 +161,18 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
         });
       if (changed) {
         summary.upgraded += 1;
+        // Card detected in either artifact: the recording still carries it
+        // — quarantine (Twilio delete + reference strip + office heads-up),
+        // same as the live pipeline (Codex #2676 round-3 P1). Lazy require
+        // avoids a load cycle with the processor.
+        if (freshScrub.count + preservedScrub.count > 0) {
+          try {
+            await require('./call-recording-processor')
+              .quarantineCardRecording(call, { source: 'retranscription_backfill' });
+          } catch (qErr) {
+            logger.error(`[retranscribe] PAN quarantine failed for call ${call.id}: ${qErr.message}`);
+          }
+        }
       } else {
         await stampVerdict(call.id);
         summary.unusable += 1; // someone else already diarized it — done either way

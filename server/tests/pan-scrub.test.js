@@ -93,8 +93,8 @@ describe('scrubPans — numeric forms', () => {
     });
   });
 
-  // Codex #2676 round-2: provider punctuation at pauses must not break the
-  // run into unmatchable islands.
+  // Codex #2676 round-2/3: provider punctuation at pauses must not break
+  // the run into unmatchable islands.
   describe('punctuation separators', () => {
     it('masks a comma-separated readback', () => {
       expect(scrubPans('card 4242, 4242, 4242, 4242, thanks'))
@@ -104,6 +104,18 @@ describe('scrubPans — numeric forms', () => {
       expect(scrubPans('4242. 4242. 4242. 4242.'))
         .toBe('[card ending 4242].');
     });
+    it('masks a spaced-dash readback (" - " between groups)', () => {
+      expect(scrubPans('card 4242 - 4242 - 4242 - 4242 end'))
+        .toBe('card [card ending 4242] end');
+    });
+  });
+
+  // Codex #2676 round-3 P2: IIN-aware length priority — an Amex (native 15)
+  // followed by code digits must never mask as a 16 that swallows a code
+  // digit into the displayed last4.
+  it('prefers the Amex-native 15 over a 16 window that would eat a code digit', () => {
+    expect(scrubPans(`amex ${AMEX15} 234 end`))
+      .toBe('amex [card ending 0005] [code removed] end');
   });
 
   // Codex #2676 round-2 P1: a code-shaped tail whose concatenation with the
@@ -166,12 +178,33 @@ describe('scrubPans — spoken-digit form', () => {
     const spoken = 'four two four two four two four two four two four two four two four two one two two eight one two three';
     expect(scrubPans(`Caller: ${spoken}`)).toBe('Caller: [card ending 4242] [code removed]');
   });
+
+  // Codex #2676 round-3 P2: two dictated callback numbers read as words must
+  // never be eaten by a Luhn coincidence — the spoken twin of the numeric
+  // phone-lock. A real card + valid expiry that HAPPENS to parse as phones
+  // still masks (the MMYY tail check breaks the tie).
+  describe('spoken NANP protection', () => {
+    it('leaves two spoken phone numbers untouched', () => {
+      const phones = 'two three nine five five five one two three four two three nine five five five nine eight seven six';
+      expect(scrubPans(phones)).toBe(phones);
+    });
+    it('still masks a spoken card + valid expiry that also parses as phones', () => {
+      // 4242… parses as NANP (424 exchange 242…), but the trailing 12 28 is
+      // a real MMYY — the card wins.
+      const spoken = 'four two four two four two four two four two four two four two four two one two two eight';
+      expect(scrubPans(spoken)).toBe('[card ending 4242] [code removed]');
+    });
+  });
 });
 
 describe('scrubPans — CVV context redaction', () => {
   it('masks a numeric CVV named in context', () => {
     expect(scrubPans('the cvv is 123 thanks')).toBe('the cvv is [code removed] thanks');
     expect(scrubPans('security code 4 5 6 7.')).toBe('security code [code removed].');
+  });
+  it('masks a punctuated CVV readback (round-3: providers punctuate pauses)', () => {
+    expect(scrubPans('cvv is 1, 2, 3 ok')).toBe('cvv is [code removed] ok');
+    expect(scrubPans('security code 4. 5. 6 done')).toBe('security code [code removed] done');
   });
   it('masks a spoken CVV named in context', () => {
     expect(scrubPans('my cvc is one two three ok')).toBe('my cvc is [code removed] ok');

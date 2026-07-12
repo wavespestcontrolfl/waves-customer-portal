@@ -2667,6 +2667,11 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
       provider: 'openai',
       model,
       responseFormat: diarized ? 'diarized_json' : 'json',
+      // Carried up to processRecording's quarantine trigger — the provider
+      // scrub masks the text, so the later choke-point scrub sees a clean
+      // transcript and would otherwise never learn the AUDIO carries a card
+      // (Codex #2676 round-3 P1).
+      panCount: panScrub.count + segScrubCount,
     };
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
@@ -2721,8 +2726,10 @@ Rules:
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
     const raw = (textPart?.text || parts[0]?.text || '').trim() || null;
+    if (!raw) return null;
     // PAN redaction guard at the provider return (see the OpenAI twin above).
-    return raw ? scrubPansDetailed(raw).text : raw;
+    const panScrub = scrubPansDetailed(raw);
+    return { text: panScrub.text, panCount: panScrub.count };
   } catch (err) {
     logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
@@ -2758,6 +2765,9 @@ async function transcribeRecording(mp3Url, opts = {}) {
         if (result.metadata) {
           result.metadata.contact_pass_model = second.model;
           result.metadata.contact_pass_chars = second.text.length;
+          // Same audio as the primary — max(), not sum, so one blurted card
+          // heard by both passes still counts once for the quarantine trigger.
+          result.metadata.pan_count = Math.max(result.metadata.pan_count || 0, second.panCount || 0);
         }
         logger.info(`[call-proc] contact-dictation pass complete: ${second.text.length} chars (${contactModel})`);
       }
@@ -2803,16 +2813,17 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             label_provider: 'openai',
             label_model: OPENAI_TRANSCRIPT_LABEL_MODEL,
             fallback_attempted: false,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
-    const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
-    if (geminiTranscript) {
+    const gemini = await transcribeWithGemini(audioBuffer, opts);
+    if (gemini?.text) {
       return {
-        transcription: geminiTranscript,
+        transcription: gemini.text,
         provider: 'gemini_fallback',
         model: GEMINI_TRANSCRIPTION_MODEL,
         structuredSegments: null,
@@ -2820,6 +2831,9 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           audio_bytes: audioBuffer.length,
           fallback_reason: openaiTranscript ? 'openai_labeling_or_completeness' : 'openai_unavailable',
           openai_model: OPENAI_TRANSCRIPTION_MODEL,
+          // Same audio — the discarded OpenAI pass and the Gemini pass both
+          // detect the same card; max() avoids double-counting it.
+          pan_count: Math.max(openai?.panCount || 0, gemini.panCount || 0),
         },
       };
     }
@@ -2840,6 +2854,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             fallback_attempted: true,
             fallback_provider: 'gemini',
             fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
@@ -2856,6 +2871,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           fallback_attempted: true,
           fallback_provider: 'gemini',
           fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+          pan_count: openai?.panCount || 0,
         },
       };
     }
@@ -3809,8 +3825,12 @@ const CallRecordingProcessor = {
       transcription = scrubbed.transcription;
       contactPassTranscript = scrubbed.contactPassTranscript;
       result.structuredSegments = scrubbed.segments;
-      if (scrubbed.count > 0) {
-        logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) in transcript for ${maskSid(callSid)}`);
+      // The provider-return scrub already masked the text, so this
+      // choke-point count is usually 0 for a detected card — the PROVIDER
+      // count is what says the audio carries one (Codex #2676 round-3 P1).
+      const providerPanCount = Number(result?.metadata?.pan_count || 0);
+      if (scrubbed.count + providerPanCount > 0) {
+        logger.warn(`[call-proc] PAN detected in transcript for ${maskSid(callSid)} (provider=${providerPanCount}, choke=${scrubbed.count})`);
         // The audio still carries the card — quarantine it (spec invariant
         // #1) and drop the in-memory reference so nothing downstream (lead
         // updates, message media sync) re-attaches the recording.
