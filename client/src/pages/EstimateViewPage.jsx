@@ -2407,16 +2407,20 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
+      data-glass-scrim=""
       style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
-      <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+      {/* data-glass="modal": the estimate page always mounts the glass
+          scene, so this dialog picks up the strongest glass surface (owner
+          ask 2026-07-12 — Auto Pay mirrors the glass UI); the inline styles
+          are the non-glass fallback. */}
+      <div data-glass="modal" style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Set up Auto Pay</div>
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
-          Save your card to confirm your recurring plan. After each completed
-          application, your card is charged that application&rsquo;s amount
-          automatically — no bills to chase. Saving your card doesn&rsquo;t
-          charge it now; your deposit is collected separately and credited to
-          your first invoice.
+          Save your card to confirm your recurring plan — nothing is charged
+          today. After each completed service, your card is charged that
+          service&rsquo;s amount automatically. Questions anytime:
+          billing@wavespestcontrol.com.
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -4686,8 +4690,13 @@ export default function EstimateViewPage() {
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
                   : paymentPreference === 'prepay_annual'
                     ? `A ${fmtMoney(data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your annual prepay invoice.`
-                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.${serviceMode !== 'one_time' && data?.recurringCardPolicy?.required ? ' You’ll also save a card for Auto Pay — after each completed application, it’s charged automatically.' : ''}`)
-                : null)}
+                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.${serviceMode !== 'one_time' && data?.recurringCardPolicy?.required ? ' You’ll also save a card for Auto Pay — after each completed service, it’s charged automatically.' : ''}`)
+                // Deposit retired (card-on-file booking spec): the Auto Pay
+                // disclosure must stand on its own once no deposit is owed —
+                // the recurring accept is "$0 today, charged per application".
+                : (serviceMode !== 'one_time' && data?.recurringCardPolicy?.required && paymentPreference !== 'prepay_annual'
+                  ? `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`
+                  : null))}
           />
           </div>
           {depositIntent ? (

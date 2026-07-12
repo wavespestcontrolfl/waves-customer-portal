@@ -130,6 +130,26 @@ async function resolveRecurringCardPolicyForEstimate({
     } catch (err) {
       logger.warn('[recurring-cof] autopay-active check failed — card stays required', { error: err.message });
     }
+
+    // Auto-satisfy (spec §3.2: existing customers with a saved card are
+    // never re-asked): a saved CARD carrying an enrollment-qualifying v8+
+    // consent skips capture, and the accept enrolls THAT method post-commit
+    // (savedMethodRowId) — identical protection to a fresh capture. Lookup
+    // failure keeps the card required (fail toward protection).
+    try {
+      const ConsentService = require('./payment-method-consents');
+      const savedCard = await ConsentService.findConsentedChargeableCard(estimate.customer_id);
+      if (savedCard) {
+        return {
+          enforced: true,
+          required: false,
+          exemptReason: 'saved_method_consented',
+          savedMethodRowId: savedCard.id,
+        };
+      }
+    } catch (err) {
+      logger.warn('[recurring-cof] saved-method check failed — card stays required', { error: err.message });
+    }
   }
 
   return { enforced: true, required: true, exemptReason: null };

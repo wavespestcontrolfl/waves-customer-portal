@@ -80,6 +80,27 @@ async function hasConsentFor(customerId, stripePaymentMethodId) {
 }
 
 /**
+ * The customer's best already-saved CARD carrying an enrollment-qualifying
+ * (v8+) consent — the auto-satisfy source for card-on-file bookings (spec
+ * §3.2: existing customers with a saved card are never re-asked). Card-only
+ * by design (booking is card-only; ACH stays a portal action), default
+ * first, newest first. Returns the payment_methods row or null; lookup
+ * errors bubble so callers keep their own fail direction.
+ */
+async function findConsentedChargeableCard(customerId) {
+  if (!customerId) return null;
+  const rows = await db('payment_methods')
+    .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
+    .whereNotNull('stripe_payment_method_id')
+    .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }]);
+  for (const pm of rows) {
+     
+    if (await hasConsentFor(customerId, pm.stripe_payment_method_id)) return pm;
+  }
+  return null;
+}
+
+/**
  * Backfill the FK to payment_methods when the webhook finally writes the
  * row. Called from stripe-webhook.js handleSetupIntentSucceeded.
  */
@@ -138,6 +159,7 @@ module.exports = {
   recordConsent,
   hasConsentFor,
   consentVersionQualifiesForEnrollment,
+  findConsentedChargeableCard,
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),

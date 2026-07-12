@@ -728,6 +728,21 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
       return res.status(409).json({ error: 'No card hold is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
+    // Auto-satisfy (spec §3.2: existing customers with a saved card are
+    // never re-asked): a saved consented card backs the hold at accept, so
+    // no capture modal — the 409 exemptReason makes the client fall through
+    // to accept, where the gate resolves the same saved method. Lookup
+    // failure mints normally (fail toward asking).
+    try {
+      const savedCard = await require('../services/payment-method-consents')
+        .findConsentedChargeableCard(estimate.customer_id);
+      if (savedCard?.stripe_payment_method_id) {
+        return res.status(409).json({ error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
+      }
+    } catch (err) {
+      logger.warn(`[estimate-slots-public:card-hold-intent] saved-method check failed — minting capture intent: ${err.message}`);
+    }
+
     const intent = await createCardHoldSetupIntentForEstimate(estimate);
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });

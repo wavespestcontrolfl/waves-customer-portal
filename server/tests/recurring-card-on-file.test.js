@@ -45,10 +45,12 @@ jest.mock('../services/autopay-eligibility', () => ({
 const mockHasConsentFor = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent1' }));
 const mockLinkPaymentMethodId = jest.fn(async () => {});
+const mockFindConsentedChargeableCard = jest.fn(async () => null);
 jest.mock('../services/payment-method-consents', () => ({
   hasConsentFor: (...a) => mockHasConsentFor(...a),
   recordConsent: (...a) => mockRecordConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
+  findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),
 }));
 const mockEnrollConsentedMethod = jest.fn(async () => ({ enrolled: true }));
 jest.mock('../services/autopay-enrollment', () => ({
@@ -87,6 +89,7 @@ beforeEach(() => {
   mockResolveForInvoice.mockResolvedValue(null);
   mockCustomerOnAutopay.mockResolvedValue(false);
   mockHasConsentFor.mockResolvedValue(false);
+  mockFindConsentedChargeableCard.mockResolvedValue(null);
 });
 afterAll(() => { delete process.env.RECURRING_CARD_ON_FILE; });
 
@@ -162,6 +165,20 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     mockCustomerOnAutopay.mockResolvedValue(true);
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
     expect(p.exemptReason).toBe('autopay_already_active');
+  });
+
+  it('auto-satisfies with a saved consented card (spec §3.2 — never re-ask) and surfaces its row id', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pmrow-7', stripe_payment_method_id: 'pm_7' });
+    const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+    expect(p.required).toBe(false);
+    expect(p.exemptReason).toBe('saved_method_consented');
+    expect(p.savedMethodRowId).toBe('pmrow-7');
+  });
+
+  it('keeps the card required when the saved-method lookup fails (fail toward protection)', async () => {
+    mockFindConsentedChargeableCard.mockRejectedValue(new Error('consents down'));
+    const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
+    expect(p.required).toBe(true);
   });
 
   it('requires the card for a plain new recurring accept (and with no linked customer)', async () => {

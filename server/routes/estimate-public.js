@@ -7438,6 +7438,30 @@ router.put('/:token/accept', async (req, res, next) => {
         });
       }
       cardHoldVerification = await CardHolds.verifyCardHoldIntent({ estimate, setupIntentId: cardHoldSetupIntentId });
+      if (!cardHoldVerification.ok && estimate.customer_id) {
+        // Auto-satisfy (spec §3.2: existing customers with a saved card are
+        // never re-asked — the runbook flagged members being re-prompted).
+        // A saved CARD with an enrollment-qualifying consent backs the hold
+        // directly: the hold row stores its pm id (no SetupIntent), and the
+        // completion/no-show charges resolve it exactly like a captured
+        // card. Lookup failure falls through to the 402 (capture remains
+        // the path of last resort — fail toward asking, never toward an
+        // unprotected booking).
+        try {
+          const ConsentService = require('../services/payment-method-consents');
+          const savedCard = await ConsentService.findConsentedChargeableCard(estimate.customer_id);
+          if (savedCard?.stripe_payment_method_id) {
+            cardHoldVerification = {
+              ok: true,
+              paymentMethodId: savedCard.stripe_payment_method_id,
+              setupIntentId: null,
+              viaSavedMethod: true,
+            };
+          }
+        } catch (err) {
+          logger.warn(`[estimate-public] card-hold saved-method check failed — capture still required: ${err.message}`);
+        }
+      }
       if (!cardHoldVerification.ok) {
         return res.status(402).json({
           error: 'Add a card to hold your appointment to confirm this visit',
@@ -8539,6 +8563,27 @@ router.put('/:token/accept', async (req, res, next) => {
           userAgent: req.get('user-agent') || null,
         }).catch(() => {});
       }
+    } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
+      && recurringCardPolicy.savedMethodRowId && customerId) {
+      // Auto-satisfy (spec §3.2): capture was skipped because a saved card
+      // already carries an enrollment-qualifying consent — enroll THAT
+      // method so the accept lands with the same Auto Pay protection a
+      // fresh capture would have. Idempotent + ACH-guarded inside; a
+      // refusal parks an office exception via the autopay log rather than
+      // blocking the accept. Payer safety: the resolver's payer check ran
+      // BEFORE this exemption, and the exemption only fires for estimates
+      // already linked to this customer (no phone-match ambiguity).
+      try {
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        await enrollConsentedMethod({
+          customerId,
+          paymentMethodId: recurringCardPolicy.savedMethodRowId,
+          source: 'estimate_accept',
+          details: { via: 'saved_method_auto_enroll', estimate_id: estimate.id },
+        });
+      } catch (err) {
+        logger.warn(`[estimate-public] saved-method auto-enroll failed for customer ${customerId}: ${err.message}`);
+      }
     }
     let invoiceMode = txResult.invoiceMode === true;
     let invoiceId = txResult.invoiceId || null;
@@ -8580,6 +8625,34 @@ router.put('/:token/accept', async (req, res, next) => {
         acceptedAppointmentsToRegister = acceptedAppointmentsToRegister.map((appt) => (
           byId.get(String(appt.id)) || appt
         ));
+      }
+    }
+    // Per-visit price completeness (card-on-file spec §3.7): a recurring
+    // accept whose booked visit carries no billable amount — no visit price
+    // AND no per_application_fee — would silently degrade the completion
+    // auto-charge to manual invoicing (the dispatch path only warns at
+    // completion time, weeks later). Surface it NOW as an office exception
+    // so the amount is stamped before the first visit. Best-effort;
+    // prepay-annual accepts bill from the term, not per application.
+    if (!treatAsOneTime && customerId && paymentMethodPreference !== 'prepay_annual'
+      && acceptedAppointmentsToRegister.length) {
+      try {
+        const unpriced = acceptedAppointmentsToRegister.filter(
+          (appt) => !(appt?.estimated_price != null && Number(appt.estimated_price) > 0),
+        );
+        if (unpriced.length) {
+          const custRow = await db('customers').where({ id: customerId }).first('per_application_fee');
+          if (!(custRow?.per_application_fee != null && Number(custRow.per_application_fee) > 0)) {
+            await require('../services/notification-service').notifyAdmin(
+              'billing',
+              'Recurring accept booked with no per-application amount',
+              'A recurring accept committed without a visit price or per-application fee on file — stamp the amount before the first visit or its completion falls back to manual invoicing.',
+              { link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
+            );
+          }
+        }
+      } catch (e) {
+        logger.warn(`[estimate-accept] per-visit price completeness check failed (non-fatal): ${e.message}`);
       }
     }
     for (const appointment of acceptedAppointmentsToRegister) {

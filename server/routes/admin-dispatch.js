@@ -4936,7 +4936,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
-      try {
+      // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
+      // CAP): an auto-charge may only collect what the customer accepted —
+      // the per-visit amount stamped at acceptance (visit price, else the
+      // per-application fee) plus its disclosed tax/surcharge. tax_amount
+      // rides the invoice and the surcharge is added by the single
+      // surcharge authority inside chargeInvoiceWithSavedCard, so the
+      // pre-tax SUBTOTAL is the comparator. An over-quote invoice routes to
+      // office review and the customer keeps the normal pay-link flow —
+      // never an unauthorized amount off-session.
+      const acceptedPerVisit = svc.estimated_price != null && Number(svc.estimated_price) > 0
+        ? Number(svc.estimated_price)
+        : (svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+          ? Number(svc.cust_per_application_fee) : null);
+      const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+      if (acceptedPerVisit != null && invoiceSubtotal > acceptedPerVisit + 0.005) {
+        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${invoiceSubtotal} exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Auto Pay charge above accepted amount — review',
+            `A completed visit's invoice ($${invoiceSubtotal.toFixed(2)} before tax) exceeds the accepted per-application amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal, acceptedPerVisit } },
+          );
+        } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
+      } else try {
         const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
         if (isChargeableAutopayMethod(autopayPm)) {
@@ -5028,7 +5052,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
-      }
+      } // end try/catch — paired with the above-quote guard's else
     }
 
     // One-time card-on-file hold: resolve the hold on completion (dark until
