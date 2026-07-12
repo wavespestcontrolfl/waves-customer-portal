@@ -1114,6 +1114,42 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-20 findings (#2633) ──
+
+  test('Codex r20: negators inside business names are not denials', () => {
+    for (const body of ['No Bugs Pest Control is dishonest.', 'Zero Bugs LLC is dishonest.', `No Bugs Pest Control is dishonest.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r20: negated recommendations keep the fee accusation; denied reports stay clean', () => {
+    const rec = gate.evaluate({ body: `Do not choose Bug Busters because of hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rec.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const denial = gate.evaluate({ body: `Customers do not report hidden fees after choosing Bug Busters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r20: hyphenated provider phrases still declare a winner', () => {
+    const r = gate.evaluate({ body: `Choose the #1-rated pest-control company in Venice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r20: category consumer-protection copy stays clean beside a table', () => {
+    const r = gate.evaluate({ body: `How to avoid hidden fees in pest control.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r20: directional geo leads stay educational table-less', () => {
+    const r = gate.evaluate({ body: 'South Sarasota lawn care is unreliable without irrigation tuned first.' }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' || f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+  });
+
+  test('Codex r20: object-association covers lowercase CI-detected names', () => {
+    const r = gate.evaluate({ body: `Customers report hidden fees after choosing acme pest solutions.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
   // ── Codex round-19 findings (#2633) ──
 
   test('Codex r19: header-shaped names are table-less targets', () => {

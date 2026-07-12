@@ -142,7 +142,11 @@ const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|ov
 const NON_NEGATED_WORD = "(?!(?:never|not|no|without|zero|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
-  `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
+  // Gap words exclude category-scoping prepositions: "hidden fees IN pest
+  // control" is consumer-protection education about the industry, not an
+  // accusation at a provider (Codex r20 on #2633); "hidden fees from pest
+  // control companies" stays directed.
+  `(?:${DISPARAGEMENT_RE.source})(?:\\s+(?!(?:in|within|across|throughout|among|around)\\b)\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
   // Linking verbs incl. modal/hedged and sensory forms ("companies may be
   // dishonest", "providers sound shady" — Codex r10/r11 on #2633; same set
   // as the own-brand arm). Standalone appear counts as a copula too —
@@ -486,7 +490,7 @@ const GENERIC_LEAD_SET = new Set(GENERIC_LEAD_EXCLUSIONS.split('|').map((w) => w
 // Used by the TABLE-LESS collection only (Codex r19 vs the locked r4 geo
 // guard) — the table path keeps its broader capture, where comparison
 // context raises the provider prior.
-const GEO_LEAD_SET = new Set(('sarasota|bradenton|venice|parrish|palmetto|north|port|charlotte|punta|gorda|englewood|nokomis|osprey|ellenton|myakka|lakewood|ranch|manatee|florida|fl|swfl|tampa|naples|fort|myers').split('|'));
+const GEO_LEAD_SET = new Set(('sarasota|bradenton|venice|parrish|palmetto|north|south|west|east|port|charlotte|punta|gorda|englewood|nokomis|osprey|ellenton|myakka|lakewood|ranch|manatee|florida|fl|swfl|tampa|naples|fort|myers|greater|central|downtown|coastal|metro|historic|old|new|upper|lower').split('|'));
 function collectHeaderShapedProseTargets(text, { excludeGeoLeads = false } = {}) {
   const out = new Set();
   for (const m of String(text || '').matchAll(PROSE_HEADER_SHAPE_RE)) {
@@ -529,8 +533,10 @@ function finding(severity, code, message) {
 // sentence makes the match a denial ("There are no reports of hidden fees
 // from Acme"), not an accusation.
 // Contrastive "not only" is emphasis, not negation — "Not only that, hidden
-// fees from Acme are common" stays an accusation (Codex r19 on #2633).
-const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+only\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i;
+// fees from Acme are common" stays an accusation (Codex r19 on #2633). A
+// negated RECOMMENDATION isn't a denial either: "Do not choose Bug Busters
+// because of hidden fees" denies the choice, not the fees (Codex r20).
+const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+only\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -541,12 +547,14 @@ function sentenceHasNegator(text, index, length) {
   return SENTENCE_NEGATOR_RE.test(text.slice(sentStart, index + length));
 }
 
-// Span-scoped denial check for subject-verb arms whose verb list includes
+// Tail-scoped denial check for subject-verb arms whose verb list includes
 // negative auxiliaries ("X isn't dishonest", "X never scams customers" are
-// denials — Codex r19 on #2633). Only the MATCHED SPAN is checked, so
-// contrastive lead-ins ("Not only that, X is dishonest") stay accusations.
+// denials — Codex r19 on #2633). Only the post-name TAIL (named group
+// "dtail") is checked: the name itself can carry a negator ("No Bugs Pest
+// Control is dishonest" is an accusation — Codex r20), and contrastive
+// lead-ins ("Not only that, X is dishonest") sit before the match entirely.
 function spanUnnegated(m) {
-  return m && !SENTENCE_NEGATOR_RE.test(m[0]) ? m : null;
+  return m && !SENTENCE_NEGATOR_RE.test((m.groups && m.groups.dtail) || m[0]) ? m : null;
 }
 
 function normalize(s) {
@@ -846,7 +854,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // within the same sentence, a linking/behavioral verb between the name
     // and the negative term ties the negativity to the business.
     const directedP0 = new RegExp(
-      `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?<dtail>(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b))`, 'i',
     );
     // Negative adjective immediately modifying the name ("the dishonest
     // Acme Pest Solutions"). Denial-guarded like the table path ("No hidden
@@ -1013,15 +1021,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // that proximity would turn into phantom disparagement targets. They do
   // NOT feed the unclassified-option findings.
   const extraProseNames = new Set();
+  // CI/legal-entity captures are NAME-CONFIDENT (industry-suffix or legal
+  // marker with the full token discipline) — they qualify for the looser
+  // object-association arm, which header-shaped non-personified captures
+  // do not ("and Termite Prevention" noise — Codex r11/r20 on #2633).
+  const confidentProseNames = new Set();
   for (const m of proseNameText.matchAll(CI_PROVIDER_NAME_RE)) {
     const nm = splitAtNegativity(m[1]);
-    if (nm && !OWN_BRAND_RE.test(nm)) extraProseNames.add(nm);
+    if (nm && !OWN_BRAND_RE.test(nm)) { extraProseNames.add(nm); confidentProseNames.add(nm); }
   }
   // Lowercase legal-entity names ("acme holdings llc") — same CI pass the
   // table-less path runs (Codex r3 on #2633).
   for (const m of proseNameText.matchAll(legalEntityRe('gi'))) {
     const nm = splitAtNegativity(m[1]);
-    if (nm && !OWN_BRAND_RE.test(nm)) extraProseNames.add(nm);
+    if (nm && !OWN_BRAND_RE.test(nm)) { extraProseNames.add(nm); confidentProseNames.add(nm); }
   }
   for (const nm of collectHeaderShapedProseTargets(proseNameText)) extraProseNames.add(nm);
   for (const nm of targetNames) extraProseNames.delete(nm);
@@ -1107,7 +1120,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // bare and typographic forms — "Bug Busters' billing is dishonest"
       // has no trailing s (Codex r14 on #2633).
       const directedP0 = new RegExp(
-        `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?<dtail>${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b))`, 'i',
       );
       // Denial-guarded: "No hidden fees from Acme" is marketing-clean, not
       // an accusation (Codex r17 guard on #2633).
@@ -1150,12 +1163,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const fromP0 = new RegExp(
         `(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
       );
-      // Name-confident PERSONIFIED names also get a same-sentence
+      // Name-confident names — PERSONIFIED suffixes and CI/legal-entity
+      // captures ("acme pest solutions") — get a same-sentence
       // accusation-object association ("Customers report hidden fees after
-      // choosing Bug Busters" — Codex r11), denial-guarded so "with no
-      // hidden fees" stays clean. Noisy CI captures are excluded — object
-      // proximity on them re-creates the educational false positives.
-      const objAssocP0 = PERSONIFIED_SUFFIX_RE.test(name)
+      // choosing Bug Busters" — Codex r11/r20), denial-guarded so "with no
+      // hidden fees" stays clean. Header-shaped non-personified captures
+      // are excluded — object proximity on them re-creates the educational
+      // false positives.
+      const objAssocP0 = (PERSONIFIED_SUFFIX_RE.test(name) || confidentProseNames.has(name))
         ? new RegExp([
           `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})`,
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
@@ -1252,8 +1267,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // REQUIRED on service-line nouns, and choice/pick alone need a
     // geographic tail, so "the #1 option for standing water is a Bti dunk"
     // stays educational.
+    // Hyphenated service phrases count too — "#1-rated pest-control
+    // company" (Codex r20 on #2633).
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)\\s+(?:control|care|removal)\\s+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest[\\s-]+control|lawn[\\s-]+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
     );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
