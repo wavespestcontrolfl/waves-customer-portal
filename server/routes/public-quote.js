@@ -162,8 +162,13 @@ function derivePerApplication(estimate) {
       ? Number(line.frequency)
       : null;
   if (!visits) return null;
+  // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
+  // from the monthly/annual math), preferring the DISCOUNTED annual over the
+  // list per-application rate.
+  const discountedAnnual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual) || 0;
+  const exact = discountedAnnual > 0 ? discountedAnnual / visits : Number(line.perApp);
   return {
-    amount: Math.round(Number(line.perApp)),
+    amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
   };
 }

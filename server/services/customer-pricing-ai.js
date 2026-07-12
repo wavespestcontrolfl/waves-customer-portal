@@ -432,7 +432,15 @@ function quoteAmountFromLine(line) {
   const annual = positiveNumber(line.annualAfterDiscount, line.finalAnnual, line.annual, line.monitoring?.annual);
   const oneTime = positiveNumber(line.priceAfterDiscount, line.totalAfterDiscount, line.price, line.total);
   const dueAtStart = positiveNumber(line.installation?.price);
-  const perVisit = positiveNumber(line.perApp, line.internalPerVisitRevenue, line.perVisit);
+  // Per-visit must reflect the DISCOUNTED price (codex 2642 r1: line.perApp
+  // is the list per-application rate; the discount pass only writes
+  // monthly/annualAfterDiscount). Derive it from the discounted annual and
+  // the visit count whenever both exist; the raw fields are only the
+  // fallback for lines with no visit cadence.
+  const visits = positiveNumber(line.visitsPerYear, line.frequency);
+  const perVisit = annual && visits
+    ? Math.round((annual / visits) * 100) / 100
+    : positiveNumber(line.perApp, line.internalPerVisitRevenue, line.perVisit);
   return { monthly, annual, oneTime, dueAtStart, perVisit };
 }
 

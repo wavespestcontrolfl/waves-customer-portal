@@ -410,7 +410,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   const html = wrapEmail({
     preheader: proposalMode
       ? 'Your Waves commercial proposal is attached.'
-      : (priceLine ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
+      : (priceLine && priceLine.startsWith('$') ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
     heading,
     intro,
     ctaHref: viewUrl,
@@ -700,9 +700,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
     : longUrl;
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-  const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-  const annualTotal = parseFloat(estimate.annual_total || 0);
-  const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
+  // Residential sends use the compliant summary (codex 2642 r1: the old
+  // "$X/mo · $Y/yr" priceLine bypassed moneySummary's residential branch).
+  // Commercial proposals rebuild their own totals line below (freshPriceLine).
+  const priceLine = moneySummary(estimate);
 
   // Commercial proposal PDF — attached to the delivery email only when the
   // operator has authored a multi-building proposal (proposal.enabled). A
@@ -827,7 +828,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
           } else {
             const fm = parseFloat(freshEstimate.monthly_total || 0);
             const fa = parseFloat(freshEstimate.annual_total || 0);
-            freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+            freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
           }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
