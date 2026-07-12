@@ -235,22 +235,53 @@ ui-verify before review.
 4. Progress-SMS template (`service_report_v1_progress`) goes live with real
    traffic — verify on the first graduated trap-check.
 
-### Phase B — Cut over the stragglers (flow universality)
-1. `wildlife_trapping` → typed cutover migration (sectioned form already
+### Phase B — Cut over the stragglers + prove full-catalog coverage
+
+**Coverage principle (owner directive 2026-07-12: "encompass ALL the
+services we provide"):** every ACTIVE `services` row must resolve to exactly
+one of four lanes — recurring Service Report V1, typed service-report,
+compliance project (W1: WDO / pre-treat cert), or explicitly
+owner-excluded — and "generic report in a family that has a typed flow"
+counts as a defect, not a lane.
+
+1. **B0 — catalog coverage audit + fall-through guard.** An ops script
+   (`ops/agents/` per its README) enumerating every active service key →
+   resolved completion lane + delivery mode, flagging: generic-report rows
+   in typed families, legacy keys with ambiguous routing, and services with
+   no explicit decision. Plus a contract test so a FUTURE catalog service
+   cannot ship without a completion-lane decision (mirrors the write-gate
+   contract-test pattern). First audit findings already in hand:
+   - **`rodent_monitoring` (CONFIRMED GAP):** the legacy recurring
+     bait-station key — the Square-era mapping both annual and quarterly
+     bait customers land on — was NOT repointed by `20260612000001` (only
+     the new `rodent_bait_quarterly` + `rodent_bait_setup` were). It
+     completes with a GENERIC recurring report today. Fix: repoint to the
+     `rodent_bait_station` typed flow riding the rodent shadow, graduating
+     with Phase A.
+   - **`palm_treatment`, `termite_renewal`, seed-era `lawn_care` rows
+     (VERIFY):** original-seed keys whose routing predates the typed
+     program — confirm superseded/inactive or assign a lane.
+2. `wildlife_trapping` → typed cutover migration (sectioned form already
    built; auto_send — wildlife customers currently get project sends).
-2. `cockroach_control` → flip to `service_report` + `cockroach` findings
+3. `cockroach_control` → flip to `service_report` + `cockroach` findings
    (typed flow already live for the knockdown keys; German-species follow-up
    trigger already in machinery).
-3. `bed_bug_treatment` → owner approves customer copy → cutover
+4. `bed_bug_treatment` → owner approves customer copy → cutover
    (`customer_visible` flip is a separate owner decision).
-4. `general_appointment` / `waveguard_initial_setup` → owner call (§6 Q4);
+5. `general_appointment` / `waveguard_initial_setup` → owner call (§6 Q4);
    default: leave as-is, they are not customer-report lanes.
-5. Termite Phase 3 — termite_inspection + the termite_treatment keys
+6. Termite Phase 3 — termite_inspection + the termite_treatment keys
    (spot_treatment, pretreatment, trenching, liquid) — blocked on the
    FS 482.226 / FS 482.2265 / FAC 5E-14 review for the inspection/remedial
    lanes. Precedent exists: the owner already signed off the bait-station
    lane on 2026-06-12 (`20260612000023`), so this is a review of the two
    remaining lanes, not a from-scratch exercise.
+
+For the avoidance of doubt on three owner-named services: **palm_injection**
+is live in the universal flow (Phase-1 cutover, Tier 1 typed form);
+**termite bait stations** are live and graduated (`20260612000023`);
+**rodent bait** is built and shadowed — it ships to customers with the
+Phase-A graduation (plus the B0 `rodent_monitoring` repoint above).
 
 ### Phase C — Universal one-time services admin surface (the "pretty" fix)
 Replace the legacy Projects lookup with a V2 surface, strict-1:1 on data and
@@ -340,7 +371,12 @@ React UI. Could be lawn care and tree & shrub. Could be multiple things."
 exactly this — a `service_completion_profiles.companion_types` declaration
 makes the tech complete ONCE, with one `TypedFindingsSection` per companion
 under the primary form (mobile + desktop), and the customer gets ONE report
-with the primary content first and one section per companion below. Three
+with the primary content first and one section per companion below. The
+mechanism is GENERAL (owner 2026-07-12: "multiple services within one
+instance of the complete service UI, as an optionality"): any typed findings
+family can be declared a companion of any primary — validation only refuses
+the compliance types (WDO, pre-treat cert) and duplicates. The three shipped
+keys are the first uses, not the limit; E2/E3 add the ad-hoc optionality. Three
 combined catalog keys shipped, matching the owner's two examples verbatim:
 
 | service_key | name | companion | delivery today |
