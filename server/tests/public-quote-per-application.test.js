@@ -93,11 +93,19 @@ describe('derivePerApplication', () => {
     expect(derivePerApplication({ lineItems: [] })).toBeNull();
   });
 
-  test('amount is rounded to whole dollars', () => {
+  test('amount keeps exact cents (codex 2642 r1: whole-dollar rounding drifted from the annual math)', () => {
     const estimate = {
       lineItems: [{ service: 'pest_control', monthly: 35.83, perApp: 107.5, visitsPerYear: 4 }],
     };
-    expect(derivePerApplication(estimate).amount).toBe(108);
+    expect(derivePerApplication(estimate).amount).toBe(107.5);
+  });
+
+  test('prefers the discounted annual over the list per-application rate', () => {
+    const estimate = {
+      lineItems: [{ service: 'pest_control', monthly: 31.88, perApp: 107.5, annualAfterDiscount: 382.5, visitsPerYear: 4 }],
+    };
+    // 382.50 / 4 = 95.625 -> 95.63 (discounted), not the $107.50 list rate.
+    expect(derivePerApplication(estimate).amount).toBe(95.63);
   });
 
   test('string frequency (pest shape) never coerces into a cadence', () => {

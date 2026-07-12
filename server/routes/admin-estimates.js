@@ -216,16 +216,23 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-function moneySummary(estimate = {}) {
+function moneySummary(estimate = {}, { allowTotals = false } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
   const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
   if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
+    // Commercial proposals (allowTotals) keep annual framing — boards budget
+    // annually; the owner exempted them (2026-07-11). Residential emails
+    // never restate monthly/annual totals: the linked estimate leads with
+    // per-application pricing.
+    if (allowTotals) {
+      return annualTotal > 0
+        ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
+        : `$${monthlyTotal.toFixed(2)}/mo`;
+    }
+    return 'Priced per visit — full breakdown inside';
   }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return '';
 }
 
@@ -251,7 +258,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   return {
     first_name: firstName,
     estimate_url: viewUrl,
-    price_summary: priceLine || moneySummary(estimate),
+    price_summary: priceLine || moneySummary(estimate, { allowTotals: proposalMode }),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
     next_step_summary: proposalMode
@@ -403,7 +410,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   const html = wrapEmail({
     preheader: proposalMode
       ? 'Your Waves commercial proposal is attached.'
-      : (priceLine ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
+      : (priceLine && priceLine.startsWith('$') ? `Your Waves estimate is ready — ${priceLine}.` : 'Your Waves estimate is ready to review.'),
     heading,
     intro,
     ctaHref: viewUrl,
@@ -693,9 +700,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     ? await shortenOrPassthrough(longUrl, { ...linkMeta, channel: 'email' })
     : longUrl;
   const firstName = estimate.customer_name?.split(' ')[0] || 'there';
-  const monthlyTotal = parseFloat(estimate.monthly_total || 0);
-  const annualTotal = parseFloat(estimate.annual_total || 0);
-  const priceLine = monthlyTotal > 0 ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr` : '';
+  // Residential sends use the compliant summary (codex 2642 r1: the old
+  // "$X/mo · $Y/yr" priceLine bypassed moneySummary's residential branch).
+  // Commercial proposals rebuild their own totals line below (freshPriceLine).
+  const priceLine = moneySummary(estimate);
 
   // Commercial proposal PDF — attached to the delivery email only when the
   // operator has authored a multi-building proposal (proposal.enabled). A
@@ -811,16 +819,19 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             // blank for a one-time-only proposal — so summarize from the same
             // totals the PDF prints.
             const pt = computeProposalTotals(normalizeProposal(freshEstimate));
+            // Cents on every figure (owner 2026-07-11; codex 2642 r3 — the
+            // whole-dollar Math.round here bypassed the cents rule).
+            const centsMoney = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
             const parts = [];
-            if (pt.monthlyEquivalent > 0) parts.push(`$${Math.round(pt.monthlyEquivalent).toLocaleString()}/mo`);
-            if (pt.annualRecurring > 0) parts.push(`$${Math.round(pt.annualRecurring).toLocaleString()}/yr recurring`);
-            if (pt.oneTime > 0) parts.push(`$${Math.round(pt.oneTime).toLocaleString()} one-time`);
-            if (pt.firstYearTotal > 0) parts.push(`first-year total $${Math.round(pt.firstYearTotal).toLocaleString()}`);
+            if (pt.monthlyEquivalent > 0) parts.push(`${centsMoney(pt.monthlyEquivalent)}/mo`);
+            if (pt.annualRecurring > 0) parts.push(`${centsMoney(pt.annualRecurring)}/yr recurring`);
+            if (pt.oneTime > 0) parts.push(`${centsMoney(pt.oneTime)} one-time`);
+            if (pt.firstYearTotal > 0) parts.push(`first-year total ${centsMoney(pt.firstYearTotal)}`);
             freshPriceLine = parts.join(' · ');
           } else {
             const fm = parseFloat(freshEstimate.monthly_total || 0);
             const fa = parseFloat(freshEstimate.annual_total || 0);
-            freshPriceLine = fm > 0 ? `$${fm.toFixed(0)}/mo · $${fa.toLocaleString()}/yr` : priceLine;
+            freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
           }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
