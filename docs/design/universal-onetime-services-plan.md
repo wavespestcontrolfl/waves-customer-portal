@@ -846,3 +846,21 @@ review.
   commercial delta; compliance-logbook export stays a roadmap candidate.
 
 All 16 questions answered — plan header flipped to RATIFIED.
+
+**B0 catalog-verify answers (owner, 2026-07-12, during the B0 build):**
+- **palm_treatment:** repoint to the typed palm form (rides the B-cutover
+  batch; same pattern as the rodent_monitoring repoint).
+- **termite_renewal + termite_bond_1yr/5yr/10yr:** they DO get scheduled as
+  services, but are billing riders — "only be included in the invoice, and
+  referenced in the post service report; they also should not be included
+  in SMS text messages for reminders." No standalone report lane. NEW WORK
+  ITEMS this creates: (a) exclude bond/renewal keys from reminder SMS,
+  (b) surface active bond/renewal as a reference line in the post-service
+  report + invoice (natural fit: the H2 coverage-context resolver).
+- **lawn_inspection:** the internal-only consultation posture is NOT the
+  end state — "lawn assessment should in some way be tied to the lawn
+  assessment concept we have built out, where customers do get a report."
+  NEW WORK ITEM: wire lawn_inspection completions to the lawn-assessment
+  report experience (customer-visible).
+- **one_time_pest_control (B0 scan finding):** still `project_required` —
+  a straggler the plan's §1 list missed; joins the Phase-B cutover batch.
