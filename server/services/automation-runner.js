@@ -364,11 +364,19 @@ async function advanceEnrollment(enrollment, steps) {
 async function processDueSteps() {
   if (!sendgrid.isConfigured()) return { processed: 0, reason: 'sendgrid not configured' };
 
-  const due = await db('automation_enrollments')
-    .where({ status: 'active' })
-    .where('next_send_at', '<=', new Date())
-    .orderBy('next_send_at', 'asc')
-    .limit(50);
+  // Enabled templates only: toggling an automation off in the Automations tab
+  // must HOLD its in-flight enrollments immediately, not just block new ones.
+  // next_send_at stays in the past, so re-enabling resumes on the next tick.
+  // (Operator test-sends bypass this on purpose — testSequence renders and
+  // sends directly, so a disabled sequence can be proofed before enabling.)
+  const due = await db('automation_enrollments as e')
+    .join('automation_templates as t', 't.key', 'e.template_key')
+    .where('e.status', 'active')
+    .where('t.enabled', true)
+    .where('e.next_send_at', '<=', new Date())
+    .orderBy('e.next_send_at', 'asc')
+    .limit(50)
+    .select('e.id');
 
   if (!due.length) return { processed: 0 };
 

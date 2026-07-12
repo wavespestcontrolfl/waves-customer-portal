@@ -18,6 +18,15 @@ const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   flea: 'prep.flea',
 });
 
+// Pest types whose FIRST-TIME booking also auto-enrolls the customer in the
+// matching Automations-tab sequence (automation_templates — the SendGrid
+// runner sends steps per their delays). Separate stack from the transactional
+// prep guide above. Wire a pest by adding its template key here; the
+// treatmentAutomationEnroll gate stays the single kill switch.
+const TREATMENT_AUTOMATION_BY_PEST_TYPE = Object.freeze({
+  bed_bug: 'bed_bug',
+});
+
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit
 // (rescheduled rows are phantom placeholders kept while staff rebooks).
@@ -44,7 +53,10 @@ class AppointmentTagger {
       switch (type.tag) {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
         case 'german_roach': case 'cockroach': await this.triggerPestPrep(service, 'cockroach'); break;
-        case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
+        case 'bed_bug':
+          await this.triggerPestPrep(service, 'bed_bug');
+          await this.enrollTreatmentAutomation(service, 'bed_bug');
+          break;
         case 'flea': await this.triggerPestPrep(service, 'flea'); break;
       }
     } catch (err) {
@@ -300,6 +312,68 @@ class AppointmentTagger {
         ? `Prep SMS sent for ${pestType} treatment (self-contained; no email on file).`
         : `Prep SMS sent for ${pestType} treatment.`,
     });
+  }
+
+  // Automations-tab sequence enrollment for first-time treatment bookings —
+  // the event wiring the manual per-row Send button shares its plumbing with.
+  // Guards, in order:
+  //   • upcoming open visits only — regenerate-brief replays onServiceScheduled
+  //     for past/cancelled jobs too (same terminal/past rule as prep);
+  //   • first-time only (hasPriorSameTypeBooking): a follow-up in the same
+  //     infestation series must not restart "welcome" messaging;
+  //   • once EVER per customer+template from this hook: enrollCustomer alone
+  //     only no-ops while an enrollment is ACTIVE, so a replay after the
+  //     sequence completed would reactivate and re-send — skip when any prior
+  //     enrollment row exists. The manual Send button intentionally keeps
+  //     re-send ability (it calls the route, not this hook).
+  // Recipient routes like prep: service contact first (the on-site person),
+  // then primary. Email-only by design — sequences are SendGrid emails; the
+  // phone-only prep fallback above covers no-email customers. The runner
+  // applies template.enabled + ASM/suppression checks at send time.
+  // Never throws: an enrollment hiccup must not break booking.
+  async enrollTreatmentAutomation(service, pestType) {
+    const templateKey = TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] || null;
+    if (!templateKey) return;
+    if (!isEnabled('treatmentAutomationEnroll')) return;
+    if (!service.customer_id) return;
+
+    const status = String(service.status || '').toLowerCase();
+    if (PREP_TERMINAL_STATUSES.has(status)) return;
+    const serviceDateStr = dateOnlyString(service.scheduled_date);
+    if (!serviceDateStr || serviceDateStr < etDateString()) return;
+
+    try {
+      if (await this.hasPriorSameTypeBooking(service, pestType)) return;
+
+      const priorEnrollment = await db('automation_enrollments')
+        .where({ template_key: templateKey, customer_id: service.customer_id })
+        .first('id');
+      if (priorEnrollment) return;
+
+      const { resolveProjectEmailRecipient } = require('./project-email');
+      const customer = await db('customers').where({ id: service.customer_id }).first();
+      const recipient = customer
+        ? resolveProjectEmailRecipient(customer)
+        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
+      if (!recipient.email) return;
+
+      const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
+      const AutomationRunner = require('./automation-runner');
+      const result = await AutomationRunner.enrollCustomer({
+        templateKey,
+        customer: {
+          id: service.customer_id,
+          email: recipient.email,
+          first_name: nameParts[0] || service.first_name || null,
+          last_name: nameParts.slice(1).join(' ') || service.last_name || null,
+        },
+      });
+      if (result?.enrolled) {
+        logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} automation (service ${service.id})`);
+      }
+    } catch (err) {
+      logger.error(`[appointment-tagger] ${templateKey} automation enroll failed for service ${service.id}: ${err.message}`);
+    }
   }
 
   // Emit the appointment.booked trigger for the matching prep automation

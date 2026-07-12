@@ -28,6 +28,9 @@ jest.mock('../services/email-template-automation-executor', () => ({
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(),
 }));
+jest.mock('../services/automation-runner', () => ({
+  enrollCustomer: jest.fn(async () => ({ enrolled: true, enrollmentId: 'enr-1' })),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -427,5 +430,127 @@ describe('appointment tagger prep email automation', () => {
     await AppointmentTagger.triggerPrepEmailGuide(service(), 'termite');
 
     expect(executor.processTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('treatment automation enrollment (Automations-tab sequence)', () => {
+  const { enrollCustomer } = require('../services/automation-runner');
+  let priorEnrollmentRow;
+
+  // automation_enrollments — the once-ever booking-hook dedupe lookup.
+  function enrollmentsQuery() {
+    const q = {
+      where: jest.fn(() => q),
+      first: jest.fn(async () => priorEnrollmentRow),
+    };
+    return q;
+  }
+
+  beforeEach(() => {
+    // Same harness as the prep describe: first-time booking, gates on.
+    jest.clearAllMocks();
+    isEnabled.mockReturnValue(true);
+    enrollCustomer.mockResolvedValue({ enrolled: true, enrollmentId: 'enr-1' });
+    priorBookingRow = null;
+    priorEnrollmentRow = null;
+    customerRow = {
+      id: 'cust-1',
+      first_name: 'Taylor',
+      last_name: 'Example',
+      email: 'taylor@example.com',
+    };
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return priorBookingQuery();
+      if (table === 'customer_interactions') return interactionsQuery();
+      if (table === 'email_template_automations') return automationsQuery();
+      if (table === 'automation_enrollments') return enrollmentsQuery();
+      return customersQuery();
+    });
+  });
+
+  test('first-time bed bug booking enrolls the customer in the bed_bug sequence', async () => {
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+
+    expect(enrollCustomer).toHaveBeenCalledTimes(1);
+    expect(enrollCustomer).toHaveBeenCalledWith({
+      templateKey: 'bed_bug',
+      customer: expect.objectContaining({
+        id: 'cust-1',
+        email: 'taylor@example.com',
+        first_name: 'Taylor',
+      }),
+    });
+  });
+
+  test('service-contact account routes the enrollment to the on-site contact', async () => {
+    customerRow = {
+      ...customerRow,
+      service_contact_name: 'Jamie Onsite',
+      service_contact_email: 'jamie@example.com',
+    };
+
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+
+    expect(enrollCustomer).toHaveBeenCalledWith({
+      templateKey: 'bed_bug',
+      customer: expect.objectContaining({
+        email: 'jamie@example.com',
+        first_name: 'Jamie',
+      }),
+    });
+  });
+
+  test('gate off → no enrollment', async () => {
+    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
+
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('terminal or past visits never enroll (regenerate-brief replay safety)', async () => {
+    await AppointmentTagger.enrollTreatmentAutomation(service({ status: 'cancelled' }), 'bed_bug');
+    await AppointmentTagger.enrollTreatmentAutomation(service({ status: 'completed' }), 'bed_bug');
+    await AppointmentTagger.enrollTreatmentAutomation(service({ scheduled_date: PAST_DATE }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('repeat booking in the same infestation series → no enrollment', async () => {
+    priorBookingRow = { id: 'svc-0' };
+
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a prior enrollment of any status blocks re-enrollment (post-completion replay)', async () => {
+    priorEnrollmentRow = { id: 'enr-0' }; // completed sequence from the original hook run
+
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('no email on file → no enrollment (sequences are email-only)', async () => {
+    customerRow = { ...customerRow, email: '' };
+
+    await AppointmentTagger.enrollTreatmentAutomation(service({ email: '' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('unwired pest types are not enrolled', async () => {
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'flea');
+    await AppointmentTagger.enrollTreatmentAutomation(service(), 'cockroach');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('enrollment failure is logged and does not throw', async () => {
+    enrollCustomer.mockRejectedValueOnce(new Error('boom'));
+
+    await expect(AppointmentTagger.enrollTreatmentAutomation(service(), 'bed_bug')).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('bed_bug automation enroll failed'));
   });
 });
