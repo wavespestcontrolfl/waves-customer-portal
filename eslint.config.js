@@ -55,10 +55,9 @@ module.exports = [
   },
   // Client — ESM + JSX in the browser. eslint-plugin-react is loaded ONLY
   // for jsx-uses-vars/jsx-uses-react so components referenced from JSX
-  // don't false-positive as unused; no other react rules. `process` is
-  // readonly because legacy files use the guarded
-  // `typeof process !== 'undefined' && process.env...` pattern, which is
-  // browser-safe and must not trip no-undef.
+  // don't false-positive as unused; no other react rules. NO `process`
+  // global here: this SPA reads config via import.meta.env, so an unguarded
+  // `process.env.X` is a real browser crash and must trip no-undef.
   {
     files: ['client/src/**/*.{js,jsx}'],
     plugins: { react },
@@ -66,7 +65,7 @@ module.exports = [
       ecmaVersion: 'latest',
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
-      globals: { ...globals.browser, process: 'readonly' },
+      globals: { ...globals.browser },
     },
     rules: {
       ...ERRORS_ONLY,
@@ -74,17 +73,65 @@ module.exports = [
       'react/jsx-uses-react': 'error',
     },
   },
-  // Client runtime scripts outside src/ (service worker, push helper) —
-  // browser + worker globals; module sourceType (push-subscribe.js uses
-  // import/export, and module parsing accepts classic scripts like sw.js).
+  // The one legacy file using the browser-safe guarded pattern
+  // `typeof process !== 'undefined' && process.env?...` — scoped exception
+  // so the guard keeps passing without hiding unguarded `process` reads
+  // elsewhere in client/src.
+  {
+    files: ['client/src/components/brand/SerifHeading.jsx'],
+    languageOptions: {
+      globals: { process: 'readonly' },
+    },
+  },
+  // Service worker — registered classic (no `{ type: 'module' }`), so parse
+  // as a script: accidental import/export fails lint exactly like it would
+  // fail the browser. Worker globals only — no window/document.
+  {
+    files: ['client/public/sw.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      globals: { ...globals.serviceworker },
+    },
+    rules: ERRORS_ONLY,
+  },
+  // Page-side public scripts (push helper) — ESM in the browser. No worker
+  // globals, so `clients`/`importScripts` can't slip into page code.
   {
     files: ['client/public/**/*.js'],
+    ignores: ['client/public/sw.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
-      globals: { ...globals.browser, ...globals.serviceworker },
+      globals: { ...globals.browser },
     },
     rules: ERRORS_ONLY,
+  },
+  // Video workspace ESM entry — render.mjs runs on Node.
+  {
+    files: ['video/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: ERRORS_ONLY,
+  },
+  // Remotion compositions — JSX rendered in headless Chrome.
+  {
+    files: ['video/src/**/*.jsx'],
+    plugins: { react },
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      parserOptions: { ecmaFeatures: { jsx: true } },
+      globals: { ...globals.browser },
+    },
+    rules: {
+      ...ERRORS_ONLY,
+      'react/jsx-uses-vars': 'error',
+      'react/jsx-uses-react': 'error',
+    },
   },
   // Client build configs (vite/postcss/tailwind) — Node-run, ESM syntax.
   {
@@ -96,15 +143,18 @@ module.exports = [
     },
     rules: ERRORS_ONLY,
   },
-  // Client tests (vitest via explicit imports + jsdom).
+  // Client tests — vitest WITHOUT runner globals (vite.config has no
+  // `globals: true`; tests import describe/it/expect/vi from 'vitest').
+  // No jest/vitest globals whitelisted, so a test that forgets its imports
+  // or reaches for `jest.fn()` trips no-undef instead of failing at runtime.
   {
-    files: ['client/src/**/*.test.{js,jsx}', 'client/vitest.setup.js'],
+    files: ['client/src/**/*.test.{js,jsx}', 'client/src/test-setup.js'],
     plugins: { react },
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
-      globals: { ...globals.browser, ...globals.node, ...globals.jest },
+      globals: { ...globals.browser, ...globals.node },
     },
     rules: {
       ...ERRORS_ONLY,
