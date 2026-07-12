@@ -487,6 +487,29 @@ const gates = {
   // in-flight enrollments (the runner only picks enabled templates).
   treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
 
+  // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
+  // environment, same rationale as treatmentAutomationEnroll; each kill =
+  // unset the var, or toggle the sequence off in the tab to hold in-flight):
+  //
+  // Google review attributed to a customer (4-5 stars) → the matching
+  // location's Review Thank You sequence. Once per customer ever.
+  reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
+  // Autopay charge failure → payment_failed sequence, REPLACING the
+  // transactional retry-notice email (owner rule: one email; the failure SMS
+  // with the card-update link is unchanged). 14-day dedupe = one enrollment
+  // per failure episode across the retry ladder. Unset = retry-notice email
+  // returns.
+  paymentFailedEnroll: process.env.GATE_PAYMENT_FAILED_ENROLL === 'true',
+  // Renewal-window cron (30-day bucket) → service_renewal sequence. Adds an
+  // email leg to the historically SMS-only reminder; 90-day dedupe = once per
+  // renewal cycle.
+  serviceRenewalEnroll: process.env.GATE_SERVICE_RENEWAL_ENROLL === 'true',
+  // Positive-review referral invite → referral_nudge sequence, REPLACING the
+  // transactional referral.invite email (one email; the referral SMS nudge is
+  // unchanged). Once per customer ever, mirroring referral.invite's own
+  // idempotency. Unset = referral.invite email returns.
+  referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
+
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,
   // content_queue). Off means no routes, no cron, no UI. Sub-flags for

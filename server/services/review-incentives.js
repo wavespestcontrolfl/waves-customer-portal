@@ -709,6 +709,45 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       updated_at: new Date(),
     });
 
+  // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
+  // attribution touch: this customer verifiably left a review, so future
+  // review ASKS must stop (the completion-SMS bundler and review-request
+  // suppression both read has_left_google_review). Runs even for
+  // missing_technician repairs where the customer link is unchanged — the
+  // flag can still be false there from an older import or a prior mark
+  // failure. Guarded on the loaded row so repeat repairs don't spam
+  // activity_log. Best-effort — a marking hiccup must not fail attribution.
+  if (customer.has_left_google_review !== true) {
+    try {
+      await conn('customers')
+        .where({ id: customerId })
+        .update({ has_left_google_review: true, review_marked_at: new Date() });
+      await conn('activity_log').insert({
+        customer_id: customerId,
+        admin_user_id: attrs.adminId || null,
+        action: 'review_manual_marked',
+        description: 'Manual review match — customer marked as having left a Google review; review asks stop.',
+      });
+    } catch (markErr) {
+      logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
+    }
+  }
+
+  // Thank-you sequence ONLY when the customer link actually changed: the
+  // missing_technician repair queue flows through this same path with the
+  // review already attributed, and a months-later "thanks for your review"
+  // from that repair would read as noise. (Gate, 4-5-star bar, cross-location
+  // once-ever dedupe all live in the shared helper; it never throws.)
+  if (review.customer_id !== customerId) {
+    const { enrollReviewThankYou } = require('./automation-enroll');
+    await enrollReviewThankYou({
+      customerId,
+      locationId: review.location_id,
+      starRating: review.star_rating,
+      source: 'google_review_manual_match',
+    });
+  }
+
   const attributionSnapshot = {
     method: 'manual_admin_match',
     adminId: attrs.adminId || null,

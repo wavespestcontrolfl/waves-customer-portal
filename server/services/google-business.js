@@ -553,6 +553,21 @@ class GoogleBusinessService {
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
       await this._markCustomerLeftReview(row.customer_id);
+      // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
+      // an existing one that just matched a customer) — not on every hourly
+      // re-sync; the helper's once-ever dedupe backstops replays anyway.
+      // Gate / 4-5-star bar / location mapping live in the shared helper so
+      // the manual-match flow (review-incentives) behaves identically.
+      const justAttributed = result.inserted || !existing?.customer_id;
+      if (justAttributed) {
+        const { enrollReviewThankYou } = require('./automation-enroll');
+        await enrollReviewThankYou({
+          customerId: row.customer_id,
+          locationId: row.location_id,
+          starRating: row.star_rating,
+          source: 'google_review',
+        });
+      }
     } else if (result.inserted) {
       // New review we couldn't tie to a customer — alert the office to match it.
       await this._notifyUnlinkedReview(row);
@@ -668,6 +683,17 @@ class GoogleBusinessService {
       if (effectiveCustomerId) {
         // Matched to a customer → they left a review; auto-exclude from outreach.
         await this._markCustomerLeftReview(effectiveCustomerId);
+        // Same attribution-moment thank-you hook as the GBP feed path.
+        const justAttributed = !existing || !existing.customer_id;
+        if (justAttributed) {
+          const { enrollReviewThankYou } = require('./automation-enroll');
+          await enrollReviewThankYou({
+            customerId: effectiveCustomerId,
+            locationId: loc.id,
+            starRating: review.rating || 0,
+            source: 'google_review_places',
+          });
+        }
       } else if (!existing) {
         // Newly inserted, unmatched → alert the office to match it.
         await this._notifyUnlinkedReview({
