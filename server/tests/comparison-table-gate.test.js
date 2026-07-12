@@ -1114,6 +1114,45 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-24 findings (#2633) ──
+
+  test('Codex r24: present-tense and call/name reflexive #1 claims block', () => {
+    for (const prose of ['We claim #1.', 'We claim the #1 spot.', 'We call ourselves #1.', 'We name ourselves No. 1.', 'Bug Busters calls itself #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r24: subjectless accolade #1 verbs block', () => {
+    for (const prose of ['Awarded #1 for customer service.', 'Chosen #1 by homeowners.', 'Selected #1 by homeowners.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r24: provider-noun separator and possessive accusations block; denials stay clean', () => {
+    for (const prose of ['Pest control companies: hidden fees are common.', "Providers' scams are common."]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: `Pest control companies: no hidden fees here.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r24: competitor nouns are provider targets', () => {
+    for (const prose of ['Our competitors are dishonest.', 'The competition has hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r24: warning negators keep the accusation', () => {
+    for (const prose of ['No one should ignore hidden fees after choosing Bug Busters.', 'No homeowner should overlook hidden fees after choosing Bug Busters.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-23 findings (#2633) ──
 
   test('Codex r23: table-less association accusations block; denials stay clean', () => {

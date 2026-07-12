@@ -59,7 +59,7 @@ const TABLE_DISPARAGEMENT_RE = /\b(worst|terrible|awful|horrible|useless|inferio
 const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\\s-]?par|pathetic|mediocre|lousy|sloppy|incompetent|shady|dishonest|untrustworthy';
 // Hyphenated service phrases count everywhere — "pest-control companies"
 // (Codex r21 on #2633).
-const PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
+const PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?|competitors?|competition|rivals?';
 // "service area(s)" is literal geography, not a provider — "our service
 // area is shady and humid" is educational copy (Codex r17 guard on #2633).
 // The optional "service" hop covers compound forms — "pest control service
@@ -179,6 +179,14 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Appositive-tolerant gap here too — "companies, frankly, charge hidden
   // fees" (Codex r7 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Separator/heading and possessive association at a provider noun —
+  // "Pest control companies: hidden fees are common", "Providers' scams
+  // are common" (Codex r24 on #2633). Separator prefix words are
+  // negator-excluded ("companies: no hidden fees" is a denial); the
+  // possessive apostrophe is REQUIRED, so the "pest control scams to
+  // avoid" consumer-education idiom does not match the possessive arm.
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC})`,
+  `\\b(?:${PROVIDER_NOUN})['’]s?\\s+(?:${ASSOC_ACCUSATION_SRC})`,
 ].join('|'), 'i');
 
 // Disparagement DIRECTED at the own brand ("Waves is dishonest", "Waves
@@ -262,7 +270,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
   // Achievement verbs — "We earned the #1 spot in Venice", "we've won #1"
   // (Codex r21 on #2633).
-  `\\bwe(?:['’]ve)?\\s+(?:have\\s+|just\\s+|finally\\s+)?(?:earned|won|claimed|secured|clinched|grabbed|took|hold|held)\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bwe(?:['’]ve)?\\s+(?:have\\s+|just\\s+|finally\\s+)?(?:earns?|earned|wins?|won|claims?|claimed|secures?|secured|clinch(?:es)?|clinched|grabs?|grabbed|takes?|took|holds?|held)\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Marketing verbs with a reflexive object — "we market ourselves as the
   // #1 choice" (Codex r17 on #2633). The reflexive is REQUIRED: "we
   // advertise the #1-rated mosquito trap" is a product mention, not
@@ -271,7 +279,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // regex behind the case-sensitive brand anchor; lowercase "waves" is the
   // common noun ("summer heat waves are #1 on the list of turf stressors")
   // — Codex r19.)
-  `\\bwe\\s+(?:advertise|market|promote|position|tout|brand|bill|present|describe)(?:s|d)?\\s+ourselves\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `\\bwe\\s+(?:advertise|market|promote|position|tout|brand|bill|present|describe|call|name)(?:s|d|ed)?\\s+ourselves\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own brand in OBJECT position ("customers rated us #1", "voted us the
   // #1 choice") — "us" makes it own-brand by construction, so the verb
   // list can be broad without educational collisions (Codex r14 on #2633).
@@ -282,7 +290,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1" statistical statements ("Florida is ranked #1 for termite pressure"
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
-  `(?<!\\b(?:is|are|was|were)\\s)\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `(?<!\\b(?:is|are|was|were)\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // (The own-brand-subject ranking arm — "Waves, after years of serving …,
   // is #1", Codex r5 — lives outside this joined regex behind the
   // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
@@ -359,7 +367,7 @@ const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
-  `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+  `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
 );
 
 // Linking/behavioral verbs that tie a subject name to a following negative
@@ -587,7 +595,9 @@ function finding(severity, code, message) {
 // Up to two words may sit between the negator and the recommendation verb —
 // "No one should choose X because of hidden fees" negates the choice, not
 // the fee claim (Codex r23 on #2633).
-const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
+// Warning verbs join the recommendation exception — "No one should IGNORE
+// hidden fees after choosing X" asserts the fees (Codex r24 on #2633).
+const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -1411,7 +1421,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         // Marketing verbs with a reflexive object, same as the own-brand
         // arm — "Bug Busters advertises itself as #1" (Codex r17 parity).
         const marketingRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
         );
         // #1-before-the-name framing — "The #1 spot belongs to Bug Busters"
         // (Codex r21). Winner-noun hop is curated so "the #1 threat is …"
