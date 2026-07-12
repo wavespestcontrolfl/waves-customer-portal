@@ -1114,6 +1114,24 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-44 findings (#2633) ──
+
+  test('Codex r44: denial cells and clauses do not hide later insults', () => {
+    const cells = gate.evaluate({ body: CATEGORY_TABLE.replace('"Usually"', '"No hidden fees"').replace('"Verify each"', '"Shady billing"') }, {});
+    expect(cells.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    for (const body of ['Acme Pest Solutions has no hidden fees; it is dishonest about scheduling.', 'Acme Pest Solutions is dishonest and has a guide to avoid hidden fees.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r44: ranked objects and top-rated products stay educational', () => {
+    for (const body of [`Bug Busters ranked the #1 mosquito breeding sites.\n\n${CATEGORY_TABLE}`, `Waves uses top-rated gel bait for roaches.\n\n${CATEGORY_TABLE}`, 'Our technicians use top-rated bait stations.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-43 findings (#2633) ──
 
   test('Codex r43: past-tense name rankings block; denial cells and provider guides stay clean', () => {

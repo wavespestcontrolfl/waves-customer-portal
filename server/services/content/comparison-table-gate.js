@@ -732,8 +732,23 @@ const EDITORIAL_TAIL_RE = /\b(?:guides?|advice|tips?|articles?|checklists?|resou
 function spanUnnegated(m) {
   if (!m) return null;
   const tail = (m.groups && m.groups.dtail) || m[0];
-  if (SENTENCE_NEGATOR_RE.test(tail)) return null;
-  if (EDITORIAL_TAIL_RE.test(tail)) return null;
+  // A denial clause before a live insult does not clear it — "has no
+  // hidden fees; it is dishonest about scheduling" (Codex r44): the same
+  // vocab-gated marker reset used by sentenceHasNegator applies here.
+  let scope = tail;
+  const markerRe2 = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
+  let lastMarker = -1;
+  let mk;
+  while ((mk = markerRe2.exec(scope)) !== null) lastMarker = mk.index + mk[0].length;
+  if (lastMarker !== -1 && ACCUSATION_VOCAB_RE.test(scope.slice(lastMarker))) {
+    scope = scope.slice(lastMarker);
+  }
+  if (SENTENCE_NEGATOR_RE.test(scope)) return null;
+  // Editorial exemption only when no live insult precedes the editorial
+  // phrase — "is dishonest and has a guide to avoid hidden fees" still
+  // blocks (Codex r44).
+  const em = tail.match(EDITORIAL_TAIL_RE);
+  if (em && !ACCUSATION_VOCAB_RE.test(tail.slice(0, em.index))) return null;
   return m;
 }
 
@@ -840,7 +855,10 @@ function scanNameRankingArms(text, names) {
         // frankly, is #1" — Codex r10 on #2633). Negator-free adverb slot
         // ("Bug Busters is currently #1" — Codex r16 parity).
         const selfRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted))?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+          // Past accolade verbs take a BARE #1 (no determiner tail): "Bug
+          // Busters ranked #1." is a self-ranking, "Bug Busters ranked the
+          // #1 mosquito breeding sites" ranks an object (Codex r44).
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}|(?:ranked|rated|voted|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted))?)\\s+${NUMERIC_ONE_ALT})`, 'i',
         );
         // Object-position idiom: "reviews call Bug Busters the #1 choice",
         // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
@@ -917,6 +935,9 @@ function scopedSelfRankingMatch(text) {
     ) + 1;
     const lead = text.slice(sentStart, sm.index + sm[0].length);
     if (SENTENCE_NEGATOR_RE.test(lead)) continue;
+    // A usage verb right before the superlative marks PRODUCT copy — "Waves
+    // uses top-rated gel bait" rates the bait, not Waves (Codex r44).
+    if (/\b(?:uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installed|installing|carr(?:y|ies|ied|ying)|stocks?|stocked|recommends?|recommended|sprays?|sprayed|deploys?|deployed|with|sells?|sold)\s*$/i.test(text.slice(sentStart, sm.index))) continue;
     let subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
     // The pronoun/brand must GOVERN the ranking phrase — "Our guide says
     // gel bait is the best option" embeds it under a reporting verb
@@ -1382,8 +1403,12 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       // Trailing verb-anchored denials clear these too — "Bug Busters:
       // hidden fees are not present." (Codex r32/r33); editorial tails
       // likewise (Codex r43).
-      disparaged = Boolean(am && !trailingDenial(nameScanText, am.index, am[0].length)
-        && !EDITORIAL_TAIL_RE.test(am[0]));
+      let assocLive = Boolean(am && !trailingDenial(nameScanText, am.index, am[0].length));
+      if (assocLive) {
+        const em = am[0].match(EDITORIAL_TAIL_RE);
+        if (em && !ACCUSATION_VOCAB_RE.test(am[0].slice(0, em.index))) assocLive = false;
+      }
+      disparaged = assocLive;
     }
     if (disparaged) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
@@ -1693,7 +1718,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         // provider-owned educational content ("has a guide to avoid hidden
         // fees" — Codex r43).
         if (dm && trailingDenial(proseNameText, dm.index, dm[0].length)) dm = null;
-        if (dm && EDITORIAL_TAIL_RE.test(dm[0])) dm = null;
+        if (dm) {
+          const em = dm[0].match(EDITORIAL_TAIL_RE);
+          if (em && !ACCUSATION_VOCAB_RE.test(dm[0].slice(0, em.index))) dm = null;
+        }
       }
       if (dm) { disp = dm; break; }
     }
@@ -1946,10 +1974,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // are attributes, not insults: values: ["No hidden fees", …] (Codex
     // r43), so matches take the negation guard.
     {
-      const bm = firstUnnegatedMatch(block, DISPARAGEMENT_RE);
-      if (bm) {
+      // Denial scope is PER CELL (quote-bounded): a "No hidden fees" cell
+      // must not clear a "Shady billing" cell in the same row (Codex r44).
+      const g = new RegExp(DISPARAGEMENT_RE.source, 'gi');
+      let bm;
+      while ((bm = g.exec(block)) !== null) {
+        const cellStart = block.lastIndexOf('"', bm.index) + 1;
+        if (SENTENCE_NEGATOR_RE.test(block.slice(cellStart, bm.index + bm[0].length))) continue;
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
           `Comparison table contains disparaging language about an option ("${bm[0].trim()}"). State attributes, never insults.`));
+        break;
       }
     }
     if (TABLE_DISPARAGEMENT_RE.test(block)) {
