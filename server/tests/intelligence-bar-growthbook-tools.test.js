@@ -113,8 +113,38 @@ describe('intelligence bar GrowthBook tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.features[0].default_value).toBe('false');
     expect(result.features[0].environments).toEqual({
-      production: { enabled: true, default_value: 'true' },
-      dev: { enabled: false, default_value: null },
+      production: { enabled: true, default_value: 'true', rules: [], rule_count: 0 },
+      dev: { enabled: false, default_value: null, rules: [], rule_count: 0 },
+    });
+  });
+
+  test('get_growthbook_features surfaces per-environment targeting rules (a forced-on flag is not reported as off)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_read-only_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      hasMore: false,
+      features: [{
+        id: 'pricing-hub',
+        valueType: 'boolean',
+        defaultValue: 'false',
+        environments: {
+          production: {
+            enabled: true,
+            defaultValue: 'false',
+            rules: [{ type: 'force', description: 'Force on for everyone', enabled: true, value: 'true', coverage: 1 }],
+          },
+        },
+        tags: [],
+        archived: false,
+      }],
+    }));
+
+    const result = await executeGrowthbookTool('get_growthbook_features', {});
+    expect(result.error).toBeUndefined();
+    const prod = result.features[0].environments.production;
+    expect(prod.default_value).toBe('false');
+    expect(prod.rule_count).toBe(1);
+    expect(prod.rules[0]).toEqual({
+      type: 'force', description: 'Force on for everyone', enabled: true, value: 'true', coverage: 1,
     });
   });
 

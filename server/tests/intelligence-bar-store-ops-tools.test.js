@@ -115,6 +115,23 @@ describe('intelligence bar store ops tools', () => {
     ]);
   });
 
+  test('when multiple versions are live, the newest by created date is chosen', async () => {
+    process.env.ASC_KEY_ID = 'KEY1';
+    process.env.ASC_ISSUER_ID = 'ISSUER1';
+    process.env.ASC_PRIVATE_KEY = 'pem';
+    // Response order intentionally puts the OLDER live row first.
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      data: [
+        { attributes: { versionString: '1.1', appStoreState: 'READY_FOR_SALE', platform: 'IOS', createdDate: '2026-07-01' } },
+        { attributes: { versionString: '1.2', appStoreState: 'READY_FOR_SALE', platform: 'IOS', createdDate: '2026-07-09' } },
+      ],
+    }));
+
+    const result = await executeStoreOpsTool('get_app_store_status', {});
+    expect(result.error).toBeUndefined();
+    expect(result.live_version).toBe('1.2');
+  });
+
   test('get_play_store_status reads tracks inside a draft edit and always deletes it', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
     mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-1' } });
@@ -137,6 +154,28 @@ describe('intelligence bar store ops tools', () => {
       { packageName: 'com.wavespestcontrol.portal', editId: 'edit-1' },
       expect.objectContaining({ timeout: expect.any(Number) }),
     );
+  });
+
+  test('a pending (non-completed) production release is surfaced over the live one', async () => {
+    process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
+    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-p' } });
+    mockEdits.tracks.list.mockResolvedValueOnce({
+      data: {
+        tracks: [
+          { track: 'production', releases: [
+            { name: '1.2 (12)', status: 'completed', versionCodes: ['12'] },
+            { name: '1.3 (13)', status: 'inProgress', versionCodes: ['13'] },
+          ] },
+        ],
+      },
+    });
+    mockEdits.delete.mockResolvedValueOnce({});
+
+    const result = await executeStoreOpsTool('get_play_store_status', {});
+    expect(result.error).toBeUndefined();
+    expect(result.production_status).toBe('inProgress');
+    expect(result.production_release).toBe('1.3 (13)');
+    expect(result.production_releases).toHaveLength(2);
   });
 
   test('the draft edit is deleted even when the track read fails', async () => {

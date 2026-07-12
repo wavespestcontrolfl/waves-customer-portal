@@ -127,7 +127,12 @@ async function getAppStoreStatus() {
     platform: v.attributes?.platform || null,
     created: v.attributes?.createdDate || null,
   }));
-  const live = versions.find(v => LIVE_STATES.includes(v.state));
+  // ASC does not guarantee ordering, and more than one row can be in a live
+  // state (e.g. different platforms). Pick the NEWEST live version by created
+  // date so "what's live?" is stable rather than response-order dependent.
+  const live = versions
+    .filter(v => LIVE_STATES.includes(v.state))
+    .sort((a, b) => String(b.created || '').localeCompare(String(a.created || '')))[0];
   const inFlight = versions.filter(v => v.state && !NOT_IN_FLIGHT_STATES.includes(v.state));
   return {
     app_id: appId,
@@ -181,10 +186,19 @@ async function getPlayStoreStatus() {
       })),
     }));
     const production = mapped.find(t => t.track === 'production');
+    const prodReleases = production?.releases || [];
+    // A track can carry several releases at once (a completed live release PLUS
+    // a draft / inProgress / halted one). For "did Play review finish?" the
+    // pending release is the newsworthy one, so surface the first non-completed
+    // release when present and fall back to the current live release otherwise.
+    // (edits.tracks.list already returns releases across all statuses — draft,
+    // inProgress, halted, completed — so pending builds are not dropped.)
+    const prodActive = prodReleases.find(r => r.status && r.status !== 'completed') || prodReleases[0] || null;
     return {
       package: packageName,
-      production_status: production?.releases?.[0]?.status || null,
-      production_release: production?.releases?.[0]?.name || null,
+      production_status: prodActive?.status || null,
+      production_release: prodActive?.name || null,
+      production_releases: prodReleases,
       tracks: mapped,
       total_tracks: mapped.length,
     };

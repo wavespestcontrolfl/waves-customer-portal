@@ -17,6 +17,7 @@ const GROWTHBOOK_API_BASE = process.env.GROWTHBOOK_API_BASE || 'https://api.grow
 const REQUEST_TIMEOUT_MS = 15000;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
+const MAX_RULES = 10;
 
 const GROWTHBOOK_TOOLS = [
   {
@@ -92,10 +93,22 @@ function mapEnvironments(environments) {
   if (!environments || typeof environments !== 'object') return {};
   const out = {};
   for (const [env, cfg] of Object.entries(environments)) {
+    const rules = Array.isArray(cfg?.rules) ? cfg.rules : [];
     out[env] = {
       enabled: Boolean(cfg?.enabled),
       // env-specific override; falls back to the feature default when absent
       default_value: cfg?.defaultValue ?? null,
+      // A flag can be default-off yet SERVED on via a force/rollout/experiment
+      // rule (or vice-versa), so summarize the rules — otherwise "is X on in
+      // production?" would be answered from default_value alone and mislead.
+      rules: rules.slice(0, MAX_RULES).map(r => ({
+        type: r.type || null,
+        description: r.description || null,
+        enabled: r.enabled !== false,
+        value: r.value ?? null,
+        coverage: r.coverage ?? null,
+      })),
+      rule_count: rules.length,
     };
   }
   return out;
