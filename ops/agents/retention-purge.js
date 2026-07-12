@@ -40,10 +40,12 @@ const tag = tagIdx > -1 && process.argv[tagIdx + 1]
   console.log(`pending_approval drafts: ${before.rows[0].n}`);
 
   if (!execute) {
-    // Print exactly the rows that would change (ids only — no PII).
-    const rows = await c.query(`SELECT id, created_at::date AS day FROM retention_outreach
+    // Print exactly the rows that would change (ids only — no PII). ::text
+    // keeps the date server-rendered — no client-side DATE parsing or local
+    // timezone involved.
+    const rows = await c.query(`SELECT id, created_at::date::text AS day FROM retention_outreach
                                 WHERE status='pending_approval' ORDER BY created_at, id`);
-    rows.rows.forEach(r => console.log(`  id=${r.id} created=${r.day.toISOString().slice(0, 10)}  pending_approval -> rejected`));
+    rows.rows.forEach(r => console.log(`  id=${r.id} created=${r.day}  pending_approval -> rejected`));
     console.log(`DRY RUN — ${rows.rows.length} rows above would get status='rejected' and a per-run tag like '${tag}'. Re-run with --execute (the execute run prints ITS tag — that tag is the rollback key).`);
   } else {
     // An explicit --tag must not collide with a prior batch or the printed
