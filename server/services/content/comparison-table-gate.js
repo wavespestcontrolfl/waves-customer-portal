@@ -96,8 +96,10 @@ const ACTIVE_DISPARAGEMENT_SRC = [
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
 // Common intervening adverbs for active-predicate shapes ("<subject> routinely
-// rips off homeowners").
-const ACTIVE_ADVERBS = '(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}';
+// rips off homeowners"). "never" is deliberately absent: it NEGATES the
+// accusation — "Waves never overcharges" is marketing copy, not disparagement
+// (Codex r6 on #2633 surfaced the collision).
+const ACTIVE_ADVERBS = '(?:(?:also|often|always|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}';
 
 // The full disparagement vocabulary DIRECTED at a provider noun — the
 // PROVIDER_DISPARAGEMENT_RE shapes (adjacent / linking-verb) but with every
@@ -131,6 +133,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
 // our own writer legitimately puts pest vocabulary near "Waves" ("Waves keeps
 // shady, damp corners treated"), so the linking-verb arm allows only a short
 // determiner/adverb gap instead of a 60-char window (Codex P2 on #2633).
+// The own-brand SUBJECT: "Waves" or first-person "we" — in a Waves-authored
+// comparison draft, "We charge hidden fees" targets the own brand exactly
+// like "Waves charges hidden fees" (Codex r6 on #2633).
+const OWN_BRAND_SUBJECT = "(?:\\bwaves\\b(?:'s)?|\\bwe\\b)";
 const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
   // adding NEG_ADJ here would newly block prose like "waves of termites are
@@ -141,12 +147,16 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // gap only): that adjacency is what keeps "Waves keeps shady corners
   // treated" clean.
   `\\bwaves\\b(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // First-person linking form requires the verb DIRECTLY after "we" — the
+  // appositive gap would match relative clauses like "the zones we treat
+  // are shady, damp corners".
+  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
-  `\\bwaves\\b(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
-  // Possession with a required accusation object ("Waves has hidden fees")
-  // — object required so "Waves has shady spots covered" stays clean
-  // (Codex r3 on #2633).
-  `\\bwaves\\b(?:'s)?\\s+(?:has|have|had)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `${OWN_BRAND_SUBJECT}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Possession/usage with a required accusation object ("Waves has hidden
+  // fees", "Waves uses shady billing") — object required so "Waves has
+  // shady spots covered" stays clean (Codex r3/r6 on #2633).
+  `${OWN_BRAND_SUBJECT}\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -159,7 +169,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
   // Typographic apostrophe accepted; optional determiner after the verb and
   // after ranked/rated/voted (Codex r3 on #2633).
-  `\\bwe(?:['’]re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:the\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bwe(?:['’]re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own-brand subject with the ranking verb anywhere in the same sentence —
   // "Waves, after years of serving …, is #1" sits outside any proximity
@@ -253,7 +263,12 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
 const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
-const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b)[a-z][a-z0-9&'.\\-]*`;
+// Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
+// Control") — an alphabetic-only lead let those names escape the
+// target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
+// yields when the token continues with +/& ("A+" is a grade, not the
+// article "A" — \b alone sits between them).
+const CI_TOKEN = `(?!(?:${CI_PROSE_EXCLUSIONS})\\b(?![+&]))[a-z0-9][a-z0-9&+'.\\-]*`;
 const CI_PROVIDER_NAME_RE = new RegExp(`\\b(${CI_TOKEN}(?:\\s+(?:${CI_TOKEN}|of|and|&)){0,3}\\s+(?:${INDUSTRY_SUFFIX_SRC}))\\b`, 'gi');
 const NEG_INSIDE_RE_SRC = `(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+`;
 const splitAtNegativity = (name) => {
@@ -861,9 +876,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // they read as names on their face, while noisy CI captures ("and
       // termite prevention") would turn "… — shady corners" back into the
       // original false positive.
+      // Non-personified names get an OBJECT-ANCHORED separator instead
+      // ("acme pest solutions: shady billing", "bob bugs llc: hidden
+      // fees") — full-vocabulary separators on noisy CI captures would
+      // turn "… and termite prevention — shady corners" back into the
+      // original false positive (Codex r6 on #2633).
       const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
         ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:\\w+\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
-        : null;
+        : new RegExp(`${escaped}(?:'s)?\\s*[:—–-]\\s*(?:\\w+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i');
       // Possession/usage accusations with the required object ("Bug Busters
       // uses shady billing", "Acme Rodent Removal comes with hidden fees")
       // — Codex r4 on #2633.

@@ -1114,6 +1114,46 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-6 findings (#2633) ──
+
+  test('Codex r6: digit/punctuated provider names are tone-scan targets', () => {
+    const rank = gate.evaluate({ body: `360 Pest Control is #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    const disp = gate.evaluate({ body: `A+ Pest Control: shady billing.\n\n${CATEGORY_TABLE}` }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r6: punctuation-separated lowercase accusations block via the accusation object', () => {
+    for (const prose of ['acme pest solutions: shady billing.', 'bob bugs llc: hidden fees on every renewal.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r6: own-brand usage accusations and first-person forms block', () => {
+    for (const prose of ['Waves uses shady billing.', 'We charge hidden fees.', 'We are dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r6: "We are your #1 choice" blocks', () => {
+    const r = gate.evaluate({ body: `We are your #1 choice in Venice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r6: negated accusations and first-person relative clauses stay clean', () => {
+    for (const prose of [
+      'Waves never overcharges — flat quoted pricing, every time.',
+      'We never charge hidden fees.',
+      'The zones we treat are shady, damp corners of the lanai.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
   test('Codex r5: own-brand appositive/linking-verb disparagement and long-distance #1 block', () => {
     for (const prose of ['Waves, frankly, is dishonest.', 'Waves stays dishonest.']) {
       const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
