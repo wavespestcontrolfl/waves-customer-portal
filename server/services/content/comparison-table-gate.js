@@ -853,9 +853,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
         ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:\\w+\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
         : null;
+      // Possession/usage accusations with the required object ("Bug Busters
+      // uses shady billing", "Acme Rodent Removal comes with hidden fees")
+      // — Codex r4 on #2633.
+      const possessionP0 = new RegExp(
+        `${escaped}(?:'s)?\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+      );
       const dm = proseNameText.match(directedP0)
         || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
+        || proseNameText.match(possessionP0)
         || (sepP0 && proseNameText.match(sepP0));
       if (dm) { disp = dm; break; }
     }
@@ -891,6 +898,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       if (numAdjacentProviderRe.test(tail) || nearBusinessName(nm1.index, nm1[0].length, { includeOwnBrand: true })) {
         rank = nm1;
         break;
+      }
+    }
+    // Names only the looser detectors see ("Bug Busters is #1") need a
+    // DIRECTED subject-verb tie, not proximity — noisy CI captures ("in
+    // termite prevention") would turn "the #1 mistake in termite
+    // prevention" into a rigged ranking (Codex r4 on #2633).
+    if (!rank) {
+      for (const name of extraProseNames) {
+        const selfRank = new RegExp(
+          `${escapeForNameRe(name)}(?:'s)?\\s+(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+        );
+        const rm = proseNameText.match(selfRank);
+        if (rm) { rank = rm; break; }
       }
     }
   }

@@ -1114,6 +1114,20 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  test('Codex r4 (P2): extra-name self-ranking and possession accusations block; CI-capture proximity does not', () => {
+    const selfRank = gate.evaluate({ body: `Bug Busters is #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(selfRank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    for (const prose of ['Bug Busters uses shady billing.', 'Acme Rodent Removal comes with hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    // A noisy CI capture ("in termite prevention") must not lend ranking
+    // context by proximity — directed subject-verb ties only.
+    const ok = gate.evaluate({ body: `The #1 mistake in termite prevention is skipping the pre-slab treatment.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
   test('Codex r4 (P2): literal-shade prose adjacent to a sourced competitor table stays clean', () => {
     const sourced = `<ComparisonTable
   columns={["What to weigh","Orkin","Local SWFL company"]}
