@@ -1114,6 +1114,21 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-43 findings (#2633) ──
+
+  test('Codex r43: past-tense name rankings block; denial cells and provider guides stay clean', () => {
+    for (const prose of ['Bug Busters ranked #1.', 'Bug Busters rated #1.', 'Bug Busters has been ranked #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const cellDenial = gate.evaluate({ body: CATEGORY_TABLE.replace('Usually', 'No hidden fees') }, {});
+    expect(cellDenial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    for (const body of ['Acme Pest Solutions has a guide to avoid hidden fees.', `Bug Busters has advice on avoiding scams.\n\n${CATEGORY_TABLE}`, `Waves explains that the bait is top-rated by researchers.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-42 findings (#2633) ──
 
   test('Codex r42: that-reported brand superlatives, past gouging, and cross-sentence bridges block', () => {
