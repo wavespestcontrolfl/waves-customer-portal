@@ -23,8 +23,11 @@
  * DARK BY DEFAULT: enforced only when RECURRING_CARD_ON_FILE=true (rollout:
  * ship dark → land the capture UI → flip). Exemptions fail toward REQUIRING
  * the card (a card wrongly captured is harmless; a wrongly granted exemption
- * silently loses the protection) — except the payer check, which mirrors the
- * deposit's fail-soft direction for the same reason it does.
+ * silently loses the protection) — EXCEPT the payer check, which fails toward
+ * EXEMPT (Codex #2668 round-4 P1): a payer lookup outage must never conclude
+ * "self-pay" and enroll the homeowner's card for invoices that route to a
+ * third-party payer. A missed capture is a recoverable protection gap; a
+ * wrong enrollment charges the wrong party.
  */
 
 const db = require('../models/db');
@@ -92,6 +95,10 @@ async function resolveRecurringCardPolicyForEstimate({
     // Payer-billed: match the eventual invoice's payer precedence
     // (scheduled_services.payer_id ?? customers.payer_id), scoped to the
     // appointment actually being accepted when the caller resolved one.
+    // throwOnError — resolveForInvoice is fail-soft by default (returns
+    // self-pay on a lookup outage), which would require + capture + enroll
+    // the homeowner's card for a payer-billed account. An uncertain payer
+    // state EXEMPTS the card instead (Codex #2668 round-4 P1).
     try {
       const PayerService = require('./payer');
       let linkedSsId = scheduledServiceId ? String(scheduledServiceId) : null;
@@ -102,14 +109,15 @@ async function resolveRecurringCardPolicyForEstimate({
             ? await gates.findLinkedUpcomingAppointment(estimate)
             : null;
           linkedSsId = appt?.id ? String(appt.id) : null;
-        } catch { /* fall through customer-default */ }
+        } catch { /* scope narrowing only — customer-default still checked below */ }
       }
-      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
+      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId, throwOnError: true });
       if (resolved?.payerId) {
         return { enforced: true, required: false, exemptReason: 'payer_billed' };
       }
     } catch (err) {
-      logger.warn('[recurring-cof] payer check failed — card policy unchanged', { error: err.message });
+      logger.warn('[recurring-cof] payer check failed — exempting card capture (never risk enrolling the wrong party)', { error: err.message });
+      return { enforced: true, required: false, exemptReason: 'payer_check_uncertain' };
     }
 
     // Already protected: enrolled AND a chargeable method in charge.

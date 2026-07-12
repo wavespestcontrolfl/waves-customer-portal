@@ -144,13 +144,17 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-1' });
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST, scheduledServiceId: 'ss-9', useLinkedFallback: false });
     expect(p.exemptReason).toBe('payer_billed');
-    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'ss-9' });
+    // throwOnError is load-bearing: resolveForInvoice is fail-soft by default,
+    // and a soft self-pay result on a lookup outage would enroll the wrong
+    // party (Codex #2668 round-4 P1).
+    expect(mockResolveForInvoice).toHaveBeenCalledWith({ customerId: 'cust-1', scheduledServiceId: 'ss-9', throwOnError: true });
   });
 
-  it('keeps the card required when the payer check fails', async () => {
+  it('EXEMPTS the card when the payer check fails (uncertain payer must never enroll the wrong party)', async () => {
     mockResolveForInvoice.mockRejectedValue(new Error('payer svc down'));
     const p = await resolveRecurringCardPolicyForEstimate({ estimate: EST });
-    expect(p.required).toBe(true);
+    expect(p.required).toBe(false);
+    expect(p.exemptReason).toBe('payer_check_uncertain');
   });
 
   it('exempts a customer already on Auto Pay with a chargeable method', async () => {

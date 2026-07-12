@@ -8496,7 +8496,10 @@ router.put('/:token/accept', async (req, res, next) => {
       if (String(estimate.customer_id || '') !== String(customerId)) {
         try {
           const PayerService = require('../services/payer');
-          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId });
+          // throwOnError: the default fail-soft contract returns self-pay on a
+          // lookup outage, which would silently defeat this fail-closed catch
+          // (Codex #2668 round-4 P1).
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId, throwOnError: true });
           payerBilled = !!resolvedPayer?.payerId;
         } catch (err) {
           payerBilled = true;
