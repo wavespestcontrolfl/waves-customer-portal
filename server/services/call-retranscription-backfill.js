@@ -72,7 +72,7 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     // retried them hourly with this same transcriber since the pipeline
     // shipped; what is still untranscribed is unrescuable audio.
     .whereIn('processing_status', ['processed', 'extraction_failed'])
-    .select('id', 'recording_url', 'transcription', 'from_phone', 'to_phone', 'customer_id',
+    .select('id', 'recording_url', 'transcription', 'transcript_structured', 'from_phone', 'to_phone', 'customer_id',
       'created_at', 'recording_duration_seconds', 'duration_seconds')
     .orderBy('created_at', 'desc')
     .limit(limit);
@@ -135,14 +135,19 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
       // still undiarized — if the live processor (or a concurrent run) wrote
       // a diarized transcript meanwhile, leave it alone and just stamp.
       // PAN redaction guard (card-on-file spec Phase 0) — this backfill
-      // writes fresh provider text outside the live pipeline's scrub, and
-      // the preserved original must be scrubbed too (round-1 P1). Detailed
-      // counts feed the quarantine below: a masked transcript with the
-      // recording still attached would leave the card replayable from the
-      // audio (round-3 P1).
+      // writes fresh provider text outside the live pipeline's choke scrub,
+      // and the LEGACY artifacts must be healed in the same touch: the
+      // preserved original (round-1 P1) AND any stored transcript_structured
+      // whose segments/contact-pass predate the guard (round-4 P1). Fresh
+      // provider text arrives already masked with the detection carried in
+      // result.metadata.pan_count, and transcribeRecording quarantined the
+      // recording itself; the freshScrub here is belt-and-suspenders for
+      // injected test transcribers.
       const panScrubModule = require('../utils/pan-scrub');
       const freshScrub = panScrubModule.scrubPansDetailed(text);
       const preservedScrub = panScrubModule.scrubPansDetailed(call.transcription ?? null);
+      const structuredScrub = processor().scrubStructuredTranscript(call.transcript_structured ?? null);
+      const providerPanCount = Number(result?.metadata?.pan_count || 0);
       const changed = await dbi('call_log')
         .where({ id: call.id })
         .whereNull('retranscribed_at')
@@ -153,6 +158,7 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
           transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, ?)', [
             preservedScrub.text ?? null,
           ]),
+          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription: freshScrub.text,
           retranscribed_at: dbi.fn.now(),
           // processing_status is deliberately untouched: candidates are
@@ -161,14 +167,15 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
         });
       if (changed) {
         summary.upgraded += 1;
-        // Card detected in either artifact: the recording still carries it
-        // — quarantine (Twilio delete + reference strip + office heads-up),
-        // same as the live pipeline (Codex #2676 round-3 P1). Lazy require
-        // avoids a load cycle with the processor.
-        if (freshScrub.count + preservedScrub.count > 0) {
+        // Card detected in ANY artifact — the fresh text (belt: normally
+        // pre-masked with the count in provider metadata), the preserved
+        // legacy transcript, or the stored structured JSON — quarantine the
+        // recording. transcribeRecording already quarantined for provider
+        // detections; the notify inside is once-per-call idempotent, so this
+        // re-run only heals the legacy-artifact cases.
+        if (freshScrub.count + preservedScrub.count + structuredScrub.count + providerPanCount > 0) {
           try {
-            await require('./call-recording-processor')
-              .quarantineCardRecording(call, { source: 'retranscription_backfill' });
+            await processor().quarantineCardRecording(call, { source: 'retranscription_backfill' });
           } catch (qErr) {
             logger.error(`[retranscribe] PAN quarantine failed for call ${call.id}: ${qErr.message}`);
           }

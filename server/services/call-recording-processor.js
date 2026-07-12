@@ -223,17 +223,25 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
       logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
     }
   }
+  let alreadyQuarantined = false;
   try {
     const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+    // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
+    // sqlite — handle both or a quarantine would clobber the provider/source
+    // metadata instead of merging (Codex #2676 round-4 P2).
+    const raw = row?.transcription_metadata;
     let meta = {};
-    try { meta = row?.transcription_metadata ? JSON.parse(row.transcription_metadata) : {}; } catch { meta = {}; }
+    try {
+      meta = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { meta = {}; }
+    alreadyQuarantined = meta.pan_detected === true;
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify({
         ...meta,
         pan_detected: true,
-        recording_quarantined: twilioDeleted,
-        quarantine_source: source,
+        recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
+        quarantine_source: meta.quarantine_source || source,
       }),
       updated_at: new Date(),
     });
@@ -246,15 +254,19 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   try {
     await updateUnifiedVoiceMessage({ ...call, recording_url: null }, { media: null });
   } catch { /* best-effort */ }
-  try {
-    await require('./notification-service').notifyAdmin(
-      'billing',
-      'Card number heard on a recorded call',
-      'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
-      { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
-    );
-  } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
-  return { quarantined: true, twilioDeleted };
+  // One office heads-up per call, however many detection points re-run the
+  // quarantine (wrapper + choke + backfill are all idempotent on the strip).
+  if (!alreadyQuarantined) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Card number heard on a recorded call',
+        'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
+        { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+      );
+    } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
+  }
+  return { quarantined: true, twilioDeleted, alreadyQuarantined };
 }
 
 // Spoken-content length only: strip diarization speaker labels and collapse
@@ -2775,6 +2787,26 @@ async function transcribeRecording(mp3Url, opts = {}) {
   } catch (err) {
     logger.warn(`[call-proc] contact-dictation pass skipped: ${err.message}`);
   }
+  // Quarantine at the WRAPPER so every caller is covered — processRecording,
+  // the re-transcription backfill, and direct consumers like the bounce
+  // reverify's forceContactPass re-listen all flow through here, and the
+  // provider-return scrub means the detection only surfaces as
+  // metadata.pan_count (Codex #2676 round-4 P1). The quarantine stamps ride
+  // result.metadata so the caller's transcript write persists them instead
+  // of clobbering the flags with fresh provenance (round-4 P2).
+  try {
+    const panCount = Number(result?.metadata?.pan_count || 0);
+    if (panCount > 0 && opts.call?.id) {
+      const q = await quarantineCardRecording(opts.call, { source: 'transcription' });
+      if (result.metadata) {
+        result.metadata.pan_detected = true;
+        result.metadata.recording_quarantined = q.twilioDeleted === true;
+      }
+      opts.call.recording_url = null;
+    }
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine at transcribe wrapper failed: ${err.message}`);
+  }
   return result;
 }
 
@@ -3825,17 +3857,19 @@ const CallRecordingProcessor = {
       transcription = scrubbed.transcription;
       contactPassTranscript = scrubbed.contactPassTranscript;
       result.structuredSegments = scrubbed.segments;
-      // The provider-return scrub already masked the text, so this
-      // choke-point count is usually 0 for a detected card — the PROVIDER
-      // count is what says the audio carries one (Codex #2676 round-3 P1).
-      const providerPanCount = Number(result?.metadata?.pan_count || 0);
-      if (scrubbed.count + providerPanCount > 0) {
-        logger.warn(`[call-proc] PAN detected in transcript for ${maskSid(callSid)} (provider=${providerPanCount}, choke=${scrubbed.count})`);
-        // The audio still carries the card — quarantine it (spec invariant
-        // #1) and drop the in-memory reference so nothing downstream (lead
-        // updates, message media sync) re-attaches the recording.
+      // Provider-detected PANs are already quarantined inside
+      // transcribeRecording (which also nulled call.recording_url — same
+      // object). This branch covers CHOKE-NOVEL detections only: text some
+      // future/side path delivered unscrubbed. The flags ride
+      // result.metadata so the transcript write below persists them.
+      if (scrubbed.count > 0) {
+        logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) at the choke point for ${maskSid(callSid)}`);
         await quarantineCardRecording(call, { source: 'primary_transcription' });
         call.recording_url = null;
+        if (result?.metadata) {
+          result.metadata.pan_detected = true;
+          result.metadata.pan_count = Number(result.metadata.pan_count || 0) + scrubbed.count;
+        }
       }
       // recordingSeconds is hoisted so the primary gate here and the terminal
       // rejection below share one value.
@@ -7639,5 +7673,6 @@ CallRecordingProcessor._test = {
 CallRecordingProcessor.transcribeRecording = transcribeRecording;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
 CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
+CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
 
 module.exports = CallRecordingProcessor;

@@ -191,9 +191,11 @@ const DIGIT_WORDS = {
 const DIGIT_WORD_ALT = Object.keys(DIGIT_WORDS).join('|');
 // Maximal spoken-digit run: 13+ digit words (candidate windows are carved
 // inside, so the run itself may include trailing expiry/CVV words).
-// Comma/period pause punctuation joins the run, mirroring the numeric side.
+// Comma/period/ALL-whitespace pause punctuation joins the run, mirroring the
+// numeric side — a provider line break mid-readback must not split the run
+// into unmatchable islands (Codex #2676 round-4 P2).
 const WORD_RUN_RE = new RegExp(
-  `\\b(?:(?:${DIGIT_WORD_ALT})[ ,.]+){12,}(?:${DIGIT_WORD_ALT})\\b`,
+  `\\b(?:(?:${DIGIT_WORD_ALT})[\\s,.]+){12,}(?:${DIGIT_WORD_ALT})\\b`,
   'gi'
 );
 
@@ -230,19 +232,33 @@ function isValidCodeTail(tail) {
   return false;
 }
 
+// Networks whose prefix is UNAMBIGUOUSLY card-shaped (Visa 4, Amex 34/37,
+// classic MC 51–55, Discover 6011/64x/65). The 2221–2720 MC range and the
+// generic 3x/6x space are deliberately excluded here: NANP area codes live
+// in 2xx–6xx, so a weak prefix on a phone-decomposable spoken run means
+// "those are phone numbers", not "that's a card" (Codex #2676 round-4 P2 —
+// two dictated callbacks whose concatenation Luhn-collides must survive).
+function strongCardIin(digits) {
+  return /^4/.test(digits) || /^3[47]/.test(digits) || /^5[1-5]/.test(digits) || /^(6011|65|64[4-9])/.test(digits);
+}
+
 function scrubSpokenRun(run) {
-  const words = run.split(/[ ,.]+/);
+  const words = run.split(/[\s,.]+/);
   const digits = words.map((w) => DIGIT_WORDS[w.toLowerCase()] ?? '').join('');
   if (digits.length > MAX_RUN_DIGITS) return { text: run, count: 0 };
   const phoneRun = looksLikeSpokenPhoneRun(digits);
   for (const len of panLengthPriority(digits.slice(0, 2))) {
     if (len > digits.length) continue;
     const candidate = digits.slice(0, len);
-    // Phone-shaped runs only mask when the leftover is genuinely
-    // code-shaped — a Luhn coincidence on two dictated callbacks must not
-    // eat the numbers the contact decoder needs, while a real card + valid
-    // expiry that HAPPENS to also parse as phones still masks.
-    if (phoneRun && !isValidCodeTail(digits.slice(len))) continue;
+    // Phone-shaped runs only mask when the prefix is a STRONG card IIN and
+    // the leftover is genuinely code-shaped — dictated callbacks (weak
+    // 2xx/3xx-style prefixes, or non-code tails like a second number's
+    // last four) survive for the contact decoder, while a real Visa/Amex
+    // readback + valid expiry that happens to also parse as phones still
+    // masks. Privacy bias documented: a 4xx-area-code phone pair with a
+    // Luhn-colliding prefix AND a valid-MMYY-shaped tail can still mask —
+    // the residual trade accepted in favor of never persisting a PAN.
+    if (phoneRun && (!strongCardIin(candidate) || !isValidCodeTail(digits.slice(len)))) continue;
     if (panCandidateValid(candidate)) {
       // Mask the first `len` words. A short spoken tail (≤8 digit words) is
       // the expiry/CVV that followed the readback — absorb it; a longer

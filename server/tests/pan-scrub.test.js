@@ -188,11 +188,22 @@ describe('scrubPans — spoken-digit form', () => {
       const phones = 'two three nine five five five one two three four two three nine five five five nine eight seven six';
       expect(scrubPans(phones)).toBe(phones);
     });
-    it('still masks a spoken card + valid expiry that also parses as phones', () => {
-      // 4242… parses as NANP (424 exchange 242…), but the trailing 12 28 is
-      // a real MMYY — the card wins.
+    it('leaves phone pairs alone even when the tail is MMYY-shaped (weak IIN loses to phones — round 4)', () => {
+      // Codex round-4 example: 239-555-1234 then 305-234-0123 — fully NANP,
+      // and the final 0123 would pass the MMYY check; the weak 2xx prefix
+      // means phones win regardless of any Luhn coincidence.
+      const phones = 'two three nine five five five one two three four three zero five two three four zero one two three';
+      expect(scrubPans(phones)).toBe(phones);
+    });
+    it('still masks a strong-IIN spoken card + valid expiry that also parses as phones', () => {
+      // 4242… parses as NANP (424 exchange 242…), but the prefix is a strong
+      // Visa IIN and the trailing 12 28 is a real MMYY — the card wins.
       const spoken = 'four two four two four two four two four two four two four two four two one two two eight';
       expect(scrubPans(spoken)).toBe('[card ending 4242] [code removed]');
+    });
+    it('masks a spoken readback wrapped across a provider line break (round 4)', () => {
+      const wrapped = 'four two four two four two four two\nfour two four two four two four two';
+      expect(scrubPans(wrapped)).toBe('[card ending 4242]');
     });
   });
 });
