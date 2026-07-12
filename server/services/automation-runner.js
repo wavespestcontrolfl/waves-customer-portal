@@ -175,6 +175,12 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
     next_send_at: nextSendAt,
     enrolled_at: new Date(),
     updated_at: new Date(),
+    // A reactivation starts a NEW episode: nothing has sent in it yet, so the
+    // delivery stamp resets with the cursor. Leaving the old last_sent_at in
+    // place made a later fail-before-send read as delivered coverage in the
+    // event-enrollment dedupe (automation-enroll.js) and suppressed the
+    // transactional dunning fallback.
+    last_sent_at: null,
     // Refresh the denormalized contact fields on reactivation — the scheduler
     // sends to the ROW's email, so re-enrolling a customer who changed their
     // address must not keep queueing steps to the stale one.

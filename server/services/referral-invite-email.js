@@ -47,17 +47,6 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     // reward in admin REQUIRES editing the referral_nudge step copy to
     // match — same as any other fact baked into an editable automation.
     // Copy verified in sync at wiring time ($25, #2621).
-    const { isEnabled } = require('../config/feature-gates');
-    if (isEnabled('referralNudgeEnroll')) {
-      const { enrollSequenceFromEvent } = require('./automation-enroll');
-      return enrollSequenceFromEvent({
-        templateKey: 'referral_nudge',
-        customerId,
-        dedupe: 'ever',
-        source: `referral_${trigger}`,
-      });
-    }
-
     const customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'first_name', 'email');
@@ -65,6 +54,45 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     if (!email || !email.includes('@')) {
       logger.info(`[referral-invite-email] no usable email for customer ${customerId}; skipping invite`);
       return null;
+    }
+
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('referralNudgeEnroll')) {
+      // Stream parity: the transactional referral.invite honors the
+      // marketing_referral suppression stream, but the referral_nudge
+      // sequence rides the newsletter ASM group — the runner would only
+      // check marketing_newsletter at send time. A customer who opted out of
+      // referral asks (but not the newsletter) must stay opted out, so the
+      // referral stream (plus global bounce/spam/do-not-email and
+      // group-less suppressions, mirroring automationSuppressionMatches) is
+      // checked here before enrolling. Fails toward suppressed.
+      try {
+        const referralSuppression = await db('email_suppressions')
+          .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+          .where({ status: 'active' })
+          .where(function referralStream() {
+            this.where('group_key', 'marketing_referral')
+              .orWhere('group_key', '')
+              .orWhereNull('group_key')
+              .orWhereIn('suppression_type', ['bounce', 'spam_complaint', 'do_not_email']);
+          })
+          .first('id');
+        if (referralSuppression) {
+          logger.info(`[referral-invite-email] referral-stream suppression active for customer ${customerId}; invite skipped`);
+          return null;
+        }
+      } catch (suppressionErr) {
+        logger.warn(`[referral-invite-email] suppression check failed for customer ${customerId}: ${suppressionErr.message} — invite skipped`);
+        return null;
+      }
+
+      const { enrollSequenceFromEvent } = require('./automation-enroll');
+      return enrollSequenceFromEvent({
+        templateKey: 'referral_nudge',
+        customerId,
+        dedupe: 'ever',
+        source: `referral_${trigger}`,
+      });
     }
 
     const { getSettings } = require('./referral-engine');

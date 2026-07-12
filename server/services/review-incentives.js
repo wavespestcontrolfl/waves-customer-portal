@@ -709,21 +709,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       updated_at: new Date(),
     });
 
-  // Manual attribution is an attribution moment like the sync paths — the
-  // office matching an unlinked review must fire the same thank-you sequence
-  // the automatic match would have (gate, 4-5-star bar, cross-location
-  // once-ever dedupe all live in the shared helper; it never throws).
-  // ONLY when the customer link actually changed: this same path also
-  // services the missing_technician repair queue, where the review is
-  // already attributed to this customer and only the technician/service
-  // record is being attached — a months-later "thanks for your review"
-  // from that repair would read as noise.
-  if (review.customer_id !== customerId) {
-    // Mirror the sync paths' _markCustomerLeftReview: a manually matched
-    // customer left a review too, so future review ASKS must stop (the
-    // completion-SMS bundler and review-request suppression both read
-    // has_left_google_review). Best-effort — a marking hiccup must not fail
-    // the attribution.
+  // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
+  // attribution touch: this customer verifiably left a review, so future
+  // review ASKS must stop (the completion-SMS bundler and review-request
+  // suppression both read has_left_google_review). Runs even for
+  // missing_technician repairs where the customer link is unchanged — the
+  // flag can still be false there from an older import or a prior mark
+  // failure. Guarded on the loaded row so repeat repairs don't spam
+  // activity_log. Best-effort — a marking hiccup must not fail attribution.
+  if (customer.has_left_google_review !== true) {
     try {
       await conn('customers')
         .where({ id: customerId })
@@ -737,7 +731,14 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     } catch (markErr) {
       logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
     }
+  }
 
+  // Thank-you sequence ONLY when the customer link actually changed: the
+  // missing_technician repair queue flows through this same path with the
+  // review already attributed, and a months-later "thanks for your review"
+  // from that repair would read as noise. (Gate, 4-5-star bar, cross-location
+  // once-ever dedupe all live in the shared helper; it never throws.)
+  if (review.customer_id !== customerId) {
     const { enrollReviewThankYou } = require('./automation-enroll');
     await enrollReviewThankYou({
       customerId,
