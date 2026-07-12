@@ -2287,11 +2287,31 @@ async function handleSetupIntentSucceeded(setupIntent) {
           ? await db('customers').where({ id: estimate.customer_id }).first('billing_mode')
           : null;
         const { isCommercialAutoAcceptEstimate } = require('./estimate-public');
+        // The FINAL accepted lane wins (Codex #2668 round-2): the customer can
+        // capture the recurring SetupIntent, go back, and accept as one_time
+        // (accepted_service_mode) or annual prepay — and a payment-pending
+        // prepay term deliberately keeps billing_mode 'per_application' until
+        // the invoice is paid, so the billing_mode check alone misses it. Any
+        // prepay term sourced from THIS estimate means the accept took the
+        // prepay lane; FAIL CLOSED on the lookup (skip enrollment — a missed
+        // backstop surfaces in billing recovery, a wrong enrollment
+        // auto-charges a prepaid customer per application).
+        let prepayLane = customer?.billing_mode === 'annual_prepay';
+        if (!prepayLane && estimate?.id) {
+          try {
+            prepayLane = (await db.schema.hasTable('annual_prepay_terms'))
+              && !!(await db('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id'));
+          } catch (err) {
+            logger.warn(`[stripe-webhook] recurring-cof prepay-term lookup failed — skipping backstop enrollment: ${err.message}`);
+            prepayLane = true;
+          }
+        }
         const eligible = estimate
           && estimate.status === 'accepted'
+          && estimate.accepted_service_mode !== 'one_time'
           && estimate.customer_id
           && estimate.bill_by_invoice !== true
-          && customer?.billing_mode !== 'annual_prepay'
+          && !prepayLane
           && !isCommercialAutoAcceptEstimate(estimate);
         if (eligible) {
           const PayerService = require('../services/payer');
