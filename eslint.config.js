@@ -33,9 +33,10 @@ module.exports = [
       'wiki/**',
     ],
   },
-  // Server, scripts, ops, packages — CommonJS on Node.
+  // Server, scripts, ops, packages — CommonJS on Node. (video/ is NOT here:
+  // its package.json has "type": "module", so its .js files are ESM.)
   {
-    files: ['server/**/*.js', 'scripts/**/*.js', 'ops/**/*.js', 'packages/**/*.js', 'video/**/*.js', '*.js'],
+    files: ['server/**/*.js', 'scripts/**/*.js', 'ops/**/*.js', 'packages/**/*.js', '*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',
@@ -43,9 +44,13 @@ module.exports = [
     },
     rules: ERRORS_ONLY,
   },
-  // Jest tests (server + packages).
+  // Jest tests (server + packages ONLY — client tests are vitest and must
+  // not inherit jest globals; flat config merges globals across every
+  // matching block, so client/** is excluded here rather than relying on
+  // the later vitest block to win).
   {
     files: ['**/*.test.js', '**/tests/**/*.js', '**/contract-tests/**/*.js', '**/__mocks__/**/*.js'],
+    ignores: ['client/**'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',
@@ -107,19 +112,22 @@ module.exports = [
     },
     rules: ERRORS_ONLY,
   },
-  // Video workspace ESM entry — render.mjs runs on Node.
+  // Video workspace Node entries — package "type": "module", so .js and
+  // .mjs are both ESM. nodeBuiltin only: `require`/`module.exports`/
+  // `__dirname` don't exist in ESM and must trip no-undef.
   {
-    files: ['video/**/*.mjs'],
+    files: ['video/**/*.{js,mjs}'],
+    ignores: ['video/src/**'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
-      globals: { ...globals.node },
+      globals: { ...globals.nodeBuiltin },
     },
     rules: ERRORS_ONLY,
   },
-  // Remotion compositions — JSX rendered in headless Chrome.
+  // Remotion compositions — rendered in headless Chrome.
   {
-    files: ['video/src/**/*.jsx'],
+    files: ['video/src/**/*.{js,jsx}'],
     plugins: { react },
     languageOptions: {
       ecmaVersion: 'latest',
@@ -133,12 +141,24 @@ module.exports = [
       'react/jsx-uses-react': 'error',
     },
   },
-  // Client build configs (vite/postcss/tailwind) — Node-run, ESM syntax.
+  // Client build configs (vite/postcss/tailwind) — Node-run ESM (client
+  // package.json is "type": "module"); nodeBuiltin for the same reason as
+  // the video entries.
   {
-    files: ['client/*.{js,cjs,mjs}'],
+    files: ['client/*.{js,mjs}'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',
+      globals: { ...globals.nodeBuiltin },
+    },
+    rules: ERRORS_ONLY,
+  },
+  // A future client/*.cjs really is CommonJS regardless of package type.
+  {
+    files: ['client/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
       globals: { ...globals.node },
     },
     rules: ERRORS_ONLY,
@@ -154,7 +174,7 @@ module.exports = [
       ecmaVersion: 'latest',
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
-      globals: { ...globals.browser, ...globals.node },
+      globals: { ...globals.browser, ...globals.nodeBuiltin },
     },
     rules: {
       ...ERRORS_ONLY,
