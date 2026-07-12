@@ -1078,6 +1078,42 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-3 findings (pre-push audit on e698f999a0) ──
+
+  test('Codex r3: comma/parenthetical adverbs cannot defeat the directed arms', () => {
+    const r = gate.evaluate({ body: `Pest control companies, frankly, are dishonest.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r3: usage verbs with a literal-shade object stay clean (the original FP class)', () => {
+    const r = gate.evaluate({ body: `Pest control companies use shady foliage to locate mosquito resting sites at dusk.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('Codex r3: own-brand possession accusations block', () => {
+    const r = gate.evaluate({ body: `Waves has hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r3: typographic apostrophe and determiner forms of numeric self-ranking block', () => {
+    for (const prose of ['We’re #1!', 'Rated the #1 choice by local homeowners.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r3: lowercase legal-entity names are disparagement targets', () => {
+    const r = gate.evaluate({ body: `acme holdings llc is dishonest about pricing.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r3: "#1" near a bare provider noun without ranking syntax stays clean', () => {
+    const r = gate.evaluate({ body: `During your next service, check the #1 hidden breeding site: clogged gutters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
   test('Codex r1 (P2): own-brand disparagement blocks; own brand near pest vocabulary does not', () => {
     for (const prose of ['Waves is dishonest.', 'Waves charges hidden fees on renewals.']) {
       const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});

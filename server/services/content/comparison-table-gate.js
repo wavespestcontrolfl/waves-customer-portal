@@ -107,12 +107,22 @@ const ACTIVE_ADVERBS = '(?:(?:also|often|always|never|routinely|repeatedly|regul
 // customers", "providers charge hidden fees") — the linking-verb shape misses
 // transitive verbs (Codex on #2633). Used by the table path's PROSE scan,
 // where a bare disparagement token is no longer enough (see evaluate).
+// Possession/usage accusations name their OBJECT: "hidden fees", "shady
+// billing". The object is REQUIRED — a bare disparagement token after
+// has/use recreates the literal-shade false positive ("companies use shady
+// foliage to locate mosquitoes" is field advice, not an accusation).
+const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
+// A word gap that tolerates comma/parenthetical adverbs within the sentence
+// ("companies, frankly, are dishonest") — whitespace-only gaps let ordinary
+// punctuation defeat the directed arms (Codex r3 on #2633).
+const NOUN_VERB_GAP = "(?:\\s*,?\\s+[\\w'’]+){0,3}\\s*,?\\s+";
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  // Linking AND possession/usage verbs: "companies have hidden fees",
-  // "chains use shady billing" are provider-directed accusations too
-  // (Codex r2 on #2633).
-  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got|has|have|had|comes?\\s+with|uses?|used)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // Linking verbs: "companies are (frankly) dishonest".
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // Possession/usage with a required accusation object: "companies have
+  // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,2}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
 ].join('|'), 'i');
 
@@ -128,6 +138,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   `\\bwaves\\b(?:'s)?(?:\\s+\\w+){0,2}\\s+(?:is|are|was|were|seems?|remains?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
   `\\bwaves\\b(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Possession with a required accusation object ("Waves has hidden fees")
+  // — object required so "Waves has shady spots covered" stays clean
+  // (Codex r3 on #2633).
+  `\\bwaves\\b(?:'s)?\\s+(?:has|have|had)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -138,8 +152,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
 const NUMERIC_ONE_ALT = '(?:#\\s?1|no\\.?\\s?1|number one)';
 const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
-  `\\bwe(?:'re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:the\\s+)?${NUMERIC_ONE_ALT}`,
-  `\\b(?:ranked|rated|voted)\\s+${NUMERIC_ONE_ALT}`,
+  // Typographic apostrophe accepted; optional determiner after the verb and
+  // after ranked/rated/voted (Codex r3 on #2633).
+  `\\bwe(?:['’]re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:the\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
 // Linking/behavioral verbs that tie a subject name to a following negative
@@ -778,6 +794,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const nm = splitAtNegativity(m[1]);
     if (nm && !OWN_BRAND_RE.test(nm)) extraProseNames.add(nm);
   }
+  // Lowercase legal-entity names ("acme holdings llc") — same CI pass the
+  // table-less path runs (Codex r3 on #2633).
+  for (const m of proseNameText.matchAll(legalEntityRe('gi'))) {
+    const nm = splitAtNegativity(m[1]);
+    if (nm && !OWN_BRAND_RE.test(nm)) extraProseNames.add(nm);
+  }
   for (const nm of collectHeaderShapedProseTargets(proseNameText)) extraProseNames.add(nm);
   for (const nm of targetNames) extraProseNames.delete(nm);
   const nearBusinessName = (idx, len, { includeOwnBrand = false } = {}) => {
@@ -853,13 +875,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
   if (!rank) {
+    // "#1" needs SYNTAX tying it to a provider — "#1 (rated) pest control
+    // company" — or a detected brand/business name in the window. A bare
+    // provider noun within 90 chars is NOT context: PROVIDER_NOUN includes
+    // generic "service(s)", so "During your next service, check the #1
+    // hidden breeding site" re-blocked as rigged ranking (Codex r3 on
+    // #2633 — the exact educational-idiom false positive again).
     const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
-    const providerNounRe = new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i');
+    const numAdjacentProviderRe = new RegExp(
+      `^${NUMERIC_ONE_ALT}\\s+(?:[\\w'’-]+\\s+){0,2}?(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?)\\b`, 'i',
+    );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
-      const window = proseNameText
-        .slice(Math.max(0, nm1.index - PROVIDER_NEGATIVE_PROXIMITY), nm1.index + nm1[0].length + PROVIDER_NEGATIVE_PROXIMITY);
-      if (providerNounRe.test(window) || nearBusinessName(nm1.index, nm1[0].length, { includeOwnBrand: true })) {
+      const tail = proseText.slice(nm1.index, nm1.index + 60);
+      if (numAdjacentProviderRe.test(tail) || nearBusinessName(nm1.index, nm1[0].length, { includeOwnBrand: true })) {
         rank = nm1;
         break;
       }
