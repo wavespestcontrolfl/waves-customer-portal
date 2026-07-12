@@ -111,6 +111,10 @@ describe('intelligence bar Sentry ops tools', () => {
 
     const result = await executeSentryOpsTool('get_sentry_issue_detail', { issue_short_id: 'WAVES-PORTAL-1A' });
     expect(result.error).toBeUndefined();
+    // Short ids only resolve via shortIdLookup with the bare id as the query.
+    const lookupUrl = decodeURIComponent(String(global.fetch.mock.calls[0][0]));
+    expect(lookupUrl).toContain('query=WAVES-PORTAL-1A');
+    expect(lookupUrl).toContain('shortIdLookup=1');
     expect(result.latest_event.exception_type).toBe('TypeError');
     expect(result.latest_event.exception_value).toMatch(/…\[truncated\]$/);
     expect(result.latest_event.innermost_frames).toHaveLength(5);

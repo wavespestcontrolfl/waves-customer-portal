@@ -164,8 +164,11 @@ async function getSentryIssueDetail(input) {
   const shortId = String(input.issue_short_id || '').trim();
   if (!shortId) throw new Error('issue_short_id is required.');
   const org = process.env.SENTRY_ORG || DEFAULT_ORG;
+  // Short ids resolve only via shortIdLookup with the bare id as the query —
+  // `shortId:` is not a recognized issue-search field.
   const matches = await sentryGet(`/organizations/${org}/issues/`, {
-    query: `shortId:${shortId}`,
+    query: shortId,
+    shortIdLookup: 1,
     limit: 1,
   });
   const issue = Array.isArray(matches) ? matches[0] : null;

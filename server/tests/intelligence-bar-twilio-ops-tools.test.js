@@ -151,6 +151,26 @@ describe('intelligence bar Twilio ops tools', () => {
     expect(global.fetch).toHaveBeenCalledTimes(5); // MAX_MESSAGE_PAGES
   });
 
+  test('get_twilio_failed_messages is non-exhaustive when the failure limit fills', async () => {
+    process.env.TWILIO_ACCOUNT_SID = 'AC123';
+    process.env.TWILIO_AUTH_TOKEN = 'auth';
+    const now = new Date().toISOString();
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      messages: [
+        { sid: 'SM-f1', to: '+1', direction: 'outbound-api', status: 'failed', error_code: 30003, error_message: null, date_sent: now },
+        { sid: 'SM-f2', to: '+1', direction: 'outbound-api', status: 'failed', error_code: 30003, error_message: null, date_sent: now },
+        { sid: 'SM-f3', to: '+1', direction: 'outbound-api', status: 'failed', error_code: 30003, error_message: null, date_sent: now },
+      ],
+    }));
+
+    const result = await executeTwilioOpsTool('get_twilio_failed_messages', { limit: 2 });
+    expect(result.error).toBeUndefined();
+    expect(result.failed_messages).toHaveLength(2);
+    // The limit filled with more failures behind it — must not read as a
+    // clean, complete scan.
+    expect(result.scan_exhaustive).toBe(false);
+  });
+
   test('get_twilio_failed_messages excludes failures older than the window', async () => {
     process.env.TWILIO_ACCOUNT_SID = 'AC123';
     process.env.TWILIO_AUTH_TOKEN = 'auth';

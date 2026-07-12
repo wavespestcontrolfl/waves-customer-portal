@@ -69,28 +69,45 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.endpoints[0].enabled_events_total).toBe(40);
   });
 
-  test('get_stripe_webhook_failures returns delivery state but never payload data', async () => {
+  test('get_stripe_webhook_failures separates real failures from recent pending, never payload data', async () => {
     process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const oldCreated = Math.floor(Date.now() / 1000) - 3600; // 1h ago — failing
+    const freshCreated = Math.floor(Date.now() / 1000) - 60; // 1 min ago — still delivering
     global.fetch.mockResolvedValueOnce(jsonResponse({
       has_more: false,
-      data: [{
-        id: 'evt_1',
-        type: 'invoice.payment_failed',
-        created: 1783800000,
-        pending_webhooks: 2,
-        data: { object: { customer_email: 'private@example.com', amount_due: 12345 } },
-      }],
+      data: [
+        {
+          id: 'evt_old',
+          type: 'invoice.payment_failed',
+          created: oldCreated,
+          pending_webhooks: 2,
+          data: { object: { customer_email: 'private@example.com', amount_due: 12345 } },
+        },
+        {
+          id: 'evt_fresh',
+          type: 'charge.succeeded',
+          created: freshCreated,
+          pending_webhooks: 1,
+          data: { object: { customer_email: 'private2@example.com' } },
+        },
+      ],
     }));
 
     const result = await executeStripeOpsTool('get_stripe_webhook_failures', { hours: 24 });
     expect(result.error).toBeUndefined();
     expect(result.undelivered_events).toEqual([{
-      id: 'evt_1',
+      id: 'evt_old',
       type: 'invoice.payment_failed',
-      created: new Date(1783800000 * 1000).toISOString(),
+      created: new Date(oldCreated * 1000).toISOString(),
       pending_webhooks: 2,
     }]);
+    // Young events are mid-delivery, not failures — reported separately so a
+    // routine health check doesn't raise false alarms.
+    expect(result.recent_pending_events.map(e => e.id)).toEqual(['evt_fresh']);
+    expect(result.total_undelivered).toBe(1);
+    expect(result.total_recent_pending).toBe(1);
     expect(JSON.stringify(result)).not.toContain('private@example.com');
+    expect(JSON.stringify(result)).not.toContain('private2@example.com');
 
     const calledUrl = String(global.fetch.mock.calls[0][0]);
     expect(calledUrl).toContain('delivery_success=false');

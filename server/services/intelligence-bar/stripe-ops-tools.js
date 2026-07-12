@@ -25,6 +25,10 @@ const MAX_HOURS = 24 * 7;
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_ENABLED_EVENTS_SHOWN = 25;
+// Stripe retries webhooks for days; delivery_success=false also returns
+// events whose first attempts are simply still in flight. Younger than this
+// is normal retry churn, not a failure signal.
+const RECENT_PENDING_MINUTES = 10;
 
 const STRIPE_OPS_TOOLS = [
   {
@@ -104,18 +108,30 @@ async function getStripeWebhookFailures(input) {
   });
   // Event payloads carry customer data — only type/timing/delivery state
   // leave this function.
-  const events = (json.data || []).map(e => ({
-    id: e.id,
-    type: e.type,
-    created: new Date(e.created * 1000).toISOString(),
-    pending_webhooks: e.pending_webhooks,
-  }));
+  const pendingCutoff = Date.now() - RECENT_PENDING_MINUTES * 60 * 1000;
+  const failing = [];
+  const recentPending = [];
+  for (const e of json.data || []) {
+    const createdMs = e.created * 1000;
+    const mapped = {
+      id: e.id,
+      type: e.type,
+      created: new Date(createdMs).toISOString(),
+      pending_webhooks: e.pending_webhooks,
+    };
+    // Young events are usually mid-delivery, not failures — splitting them
+    // out keeps a routine health check from raising false alarms.
+    if (createdMs >= pendingCutoff) recentPending.push(mapped);
+    else failing.push(mapped);
+  }
   return {
     window_hours: hours,
-    undelivered_events: events,
-    total: events.length,
+    undelivered_events: failing,
+    recent_pending_events: recentPending,
+    total_undelivered: failing.length,
+    total_recent_pending: recentPending.length,
     has_more: Boolean(json.has_more),
-    note: 'Event payloads are never exposed through the Intelligence Bar.',
+    note: `Events younger than ${RECENT_PENDING_MINUTES} min are listed as recent_pending (likely still delivering, not failures). Event payloads are never exposed through the Intelligence Bar.`,
   };
 }
 

@@ -66,6 +66,38 @@ describe('intelligence bar GitHub ops tools', () => {
     expect(result.merged_prs.map(p => p.number)).toEqual([2629, 2626]);
     expect(result.merged_prs[0].merge_commit_sha).toBe('f815af2ddc');
     expect(result.repo).toBe('wavespestcontrolfl/waves-customer-portal');
+    expect(result.scan_exhaustive).toBe(true); // short page = last page
+  });
+
+  test('get_recent_merged_prs pages until PRs fall out of the window', async () => {
+    process.env.GITHUB_TOKEN = 'ghp_x';
+    const inWindow = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const outOfWindow = new Date(Date.now() - 100 * 60 * 60 * 1000).toISOString();
+    // Page 1: 50 items, all updated in-window (only #1 merged in-window).
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      number: 3000 - i,
+      title: `PR ${3000 - i}`,
+      merged_at: i === 0 ? inWindow : null,
+      updated_at: inWindow,
+      merge_commit_sha: 'abc123def456',
+      user: { login: 'adam' },
+    }));
+    // Page 2: one in-window merge, then items past the window (stop signal).
+    const page2 = [
+      { number: 2900, title: 'PR 2900', merged_at: inWindow, updated_at: inWindow, merge_commit_sha: 'bbb222ccc333', user: { login: 'adam' } },
+      { number: 2899, title: 'PR 2899', merged_at: outOfWindow, updated_at: outOfWindow, merge_commit_sha: 'ddd444', user: { login: 'adam' } },
+    ];
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse(page1))
+      .mockResolvedValueOnce(jsonResponse(page2));
+
+    const result = await executeGithubOpsTool('get_recent_merged_prs', { hours: 48 });
+    expect(result.error).toBeUndefined();
+    expect(result.merged_prs.map(p => p.number)).toEqual([3000, 2900]);
+    expect(result.scanned_recent_prs).toBe(52);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('page=2');
   });
 
   test('get_commit_info validates the sha before any network call', async () => {

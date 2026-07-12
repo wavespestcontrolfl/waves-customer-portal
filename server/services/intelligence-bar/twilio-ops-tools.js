@@ -171,9 +171,10 @@ async function getTwilioFailedMessages(input) {
     nextPath = !pastWindow && json.next_page_uri ? json.next_page_uri : null;
     params = undefined; // next_page_uri already carries the query string
   }
-  // Exiting with a next page pending (page cap or failure limit reached)
-  // means the window was not fully scanned.
-  const exhaustive = !nextPath;
+  // A pending next page OR a filled failure limit means the window may hold
+  // more failures than reported — only an under-limit, fully-paged scan is
+  // exhaustive (hitting the limit can also strand the tail of the last page).
+  const exhaustive = !nextPath && failed.length < limit;
 
   return {
     window_hours: hours,

@@ -26,6 +26,7 @@ const MAX_HOURS = 24 * 14;
 const DEFAULT_LIMIT = 15;
 const MAX_LIMIT = 30;
 const PR_SCAN_PAGE_SIZE = 50;
+const MAX_PR_PAGES = 5;
 
 const GITHUB_OPS_TOOLS = [
   {
@@ -96,14 +97,29 @@ async function getRecentMergedPrs(input) {
   const hours = Math.min(Math.max(Number(input.hours) || DEFAULT_HOURS, 1), MAX_HOURS);
   const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const since = Date.now() - hours * 60 * 60 * 1000;
-  const pulls = await githubGet(`/repos/${repoPath()}/pulls`, {
-    state: 'closed',
-    sort: 'updated',
-    direction: 'desc',
-    per_page: PR_SCAN_PAGE_SIZE,
-  });
-  const merged = (Array.isArray(pulls) ? pulls : [])
-    .filter(p => p.merged_at && new Date(p.merged_at).getTime() >= since)
+  // Closed PRs are paginated; updated_at >= merged_at, so with updated-desc
+  // ordering a page whose last item was updated before the window means no
+  // later page can hold an in-window merge.
+  const candidates = [];
+  let scanned = 0;
+  let exhaustive = true;
+  for (let page = 1; page <= MAX_PR_PAGES; page += 1) {
+    const pulls = await githubGet(`/repos/${repoPath()}/pulls`, {
+      state: 'closed',
+      sort: 'updated',
+      direction: 'desc',
+      per_page: PR_SCAN_PAGE_SIZE,
+      page,
+    });
+    const items = Array.isArray(pulls) ? pulls : [];
+    scanned += items.length;
+    candidates.push(...items.filter(p => p.merged_at && new Date(p.merged_at).getTime() >= since));
+    if (items.length < PR_SCAN_PAGE_SIZE) break; // last page
+    const oldest = items[items.length - 1];
+    if (oldest?.updated_at && new Date(oldest.updated_at).getTime() < since) break;
+    if (page === MAX_PR_PAGES) exhaustive = false;
+  }
+  const merged = candidates
     .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))
     .slice(0, limit)
     .map(p => ({
@@ -118,7 +134,8 @@ async function getRecentMergedPrs(input) {
     window_hours: hours,
     merged_prs: merged,
     total: merged.length,
-    scanned_recent_prs: Array.isArray(pulls) ? pulls.length : 0,
+    scanned_recent_prs: scanned,
+    scan_exhaustive: exhaustive && merged.length === candidates.length,
   };
 }
 
