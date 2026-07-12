@@ -947,9 +947,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // #2633 — the exact educational-idiom false positive again).
     const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
     // Hyphen joins count as adjacency — "The #1-rated pest control
-    // company" (Codex r7 on #2633).
+    // company" (Codex r7 on #2633). Service-line winner claims count too
+    // ("#1 mosquito control choice", Codex r9) — but a winner-noun tail is
+    // REQUIRED on service-line nouns, and choice/pick alone need a
+    // geographic tail, so "the #1 option for standing water is a Bti dunk"
+    // stays educational.
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?)\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)\\s+(?:control|care|removal)\\s+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick)\\s+(?:in|around|near))\\b`, 'i',
     );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {

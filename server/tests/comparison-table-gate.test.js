@@ -1114,6 +1114,18 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-9 finding (#2633) ──
+
+  test('Codex r9: service-line "#1 … choice" winner claims block; method rankings stay clean', () => {
+    for (const prose of ['The #1 mosquito control choice in Venice.', 'The #1 termite control option for your home.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const ok = gate.evaluate({ body: `The #1 option for standing water is a Bti dunk, refreshed monthly.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
   // ── Codex round-8 finding (#2633) ──
 
   test('Codex r8: "#10" / "No. 10" ordinals do not match the "#1" prefix', () => {
