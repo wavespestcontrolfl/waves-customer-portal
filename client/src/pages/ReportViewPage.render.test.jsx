@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
@@ -71,7 +71,10 @@ describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
     renderReport({ ...legacyLawnReport, recap: { ready: true } });
     await screen.findByText('Visit Summary');
 
-    expect(scrollSpy).toHaveBeenCalled();
+    // The anchor effect flushes after the commit findByText resolves on (then
+    // re-runs on a 250ms interval) — wait on the observable scroll, not the
+    // commit, or slow runners lose the race (first CI run failed exactly here).
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
     const target = scrollSpy.mock.instances?.[0] || scrollSpy.mock.contexts?.[0];
     expect(target?.id).toBe('visit-recap');
   });

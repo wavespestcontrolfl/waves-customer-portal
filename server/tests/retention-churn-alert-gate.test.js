@@ -80,6 +80,10 @@ beforeEach(() => {
     id: CUSTOMER_ID,
     first_name: 'Pat',
     last_name: 'Rivera',
+    // #2631 churn-lead-guard: outreach requires a real-customer pipeline stage
+    // (active_customer/won/at_risk) and no soft-delete; leads get null.
+    pipeline_stage: 'active_customer',
+    deleted_at: null,
     waveguard_tier: 'Gold',
     monthly_rate: 89,
   };
@@ -90,6 +94,17 @@ afterAll(() => {
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.ADAM_PHONE;
   delete process.env.GATE_CHURN_ALERT_SMS;
+});
+
+test('#2631 churn-lead-guard: a new_leads-stage record gets no outreach and no SMS', async () => {
+  isEnabled.mockReturnValue(true);
+  db.__firstByTable.customers = { ...db.__firstByTable.customers, pipeline_stage: 'new_leads' };
+
+  const saved = await RetentionEngine.generateRetentionOutreach(CUSTOMER_ID);
+
+  expect(saved).toBeNull();
+  expect(db.__insertedRows.some((r) => r.table === 'retention_outreach')).toBe(false);
+  expect(TwilioService.sendSMS).not.toHaveBeenCalled();
 });
 
 test('gate OFF: outreach draft still saves but no owner SMS fires', async () => {
