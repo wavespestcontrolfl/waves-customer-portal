@@ -29,9 +29,9 @@
 //   Pillar G Intrinsic 7969-295→7969-304 · Vendetta Plus 1021-1828→1021-2593
 //   LESCO Stonewall 0-0-7 10404-117→10404-89 (117 = Prosecutor Pro glyphosate)
 //
-// down() is structural: it clears only values this migration wrote, matched
-// by the exact written value AND our label_verified_by stamp where set;
-// EPA corrections revert to the (wrong) prior value only if still ours.
+// down() clears only values this migration wrote (exact-value match under
+// its own label_verified_by stamp); the EPA and legacy-dilution CORRECTIONS
+// are never reverted — restoring a proven-wrong value is not a rollback.
 
 const VERIFIED_BY = 'label-rate-backfill-2026-07-12';
 
@@ -42,6 +42,17 @@ const EPA_CORRECTIONS = [
   ['Pillar G Intrinsic', '7969-295', '7969-304'],
   ['Vendetta Plus', '1021-1828', '1021-2593'],
   ['LESCO Stonewall 0-0-7', '10404-117', '10404-89'],
+];
+// Rows whose reg number changes also get their audit note/stamps REPLACED
+// (not fill-if-empty) — an older seed's note citing the wrong reg number
+// must not survive next to the corrected value.
+const EPA_CORRECTION_NAMES = new Set(EPA_CORRECTIONS.map(([n]) => n.toLowerCase()));
+
+// Known-wrong legacy dilution defaults, replaced (guarded on the exact old
+// seeded value): the 20260401000017 seed gave Alpine WSG "0.5 oz/gal", but
+// the label states its rates in grams only (10-30 g per gallon).
+const LEGACY_CORRECTIONS = [
+  ['Alpine WSG', { default_rate: '0.5', default_unit: 'oz/gal' }, { default_rate: '10-30', default_unit: 'g/gal' }],
 ];
 
 const DATA = [
@@ -115,8 +126,8 @@ const DATA = [
     note: "distributor_label_pdf: https://www.davey.com/media/r4nfmj2x/barricade-65wg_label.pdf — \"Table 1: Maximum Application Rate of Barricade 65WG per Calendar Year for Turfgrass Species: Bermudagrass / Bahiagrass / Centipedegrass / Kikuyugrass / Seashore Paspalum / St. Augustinegrass / Tall Fescue (including turf\"" },
   { name: "Bifen I/T", basis: "per_gallon", rate: null, min: 0.33, max: 1.0, unit: "fl_oz", epa: "53883-118",
     note: "manufacturer: https://www.controlsolutionsinc.com/hubfs/Specimen%20Labels/Specimen-BifenIT-53883-118.pdf — \"Use a 0.02 to 0.06% dilution to spray the outside surfaces of buildings such as private homes, duplexes, townhouses, condominiums, house trailers, apartment complexes, carports, garages, fence lines, storage sheds, barns\"" },
-  { name: "Bifen XTS", basis: "per_1000_sqft", rate: null, min: 0.07, max: 0.15, unit: "fl_oz", epa: "53883-189",
-    note: "manufacturer: https://www.controlsolutionsinc.com/hubfs/Specimen%20Labels/Specimen-BifenXTS-53883-189.pdf — \"Bifen XTS may be used as a broadcast treatment. To accomplish uniform control when applying to dense grass foliage, use volumes of up to 10 gallons per 1000 square feet. [Table:] Ants, Armyworms, Billbugs, Chinch Bugs, C\"" },
+  { name: "Bifen XTS", basis: "per_1000_sqft", rate: null, min: 0.07, max: 0.3, unit: "fl_oz", epa: "53883-189",
+    note: "manufacturer: https://www.controlsolutionsinc.com/hubfs/Specimen%20Labels/Specimen-BifenXTS-53883-189.pdf — \"Bifen XTS may be used as a broadcast treatment. [Table:] Ants, Armyworms, Billbugs, Chinch Bugs...\" General lawn band 0.07-0.15 fl oz/1,000 sq ft; label table allows up to 0.30 fl oz/1,000 sq ft for listed pests (e.g. fire ants, Japanese beetle larvae)." },
   { name: "Blindside Herbicide", basis: "per_1000_sqft", rate: null, min: 0.149, max: 0.23, unit: "oz", epa: "279-3411",
     note: "distributor_label_pdf: https://homeparamount.com/pdf/doc-blindside-label-1608311602.pdf — \"Table 1. Tolerant grasses. Warm Season Grasses: Bermudagrass (Cynodon dactylon) & hybrids / Centipedegrass (Eremochloa ophuiroides) / St.Augustine grass (Stenotaphrum secundatum) / Zoysiagrass (Zoysia japonica): Recommen\"" },
   { name: "Bora-Care", basis: "other", rate: null, min: null, max: null, unit: null, epa: "64405-1",
@@ -330,17 +341,29 @@ exports.up = async function up(knex) {
       .update({ epa_reg_number: right, updated_at: new Date() });
   }
 
+  for (const [name, oldVals, newVals] of LEGACY_CORRECTIONS) {
+    await knex('products_catalog')
+      .whereRaw('LOWER(name) = LOWER(?)', [name])
+      .where(oldVals)
+      .update({ ...newVals, updated_at: new Date() });
+  }
+
   for (const d of DATA) {
     const row = await knex('products_catalog')
       .whereRaw('LOWER(name) = LOWER(?)', [d.name])
       .first();
     if (!row) continue;
+    const isEpaCorrection = EPA_CORRECTION_NAMES.has(d.name.toLowerCase());
     const updates = {};
     if (d.basis === 'per_1000_sqft') {
       const rate = d.rate != null ? d.rate : d.min;
+      // A label that names a single rate with no band IS its own ceiling —
+      // applying above the only labeled rate is off-label, and the
+      // over-label warning needs max_label_rate_per_1000 to catch it.
+      const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
       if (rate != null && row.default_rate_per_1000 == null) updates.default_rate_per_1000 = rate;
       if (d.min != null && row.min_label_rate_per_1000 == null) updates.min_label_rate_per_1000 = d.min;
-      if (d.max != null && row.max_label_rate_per_1000 == null) updates.max_label_rate_per_1000 = d.max;
+      if (max != null && row.max_label_rate_per_1000 == null) updates.max_label_rate_per_1000 = max;
       if (d.unit && emptyText(row.rate_unit)) updates.rate_unit = d.unit;
     } else if (d.basis === 'per_gallon') {
       const display = d.rate != null
@@ -350,8 +373,10 @@ exports.up = async function up(knex) {
       if (d.unit && emptyText(row.default_unit)) updates.default_unit = `${d.unit}/gal`;
     }
     if (d.epa && emptyText(row.epa_reg_number)) updates.epa_reg_number = d.epa;
-    if (d.note && emptyText(row.label_source_note)) updates.label_source_note = d.note;
-    if (row.label_verified_at == null) {
+    // EPA-corrected rows REPLACE their audit note/stamps — an older seed's
+    // note citing the superseded reg number must not outlive the correction.
+    if (d.note && (emptyText(row.label_source_note) || isEpaCorrection)) updates.label_source_note = d.note;
+    if (row.label_verified_at == null || isEpaCorrection) {
       updates.label_verified_at = new Date();
       updates.label_verified_by = VERIFIED_BY;
     }
@@ -365,6 +390,11 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
+
+  // EPA_CORRECTIONS and LEGACY_CORRECTIONS are intentionally NOT reverted:
+  // rolling back to a registration number or dilution display proven wrong
+  // against the label would corrupt current catalog data, and a row corrected
+  // before/after this migration is indistinguishable from one it corrected.
 
   for (const d of DATA) {
     const row = await knex('products_catalog')
@@ -381,12 +411,13 @@ exports.down = async function down(knex) {
     };
     if (d.basis === 'per_1000_sqft') {
       const rate = d.rate != null ? d.rate : d.min;
+      const max = d.max != null ? d.max : (d.rate != null && d.min == null ? d.rate : null);
       // eslint-disable-next-line eqeqeq
       if (rate != null && row.default_rate_per_1000 == rate) reverts.default_rate_per_1000 = null;
       // eslint-disable-next-line eqeqeq
       if (d.min != null && row.min_label_rate_per_1000 == d.min) reverts.min_label_rate_per_1000 = null;
       // eslint-disable-next-line eqeqeq
-      if (d.max != null && row.max_label_rate_per_1000 == d.max) reverts.max_label_rate_per_1000 = null;
+      if (max != null && row.max_label_rate_per_1000 == max) reverts.max_label_rate_per_1000 = null;
       if (d.unit && row.rate_unit === d.unit) reverts.rate_unit = null;
     } else if (d.basis === 'per_gallon') {
       const display = d.rate != null
@@ -395,17 +426,13 @@ exports.down = async function down(knex) {
       if (display != null && row.default_rate === display) reverts.default_rate = null;
       if (d.unit && row.default_unit === `${d.unit}/gal`) reverts.default_unit = null;
     }
-    if (d.epa && row.epa_reg_number === d.epa) reverts.epa_reg_number = null;
+    // Corrected registrations stay corrected (see note at the top of down()).
+    if (d.epa && row.epa_reg_number === d.epa && !EPA_CORRECTION_NAMES.has(d.name.toLowerCase())) {
+      reverts.epa_reg_number = null;
+    }
     if (d.note && row.label_source_note === d.note) reverts.label_source_note = null;
     await knex('products_catalog')
       .where({ id: row.id })
       .update({ ...reverts, updated_at: new Date() });
-  }
-
-  for (const [name, wrong, right] of EPA_CORRECTIONS) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .where('epa_reg_number', right)
-      .update({ epa_reg_number: wrong, updated_at: new Date() });
   }
 };
