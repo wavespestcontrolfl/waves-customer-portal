@@ -107,6 +107,13 @@ function mapEnvironments(environments) {
         enabled: r.enabled !== false,
         value: r.value ?? null,
         coverage: r.coverage ?? null,
+        // Preserve targeting predicates — otherwise a narrowly-scoped rule
+        // (staff-only, saved-group, prerequisite-gated, or scheduled) reads as
+        // generally applicable and "is X on in production?" gets a wrong answer.
+        condition: r.condition ?? null,
+        saved_group_targeting: r.savedGroupTargeting ?? null,
+        prerequisites: r.prerequisites ?? null,
+        schedule: r.scheduleRules ?? null,
       })),
       rule_count: rules.length,
     };

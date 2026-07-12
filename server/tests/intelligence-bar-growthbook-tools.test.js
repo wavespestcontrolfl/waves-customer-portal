@@ -145,7 +145,38 @@ describe('intelligence bar GrowthBook tools', () => {
     expect(prod.rule_count).toBe(1);
     expect(prod.rules[0]).toEqual({
       type: 'force', description: 'Force on for everyone', enabled: true, value: 'true', coverage: 1,
+      condition: null, saved_group_targeting: null, prerequisites: null, schedule: null,
     });
+  });
+
+  test('get_growthbook_features preserves a rule targeting predicate (scoped rule is not read as global)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_read-only_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      hasMore: false,
+      features: [{
+        id: 'staff-tool',
+        valueType: 'boolean',
+        defaultValue: 'false',
+        environments: {
+          production: {
+            enabled: true,
+            defaultValue: 'false',
+            rules: [{
+              type: 'force', value: 'true', coverage: 1,
+              condition: '{"role":"staff"}',
+              savedGroupTargeting: [{ match: 'all', ids: ['grp_staff'] }],
+            }],
+          },
+        },
+        tags: [],
+        archived: false,
+      }],
+    }));
+
+    const result = await executeGrowthbookTool('get_growthbook_features', {});
+    const rule = result.features[0].environments.production.rules[0];
+    expect(rule.condition).toBe('{"role":"staff"}');
+    expect(rule.saved_group_targeting).toEqual([{ match: 'all', ids: ['grp_staff'] }]);
   });
 
   test('auth rejection surfaces a key hint as { error }, never a throw', async () => {

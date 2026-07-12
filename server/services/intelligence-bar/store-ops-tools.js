@@ -46,7 +46,12 @@ const ASC_API_BASE = process.env.ASC_API_BASE || 'https://api.appstoreconnect.ap
 const DEFAULT_ASC_APP_ID = '6782775654'; // Waves customer portal iOS app
 const DEFAULT_PLAY_PACKAGE = 'com.wavespestcontrol.portal';
 const REQUEST_TIMEOUT_MS = 15000;
-const MAX_VERSIONS = 10;
+// ASC's appStoreVersions relationship does NOT support a `sort` param (it
+// returns HTTP 400 "The parameter 'sort' can not be used with this request",
+// verified live), and it returns rows newest-first by default. Request a
+// generous page so the live/in-review version is always in the returned set
+// even for apps with many historical versions; we sort locally after.
+const MAX_VERSIONS = 50;
 
 // "Live on the App Store" has two spellings: the legacy appStoreState field
 // says READY_FOR_SALE; the newer appVersionState field says
@@ -226,7 +231,10 @@ async function executeStoreOpsTool(toolName, input = {}) {
       default: return { error: `Unknown tool: ${toolName}` };
     }
   } catch (err) {
-    logger.error(`[intelligence-bar:store-ops] Tool ${toolName} failed:`, err);
+    // Log ONLY the message/status — never the raw error object. Gaxios (Play)
+    // errors carry the request config incl. the post-auth Authorization header,
+    // so logging the object would leak the release-capable SA's bearer token.
+    logger.error(`[intelligence-bar:store-ops] Tool ${toolName} failed: ${err.message}`);
     return { error: err.message };
   }
 }
