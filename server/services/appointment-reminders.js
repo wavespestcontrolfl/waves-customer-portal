@@ -1226,6 +1226,12 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
+            // Card-hold fee policy clause (card-on-file spec Phase 1) — ''
+            // for non-held bookings so the template placeholder resolves
+            // clean. Lazy require: estimate-card-holds requires THIS module
+            // for appointment times, so a top-level import would cycle.
+            const cardHoldPolicyLine72 = await require('./estimate-card-holds')
+              .cardHoldReminderLine(r.scheduled_service_id);
             await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
@@ -1238,7 +1244,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1290,6 +1296,9 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
+            // Card-hold fee policy clause — see the 72h twin above.
+            const cardHoldPolicyLine24 = await require('./estimate-card-holds')
+              .cardHoldReminderLine(r.scheduled_service_id);
             await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
@@ -1302,7 +1311,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line },
+                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),

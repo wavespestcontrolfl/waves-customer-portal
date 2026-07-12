@@ -619,18 +619,34 @@ const CARD_HOLD_POST_START_GRACE_MS = 2 * 3600000;
 
 // Whether a cancellation lands INSIDE the fee window (fee applies) vs outside
 // (free release). serviceStart is the appointment's scheduled start instant
-// (window_start). The fee window is (start − cancel_window_hours, start +
-// arrival-window grace): it opens 24h out and stays open while the tech may
-// still arrive; past the grace the visit came and went undelivered (missed
-// dispatch, stale-row cleanup, churn sweep) and charging the late-cancel fee
-// would bill the customer for a visit that never happened — those always
-// release free.
+// (window_start). The fee window is (start − effectiveWindow, start +
+// arrival-window grace), where effectiveWindow = min(cancel_window_hours,
+// time since BOOKING) — card-on-file spec Phase 1 (owner default 2026-07-12,
+// spec §5 #1): a booking made <24h before the slot used to be INSTANTLY
+// inside the 24h window, so any cancel drew the fee with no free-cancel
+// moment at all. Anchoring the window to booking age means the free-cancel
+// period a same-day booker gets is exactly the time they've had the booking:
+// book 3h out and cancel a minute later → free; sit on it until the visit is
+// imminent → the fee applies as disclosed. held_at (stamped when the hold is
+// recorded inside the accept transaction) is the booking instant; legacy
+// rows without it keep the full disclosed window (the frozen-terms
+// direction — never grant a wider free-cancel than the customer was shown,
+// except through this booking-age rule itself).
+// The post-start grace is unchanged: while the tech may still arrive the
+// cancel is real; past it the visit came and went undelivered and always
+// releases free.
 function isWithinCancelWindow({ hold, serviceStart, now = new Date() }) {
   const windowHours = Number(hold?.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
   const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
   if (Number.isNaN(start.getTime())) return false;
+  let windowMs = windowHours * 3600000;
+  const heldAt = hold?.held_at ? new Date(hold.held_at) : null;
+  if (heldAt && !Number.isNaN(heldAt.getTime())) {
+    const msSinceBooking = now.getTime() - heldAt.getTime();
+    if (msSinceBooking >= 0) windowMs = Math.min(windowMs, msSinceBooking);
+  }
   const msUntilStart = start.getTime() - now.getTime();
-  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowHours * 3600000;
+  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
 }
 
 // Single entry for the cancel path: charge the late-cancel fee if the
@@ -662,6 +678,31 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
   const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
+}
+
+// Reminder policy clause (card-on-file spec Phase 1): the 72h/24h
+// appointment reminders for a HELD one-time booking state the fee policy —
+// dispute evidence as much as UX. Clause-style like reschedule-link's
+// smsLineFor: returns '' when the flag is off, no held row exists, or the
+// lookup fails, so the templates' {card_hold_policy_line} placeholder always
+// resolves and non-card-hold reminders stay byte-identical. Terms come from
+// the FROZEN hold row (what the customer consented to), never live config.
+// The cutoff is stated relative to the visit ("until N hours before") — the
+// booking-age grace in isWithinCancelWindow only ever makes the real rule
+// MORE lenient than this disclosure, never less.
+async function cardHoldReminderLine(scheduledServiceId) {
+  try {
+    if (!isCardHoldEnabled()) return '';
+    const hold = await heldCardForScheduledService(scheduledServiceId);
+    if (!hold) return '';
+    const fee = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
+    const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
+    const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+    return `\n\nYour card on file holds this visit. Reschedule or cancel free until ${windowHours} hours before your appointment — inside that window, or if no one is home, a ${feeText} fee applies.`;
+  } catch (err) {
+    logger.warn('[estimate-card-holds] reminder policy line failed (non-fatal)', { error: err.message });
+    return '';
+  }
 }
 
 // Read-only cancel preview for the admin cancel UIs: does this visit carry a
@@ -916,6 +957,7 @@ module.exports = {
   releaseCardHold,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
+  cardHoldReminderLine,
   isWithinCancelWindow,
   settleNoShowFee,
   _private: {

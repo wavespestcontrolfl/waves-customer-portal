@@ -62,6 +62,7 @@ const {
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
+  cardHoldReminderLine,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -190,6 +191,61 @@ describe('isWithinCancelWindow', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:00Z'), now })).toBe(false); // exactly grace boundary (start + 2h == now)
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T08:00:00Z'), now })).toBe(false); // same-day morning visit never delivered
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false); // days-stale (churn-sweep rescheduled phantom)
+  });
+
+  // Card-on-file spec Phase 1 (owner default, spec §5 #1): the effective
+  // window is min(cancel_window_hours, time since booking) — a same-day
+  // booking is no longer instantly inside the fee window.
+  describe('inside-window booking grace (window anchored to booking age)', () => {
+    const start = new Date('2026-06-24T15:00:00Z'); // visit 3h from `now`
+    it('free cancel right after a same-day booking', () => {
+      const freshHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T11:55:00Z') }; // booked 5 min ago
+      expect(isWithinCancelWindow({ hold: freshHold, serviceStart: start, now })).toBe(false);
+    });
+    it('fee applies once the booking has aged past the time remaining', () => {
+      const agedHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T08:00:00Z') }; // booked 4h ago, visit in 3h
+      expect(isWithinCancelWindow({ hold: agedHold, serviceStart: start, now })).toBe(true);
+    });
+    it('booking age never WIDENS the disclosed window', () => {
+      const oldHold = { cancel_window_hours: 24, held_at: new Date('2026-06-20T12:00:00Z') }; // booked days ago
+      // visit 25h out — outside the 24h disclosed window regardless of age
+      expect(isWithinCancelWindow({ hold: oldHold, serviceStart: new Date('2026-06-25T13:00:00Z'), now })).toBe(false);
+    });
+    it('legacy rows without held_at keep the full disclosed window', () => {
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24 }, serviceStart: start, now })).toBe(true);
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24, held_at: 'not-a-date' }, serviceStart: start, now })).toBe(true);
+    });
+    it('a clock-skewed future held_at falls back to the disclosed window', () => {
+      const skewed = { cancel_window_hours: 24, held_at: new Date('2026-06-24T12:05:00Z') }; // "booked" 5 min in the future
+      expect(isWithinCancelWindow({ hold: skewed, serviceStart: start, now })).toBe(true);
+    });
+  });
+});
+
+describe('cardHoldReminderLine — reminder fee-policy clause (spec Phase 1)', () => {
+  it("'' while the flag is off (dark-safe)", async () => {
+    delete process.env.ONE_TIME_CARD_HOLD;
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it("'' when the visit carries no held card (non-card-hold reminders stay byte-identical)", async () => {
+    stubDb(null);
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it('states the FROZEN fee + window from the hold row, not live config', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48 });
+    const line = await cardHoldReminderLine('svc1');
+    expect(line).toBe('\n\nYour card on file holds this visit. Reschedule or cancel free until 48 hours before your appointment — inside that window, or if no one is home, a $39 fee applies.');
+  });
+  it('falls back to config defaults when frozen values are absent (legacy rows)', async () => {
+    stubDb({ id: 'h1' });
+    const line = await cardHoldReminderLine('svc1');
+    expect(line).toContain('until 24 hours before');
+    expect(line).toContain('$49 fee applies');
+  });
+  it("'' on a lookup error — a reminder must never fail on the policy clause", async () => {
+    stubDb(new Error('db down'));
+    expect(await cardHoldReminderLine('svc1')).toBe('');
   });
 });
 
