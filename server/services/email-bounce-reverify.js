@@ -182,7 +182,11 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
     .whereNotNull('recording_url')
     .whereRaw(`created_at >= now() - interval '${SOURCE_CALL_LOOKBACK_DAYS} days'`)
     .whereRaw('LOWER(COALESCE(ai_extraction, \'\')) ~ ?', [emailBoundaryRegex(bounced)])
-    .select('id', 'recording_url', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
+    // twilio_call_sid + recording_sid ride along for the PAN quarantine
+    // path: without the call SID, quarantineCardRecording can strip
+    // call_log.recording_url but cannot clear the recording media already
+    // synced onto the unified voice message (Codex #2676 round-7/8 P1).
+    .select('id', 'recording_url', 'recording_sid', 'twilio_call_sid', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
     .modify((qb) => {
       if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
       else qb.orderBy('created_at', 'desc');

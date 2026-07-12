@@ -114,36 +114,47 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
 
   for (const call of calls) {
     summary.attempted += 1;
+    // Heal legacy PAN-bearing TEXT artifacts BEFORE the throwable re-listen
+    // (Codex #2676 round-7 P1): a provider outage throws out of
+    // transcribeFn, and after MAX_ATTEMPTS recordFailure stamps
+    // retranscribed_at — a heal that only ran on success would strand the
+    // raw card data permanently. Text-only here (no quarantine yet): the
+    // recording must survive for the re-listen this job exists to perform;
+    // the quarantine runs after the listen — or in the catch when the
+    // listen itself failed. Candidates are terminal-state rows the live
+    // pipeline is done with, so the whereNull(retranscribed_at) guard is
+    // sufficient against concurrent writers.
+    let legacyPanCount = 0;
+    try {
+      const legacyText = require('../utils/pan-scrub').scrubPansDetailed(call.transcription ?? null);
+      const legacyStructured = processor().scrubStructuredTranscript(call.transcript_structured ?? null);
+      legacyPanCount = legacyText.count + legacyStructured.count;
+      if (legacyPanCount > 0) {
+        await dbi('call_log')
+          .where({ id: call.id })
+          .whereNull('retranscribed_at')
+          .update({
+            ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
+            ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
+            updated_at: dbi.fn.now(),
+          });
+        if (legacyText.count > 0) call.transcription = legacyText.text;
+        if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
+      }
+    } catch (healErr) {
+      logger.error(`[retranscribe] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);
+    }
     try {
       const result = await transcribeFn(call);
-      // Heal legacy PAN-bearing artifacts IMMEDIATELY — the unusable/
-      // retry verdict branches below stamp retranscribed_at (or leave the
-      // row for another pass) without ever reaching the main update, which
-      // would leave a raw card number stored permanently (Codex #2676
-      // round-5 P1). Runs AFTER transcribeFn so the quarantine's recording
-      // delete can't race the re-listen this job exists to perform.
-      // Candidates are terminal-state rows the live pipeline is done with,
-      // so the whereNull(retranscribed_at) guard is sufficient against
-      // concurrent writers.
-      try {
-        const legacyText = require('../utils/pan-scrub').scrubPansDetailed(call.transcription ?? null);
-        const legacyStructured = processor().scrubStructuredTranscript(call.transcript_structured ?? null);
-        if (legacyText.count + legacyStructured.count > 0) {
-          await dbi('call_log')
-            .where({ id: call.id })
-            .whereNull('retranscribed_at')
-            .update({
-              ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
-              ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
-              updated_at: dbi.fn.now(),
-            });
-          if (legacyText.count > 0) call.transcription = legacyText.text;
-          if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
+      // Legacy artifacts carried a PAN — the recording carries it too;
+      // quarantine now that the re-listen has run (round-5 P1 ordering).
+      if (legacyPanCount > 0) {
+        try {
           await processor().quarantineCardRecording(call, { source: 'retranscription_backfill_legacy' });
           call.recording_url = null;
+        } catch (qErr) {
+          logger.error(`[retranscribe] legacy PAN quarantine failed for call ${call.id}: ${qErr.message}`);
         }
-      } catch (healErr) {
-        logger.error(`[retranscribe] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);
       }
       const text = result?.transcription || null;
       if (!text || result?.provider === 'openai_unlabeled_fallback') {
@@ -216,6 +227,19 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
       }
     } catch (err) {
       logger.warn(`[retranscribe] call ${call.id} failed: ${err.message}`);
+      // The re-listen failed but the legacy artifacts carried a PAN — the
+      // recording carries it too, and the exhausted path below stamps the
+      // row out of future selection, so this catch is the last chance to
+      // delete the card audio (round-7 P1). Retryability trade accepted:
+      // the audio must not outlive the attempt window.
+      if (legacyPanCount > 0) {
+        try {
+          await processor().quarantineCardRecording(call, { source: 'retranscription_backfill_legacy' });
+          call.recording_url = null;
+        } catch (qErr) {
+          logger.error(`[retranscribe] legacy PAN quarantine failed for call ${call.id}: ${qErr.message}`);
+        }
+      }
       summary[await recordFailure(call.id)] += 1;
     }
   }

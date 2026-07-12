@@ -7494,6 +7494,18 @@ const CallRecordingProcessor = {
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) return { success: false, reason: 'call_not_found' };
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
+    // PAN quarantine guard (Codex #2676 round-7 P1): a quarantined call's
+    // nulled recording_url makes it look exactly like a missing-recording
+    // candidate — if the Twilio delete was transient/slow, recovery would
+    // reattach the card audio and undo the quarantine. The stamp is the
+    // durable guard; every recovery entry point flows through here.
+    try {
+      const rawMeta = call.transcription_metadata;
+      const meta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      if (meta.pan_detected === true) {
+        return { success: true, skipped: true, reason: 'pan_quarantined' };
+      }
+    } catch { /* unparseable metadata -> treat as unstamped */ }
 
     let recordings;
     try {

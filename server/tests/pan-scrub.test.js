@@ -250,18 +250,72 @@ describe('scrubSegments — diarized-segment scrub with cross-boundary bridging 
 describe('scrubPans — CVV context redaction', () => {
   it('masks a numeric CVV named in context', () => {
     expect(scrubPans('the cvv is 123 thanks')).toBe('the cvv is [code removed] thanks');
-    expect(scrubPans('security code 4 5 6 7.')).toBe('security code [code removed].');
+    expect(scrubPans('card security code 4 5 6 7.')).toBe('card security code [code removed].');
   });
   it('masks a punctuated CVV readback (round-3: providers punctuate pauses)', () => {
     expect(scrubPans('cvv is 1, 2, 3 ok')).toBe('cvv is [code removed] ok');
-    expect(scrubPans('security code 4. 5. 6 done')).toBe('security code [code removed] done');
+    expect(scrubPans('the card security code 4. 5. 6 done')).toBe('the card security code [code removed] done');
   });
   it('masks a spoken CVV named in context', () => {
     expect(scrubPans('my cvc is one two three ok')).toBe('my cvc is [code removed] ok');
   });
+  it('masks spaced/punctuated CVV acronyms (round-7: providers spell them out)', () => {
+    expect(scrubPans('the C V V is 123')).toBe('the C V V is [code removed]');
+    expect(scrubPans('C.V.C. is 4 5 6 ok')).toBe('C.V.C. is [code removed] ok');
+  });
+  it('bare "security code" masks ONLY with card context nearby (round-7/8 P2)', () => {
+    // Card wording nearby → it's the card's code.
+    expect(scrubPans('reading the card now, security code is 123')).toBe('reading the card now, security code is [code removed]');
+    // No context at all → left alone (could be anything).
+    expect(scrubPans('security code is 1234')).toBe('security code is 1234');
+    // Gate/access wording → an ENTRY code the extraction must keep.
+    const gate = 'the gate security code is 1234';
+    expect(scrubPans(gate)).toBe(gate);
+    const lockbox = 'lock box security code is 321 for the tech';
+    expect(scrubPans(lockbox)).toBe(lockbox);
+  });
   it('leaves bare 3-4 digit runs without context untouched', () => {
     const s = 'gate code 1234 and unit 567';
     expect(scrubPans(s)).toBe(s);
+  });
+});
+
+describe('scrubPans — round 7/8 hardening', () => {
+  it('absorbs a slash-form expiry + CVV tail into the mask (round-7)', () => {
+    expect(scrubPans('4242 4242 4242 4242, 12/28 123')).toBe('[card ending 4242] [code removed]');
+  });
+  it('masks a readback split one group per segment via the sliding window (round-7/8)', () => {
+    const r = scrubSegments([
+      { id: 's1', text: '4242' },
+      { id: 's2', text: '4242' },
+      { id: 's3', text: '4242' },
+      { id: 's4', text: '4242' },
+      { id: 's5', text: 'thanks' },
+    ]);
+    expect(r.count).toBe(1);
+    expect(r.segments[0].text).toBe('[card ending 4242]');
+    expect(r.segments[1].text).toBe('');
+    expect(r.segments[2].text).toBe('');
+    expect(r.segments[3].text).toBe('');
+    expect(r.segments[4]).toEqual({ id: 's5', text: 'thanks' });
+  });
+  it('masks a SECOND spoken card in the same run instead of returning it verbatim (round-8)', () => {
+    const W = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+    const say = (digits) => digits.split('').map((d) => W[Number(d)]).join(' ');
+    const two = `${say('4242424242424242')} ${say('4012888888881881')}`;
+    expect(scrubPansDetailed(two)).toEqual({ text: '[card ending 4242] [card ending 1881]', count: 2 });
+  });
+  it('masks a spoken 2-series Mastercard + FUTURE expiry that also decomposes as phones (round-7)', () => {
+    const W = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+    const say = (digits) => digits.split('').map((d) => W[Number(d)]).join(' ');
+    const r = scrubPansDetailed(`${say('2222000000200202')} one two two eight`);
+    expect(r.count).toBe(1);
+    expect(r.text).toBe('[card ending 0202] [code removed]');
+  });
+  it('a phone pair in the 2-series range with a PAST-dated MMYY tail still survives (round-4 posture kept)', () => {
+    // 239 = Fort Myers — a dictated local callback pair must never be eaten.
+    const phones = 'two three nine five five five one two three four three zero five two three four zero one two three';
+    expect(scrubPans(phones)).toBe(phones);
   });
 });
 

@@ -78,7 +78,11 @@ function maskFor(digits) {
 // providers punctuate pauses, so a card readback commonly lands as
 // "4242, 4242, 4242, 4242" or period/newline-separated groups — commas,
 // periods, and whitespace must join a run or each group is an unmatchable
-// <13-digit island (Codex #2676 round-2 P1).
+// <13-digit island (Codex #2676 round-2 P1). Slashes join too: a trailing
+// "12/28 123" expiry/CVV must ride the same run so the absorb step can
+// swallow it — stopping at the slash left "/28 123" (raw CVV) beside the
+// mask (round-7 P1). Slash-joined non-card runs (dates, phones) stay under
+// the 13-digit floor or phone-lock, so nothing new becomes maskable.
 // A diarization label sitting mid-readback ("4242 4242\nSpeaker 1: 4242
 // 4242" — same caller, split by the provider) must not break the run into
 // unmatchable islands (Codex #2676 round-5 P1). The label text is swallowed
@@ -91,7 +95,7 @@ const LABEL_SEP = '(?:(?:speaker\\s*\\d+|agent|caller)\\s*:[\\s,.-]{1,3})';
 // so "Speaker 1:" mid-readback can never poison the Luhn stream (Codex
 // #2676 round-6 P1).
 const NUMERIC_RUN_RE = new RegExp(
-  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:[\\s,.-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
+  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:[\\s,./-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
   'gi'
 );
 const LABEL_TOKEN_RE = new RegExp('(?:speaker\\s*\\d+|agent|caller)\\s*:', 'gi');
@@ -272,6 +276,30 @@ function strongCardIin(digits) {
   return /^4/.test(digits) || /^3[47]/.test(digits) || /^5[1-5]/.test(digits) || /^(6011|65|64[4-9])/.test(digits);
 }
 
+// 2-series Mastercard (2221–2720): too weak for the generic guard above —
+// NANP area codes live in 2xx, and 239/261/272… are REAL dictated-phone
+// prefixes (239 is Waves' own Fort Myers market) — but the PRECISE 4-digit
+// range check plus a STRICT FUTURE-DATED expiry tail is card evidence: a
+// spoken 2-series MC + real expiry must not survive as "two phone numbers"
+// (round-7 P1), while a phone pair whose tail merely LOOKS like MMYY keeps
+// losing to the phone decomposition (round-4 P2) because a coincidental
+// tail is as likely a past date as a future one and real card expiries are
+// always in the future. Residual trade documented as with the 4xx case.
+function mc2SeriesIin(digits) {
+  const four = Number(digits.slice(0, 4));
+  return Number.isFinite(four) && four >= 2221 && four <= 2720;
+}
+
+function isStrictFutureExpiryTail(tail) {
+  if (tail.length !== 4 && tail.length !== 7 && tail.length !== 8) return false;
+  const mm = Number(tail.slice(0, 2));
+  if (!(mm >= 1 && mm <= 12)) return false;
+  const yy = Number(tail.slice(2, 4));
+  const nowYY = new Date().getFullYear() % 100;
+  const ahead = (yy - nowYY + 100) % 100;
+  return ahead <= 15; // cards expire ≤ ~10y out; 15 leaves slack, past years fail
+}
+
 function scrubSpokenRun(run) {
   // Words may include fillers/label tokens the separator let through —
   // track which word positions are DIGIT words so windows count digits,
@@ -300,7 +328,9 @@ function scrubSpokenRun(run) {
     // masks. Privacy bias documented: a 4xx-area-code phone pair with a
     // Luhn-colliding prefix AND a valid-MMYY-shaped tail can still mask —
     // the residual trade accepted in favor of never persisting a PAN.
-    if (phoneRun && (!strongCardIin(candidate) || !isValidCodeTail(digits.slice(len)))) continue;
+    if (phoneRun
+      && !(strongCardIin(candidate) && isValidCodeTail(digits.slice(len)))
+      && !(mc2SeriesIin(candidate) && isStrictFutureExpiryTail(digits.slice(len)))) continue;
     if (panCandidateValid(candidate)) {
       // Mask through the len-th DIGIT word (fillers inside the readback are
       // swallowed by the mask). A short DIGIT tail (≤8) is the expiry/CVV
@@ -309,10 +339,18 @@ function scrubSpokenRun(run) {
       const lastMaskedWordIdx = digitWordIdx[len - 1];
       const tailWords = words.slice(lastMaskedWordIdx + 1);
       const tailDigitCount = digits.length - len;
-      const tail = tailDigitCount > 0 && tailDigitCount <= 8
-        ? ' [code removed]'
-        : (tailWords.length ? ` ${tailWords.join(' ')}` : '');
-      return { text: maskFor(candidate) + tail, count: 1 };
+      if (tailDigitCount > 0 && tailDigitCount <= 8) {
+        return { text: maskFor(candidate) + ' [code removed]', count: 1 };
+      }
+      if (tailWords.length) {
+        // A longer tail can be a SECOND card in the same utterance (a caller
+        // repeating or replacing a card) — recursively scrub it instead of
+        // returning it verbatim (round-8 P1). Sub-13-digit tails come back
+        // untouched from the recursion's floor check.
+        const rest = scrubSpokenRun(tailWords.join(' '));
+        return { text: `${maskFor(candidate)} ${rest.text}`, count: 1 + rest.count };
+      }
+      return { text: maskFor(candidate), count: 1 };
     }
   }
   return { text: run, count: 0 };
@@ -333,16 +371,28 @@ function scrubSegments(segments) {
     count += s.count;
     return s.count ? { ...seg, text: s.text } : seg;
   });
-  for (let i = 0; i + 1 < out.length; i += 1) {
+  // Sliding multi-segment window (round-7/8 P1): a readback split one
+  // 4-digit chunk per segment never reaches the 13-digit floor in any
+  // PAIR — keep extending the joined window (bounded at 8 hops) until a
+  // scrub hits, then mask in the first segment and empty the rest of the
+  // window. Windows only START at a segment that carries digit content.
+  const DIGITISH_RE = /\d|\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i;
+  for (let i = 0; i < out.length; i += 1) {
     const a = out[i];
-    const b = out[i + 1];
-    if (!a || !b || typeof a.text !== 'string' || typeof b.text !== 'string') continue;
-    const joined = `${a.text}\n${b.text}`;
-    const r = scrubPansDetailed(joined);
-    if (r.count > 0) {
-      out[i] = { ...a, text: r.text };
-      out[i + 1] = { ...b, text: '' };
-      count += r.count;
+    if (!a || typeof a.text !== 'string' || !DIGITISH_RE.test(a.text)) continue;
+    let joined = a.text;
+    for (let j = i + 1; j < out.length && j - i <= 8; j += 1) {
+      const b = out[j];
+      if (!b || typeof b.text !== 'string') break;
+      joined = `${joined}\n${b.text}`;
+      const r = scrubPansDetailed(joined);
+      if (r.count > 0) {
+        out[i] = { ...a, text: r.text };
+        for (let k = i + 1; k <= j; k += 1) out[k] = { ...out[k], text: '' };
+        count += r.count;
+        i = j;
+        break;
+      }
     }
   }
   return { segments: out, count };
@@ -350,16 +400,47 @@ function scrubSegments(segments) {
 
 // Read-aloud CVV with context ("cvv 123", "security code is one two three").
 // Bare 3–4 digit runs stay untouched — context is what disambiguates.
-const CVV_KEYWORD = '(?:cvv2?|cvc|csc|security\\s+code|card\\s+(?:security\\s+)?code|verification\\s+(?:code|number))';
+// Providers spell the acronym out ("C V V", "C.V.V.") — spaced/punctuated
+// forms must match or the keyword check never runs (round-7 P1).
+const CVV_ACRONYM = '(?:c[\\s.]{0,2}v[\\s.]{0,2}v2?|c[\\s.]{0,2}v[\\s.]{0,2}c|c[\\s.]{0,2}s[\\s.]{0,2}c)';
+const CVV_KEYWORD = `(?:${CVV_ACRONYM}|card\\s+(?:security\\s+)?code|verification\\s+(?:code|number))`;
+// Bare "security code" is context-gated (round-7/8 P2): in a pest-service
+// call it usually means a GATE/lockbox/access code — an artifact the call
+// extraction explicitly persists for booked visits — and masking it (plus
+// the quarantine the count triggers) would destroy entry instructions over
+// zero card data. It only scrubs when card wording appears nearby AND no
+// access wording does; "card security code" stays in the always-on set.
+const BARE_SECURITY_CODE = 'security\\s+code';
+const CARD_CONTEXT_RE = /\b(?:card|visa|master\s*card|amex|american\s+express|discover|debit|credit|c[\s.]{0,2}v[\s.]{0,2}[vc]|expir)/i;
+const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|lock\s*box|community|entry|access|alarm|building|call\s*box|keypad|pool|fence|hoa)\b/i;
 // Digit separators mirror the PAN path — providers punctuate pauses, so
 // "cvv is 1, 2, 3" must match as readily as "cvv 123" (round-3 P1).
-const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:\\d[\\s,.-]{0,2}){2,3}\\d)(?![\\d])`, 'gi');
+const CVV_TAIL_NUMERIC = '((?:\\d[\\s,.-]{0,2}){2,3}\\d)(?![\\d])';
+const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
 const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
+const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+
+function bareSecurityCodeIsCardCvv(full, offset) {
+  const windowText = full.slice(Math.max(0, offset - 80), offset + 20);
+  if (ACCESS_CONTEXT_RE.test(windowText)) return false;
+  return CARD_CONTEXT_RE.test(windowText);
+}
 
 function scrubCvvContext(text) {
   let count = 0;
   let out = text.replace(CVV_NUMERIC_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
   out = out.replace(CVV_SPOKEN_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
+  out = out.replace(SEC_NUMERIC_RE, (m, kw, code, offset, full) => {
+    if (!bareSecurityCodeIsCardCvv(full, offset)) return m;
+    count += 1;
+    return `${kw}[code removed]`;
+  });
+  out = out.replace(SEC_SPOKEN_RE, (m, kw, code, offset, full) => {
+    if (!bareSecurityCodeIsCardCvv(full, offset)) return m;
+    count += 1;
+    return `${kw}[code removed]`;
+  });
   return { text: out, count };
 }
 
