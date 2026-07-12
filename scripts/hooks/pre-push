@@ -212,6 +212,13 @@ for i in "${!REF_SHAS[@]}"; do
   set +m
   CODEX_STATUS=0
   wait "$CODEX_PID" || CODEX_STATUS=$?
+  # If the watchdog fired, escalate to KILL on the whole group ourselves:
+  # the leader dying on TERM makes wait return before the watchdog reaches
+  # its own sleep-5 KILL fallback, and a TERM-ignoring descendant would
+  # otherwise survive under pid 1.
+  if [ -f "$TMPDIR_RUN/timed-out-$i" ]; then
+    kill -KILL -"$CODEX_PID" 2>/dev/null
+  fi
   kill -TERM -"$WATCHDOG_PID" 2>/dev/null
   wait "$WATCHDOG_PID" 2>/dev/null
 
