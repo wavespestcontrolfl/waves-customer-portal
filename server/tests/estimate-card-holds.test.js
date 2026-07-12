@@ -261,6 +261,14 @@ describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Pha
     expect(note).toContain('A $49 fee applies only if you cancel or no one is home');
     expect(note).not.toContain('cancel free until');
   });
+  it('a clock-skewed FUTURE held_at falls back to the disclosed-window cutoff (matches the fee check)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() + 2 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // disclosed cutoff = start − 24h, future
+    const note = await cardHoldReminderNote('svc1');
+    // Must NOT use the midpoint of a future booking time — the fee check
+    // ignores future held_at and charges on the full disclosed window.
+    expect(note).toContain('cancel free until');
+  });
   it('appointment-time resolution failure degrades to the generic copy, never throws', async () => {
     stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
     mockApptTime.mockRejectedValue(new Error('appt lookup down'));

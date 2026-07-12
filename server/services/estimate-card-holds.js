@@ -714,7 +714,11 @@ async function cardHoldReminderNote(scheduledServiceId) {
       if (Number.isFinite(startMs)) {
         const heldMs = hold.held_at ? new Date(hold.held_at).getTime() : NaN;
         const byWindow = startMs - windowHours * 3600000;
-        const tStar = Number.isFinite(heldMs) && heldMs <= startMs
+        // A clock-skewed FUTURE held_at must fall back to the disclosed
+        // window, exactly like isWithinCancelWindow does — otherwise the
+        // reminder promises a midpoint cutoff the fee check won't honor
+        // (Codex #2677 round-2).
+        const tStar = Number.isFinite(heldMs) && heldMs <= Date.now()
           ? Math.max(byWindow, (heldMs + startMs) / 2)
           : byWindow;
         if (tStar > Date.now()) {
