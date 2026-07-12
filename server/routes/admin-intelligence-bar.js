@@ -157,30 +157,26 @@ function isNonAdminDashboardRequest(req) {
 const MAX_QUERY_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+// Stack-safe (sliced) validation — a whole-string regex on a multi-megabyte
+// payload is the CI-only 500 flake; see server/utils/base64-validate.js.
+const { isValidBase64 } = require('../utils/base64-validate');
 const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
-
-function isValidBase64(data) {
-  return typeof data === 'string'
-    && data.length > 0
-    && data.length % 4 === 0
-    && BASE64_RE.test(data);
-}
 
 // Validate attachments server-side — never trust the client downscaler. Drop
 // anything with an unsupported media type, non-base64 data, or a decoded size
 // over the provider's per-image cap, so a stale/malformed/direct-API payload
 // can't burn an AI request on a guaranteed provider error. Unsupported types
-// are dropped, never relabeled.
+// are dropped, never relabeled. The size cap runs before base64 validation:
+// it's plain arithmetic, and an oversized payload should never be scanned.
 function sanitizeQueryImages(images) {
   if (!Array.isArray(images)) return [];
   const out = [];
   for (const img of images) {
     if (out.length >= MAX_QUERY_IMAGES) break;
     if (!img || !ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType)) continue;
+    if (typeof img.data !== 'string' || Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
     if (!isValidBase64(img.data)) continue;
-    if (Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
     out.push({ mediaType: img.mediaType, data: img.data });
   }
   return out;
