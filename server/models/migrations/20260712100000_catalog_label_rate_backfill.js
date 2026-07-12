@@ -33,8 +33,10 @@
 //   LESCO Stonewall 0-0-7 10404-117→10404-89 (117 = Prosecutor Pro glyphosate)
 //
 // down() clears only values this migration wrote (exact-value match under
-// its own label_verified_by stamp); the EPA and legacy-dilution CORRECTIONS
-// are never reverted — restoring a proven-wrong value is not a rollback.
+// its own label_verified_by stamp). Never reverted: the EPA and legacy-
+// dilution CORRECTIONS (restoring a proven-wrong value is not a rollback)
+// and ALL epa_reg_number fills (indistinguishable from pre-existing data,
+// and 'N/A' is strictly less information than a verified registration).
 
 const VERIFIED_BY = 'label-rate-backfill-2026-07-12';
 
@@ -46,10 +48,10 @@ const EPA_CORRECTIONS = [
   ['Vendetta Plus', '1021-1828', '1021-2593'],
   ['LESCO Stonewall 0-0-7', '10404-117', '10404-89'],
 ];
-// Rows whose reg number changes also get their audit note/stamps REPLACED
-// (not fill-if-empty) — an older seed's note citing the wrong reg number
-// must not survive next to the corrected value.
-const EPA_CORRECTION_NAMES = new Set(EPA_CORRECTIONS.map(([n]) => n.toLowerCase()));
+// Rows whose reg number actually changes also get their audit note/stamps
+// REPLACED (not fill-if-empty) — an older seed's note citing the wrong reg
+// number must not survive next to the corrected value. up() tracks the
+// applied set at runtime (epaApplied).
 
 // Known-wrong legacy dilution defaults, replaced (guarded on the exact old
 // seeded value): the 20260401000017 seed gave Alpine WSG "0.5 oz/gal", but
@@ -453,12 +455,11 @@ exports.down = async function down(knex) {
       if (display != null && row.default_rate === display) reverts.default_rate = null;
       if (d.unit && row.default_unit === `${d.unit}/gal`) reverts.default_unit = null;
     }
-    // Corrected registrations stay corrected (see note at the top of down()).
-    // Revert to the 'N/A' sentinel, not null: epa_reg_number is NOT NULL
-    // since 20260517000004, and 'N/A' is the exact pre-fill state up() saw.
-    if (d.epa && row.epa_reg_number === d.epa && !EPA_CORRECTION_NAMES.has(d.name.toLowerCase())) {
-      reverts.epa_reg_number = 'N/A';
-    }
+    // epa_reg_number is NEVER reverted: a value equal to ours may have been
+    // present before up() ran (fill-if-empty can't be distinguished from
+    // pre-existing data on rollback), and replacing a label-verified
+    // registration with the 'N/A' sentinel destroys information either way.
+    // Corrected registrations stay corrected for the same reason.
     if (d.note && row.label_source_note === d.note) {
       reverts.label_source_note = null;
     } else if (d.note && row.label_source_note && row.label_source_note.endsWith(` | ${d.note}`)) {

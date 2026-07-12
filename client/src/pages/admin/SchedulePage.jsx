@@ -8756,13 +8756,21 @@ export function CompletionPanel({
         rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
+        // A "/gal" unit is a mix concentration — fine as the rate, but
+        // "Total used" records a real quantity (and inventory deduction
+        // can't convert a concentration), so default the amount unit to
+        // the base unit instead.
+        amountUnit: usePestSprayDefault
+          ? "oz"
+          : defaultUnit.endsWith("/gal")
+            ? defaultUnit.slice(0, -"/gal".length)
+            : defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           null,
         totalAmount: prefillTotal,
         totalAmountManual: false,
-        amountUnit: usePestSprayDefault ? "oz" : defaultUnit,
         applicationMethod,
         applicationArea: "",
         areaValue: prefillArea,
@@ -11250,9 +11258,6 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
-                        <option value="oz/gal">oz/gal</option>{" "}
-                        <option value="fl_oz/gal">fl oz/gal</option>{" "}
-                        <option value="g/gal">g/gal</option>{" "}
                       </select>{" "}
                       {areasServiced.length > 0 && (
                         <select
@@ -13192,9 +13197,6 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
-                    <option value="oz/gal">oz/gal</option>{" "}
-                    <option value="fl_oz/gal">fl oz/gal</option>{" "}
-                    <option value="g/gal">g/gal</option>{" "}
                   </select>{" "}
                   {areasServiced.length > 0 && (
                     <select
