@@ -17,7 +17,12 @@ const VALID_LOCATIONS = ['front_yard', 'back_yard', 'side_yard', 'inside_home', 
 
 const MAX_PHOTOS = 3;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB per photo decoded
-const DATA_URL_RE = /^data:image\/(jpeg|jpg|png|webp|heic|heif);base64,([A-Za-z0-9+/=]+)$/;
+// Prefix-only match — the old anchored form captured the whole multi-megabyte
+// payload in one regex, which can blow V8's regex stack on a loaded worker
+// (see server/utils/base64-validate.js). The payload is size-checked, then
+// charset-validated in slices.
+const DATA_URL_PREFIX_RE = /^data:image\/(?:jpeg|jpg|png|webp|heic|heif);base64,/;
+const { isValidBase64 } = require('../utils/base64-validate');
 
 // Throttle creates per authenticated customer — POST fans out two SMS messages,
 // so we want stricter scoping than the global /api limiter.
@@ -53,13 +58,14 @@ function stripHtml(s) {
 // Validate a single photo entry — must be a small base64 data URL of an allowed image type.
 function validatePhoto(p) {
   if (typeof p !== 'string') return null;
-  const m = DATA_URL_RE.exec(p);
+  const m = DATA_URL_PREFIX_RE.exec(p);
   if (!m) return null;
-  const b64 = m[2];
+  const b64 = p.slice(m[0].length);
   // Approximate decoded byte size from base64 length
   const padding = (b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0);
   const decoded = Math.floor((b64.length * 3) / 4) - padding;
   if (decoded > MAX_PHOTO_BYTES) return null;
+  if (!isValidBase64(b64)) return null;
   return p;
 }
 

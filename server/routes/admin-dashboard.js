@@ -2052,17 +2052,18 @@ router.get('/alerts', dashboardCache, async (req, res, next) => {
 const ALLOWED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_IMAGES = 3;
 const MAX_IMAGE_B64 = 7 * 1024 * 1024; // ~5 MB decoded
-const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
-function isValidBase64(s) {
-  return typeof s === 'string' && s.length > 0 && s.length % 4 === 0 && B64_RE.test(s);
-}
+// Stack-safe (sliced) validation, size-capped BEFORE the charset scan — a
+// whole-string regex on an oversized payload can blow V8's regex stack; see
+// server/utils/base64-validate.js.
+const { isValidBase64 } = require('../utils/base64-validate');
 function sanitizeChartImages(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
     // Reject malformed/oversized data up front so a stale client or direct
     // request can't burn a Gemini+Claude call on garbage before it fails.
     .filter((im) => im && ALLOWED_IMAGE_MIME.has(im.mimeType)
-      && isValidBase64(im.data) && im.data.length <= MAX_IMAGE_B64)
+      && typeof im.data === 'string' && im.data.length <= MAX_IMAGE_B64
+      && isValidBase64(im.data))
     .slice(0, MAX_IMAGES)
     .map((im) => ({ data: im.data, mimeType: im.mimeType }));
 }
