@@ -1114,6 +1114,45 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-15 findings (#2633) ──
+
+  test('Codex r15: appositive active insults against extra prose names block; denials stay clean', () => {
+    for (const prose of ['Bug Busters, frankly, scams customers.', 'Acme Rodent Removal, frankly, overcharges for callbacks.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    // NOUN_VERB_GAP words are negator-excluded — the appositive gap must not
+    // swallow a denial's negator ("never" itself routes through directedP0's
+    // SUBJECT_VERBS by prior design, so the guard uses "doesn't").
+    const denial = gate.evaluate({ body: `Bug Busters doesn't scam customers.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(denial.pass).toBe(true);
+  });
+
+  test('Codex r15: hedged linking-verb insults on extra prose names block', () => {
+    for (const prose of ['Bug Busters may be dishonest.', 'Acme Rodent Removal appears to be dishonest.', 'A+ Pest Control could be overpriced for what you get.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r15: comma-separated unambiguous insults on non-personified extra names block', () => {
+    for (const prose of ['A+ Pest Control, dishonest.', 'Acme Rodent Removal, dishonest.', 'Acme Pest Solutions, hidden fees on every renewal.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r15: separator #1 winner claims on non-personified extra names block; non-winner tails stay clean', () => {
+    for (const prose of ['A+ Pest Control — the #1 choice.', '360 Pest Control: the #1 provider in the county.', 'Acme Rodent Removal, the #1 rated company around.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const educational = gate.evaluate({ body: `Acme Rodent Removal — the #1 mistake homeowners make is sealing vents too late.\n\n${CATEGORY_TABLE}` }, {});
+    expect(educational.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(educational.pass).toBe(true);
+  });
+
   // ── Codex round-14 findings (#2633) ──
 
   test('Codex r14: sentence-case full brand before separators blocks; lowercase common noun stays clean', () => {

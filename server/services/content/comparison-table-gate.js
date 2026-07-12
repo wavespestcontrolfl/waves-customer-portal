@@ -246,8 +246,11 @@ const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}(?:\\s*[,:—
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
 
 // Linking/behavioral verbs that tie a subject name to a following negative
-// term (shared by the table-less directed scans).
-const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seems?|looks?|sounds?|remains?|stays?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?|tend';
+// term (shared by the table-less directed scans). Includes the hedged/linking
+// forms the provider-noun arms accept — "may be dishonest" / "appears to be
+// dishonest" is still the accusation (Codex r15 on #2633); past-tense linking
+// forms ride along for the same parity.
+const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appears?\\s+to\\s+be';
 
 // Numeric self-ranking ("#1", "No. 1", "number one") split out of the
 // context-free ranking set: in educational pest prose these are overwhelmingly
@@ -952,7 +955,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
       const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
-      const activeP0 = new RegExp(`${escaped}\\b(?:['’]s?)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
+      // Active predicates take the same appositive-tolerant gap as the
+      // provider-noun active arm — "Bug Busters, frankly, scams customers"
+      // (Codex r15 on #2633). NOUN_VERB_GAP's words are negator-excluded, so
+      // "X never scams customers" stays a denial.
+      const activeP0 = new RegExp(`${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
       // Punctuation-separated claims ("Bug Busters: shady billing",
       // "Mosquito Squad — shady billing") carry no verb for the shapes
       // above (Codex r2 on #2633). Only PERSONIFIED suffixes get this arm:
@@ -963,11 +970,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // instead ("acme pest solutions: dishonest", "bob bugs llc: hidden
       // fees") — the full vocabulary on noisy CI captures would turn "…
       // and termite prevention — shady corners" back into the original
-      // false positive (Codex r6/r12 on #2633). Prefix words are
+      // false positive (Codex r6/r12 on #2633). The vocabulary restriction
+      // is the guard, not the separator set, so comma qualifies here too —
+      // "A+ Pest Control, dishonest." (Codex r15). Prefix words are
       // negator-excluded on both arms ("X: not overpriced" is a denial).
       const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
         ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
-        : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
+        : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
       // Possession/usage accusations with the required object ("Bug Busters
       // uses shady billing", "Acme Rodent Removal comes with hidden fees")
       // — Codex r4 on #2633.
@@ -1089,12 +1098,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const calledRank = new RegExp(
           `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
-        // Separator/appositive #1 for PERSONIFIED names only ("Bug Busters,
-        // the #1 choice" — Codex r12); CI captures excluded ("… and termite
-        // prevention, the #1 defense is …" is educational).
+        // Separator/appositive #1: PERSONIFIED names take any following #1
+        // ("Bug Busters, the #1 choice" — Codex r12). Non-personified names
+        // ("A+ Pest Control — the #1 choice.") need a WINNER-NOUN tail after
+        // the #1 (Codex r15): the tail is what separates a declared winner
+        // from educational idiom on a noisy capture ("… and termite
+        // prevention, the #1 defense is …" has no winner noun and stays
+        // clean).
         const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
           ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
-          : null;
+          : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?)\\b`, 'i');
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
           || (sepRank && proseNameText.match(sepRank));
