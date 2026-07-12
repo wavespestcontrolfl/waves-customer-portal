@@ -189,7 +189,7 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // sentence — "pest control companies are not cheap because THEY have
   // hidden fees" (Codex r34). The object requirement keeps "they have no
   // hidden fees" a denial.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\bthey\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added|are\\s+(?:known|notorious)\\s+for)|their\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:ha(?:s|ve)|includes?|comes?\\s+with))\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Separator/heading and possessive association at a provider noun —
   // "Pest control companies: hidden fees are common", "Providers' scams
   // are common" (Codex r24 on #2633). Separator prefix words are
@@ -212,6 +212,14 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
 // r6/r14 on #2633). Safe in the active/possession arms because those
 // require an accusation object.
 const OWN_BRAND_SUBJECT = "(?:\\bwaves\\b(?:['’]s?)?|\\bwe\\b|\\bour\\s+[\\w'’]+)";
+// Possession subjects restrict "our <noun>" to business-practice/people
+// nouns: "Our GUIDE includes hidden fees to watch for" is editorial content
+// (Codex r35 on #2633).
+const OWN_BRAND_POSSESSION_SUBJECT = "(?:\\bwaves\\b(?:['’]s?)?|\\bwe\\b|\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoic[\\w'’]*|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?|services?|plans?)\\b)";
+// Gap for own-brand active/possession arms stops at reporting/clause
+// markers — "Waves explains that companies charge hidden fees" reports on
+// the industry, it is not a self-accusation (Codex r35).
+const OWN_BRAND_CLAUSE_GAP = `(?:\\s*,?\\s+(?!(?:that|whether|if|how|why|explains?|explained|notes?|noted|says?|said|warns?|warned|reports?|reported|teach(?:es)?|taught|shows?|showed|covers?|covered|lists?|listed)\\b)${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
   // adding NEG_ADJ here would newly block prose like "waves of termites are
@@ -252,11 +260,11 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   `(?<!\\b(?:not|never|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|rarely|hardly|seldom)\\s)\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:waves|us)\\b\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source})`,
   // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
   // Codex r7 on #2633.
-  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  `${OWN_BRAND_SUBJECT}${OWN_BRAND_CLAUSE_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
   // Possession/usage with a required accusation object ("Waves has hidden
   // fees", "Waves uses shady billing") — object required so "Waves has
   // shady spots covered" stays clean (Codex r3/r6 on #2633).
-  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `${OWN_BRAND_POSSESSION_SUBJECT}${OWN_BRAND_CLAUSE_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -316,7 +324,10 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // Provider-noun subject: "pest control companies are #1", "providers
   // rank #1" (Codex r11 on #2633). Negator-free adverb slot, same as the
   // we-arm ("companies are currently #1" — Codex r16 parity).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Company-class subjects only: bare industry phrases rank tasks, not
+  // providers — "Pest control is the #1 way to prevent termite damage"
+  // (Codex r35).
+  `\\b(?:compan(?:y|ies)|providers?|chains?|businesses?|operators?|outfits?|competitors?|competition|rivals?|exterminators?)\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
 // Own-brand SEPARATOR and appositive-#1 forms keep a case-SENSITIVE brand
@@ -401,7 +412,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted))?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -658,7 +669,11 @@ function sentenceHasNegator(text, index, length) {
   // because it has hidden fees" asserts the fees (Codex r34). The reset
   // uses the LAST conjunction before the accusation match, so a negator in
   // an earlier coordinate clause cannot deny a later one.
-  const conjRe = /\b(?:and|but|because|yet|so)\b/gi;
+  // Comma-led coordinators or subordinating markers only — a bare "and"
+  // inside a list must not drop a leading denial ("No hidden fees and
+  // transparent billing from Waves" — Codex r35); temporal "since <year>"
+  // excluded.
+  const conjRe = /,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
   let lastConj = -1;
   let cm;
   while ((cm = conjRe.exec(clause)) !== null) lastConj = cm.index + cm[0].length;
@@ -1066,7 +1081,28 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // Non-numeric superlatives ("We are the best choice in Venice", "Waves
   // is the clear winner") enforce the same anti-ranking rule table-less
   // (Codex r33) — plain whole-text match, matching the table path.
-  let ownRank = scanText.match(SELF_RANKING_RE);
+  // Superlatives need an own-brand/provider subject in the clause when no
+  // table supplies comparison context — "gel bait is the best option" is
+  // treatment advice (Codex r35).
+  let ownRank = null;
+  {
+    const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
+    let sm;
+    while ((sm = selfRe.exec(scanText)) !== null) {
+      const sentStart = Math.max(
+        scanText.lastIndexOf('.', sm.index),
+        scanText.lastIndexOf('!', sm.index),
+        scanText.lastIndexOf('?', sm.index),
+        scanText.lastIndexOf('\n', sm.index),
+      ) + 1;
+      const lead = scanText.slice(sentStart, sm.index + sm[0].length);
+      if (/\b(?:we|our|us)\b/i.test(lead) || /\bW(?:aves|AVES)\b/.test(lead)
+        || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(lead)) {
+        ownRank = sm;
+        break;
+      }
+    }
+  }
   if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
     const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');

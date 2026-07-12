@@ -1114,6 +1114,22 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-35 findings (#2633) ──
+
+  test('Codex r35: list-scope denials and educational advice stay clean', () => {
+    for (const body of [`No hidden fees and transparent billing from Waves.\n\n${CATEGORY_TABLE}`, 'Our guide includes hidden fees to watch for when comparing quotes.', 'For roaches, gel bait is the best option.', `Waves explains that hidden fees frustrate homeowners.\n\n${CATEGORY_TABLE}`, `Waves has been tracking the #1 breeding site all summer.\n\n${CATEGORY_TABLE}`, 'Pest control is the #1 way to prevent termite damage.', 'Lawn care is the number one thing homeowners forget.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
+  test('Codex r35: causal-marker accusations and pronoun-possessive variants block', () => {
+    for (const prose of ['Waves is not cheap although Waves has hidden fees.', 'Pest control companies are not cheap since they have hidden fees.', 'Pest control companies are not cheap because their billing includes hidden fees.', 'Pest control companies are not cheap because they are known for hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-34 findings (#2633) ──
 
   test('Codex r34: conjunction-separated accusations keep the P0; denials stay denials', () => {
