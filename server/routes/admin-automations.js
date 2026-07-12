@@ -341,6 +341,131 @@ router.post('/templates/:key/trigger', async (req, res) => {
   }
 });
 
+// ── Segment send ─────────────────────────────────────────────────
+// Bulk enrollment for announcement-style automations (e.g. Pricing Update):
+// preview a segment's live count, then enroll the whole segment on an explicit
+// operator confirm. Two-step by design — the send endpoint re-counts and
+// refuses if the segment drifted from the previewed count, so the operator
+// always confirms the number that actually sends.
+
+const SEGMENT_SCOPES = new Set(['customers', 'program']);
+const SEGMENT_LOCATIONS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
+const SEGMENT_SEND_CAP = 2000;
+
+// Live customers with an email, per the canonical real-customer predicate
+// (customer-stages.js — pipeline_stage, NOT the always-true `active` flag
+// alone). scope 'program' = WaveGuard program (recurring) customers only.
+function segmentQuery({ scope, locationId }) {
+  const { whereLiveCustomer } = require('../services/customer-stages');
+  let q = db('customers')
+    .modify(whereLiveCustomer)
+    .whereNotNull('email')
+    .whereRaw("TRIM(email) <> ''");
+  if (scope === 'program') q = q.whereNotNull('waveguard_tier');
+  if (locationId) q = q.where('nearest_location_id', locationId);
+  return q;
+}
+
+function parseSegment(body) {
+  const scope = String(body?.segment?.scope || '');
+  if (!SEGMENT_SCOPES.has(scope)) throw badRequest('segment.scope must be customers or program');
+  const locationId = body?.segment?.locationId ? String(body.segment.locationId) : null;
+  if (locationId && !SEGMENT_LOCATIONS.has(locationId)) throw badRequest('segment.locationId is not a known location');
+  return { scope, locationId };
+}
+
+// POST /api/admin/automations/templates/:key/segment-preview — count only
+router.post('/templates/:key/segment-preview', async (req, res) => {
+  try {
+    const segment = parseSegment(req.body);
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+
+    const row = await segmentQuery(segment).count('* as count').first();
+    const count = Number(row?.count || 0);
+    res.json({ count, cap: SEGMENT_SEND_CAP, overCap: count > SEGMENT_SEND_CAP });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[automations/segment-preview] failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/automations/templates/:key/segment-send
+// Body: { segment: { scope, locationId? }, expectedCount }
+router.post('/templates/:key/segment-send', async (req, res) => {
+  try {
+    const segment = parseSegment(req.body);
+    const expectedCount = Number(req.body?.expectedCount);
+    if (!Number.isFinite(expectedCount) || expectedCount <= 0) {
+      return res.status(400).json({ error: 'expectedCount required — preview the segment first' });
+    }
+
+    const template = await db('automation_templates').where({ key: req.params.key }).first();
+    if (!template) return res.status(404).json({ error: 'template not found' });
+    if (!template.enabled) return res.status(400).json({ error: 'This automation is disabled. Enable it first, then send.' });
+    if (!(await AutomationRunner.hasLocalContent(req.params.key))) {
+      return res.status(400).json({ error: 'No enabled step has content yet — there is nothing to send.' });
+    }
+
+    const countRow = await segmentQuery(segment).count('* as count').first();
+    const liveCount = Number(countRow?.count || 0);
+    if (liveCount !== expectedCount) {
+      // Segment moved between preview and confirm — make the operator look at
+      // the real number before a mass send.
+      return res.status(409).json({ error: `Segment is now ${liveCount} customers (you previewed ${expectedCount}). Preview again to confirm the current count.`, count: liveCount });
+    }
+    if (liveCount > SEGMENT_SEND_CAP) {
+      return res.status(400).json({ error: `Segment (${liveCount}) exceeds the ${SEGMENT_SEND_CAP}-customer cap for one send.` });
+    }
+
+    const customers = await segmentQuery(segment)
+      .select('id', 'email', 'first_name', 'last_name')
+      .orderBy('id', 'asc');
+
+    // enrollCustomer per customer: idempotent (active enrollment = no-op),
+    // reactivates completed rows (a repeat announcement SHOULD reach past
+    // recipients), refreshes stale contact fields, and the runner applies
+    // ASM/suppression checks at send time. The scheduler drains 50/minute,
+    // so a full segment fans out over ~N/50 minutes rather than instantly.
+    const summary = { enrolled: 0, alreadyActive: 0, skipped: 0 };
+    for (const customer of customers) {
+      try {
+        const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
+        if (result.enrolled) summary.enrolled += 1;
+        else if (result.reason === 'already enrolled') summary.alreadyActive += 1;
+        else summary.skipped += 1;
+      } catch (err) {
+        summary.skipped += 1;
+        logger.warn(`[automations/segment-send] enroll failed for customer ${customer.id}: ${err.message}`);
+      }
+    }
+
+    // One audit row for the mass action (best-effort).
+    try {
+      await db('activity_log').insert({
+        admin_user_id: req.technicianId || null,
+        action: 'automation_segment_send',
+        description: `${template.name}: segment send to ${segment.scope}${segment.locationId ? ` @ ${segment.locationId}` : ''} — ${summary.enrolled} enrolled, ${summary.alreadyActive} already active, ${summary.skipped} skipped.`,
+        metadata: JSON.stringify({ template_key: req.params.key, segment, summary }),
+      });
+    } catch (auditErr) {
+      logger.warn(`[automations/segment-send] audit log failed: ${auditErr.message}`);
+    }
+
+    logger.info(`[automations/segment-send] ${req.params.key} → ${segment.scope}${segment.locationId ? `@${segment.locationId}` : ''}: ${JSON.stringify(summary)}`);
+    res.json({
+      success: true,
+      ...summary,
+      message: `${template.name} — ${summary.enrolled} enrolled${summary.alreadyActive ? `, ${summary.alreadyActive} already active` : ''}${summary.skipped ? `, ${summary.skipped} skipped (no usable email / disabled)` : ''}. The runner sends ~50/minute.`,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    logger.error(`[automations/segment-send] failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/automations/enrollments?template=x&limit=100
 router.get('/enrollments', async (req, res, next) => {
   try {
