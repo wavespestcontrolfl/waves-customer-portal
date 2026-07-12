@@ -1114,6 +1114,16 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-8 finding (#2633) ──
+
+  test('Codex r8: "#10" / "No. 10" ordinals do not match the "#1" prefix', () => {
+    for (const prose of ['We are #10 on the callback list for the county.', 'Rated No. 10 in the region for call volume.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
   // ── Codex round-7 findings (#2633) ──
 
   test('Codex r7: own-brand appositive and separator forms block; lowercase common noun stays clean', () => {

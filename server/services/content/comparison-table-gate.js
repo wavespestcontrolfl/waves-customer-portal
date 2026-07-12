@@ -172,7 +172,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
 // #1"), or ranked/rated framing ("rated #1"). Everything here declares a
 // winner regardless of context, so it scans whole-text like SELF_RANKING_RE
 // (Codex on #2633: "We are #1 in Venice" must not need a nearby brand token).
-const NUMERIC_ONE_ALT = '(?:#\\s?1|no\\.?\\s?1|number one)';
+// Digit boundary is load-bearing: without it "#10" / "No. 10" match the
+// "#1" prefix and a clean "We are #10 on the callback list" parks as a
+// rigged ranking (Codex r8 on #2633).
+const NUMERIC_ONE_ALT = '(?:#\\s?1\\b|no\\.?\\s?1\\b|number one\\b)';
 const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
   // Typographic apostrophe accepted; optional determiner after the verb and
