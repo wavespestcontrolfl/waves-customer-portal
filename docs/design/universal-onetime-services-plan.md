@@ -22,8 +22,9 @@ PRs 0–5 + Phase 1b/2 cutovers, June 2026). Most one-time services already
 complete through the standard appointment lifecycle + typed CompletionPanel +
 Service Report V1. What's left is (1) graduating the rodent shadow, (2) cutting
 over four straggler types, (3) replacing the legacy Projects admin UI — the
-"not pretty" lookup, (4) retiring the legacy project report viewer for
-everything that still uses it, and (5) a decision on how far WDO joins.
+"not pretty" lookup, (4) building the one-time report UIs up from the
+recurring-pest report's parts (timeline, recap-video slot, designed cards)
+over the typed fields, and (5) a decision on how far WDO joins.
 
 ---
 
@@ -135,10 +136,11 @@ So "not as clean as the React reports" is two distinct gaps:
    cutover/graduation — those types then ride the exact Tier A page and
    auto-delivery.
 2. **Tier B is visually thinner than Tier A** — same page, same tokens, but a
-   bare definition list where pest/lawn get designed V2 sections. Closable
-   with a presentation-only pass on the three typed cards (content and
-   section order stay contract-bound: Today's Result first, no pressure
-   cards, banned-words machinery untouched).
+   bare definition list where pest/lawn get designed V2 sections, no visit
+   timeline, and the recap-video pipeline is gated pest-only. Closed by
+   Phase D: card polish + timeline + recap-video parity composed from the
+   Tier-A parts (content and section order stay contract-bound: Today's
+   Result first, no pressure cards, banned-words machinery untouched).
 
 Customer portal note: `ServicesTab` (PortalPage.jsx:2680-2720) already
 branches on `isProjectCompletion` — project rows get "View project report"
@@ -265,14 +267,43 @@ cert, Phase-3-pending termite, and the kept ad-hoc documentation types —
 today's 9-type picker (owner screenshot 2026-07-12) is the straggler list in
 UI form.
 
-### Phase D — Report shell convergence (the "clean reports" fix)
-1. After A+B every routine one-time report rides the Tier A page and
-   auto-delivery. Close the Tier B polish gap: **typed report card pass** —
-   bring `TodaysResultCard` / `TypedFindingsCard` / `ActivityCard` up to the
-   pestV2/lawnV2 visual standard (designed cards instead of a bare `<dl>`).
-   Presentation-only: contract §8 section order, snapshot immutability, and
-   customer copy are untouched; golden-fixture rendering tests must pass
-   unchanged.
+### Phase D — Report convergence & feature parity (the "clean reports" fix)
+Owner direction (2026-07-12): build the one-time report UIs by **taking parts
+from the recurring-pest report** — service report timeline "and stuff like
+that," with the video recap available "just in case we want the same
+features" — over the typed project fields as the data. So Phase D is
+composition from Tier-A parts, not invention:
+
+1. **D1 — typed card pass:** bring `TodaysResultCard` / `TypedFindingsCard` /
+   `ActivityCard` up to the pestV2/lawnV2 visual standard (designed cards
+   instead of a bare `<dl>`). Presentation-only: contract §8 section order,
+   snapshot immutability, and customer copy untouched; golden-fixture
+   rendering tests pass unchanged.
+2. **D2 — visit timeline for typed families:** adapt the Tier-A timeline
+   treatment (`ServiceTimelineSection` / `LawnVisitTimeline` pattern) to
+   typed reports — completed visits with dates + each visit's Today's Result
+   headline, strongest for trend programs (trap checks, German roach
+   follow-ups) where `service_activity_scores` history already exists and
+   `ActivityCard` already shows the gauge trend. Trend types first, then
+   evaluate for one-shot types (a one-visit timeline is noise).
+3. **D3 — video recap parity (the "just in case"):** the report page already
+   has the `RecapVideoCard` slot; the recap pipeline is currently pest-only
+   at three gates — `serviceLine === 'pest'` (reports-public.js:1106), the
+   Remotion composition (`video/src/VisitRecap.jsx` is pest-themed), and the
+   during-visit capture affordance (`TechRecapCapture`, flag `pest-recap-v1`,
+   active pest jobs only). Parity = per-family gate allowlist + a typed
+   composition fed from the snapshot (Today's Result headline, activity
+   trend, photos) + widening the capture affordance. Sized M–L; sequenced
+   after D2, per-family opt-in so it lights up only where the owner wants it.
+
+D component work is independent of the cutover migrations — D1/D2 can start
+in parallel with Phase B.
+
+**Contract amendment note:** the PR-0 contract's §8 "Never" list (Pest
+Pressure card, pressure trend, lawn program cards) stays banned on typed
+reports. Timeline and recap video are additions the contract didn't
+contemplate — this doc, owner-directed, is the amendment of record; update
+`specialty-service-completion-contract.md` §8 when D2/D3 ship.
 2. `ProjectReportViewPage` (`/report/project/:token`) remains for WDO,
    pre-treat cert, Phase-3-pending termite, and historical sends: restyle to
    the current customer-facing shell standard (glass navy per
@@ -311,3 +342,7 @@ UI form.
    which is right?
 9. **Tech entry (C4):** open the completion sheet directly on /tech, or is
    the dispatch-tab habit fine as-is?
+10. **D2/D3 rollout:** timeline — trend types only, or all typed families?
+    Video recap — which family first (rodent trap checks are the natural
+    fit: multi-visit story + existing activity history), and is the
+    during-visit capture affordance wanted beyond pest jobs?
