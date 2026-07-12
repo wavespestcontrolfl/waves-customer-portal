@@ -85,10 +85,16 @@ function maskFor(digits) {
 // into the mask when a PAN bridges it — a small diarization loss, the right
 // trade against a stored card number.
 const LABEL_SEP = '(?:(?:speaker\\s*\\d+|agent|caller)\\s*:[\\s,.-]{1,3})';
+// The negative lookbehind on "speaker" keeps a run from STARTING on the
+// label's own digit ("Speaker 1: 4242…" must begin at 4242, not at the 1) —
+// and scrubNumericRun drops any digit group that sits inside a label token,
+// so "Speaker 1:" mid-readback can never poison the Luhn stream (Codex
+// #2676 round-6 P1).
 const NUMERIC_RUN_RE = new RegExp(
-  `(?<![\\d-])\\d(?:(?:[\\s,.-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
+  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:[\\s,.-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
   'gi'
 );
+const LABEL_TOKEN_RE = new RegExp('(?:speaker\\s*\\d+|agent|caller)\\s*:', 'gi');
 const MAX_RUN_DIGITS = 40;
 
 // Real-world PAN length priority: 16 (Visa/MC dominant), 15 (Amex), 19
@@ -126,11 +132,23 @@ function lockPhoneGroups(groups) {
 // Scrub one numeric run via group-span search. Returns the replacement
 // string for the run and how many PANs were masked.
 function scrubNumericRun(run) {
+  // Digit groups that belong to a diarization label ("Speaker 1:") are NOT
+  // part of the readback — collecting them would corrupt the digit stream
+  // and fail Luhn on a genuinely bridged card (round-6 P1). The label text
+  // itself still gets swallowed by the mask when a span crosses it.
+  const labelRanges = [];
+  let lm;
+  LABEL_TOKEN_RE.lastIndex = 0;
+  while ((lm = LABEL_TOKEN_RE.exec(run)) !== null) {
+    labelRanges.push([lm.index, lm.index + lm[0].length]);
+  }
+  const insideLabel = (start, end) => labelRanges.some(([ls, le]) => start >= ls && end <= le);
   // Split into groups while tracking each group's char offsets in the run.
   const groups = [];
   const groupRe = /\d+/g;
   let g;
   while ((g = groupRe.exec(run)) !== null) {
+    if (insideLabel(g.index, g.index + g[0].length)) continue;
     groups.push({ digits: g[0], start: g.index, end: g.index + g[0].length });
   }
   const totalDigits = groups.reduce((n, grp) => n + grp.digits.length, 0);

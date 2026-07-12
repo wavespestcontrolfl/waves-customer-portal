@@ -114,6 +114,15 @@ describe('scrubPans — numeric forms', () => {
       expect(r.text).not.toContain('4242 4242');
       expect(r.text).toContain('[card ending 4242]');
     });
+    it('the digit inside "Speaker 1:" never poisons the bridged Luhn stream (round 6)', () => {
+      const r = scrubPansDetailed('Speaker 1: 4242 4242\nSpeaker 1: 4242 4242');
+      expect(r.count).toBe(1);
+      expect(r.text).not.toContain('4242 4242');
+      expect(r.text).toContain('[card ending 4242]');
+      // And a label digit alone never starts a run that misaligns masking.
+      const r2 = scrubPansDetailed(`Speaker 1: ${VISA16} thanks`);
+      expect(r2.text).toBe('Speaker 1: [card ending 4242] thanks');
+    });
   });
 
   // Codex #2676 round-3 P2: IIN-aware length priority — an Amex (native 15)
