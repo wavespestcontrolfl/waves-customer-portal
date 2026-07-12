@@ -521,6 +521,17 @@ const gates = {
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
 
+  // Listicle brief overlay — when a supporting-blog brief's query is
+  // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
+  // citable-listicle architecture (count-in-title, numbered H2 per item,
+  // 60-word quick answer, sourced methodology note, dated line) on top of the
+  // normal supporting-blog contract. Informational lists only — the overlay's
+  // voice notes forbid vendor rankings, and transactional queries never reach
+  // the blog lane anyway (router's terminal guard). Default OFF in prod, ON in
+  // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
+  // and the Codex publish review apply untouched. Kill switch: unset.
+  listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
+
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
   // which is opt-in in EVERY environment, and sensitive reveal, which is off

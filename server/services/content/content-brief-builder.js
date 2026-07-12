@@ -19,6 +19,7 @@ const { etDateString, addETDays, parseETDateTime } = require('../../utils/dateti
 const { THRESHOLDS } = require('./scoring-config');
 const { buildSeoRequirements } = require('./blog-seo-contract');
 const { isFaqBlockedService } = require('./content-guardrails');
+const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
 const router = require('./decision-router');
@@ -194,6 +195,55 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
     ],
   };
   return { requiredSections: sections, schemaTypes: schema, voiceConstraints: voice };
+}
+
+// Listicle overlay (GATE_LISTICLE_BRIEFS, opt-in every env). When a
+// supporting-blog brief's target query is list-shaped ("signs of…", "10
+// natural…"), layer the citable-listicle architecture on top of the normal
+// supporting-blog contract: exact count in the title, one numbered H2 per
+// item, a quick-answer summary in the first 60 words, a sourced "how we put
+// this together" note, and a visible dated line. List-format pages are the
+// most-cited content class in answer engines (Ahrefs 2026 citation study),
+// and the same structural rules lift informational lists. Deliberately
+// INFORMATIONAL-ONLY: ranked vendor roundups stay out of the blog lane
+// (operator directive — the router's terminal near-me guard already parks
+// transactional queries), so "best company" intent never reaches this
+// overlay, and the voice notes forbid ranking companies outright.
+const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
+
+// Query shapes that map naturally to an enumerable list: a leading count
+// ("10 natural mosquito repellents") or an enumerable-noun keyword. Kept
+// narrow on purpose — a miss just produces a normal supporting-blog, and a
+// borderline match still yields a valid post, just list-formatted.
+const LISTICLE_QUERY_RE = /(^\s*\d{1,2}\s+\w)|\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
+
+function isListicleQuery(query) {
+  return LISTICLE_QUERY_RE.test(String(query || '').trim());
+}
+
+function applyListicleTreatment({ enabled, pageType, query, requiredSections, schemaTypes, voiceConstraints }) {
+  if (!enabled || !LISTICLE_ELIGIBLE_PAGE_TYPES.has(pageType) || !isListicleQuery(query)) {
+    return { requiredSections, schemaTypes, voiceConstraints, listicle: false };
+  }
+  const sections = [
+    ...requiredSections,
+    'listicle structure: exact item count in the title (e.g. "7 Signs of Termite Damage in Bradenton Homes"), one numbered H2 per item, and the same internal shape for every item (what it is → why it matters in SWFL → what to do)',
+    'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
+    '"how we put this list together" note (2–3 sentences citing the facts-pack / UF-IFAS / FDACS sources actually used — never an invented methodology)',
+    'visible "Last updated: [Month Year]" line under the title (must match the frontmatter modified date)',
+  ];
+  const voice = {
+    ...voiceConstraints,
+    listicle_notes: [
+      'The item count in the title MUST equal the number of numbered H2 sections — recount before finishing.',
+      "Each item's first sentence is self-contained and declarative so it can be quoted standalone by an answer engine.",
+      'No filler between an item heading and its answer — the payoff sentence comes first, color commentary after.',
+      'This is an informational list, never a ranked vendor roundup — do not rank or compare companies.',
+    ],
+  };
+  // Schema unchanged: Article/BreadcrumbList from the supporting-blog
+  // contract (FAQPage only ever arrives via the AEO overlay upstream).
+  return { requiredSections: sections, schemaTypes, voiceConstraints: voice, listicle: true };
 }
 
 // NO-FAQ policy at the BRIEF level. FAQ-blocked topics (content-guardrails.
@@ -461,6 +511,17 @@ class ContentBriefBuilder {
       voiceConstraints: VOICE_CONSTRAINTS,
     });
 
+    // Overlay the citable-listicle architecture on list-shaped supporting-blog
+    // queries (gated; applied on top of the AEO overlay so both can coexist).
+    const layered = applyListicleTreatment({
+      enabled: isEnabled('listicleBriefs'),
+      pageType,
+      query: opportunity.query,
+      requiredSections: aeo.requiredSections,
+      schemaTypes: aeo.schemaTypes,
+      voiceConstraints: aeo.voiceConstraints,
+    });
+
     // FAQ-blocked topic? Match on the same fields the downstream gates use:
     // the opportunity's service plus the customer-signal service/topic (a
     // city-service brief can carry broad service 'pest' with the real topic
@@ -471,8 +532,8 @@ class ContentBriefBuilder {
       signals.customer_signal?.topic,
     ]);
     const { requiredSections, schemaTypes } = faqBlocked
-      ? stripFaqRequirements({ requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes })
-      : { requiredSections: aeo.requiredSections, schemaTypes: aeo.schemaTypes };
+      ? stripFaqRequirements({ requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes })
+      : { requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes };
 
     // Operator-authored intercept brief: the seeded payload is injected
     // VERBATIM — the operator's outline becomes the content plan, sources
@@ -588,8 +649,8 @@ class ContentBriefBuilder {
       }),
       word_count_target: WORD_COUNT_TARGET[pageType] || 'intent-complete',
       voice_constraints: operatorOverlay
-        ? { ...aeo.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
-        : aeo.voiceConstraints,
+        ? { ...layered.voiceConstraints, operator_brief: operatorOverlay.operator_brief }
+        : layered.voiceConstraints,
 
       publish_window: nextWeekday9amET().toISOString(),
       human_review_required: decision.human_review_required,
@@ -705,5 +766,7 @@ module.exports._internals = {
   buildSeoRequirements,
   nextWeekday9amET,
   applyAeoTreatment,
+  applyListicleTreatment,
+  isListicleQuery,
   stripFaqRequirements,
 };

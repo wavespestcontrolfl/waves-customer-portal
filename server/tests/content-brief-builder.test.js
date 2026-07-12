@@ -16,8 +16,86 @@ const {
   SERVICE_HUB_LINKS,
   nextWeekday9amET,
   applyAeoTreatment,
+  applyListicleTreatment,
+  isListicleQuery,
 } = require('../services/content/content-brief-builder')._internals;
 const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
+
+describe('isListicleQuery — list-shaped query detection', () => {
+  test('matches leading counts and enumerable-noun keywords', () => {
+    expect(isListicleQuery('10 natural mosquito repellents')).toBe(true);
+    expect(isListicleQuery('signs of termite damage in florida')).toBe(true);
+    expect(isListicleQuery('plants that repel mosquitoes')).toBe(true);
+    expect(isListicleQuery('lawn care mistakes st augustine grass')).toBe(true);
+  });
+  test('does not match non-enumerable informational or empty queries', () => {
+    expect(isListicleQuery('how to get rid of ants in the kitchen')).toBe(false);
+    expect(isListicleQuery('termite inspection cost')).toBe(false);
+    expect(isListicleQuery('')).toBe(false);
+    expect(isListicleQuery(null)).toBe(false);
+  });
+});
+
+describe('applyListicleTreatment', () => {
+  const base = (over = {}) => ({
+    enabled: true,
+    pageType: 'supporting-blog',
+    query: 'signs of chinch bugs in st augustine grass',
+    requiredSections: [...REQUIRED_SECTIONS['supporting-blog']],
+    schemaTypes: [...SCHEMA_TYPES['supporting-blog']],
+    voiceConstraints: { tone: 't', forbidden: [], required_phrases: [] },
+    ...over,
+  });
+
+  test('list-shaped supporting-blog query gets the citable-listicle sections + voice notes', () => {
+    const r = applyListicleTreatment(base());
+    expect(r.listicle).toBe(true);
+    // The full supporting-blog contract is preserved, listicle sections appended.
+    for (const s of REQUIRED_SECTIONS['supporting-blog']) expect(r.requiredSections).toContain(s);
+    expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /first 60 words/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /how we put this list together/i.test(s))).toBe(true);
+    expect(r.requiredSections.some((s) => /Last updated/i.test(s))).toBe(true);
+    expect(r.voiceConstraints.listicle_notes.some((n) => /never a ranked vendor roundup/i.test(n))).toBe(true);
+    // Schema untouched — no ItemList/FAQPage injection here.
+    expect(r.schemaTypes).toEqual(SCHEMA_TYPES['supporting-blog']);
+  });
+
+  test('gate off → passthrough', () => {
+    const r = applyListicleTreatment(base({ enabled: false }));
+    expect(r.listicle).toBe(false);
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['supporting-blog']);
+    expect(r.voiceConstraints.listicle_notes).toBeUndefined();
+  });
+
+  test('non-list query or non-blog page type → passthrough', () => {
+    expect(applyListicleTreatment(base({ query: 'how to get rid of ants' })).listicle).toBe(false);
+    expect(applyListicleTreatment(base({ pageType: 'city-service' })).listicle).toBe(false);
+  });
+
+  test('stacks on top of the AEO overlay without losing its additions', () => {
+    const aeo = applyAeoTreatment({
+      isAeoGap: true,
+      pageType: 'supporting-blog',
+      requiredSections: [...REQUIRED_SECTIONS['supporting-blog']],
+      schemaTypes: [...SCHEMA_TYPES['supporting-blog']],
+      voiceConstraints: { tone: 't', forbidden: [], required_phrases: [] },
+    });
+    const r = applyListicleTreatment({
+      enabled: true,
+      pageType: 'supporting-blog',
+      query: '7 ways to keep mosquitoes off your lanai',
+      requiredSections: aeo.requiredSections,
+      schemaTypes: aeo.schemaTypes,
+      voiceConstraints: aeo.voiceConstraints,
+    });
+    expect(r.requiredSections.some((s) => /direct-answer/i.test(s))).toBe(true); // AEO kept
+    expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true); // listicle added
+    expect(r.schemaTypes).toContain('FAQPage'); // AEO schema kept
+    expect(r.voiceConstraints.aeo_notes).toBeDefined();
+    expect(r.voiceConstraints.listicle_notes).toBeDefined();
+  });
+});
 
 describe('applyAeoTreatment', () => {
   const base = (pageType) => ({
