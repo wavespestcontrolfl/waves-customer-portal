@@ -2548,9 +2548,29 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
     if (!text) return null;
+    // PAN redaction guard — applied at the PROVIDER RETURN, before any other
+    // LLM sees the text: the labeling pass (labelTranscriptWithOpenAI)
+    // consumes this raw transcript, so scrubbing only at persistence would
+    // still embed a blurted card number in the labeling prompt (Codex #2676
+    // round-1 P1). The dictation contact-pass rides this same function, so
+    // it is covered here too.
+    const panScrub = scrubPansDetailed(text);
+    let segments = normalizeOpenAISegments(data);
+    let segScrubCount = 0;
+    if (Array.isArray(segments)) {
+      segments = segments.map((seg) => {
+        if (!seg || typeof seg.text !== 'string') return seg;
+        const s = scrubPansDetailed(seg.text);
+        segScrubCount += s.count;
+        return s.count ? { ...seg, text: s.text } : seg;
+      });
+    }
+    if (panScrub.count + segScrubCount > 0) {
+      logger.warn(`[call-proc] PAN scrub masked ${panScrub.count + segScrubCount} card artifact(s) at OpenAI provider return`);
+    }
     return {
-      text,
-      segments: normalizeOpenAISegments(data),
+      text: panScrub.text,
+      segments,
       provider: 'openai',
       model,
       responseFormat: diarized ? 'diarized_json' : 'json',
@@ -2607,7 +2627,9 @@ Rules:
     // Gemini 2.5 may return thinking parts — skip those
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
-    return (textPart?.text || parts[0]?.text || '').trim() || null;
+    const raw = (textPart?.text || parts[0]?.text || '').trim() || null;
+    // PAN redaction guard at the provider return (see the OpenAI twin above).
+    return raw ? scrubPansDetailed(raw).text : raw;
   } catch (err) {
     logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
@@ -3769,6 +3791,10 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          // Persist the scrubbed text, not just the local copy — a legacy
+          // PAN-bearing row would otherwise stay exposed to every
+          // persisted-row consumer (Codex #2676 round-1 P1).
+          transcription,
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
@@ -3788,6 +3814,7 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          transcription, // scrubbed — see the fresh-row twin above
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),

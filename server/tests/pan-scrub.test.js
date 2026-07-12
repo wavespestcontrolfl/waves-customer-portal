@@ -64,6 +64,34 @@ describe('scrubPans — numeric forms', () => {
     expect(r.text).toBe('first [card ending 4242] then [card ending 0005]');
     expect(r.count).toBe(2);
   });
+
+  // Codex #2676 round-1 P1: PAN read back-to-back with expiry/CVV must not
+  // survive because the COMBINED run fails Luhn.
+  describe('PAN with adjacent expiry/CVV digits', () => {
+    it('masks the PAN and absorbs a trailing spoken-style expiry pair', () => {
+      expect(scrubPans('card 4242 4242 4242 4242 12 28 thanks'))
+        .toBe('card [card ending 4242] [code removed] thanks');
+    });
+    it('masks the PAN and absorbs a trailing CVV group', () => {
+      expect(scrubPans(`number ${VISA16} 123 end`))
+        .toBe('number [card ending 4242] [code removed] end');
+    });
+    it('masks the PAN and absorbs expiry + CVV together', () => {
+      expect(scrubPans('4242 4242 4242 4242 12 28 123'))
+        .toBe('[card ending 4242] [code removed]');
+    });
+    it('still ignores adjacent PHONE numbers (no 13–19 group span exists)', () => {
+      const s = 'numbers 9415551234 9415559876 on file';
+      expect(scrubPans(s)).toBe(s);
+    });
+    it('rejects non-card issuer prefixes even when Luhn-valid', () => {
+      // 79927398713 is the classic Luhn example but 11 digits; build a
+      // Luhn-valid 16-digit starting with 9 (not a card IIN): 9999999999999995
+      expect(luhnValid('9999999999999995')).toBe(true);
+      const s = 'ref 9999999999999995 code';
+      expect(scrubPans(s)).toBe(s);
+    });
+  });
 });
 
 describe('scrubPans — spoken-digit form', () => {
@@ -83,6 +111,24 @@ describe('scrubPans — spoken-digit form', () => {
   });
   it('leaves Luhn-invalid spoken runs untouched', () => {
     const s = 'one one one one one one one one one one one one one one one one';
+    expect(scrubPans(s)).toBe(s);
+  });
+  it('masks a spoken PAN with trailing spoken expiry/CVV (prefix window)', () => {
+    const spoken = 'four two four two four two four two four two four two four two four two one two two eight one two three';
+    expect(scrubPans(`Caller: ${spoken}`)).toBe('Caller: [card ending 4242] [code removed]');
+  });
+});
+
+describe('scrubPans — CVV context redaction', () => {
+  it('masks a numeric CVV named in context', () => {
+    expect(scrubPans('the cvv is 123 thanks')).toBe('the cvv is [code removed] thanks');
+    expect(scrubPans('security code 4 5 6 7.')).toBe('security code [code removed].');
+  });
+  it('masks a spoken CVV named in context', () => {
+    expect(scrubPans('my cvc is one two three ok')).toBe('my cvc is [code removed] ok');
+  });
+  it('leaves bare 3-4 digit runs without context untouched', () => {
+    const s = 'gate code 1234 and unit 567';
     expect(scrubPans(s)).toBe(s);
   });
 });

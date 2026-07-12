@@ -139,7 +139,14 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
         .whereNull('retranscribed_at')
         .whereRaw(UNDIARIZED_SQL)
         .update({
-          transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
+          // The preserved original must be scrubbed too — copying a legacy
+          // PAN-bearing transcript into transcription_pre_backfill would
+          // store the card number indefinitely in a second artifact (Codex
+          // #2676 round-1 P1). An already-populated pre_backfill value is
+          // kept as-is (first stamp wins, matching the original COALESCE).
+          transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, ?)', [
+            require('../utils/pan-scrub').scrubPans(call.transcription) ?? null,
+          ]),
           // PAN redaction guard (card-on-file spec Phase 0) — this backfill
           // writes fresh provider text outside the live pipeline's scrub.
           transcription: require('../utils/pan-scrub').scrubPans(text),
