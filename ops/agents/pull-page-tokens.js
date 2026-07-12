@@ -25,19 +25,29 @@ const { Client } = require('pg');
   // Each query mirrors its public loader's eligibility gates so the newest
   // matching row is actually renderable (estimate-public / pay-v2 /
   // prep-public / review-gate / card-public / public-*-diagnostic routes).
-  await one('estimate', `SELECT token FROM estimates WHERE status IN ('sent','viewed') AND token IS NOT NULL AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at DESC LIMIT 1`);
+  await one('estimate', `SELECT token FROM estimates WHERE status IN ('sent','viewed') AND token IS NOT NULL AND archived_at IS NULL AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at DESC LIMIT 1`);
   await one('pay_unpaid', `SELECT token FROM invoices WHERE status NOT IN ('paid','void','canceled') AND token IS NOT NULL AND payer_statement_id IS NULL ORDER BY created_at DESC LIMIT 1`);
   await one('receipt_paid', `SELECT token FROM invoices WHERE status='paid' AND token IS NOT NULL AND payer_statement_id IS NULL ORDER BY created_at DESC LIMIT 1`);
   await one('statement', `SELECT token FROM payer_statements WHERE token IS NOT NULL ORDER BY created_at DESC LIMIT 1`);
-  await one('report', `SELECT report_view_token AS token FROM service_records WHERE report_view_token IS NOT NULL ORDER BY created_at DESC LIMIT 1`);
+  // Suppressed typed reports (typedReportDelivery set and != auto_send) are
+  // rejected by the reports router's token param — skip them.
+  await one('report', `SELECT report_view_token AS token FROM service_records WHERE report_view_token IS NOT NULL AND (structured_notes->>'typedReportDelivery' IS NULL OR structured_notes->>'typedReportDelivery' = 'auto_send') ORDER BY created_at DESC LIMIT 1`);
   await one('project_report', `SELECT report_token AS token FROM projects WHERE report_token IS NOT NULL ORDER BY created_at DESC LIMIT 1`);
   await one('prep', `SELECT prep_token AS token FROM projects WHERE prep_token IS NOT NULL AND (prep_expires_at IS NULL OR prep_expires_at > NOW()) ORDER BY created_at DESC LIMIT 1`);
   // Mirror the public loaders' gates (status='sent' + unexpired) or the
   // pulled URL 404s: public-lawn-diagnostic.js / public-pest-identifier.js.
   await one('lawn_report', `SELECT report_token AS token FROM lawn_diagnostics WHERE report_token IS NOT NULL AND status='sent' AND report_expires_at > NOW() ORDER BY created_at DESC LIMIT 1`);
   await one('pest_report', `SELECT report_token AS token FROM pest_identifications WHERE report_token IS NOT NULL AND status='sent' AND report_expires_at > NOW() ORDER BY created_at DESC LIMIT 1`);
-  // ET wall-clock date, not session CURRENT_DATE (server runs TZ=UTC).
-  await one('reschedule', `SELECT reschedule_token AS token FROM scheduled_services WHERE reschedule_token IS NOT NULL AND scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date ORDER BY scheduled_date ASC LIMIT 1`);
+  // Mirrors reschedule-public eligibility(): reschedulable status, ET
+  // wall-clock date (server runs TZ=UTC), and same-day rows only while the
+  // arrival window hasn't elapsed.
+  await one('reschedule', `SELECT reschedule_token AS token FROM scheduled_services
+    WHERE reschedule_token IS NOT NULL
+      AND lower(status) IN ('pending','confirmed','rescheduled')
+      AND (scheduled_date > (NOW() AT TIME ZONE 'America/New_York')::date
+        OR (scheduled_date = (NOW() AT TIME ZONE 'America/New_York')::date
+            AND COALESCE(window_end, window_start) > (NOW() AT TIME ZONE 'America/New_York')::time))
+    ORDER BY scheduled_date ASC LIMIT 1`);
   await one('track', `SELECT track_view_token AS token FROM scheduled_services WHERE track_view_token IS NOT NULL AND track_token_expires_at > NOW() ORDER BY track_token_expires_at DESC LIMIT 1`);
   await one('rate', `SELECT token FROM review_requests WHERE token IS NOT NULL AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at DESC LIMIT 1`);
   await one('card', `SELECT cc.share_token AS token FROM customer_cards cc JOIN customers cu ON cu.id = cc.customer_id AND cu.deleted_at IS NULL WHERE cc.share_token IS NOT NULL ORDER BY cc.created_at DESC LIMIT 1`);

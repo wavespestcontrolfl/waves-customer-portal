@@ -2,7 +2,7 @@
 // outreach draft (status -> rejected). No deletes. Reversible: written rows
 // are tagged in approved_by with a per-run ET timestamp tag, so ONE batch
 // can be flipped back with
-//   UPDATE retention_outreach SET status='pending_approval'
+//   UPDATE retention_outreach SET status='pending_approval', approved_by=NULL
 //   WHERE approved_by='<tag printed by the run>';
 //
 // Usage (repo root):
@@ -59,7 +59,7 @@ const tag = tagIdx > -1 && process.argv[tagIdx + 1]
     );
     console.log(`updated: ${r.rowCount}`);
     console.log(`batch tag: ${tag}`);
-    console.log(`rollback:  UPDATE retention_outreach SET status='pending_approval' WHERE approved_by='${tag}';`);
+    console.log(`rollback:  UPDATE retention_outreach SET status='pending_approval', approved_by=NULL WHERE approved_by='${tag}';`);
     const after = await c.query(`SELECT status, count(*)::int AS n FROM retention_outreach GROUP BY status ORDER BY status`);
     after.rows.forEach(row => console.log(`  ${row.status}: ${row.n}`));
   }
