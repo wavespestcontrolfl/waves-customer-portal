@@ -287,9 +287,14 @@ const TwilioService = {
       // success:false so the route answers 401 "Invalid or expired
       // verification code" instead of throwing into the 500 handler
       // (customers retrying stale codes were getting server errors).
-      if (err.code === 20404 || err.status === 404) {
-        logger.info(
-          `Verification check for ${maskPhone(phone)}: expired_or_not_found`,
+      // Only the Twilio-coded 20404 is suppressed — a 404 without a Twilio
+      // error code is not a RestException and still throws. A misconfigured
+      // Verify service SID also surfaces as 20404 here (Twilio's response is
+      // identical), but that misconfig breaks the SEND leg first, which
+      // throws loudly — the warn below keeps the check-side pattern visible.
+      if (err.code === 20404) {
+        logger.warn(
+          `Verification check for ${maskPhone(phone)}: 20404 expired_or_not_found (${err.message})`,
         );
         return { success: false, status: "expired_or_not_found" };
       }

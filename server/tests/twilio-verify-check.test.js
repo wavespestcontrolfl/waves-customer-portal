@@ -63,10 +63,12 @@ describe('checkVerificationCode', () => {
     expect(result).toEqual({ success: false, status: 'expired_or_not_found' });
   });
 
-  test('HTTP 404 without a Twilio code is still an expired outcome', async () => {
+  test('HTTP 404 without a Twilio error code is NOT suppressed — still throws', async () => {
+    // Only Twilio's coded 20404 is a wrong-code outcome; a bare 404 is not a
+    // RestException and must reach the error handler as an infra failure.
     mockVerificationChecks.create.mockRejectedValueOnce(twilioError({ status: 404 }));
-    const result = await TwilioService.checkVerificationCode('+19415551234', '123456');
-    expect(result).toEqual({ success: false, status: 'expired_or_not_found' });
+    await expect(TwilioService.checkVerificationCode('+19415551234', '123456'))
+      .rejects.toThrow('Verification check failed');
   });
 
   test('max check attempts (60202) returns success:false, not a throw', async () => {
