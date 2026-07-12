@@ -220,20 +220,30 @@ const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
 const LISTICLE_TIME_UNIT_RE = /^(hour|hr|day|week|month|year|minute|min|am|pm)s?\b/i;
 const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}\s+(\S+)/;
 const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
+// Vendor/roundup intent ("10 best pest control companies", "top exterminators")
+// must never receive the overlay: the voice notes forbid ranking companies, so
+// the brief would be self-contradictory — leave those SERPs to the existing
+// buyer-guide/comparison handling. Conservative by design: excluding e.g.
+// "best plants for shade" only costs the list formatting, never the post.
+const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
 
 function isListicleQuery(query) {
   const q = String(query || '').trim();
   if (!q) return false;
+  if (LISTICLE_VENDOR_RE.test(q)) return false;
   const count = q.match(LISTICLE_LEADING_COUNT_RE);
   if (count && !LISTICLE_TIME_UNIT_RE.test(count[1])) return true;
   return LISTICLE_NOUN_RE.test(q);
 }
 
-function applyListicleTreatment({ enabled, actionType, pageType, query, requiredSections, schemaTypes, voiceConstraints }) {
-  // New drafts only: a refresh whose SERP type normalizes to supporting-blog
-  // must never receive restructure-the-title/H2 mandates — the refresh lane's
-  // contract is preserve slug + structural identity.
-  if (!enabled || actionType !== 'new_supporting_blog' || !LISTICLE_ELIGIBLE_PAGE_TYPES.has(pageType) || !isListicleQuery(query)) {
+function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, requiredSections, schemaTypes, voiceConstraints }) {
+  // New MINED drafts only:
+  // - a refresh whose SERP type normalizes to supporting-blog must never
+  //   receive restructure-the-title/H2 mandates (preserve slug + structure);
+  // - operator-pinned briefs (intercept / spoke-seed) inject a human-authored
+  //   outline VERBATIM — a list-shaped keyword must not force that outline
+  //   into a numbered-list structure the operator didn't write.
+  if (!enabled || operatorPinned || actionType !== 'new_supporting_blog' || !LISTICLE_ELIGIBLE_PAGE_TYPES.has(pageType) || !isListicleQuery(query)) {
     return { requiredSections, schemaTypes, voiceConstraints, listicle: false };
   }
   // required_sections is an ORDERED plan for the writer — the above-the-fold
@@ -245,7 +255,7 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, required
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
     ...requiredSections,
-    '"how we put this list together" note (2–3 sentences citing the facts-pack / UF-IFAS / FDACS sources actually used — never an invented methodology)',
+    '"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)',
   ];
   const voice = {
     ...voiceConstraints,
@@ -533,6 +543,7 @@ class ContentBriefBuilder {
       actionType: decision.action_type,
       pageType,
       query: opportunity.query,
+      operatorPinned: spokeSeeder.isSpokeSeed(opportunity) || interceptSeeder.isOperatorIntercept(opportunity),
       requiredSections: aeo.requiredSections,
       schemaTypes: aeo.schemaTypes,
       voiceConstraints: aeo.voiceConstraints,

@@ -41,6 +41,14 @@ describe('isListicleQuery — list-shaped query detection', () => {
     // …but a real count followed by a content noun still matches.
     expect(isListicleQuery('7 plants that repel mosquitoes')).toBe(true);
   });
+  test('vendor/roundup intent never gets the overlay (voice notes forbid company rankings)', () => {
+    expect(isListicleQuery('10 best pest control companies')).toBe(false);
+    expect(isListicleQuery('top exterminators in sarasota')).toBe(false);
+    expect(isListicleQuery('5 cheapest lawn care services')).toBe(false);
+    expect(isListicleQuery('orkin vs terminix')).toBe(false);
+    // Conservative by design: "best" excludes even non-vendor lists.
+    expect(isListicleQuery('best plants for shade')).toBe(false);
+  });
 });
 
 describe('applyListicleTreatment', () => {
@@ -94,6 +102,19 @@ describe('applyListicleTreatment', () => {
     // refresh_existing_page whose SERP type normalized to supporting-blog must
     // NOT get restructure mandates (preserve-slug/structure contract).
     expect(applyListicleTreatment(base({ actionType: 'refresh_existing_page' })).listicle).toBe(false);
+  });
+
+  test('operator-pinned briefs (intercept/spoke-seed) are never restructured by the overlay', () => {
+    const r = applyListicleTreatment(base({ operatorPinned: true }));
+    expect(r.listicle).toBe(false);
+    expect(r.requiredSections).toEqual(REQUIRED_SECTIONS['supporting-blog']);
+  });
+
+  test('methodology note is plain-text sourced — never demands external links', () => {
+    const r = applyListicleTreatment(base());
+    const note = r.requiredSections.find((s) => /how we put this list together/i.test(s));
+    expect(note).toMatch(/PLAIN TEXT/);
+    expect(note).toMatch(/no external links/i);
   });
 
   test('stacks on top of the AEO overlay without losing its additions', () => {
