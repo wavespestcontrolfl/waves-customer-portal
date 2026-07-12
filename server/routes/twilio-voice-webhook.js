@@ -1105,8 +1105,13 @@ router.post('/transcription', async (req, res) => {
       // by the parent CallSid. Try ParentCallSid first, fall back to
       // CallSid for non-dial single-leg cases.
       const ParentCallSid = req.body.ParentCallSid || null;
+      // PAN redaction guard (card-on-file spec Phase 0): this is the one
+      // transcript persistence path that bypasses call-recording-processor's
+      // scrub (Twilio's built-in transcription writes the row directly), so
+      // a blurted card number must be masked here too.
+      const scrubbedTranscription = require('../utils/pan-scrub').scrubPans(TranscriptionText);
       const update = {
-        transcription: TranscriptionText,
+        transcription: scrubbedTranscription,
         transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
         transcription_provider: 'twilio_builtin',
         transcription_model: null,
@@ -1114,7 +1119,7 @@ router.post('/transcription', async (req, res) => {
           provider: 'twilio_builtin',
           source: 'twilio_transcription_webhook',
           transcription_status: TranscriptionStatus || null,
-          transcript_chars: TranscriptionText.length,
+          transcript_chars: scrubbedTranscription.length,
           recording_sid_present: !!RecordingSid,
         }),
         updated_at: new Date(),

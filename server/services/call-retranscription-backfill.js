@@ -140,7 +140,9 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
         .whereRaw(UNDIARIZED_SQL)
         .update({
           transcription_pre_backfill: dbi.raw('COALESCE(transcription_pre_backfill, transcription)'),
-          transcription: text,
+          // PAN redaction guard (card-on-file spec Phase 0) — this backfill
+          // writes fresh provider text outside the live pipeline's scrub.
+          transcription: require('../utils/pan-scrub').scrubPans(text),
           retranscribed_at: dbi.fn.now(),
           // processing_status is deliberately untouched: candidates are
           // restricted to states the live pipeline is done with, so there is

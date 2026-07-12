@@ -33,6 +33,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
+const { scrubPansDetailed } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
@@ -131,6 +132,37 @@ const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'ge
 const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_CHARS_PER_SEC || 25);
 const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+// PAN redaction guard (card-on-file spec Phase 0). One transcription pass
+// yields up to three artifacts carrying the same audio — the labeled
+// transcript string, the diarized segment array, and the dictation-focused
+// contact-pass string — so a blurted card number must be scrubbed from all
+// three together or it survives in transcript_structured / the dictation
+// decoder prompt. Returns new values plus the total mask count (for a
+// PAN-free log line); never throws (scrubPansDetailed passes non-strings
+// through untouched).
+function scrubTranscriptArtifacts({ transcription, contactPassTranscript, segments } = {}) {
+  let count = 0;
+  const main = scrubPansDetailed(transcription);
+  count += main.count;
+  const contactPass = scrubPansDetailed(contactPassTranscript);
+  count += contactPass.count;
+  let scrubbedSegments = segments;
+  if (Array.isArray(segments)) {
+    scrubbedSegments = segments.map((seg) => {
+      if (!seg || typeof seg.text !== 'string') return seg;
+      const s = scrubPansDetailed(seg.text);
+      count += s.count;
+      return s.count ? { ...seg, text: s.text } : seg;
+    });
+  }
+  return {
+    transcription: main.text,
+    contactPassTranscript: contactPass.text,
+    segments: scrubbedSegments,
+    count,
+  };
+}
 
 // Spoken-content length only: strip diarization speaker labels and collapse
 // whitespace so a valid short diarized call's formatting overhead ("Agent:",
@@ -3647,6 +3679,24 @@ const CallRecordingProcessor = {
       const result = await transcribeRecording(call.recording_url, { call, contactPhone });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
+      // PAN redaction guard (card-on-file spec Phase 0): a card number
+      // blurted on the recorded line must become a non-event — scrubbed
+      // BEFORE the plausibility gate, BEFORE persistence, and therefore
+      // before every LLM consumer (extraction, CSR coach, dictation decode
+      // read this variable; everything else re-reads the row written from
+      // it). Segments and the contact-pass stream carry the same audio, so
+      // all three artifacts are scrubbed together.
+      const scrubbed = scrubTranscriptArtifacts({
+        transcription,
+        contactPassTranscript,
+        segments: result.structuredSegments,
+      });
+      transcription = scrubbed.transcription;
+      contactPassTranscript = scrubbed.contactPassTranscript;
+      result.structuredSegments = scrubbed.segments;
+      if (scrubbed.count > 0) {
+        logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) in transcript for ${maskSid(callSid)}`);
+      }
       // recordingSeconds is hoisted so the primary gate here and the terminal
       // rejection below share one value.
       const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
@@ -3704,7 +3754,10 @@ const CallRecordingProcessor = {
     if (!transcription) {
       const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
       if (isUsableFallback(freshCall?.transcription)) {
-        transcription = freshCall.transcription;
+        // Rows written before the PAN guard deployed (or by an unscrubbed
+        // legacy path) re-enter the live pipeline here — scrub on read so
+        // the LLM consumers downstream never see a stored PAN.
+        transcription = scrubPansDetailed(freshCall.transcription).text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -3723,7 +3776,7 @@ const CallRecordingProcessor = {
         });
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (isUsableFallback(call.transcription)) {
-        transcription = call.transcription;
+        transcription = scrubPansDetailed(call.transcription).text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -7371,6 +7424,7 @@ const CallRecordingProcessor = {
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  scrubTranscriptArtifacts,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
