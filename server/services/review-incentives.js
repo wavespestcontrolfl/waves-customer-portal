@@ -709,6 +709,18 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       updated_at: new Date(),
     });
 
+  // Manual attribution is an attribution moment like the sync paths — the
+  // office matching an unlinked review must fire the same thank-you sequence
+  // the automatic match would have (gate, 4-5-star bar, cross-location
+  // once-ever dedupe all live in the shared helper; it never throws).
+  const { enrollReviewThankYou } = require('./automation-enroll');
+  await enrollReviewThankYou({
+    customerId,
+    locationId: review.location_id,
+    starRating: review.star_rating,
+    source: 'google_review_manual_match',
+  });
+
   const attributionSnapshot = {
     method: 'manual_admin_match',
     adminId: attrs.adminId || null,

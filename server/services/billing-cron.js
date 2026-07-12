@@ -459,9 +459,15 @@ const BillingCron = {
           // transactional retry-notice email. The failure SMS above, with the
           // card-update link, is unchanged either way. 14-day dedupe = one
           // enrollment per failure episode across the retry ladder; a repeat
-          // failure months later re-enrolls via reactivation. Falls back to
-          // the retry notice if the enrollment errors so a failure never
-          // goes email-silent by accident.
+          // failure months later re-enrolls via reactivation.
+          //
+          // DUNNING NEVER GOES EMAIL-SILENT: the sequence only counts as
+          // covering the failure when it enrolled, this episode already
+          // enrolled (deduped), or no email exists anywhere (the transactional
+          // notice couldn't send either). A paused/empty sequence
+          // (not_sendable), an unsubscribe suppression the runner would
+          // cancel on (suppressed), or an error all fall back to the
+          // transactional retry notice, which has its own delivery rules.
           let emailed = false;
           if (isEnabled('paymentFailedEnroll')) {
             const { enrollSequenceFromEvent } = require('./automation-enroll');
@@ -470,9 +476,10 @@ const BillingCron = {
               customerId: customer.id,
               dedupe: 14,
               recipient: 'billing',
+              checkSuppression: true,
               source: 'autopay_failure',
             });
-            emailed = enrollResult.reason !== 'error';
+            emailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
           }
           if (!emailed) {
             await PaymentLifecycleEmail.sendPaymentRetryNotice({
@@ -1162,10 +1169,13 @@ const BillingCron = {
           }
 
           // Same gate swap as the initial-failure path: with the sequence
-          // covering this failure episode (14-day dedupe means this call is a
-          // no-op re-enroll, which is the point — one email per episode), the
-          // per-retry transactional notice stays quiet. The retry SMS above
-          // is unchanged. Enroll errors fall back to the notice.
+          // covering this failure episode (14-day dedupe means this call is
+          // usually a no-op re-enroll, which is the point — one email per
+          // episode), the per-retry transactional notice stays quiet. The
+          // retry SMS above is unchanged. Same covered-reasons contract as
+          // the initial-failure site: paused sequence, suppression, or error
+          // fall back to the transactional notice — dunning never goes
+          // email-silent.
           let retryEmailed = false;
           if (isEnabled('paymentFailedEnroll')) {
             const { enrollSequenceFromEvent } = require('./automation-enroll');
@@ -1174,9 +1184,10 @@ const BillingCron = {
               customerId: customer.id,
               dedupe: 14,
               recipient: 'billing',
+              checkSuppression: true,
               source: 'autopay_retry_failure',
             });
-            retryEmailed = enrollResult.reason !== 'error';
+            retryEmailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
           }
           if (!retryEmailed) {
             await PaymentLifecycleEmail.sendPaymentRetryNotice({

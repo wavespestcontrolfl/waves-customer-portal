@@ -2,12 +2,17 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/automation-runner', () => ({
   enrollCustomer: jest.fn(async () => ({ enrolled: true, enrollmentId: 'enr-1' })),
+  activeAutomationSuppressionFor: jest.fn(async () => null),
+}));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn(() => true),
 }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { enrollCustomer } = require('../services/automation-runner');
-const { enrollSequenceFromEvent } = require('../services/automation-enroll');
+const { isEnabled } = require('../config/feature-gates');
+const { enrollCustomer, activeAutomationSuppressionFor } = require('../services/automation-runner');
+const { enrollSequenceFromEvent, enrollReviewThankYou } = require('../services/automation-enroll');
 
 let templateRow;
 let firstStepRow;
@@ -46,7 +51,9 @@ function prefsQuery() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  isEnabled.mockReturnValue(true);
   enrollCustomer.mockResolvedValue({ enrolled: true, enrollmentId: 'enr-1' });
+  activeAutomationSuppressionFor.mockResolvedValue(null);
   templateRow = { key: 'payment_failed', enabled: true };
   firstStepRow = { step_order: 0, enabled: true, html_body: '<p>note</p>', text_body: '' };
   priorRow = null;
@@ -201,5 +208,72 @@ describe('enrollSequenceFromEvent', () => {
     expect(await enrollSequenceFromEvent({ templateKey: null, customerId: 'x' })).toEqual({ enrolled: false, reason: 'bad_args' });
     expect(await enrollSequenceFromEvent({ templateKey: 'x', customerId: null })).toEqual({ enrolled: false, reason: 'bad_args' });
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('checkSuppression: an active stream suppression blocks enrollment so the caller can fall back', async () => {
+    activeAutomationSuppressionFor.mockResolvedValueOnce({ suppression_type: 'unsubscribe', group_key: 'service_operational' });
+
+    const result = await enrollSequenceFromEvent({
+      templateKey: 'payment_failed',
+      customerId: 'cust-1',
+      checkSuppression: true,
+    });
+
+    expect(result).toEqual({ enrolled: false, reason: 'suppressed' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('checkSuppression: a failing suppression lookup fails toward suppressed (transactional fallback carries it)', async () => {
+    activeAutomationSuppressionFor.mockRejectedValueOnce(new Error('boom'));
+
+    const result = await enrollSequenceFromEvent({
+      templateKey: 'payment_failed',
+      customerId: 'cust-1',
+      checkSuppression: true,
+    });
+
+    expect(result).toEqual({ enrolled: false, reason: 'suppressed' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+});
+
+describe('enrollReviewThankYou', () => {
+  test('maps the GBP location to its sequence and dedupes across the whole family', async () => {
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'parrish', starRating: 5 });
+
+    expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'review_thank_you_parrish' }));
+    expect(enrollmentWhereInArgs[0][1]).toEqual(expect.arrayContaining([
+      'review_thank_you_lwr', 'review_thank_you_parrish', 'review_thank_you_sarasota', 'review_thank_you_venice',
+    ]));
+  });
+
+  test('bradenton GBP routes to the LWR-keyed sequence', async () => {
+    await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'bradenton', starRating: 4 });
+
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'review_thank_you_lwr' }));
+  });
+
+  test('gate off → gate_off, nothing queried', async () => {
+    isEnabled.mockImplementation((key) => key !== 'reviewThankYouEnroll');
+
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 5 });
+
+    expect(result).toEqual({ enrolled: false, reason: 'gate_off' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('1-3 star reviews are never thanked', async () => {
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'venice', starRating: 3 });
+
+    expect(result).toEqual({ enrolled: false, reason: 'low_rating' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('unknown location → no_template', async () => {
+    const result = await enrollReviewThankYou({ customerId: 'cust-1', locationId: 'tampa', starRating: 5 });
+
+    expect(result).toEqual({ enrolled: false, reason: 'no_template' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
   });
 });

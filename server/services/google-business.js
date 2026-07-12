@@ -9,19 +9,7 @@ const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
-const { isEnabled } = require('../config/feature-gates');
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-// Review Thank You sequence per GBP location (Automations tab). The
-// 'bradenton' location id is the Lakewood Ranch-branded GBP — its sequence
-// key stays 'lwr' for the same segment-continuity reason as the Beehiiv-era
-// tag (see the WAVES_LOCATIONS header comment).
-const REVIEW_THANKYOU_BY_LOCATION = Object.freeze({
-  bradenton: 'review_thank_you_lwr',
-  parrish: 'review_thank_you_parrish',
-  sarasota: 'review_thank_you_sarasota',
-  venice: 'review_thank_you_venice',
-});
 
 function isDraftReply(reply) {
   return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
@@ -568,19 +556,15 @@ class GoogleBusinessService {
       // Thank-you sequence on the ATTRIBUTION moment only (a new review, or
       // an existing one that just matched a customer) — not on every hourly
       // re-sync; the helper's once-ever dedupe backstops replays anyway.
-      // 4-5 stars only: an automated "thank you for your review" on a 1-3
-      // star review reads as tone-deaf.
+      // Gate / 4-5-star bar / location mapping live in the shared helper so
+      // the manual-match flow (review-incentives) behaves identically.
       const justAttributed = result.inserted || !existing?.customer_id;
-      const thankYouKey = REVIEW_THANKYOU_BY_LOCATION[row.location_id];
-      if (justAttributed && thankYouKey && Number(row.star_rating) >= 4 && isEnabled('reviewThankYouEnroll')) {
-        const { enrollSequenceFromEvent } = require('./automation-enroll');
-        await enrollSequenceFromEvent({
-          templateKey: thankYouKey,
+      if (justAttributed) {
+        const { enrollReviewThankYou } = require('./automation-enroll');
+        await enrollReviewThankYou({
           customerId: row.customer_id,
-          dedupe: 'ever',
-          // One thank-you per customer across ALL locations — a customer who
-          // reviews two GBP listings is thanked once.
-          dedupeAcross: Object.values(REVIEW_THANKYOU_BY_LOCATION),
+          locationId: row.location_id,
+          starRating: row.star_rating,
           source: 'google_review',
         });
       }
@@ -701,14 +685,12 @@ class GoogleBusinessService {
         await this._markCustomerLeftReview(effectiveCustomerId);
         // Same attribution-moment thank-you hook as the GBP feed path.
         const justAttributed = !existing || !existing.customer_id;
-        const thankYouKey = REVIEW_THANKYOU_BY_LOCATION[loc.id];
-        if (justAttributed && thankYouKey && Number(review.rating || 0) >= 4 && isEnabled('reviewThankYouEnroll')) {
-          const { enrollSequenceFromEvent } = require('./automation-enroll');
-          await enrollSequenceFromEvent({
-            templateKey: thankYouKey,
+        if (justAttributed) {
+          const { enrollReviewThankYou } = require('./automation-enroll');
+          await enrollReviewThankYou({
             customerId: effectiveCustomerId,
-            dedupe: 'ever',
-            dedupeAcross: Object.values(REVIEW_THANKYOU_BY_LOCATION),
+            locationId: loc.id,
+            starRating: review.rating || 0,
             source: 'google_review_places',
           });
         }

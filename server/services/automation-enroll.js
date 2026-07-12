@@ -56,6 +56,11 @@ async function enrollSequenceFromEvent({
   // via getBillingContact, falling back to primary) — payment sequences must
   // reach the same billing contact the transactional emails they replace did.
   recipient = 'primary',
+  // When true, an active email suppression matching the template's stream
+  // returns { reason: 'suppressed' } instead of enrolling — for callers that
+  // REPLACE a transactional email and must fall back to it rather than let the
+  // runner cancel the enrollment silently (dunning must always deliver).
+  checkSuppression = false,
   source = 'event',
 } = {}) {
   try {
@@ -104,6 +109,20 @@ async function enrollSequenceFromEvent({
     if (!email || !email.includes('@')) return { enrolled: false, reason: 'no_email' };
 
     const AutomationRunner = require('./automation-runner');
+
+    if (checkSuppression) {
+      try {
+        const template = await db('automation_templates').where({ key: templateKey }).first();
+        const suppression = await AutomationRunner.activeAutomationSuppressionFor(template, email);
+        if (suppression) return { enrolled: false, reason: 'suppressed' };
+      } catch (err) {
+        // Fail toward 'suppressed' so the caller's transactional fallback
+        // (which has its own delivery rules) carries the message.
+        logger.warn(`[automation-enroll] suppression check failed for ${templateKey}/${customerId}: ${err.message}`);
+        return { enrolled: false, reason: 'suppressed' };
+      }
+    }
+
     const result = await AutomationRunner.enrollCustomer({
       templateKey,
       customer: {
@@ -124,4 +143,44 @@ async function enrollSequenceFromEvent({
   }
 }
 
-module.exports = { enrollSequenceFromEvent, isSequenceSendable };
+// ── Review thank-you ─────────────────────────────────────────────
+// One shared entry point for EVERY path that attributes a Google review to a
+// customer — the hourly GBP feed sync, the Places fallback sync, and the
+// office's manual match flow (review-incentives). Gate + 4-5-star bar +
+// location mapping live here so no attribution path can drift.
+
+// Sequence per GBP location (Automations tab). The 'bradenton' location id is
+// the Lakewood Ranch-branded GBP — its sequence key stays 'lwr' for the same
+// segment-continuity reason as the Beehiiv-era tag (see the WAVES_LOCATIONS
+// header comment in config/locations.js).
+const REVIEW_THANKYOU_BY_LOCATION = Object.freeze({
+  bradenton: 'review_thank_you_lwr',
+  parrish: 'review_thank_you_parrish',
+  sarasota: 'review_thank_you_sarasota',
+  venice: 'review_thank_you_venice',
+});
+
+async function enrollReviewThankYou({ customerId, locationId, starRating, source = 'google_review' } = {}) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('reviewThankYouEnroll')) return { enrolled: false, reason: 'gate_off' };
+  const templateKey = REVIEW_THANKYOU_BY_LOCATION[locationId] || null;
+  if (!templateKey) return { enrolled: false, reason: 'no_template' };
+  // 4-5 stars only: an automated "thank you for your review" on a 1-3 star
+  // review reads as tone-deaf.
+  if (Number(starRating || 0) < 4) return { enrolled: false, reason: 'low_rating' };
+  return enrollSequenceFromEvent({
+    templateKey,
+    customerId,
+    dedupe: 'ever',
+    // One thank-you per customer across ALL locations.
+    dedupeAcross: Object.values(REVIEW_THANKYOU_BY_LOCATION),
+    source,
+  });
+}
+
+module.exports = {
+  enrollSequenceFromEvent,
+  isSequenceSendable,
+  enrollReviewThankYou,
+  REVIEW_THANKYOU_BY_LOCATION,
+};
