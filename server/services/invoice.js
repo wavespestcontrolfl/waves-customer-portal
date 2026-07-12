@@ -20,6 +20,12 @@ const SEND_CLAIMABLE_STATUSES = [
 ];
 const SEND_FINALIZABLE_STATUSES = [...SEND_CLAIMABLE_STATUSES, "sending"];
 
+// How many times processScheduledSends retries a failing auto-send before it
+// gives up and hands the invoice to a human (raises invoice_delivery_failed).
+// Used by the cron's due-row filter AND its exhaustion check so the two can't
+// drift. Accept-time auto-sends that fail are enqueued here for self-healing.
+const MAX_SCHEDULED_SEND_ATTEMPTS = 5;
+
 // Invoice statuses that are safe to auto-void when the underlying scheduled
 // service is cancelled. Mirrors assertInvoiceVoidable: paid / processing
 // money-states are off-limits (refund is the right path); 'scheduled' is
@@ -2208,6 +2214,50 @@ const InvoiceService = {
     return finalInvoice;
   },
 
+  /**
+   * Queue an invoice for automatic retry by processScheduledSends. Used when an
+   * immediate (accept-time) auto-send fails: instead of stranding the invoice
+   * in 'draft' with no pay link out and no signal, flip it to 'scheduled' with
+   * a fresh retry budget so the cron self-heals transient failures (Twilio
+   * blip, SES throttle) and, on exhaustion, raises invoice_delivery_failed.
+   *
+   * Guarded like the manual schedule-send endpoint: only draft/scheduled rows
+   * (never paid/voided/sent) and never an accrued payer-statement invoice
+   * (those are delivered on the consolidated statement — queueing one here just
+   * churns failed sends). Idempotent: re-queuing only resets the retry budget.
+   *
+   * Returns the updated row, or null if the invoice was ineligible.
+   */
+  async enqueueScheduledSend(
+    invoiceId,
+    { sendAt = null, requestReview = null, reviewDelayMinutes = null } = {},
+  ) {
+    if (!invoiceId) return null;
+    const updates = {
+      status: "scheduled",
+      scheduled_send_at: sendAt || new Date(),
+      scheduled_send_attempts: 0,
+      scheduled_send_error: null,
+      updated_at: new Date(),
+    };
+    // Only override the review request when the caller takes a decision —
+    // otherwise leave whatever was configured at schedule time intact (the
+    // send path falls back to the stored value).
+    if (requestReview !== null) {
+      updates.scheduled_request_review = Boolean(requestReview);
+      updates.scheduled_review_delay_minutes = requestReview
+        ? reviewDelayMinutes
+        : null;
+    }
+    const [invoice] = await db("invoices")
+      .where({ id: invoiceId })
+      .whereIn("status", ["draft", "scheduled"])
+      .whereNull("payer_statement_id")
+      .update(updates)
+      .returning("*");
+    return invoice || null;
+  },
+
   async processScheduledSends({ limit = 25 } = {}) {
     await db("invoices")
       .where({ status: "sending" })
@@ -2225,7 +2275,7 @@ const InvoiceService = {
       .where((q) =>
         q
           .whereNull("scheduled_send_attempts")
-          .orWhere("scheduled_send_attempts", "<", 5),
+          .orWhere("scheduled_send_attempts", "<", MAX_SCHEDULED_SEND_ATTEMPTS),
       )
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
@@ -2247,7 +2297,7 @@ const InvoiceService = {
         .where((q) =>
           q
             .whereNull("scheduled_send_attempts")
-            .orWhere("scheduled_send_attempts", "<", 5),
+            .orWhere("scheduled_send_attempts", "<", MAX_SCHEDULED_SEND_ATTEMPTS),
         )
         .update({ status: "sending", updated_at: new Date() })
         .returning([
@@ -2275,12 +2325,19 @@ const InvoiceService = {
         ]
           .filter(Boolean)
           .join(" | ") || "send failed";
+      const newAttempts = Number(inv.scheduled_send_attempts || 0) + 1;
+      const exhausted = newAttempts >= MAX_SCHEDULED_SEND_ATTEMPTS;
       await db("invoices")
         .where({ id: inv.id })
         .update({
           status: "scheduled",
-          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+          scheduled_send_attempts: newAttempts,
           scheduled_send_error: error,
+          // Exhausted: take the row out of the retry queue cleanly so it doesn't
+          // sit forever as a due-but-capped scheduled send. It's now a manual
+          // follow-up item (the alert below is the handoff; the error column
+          // and 'scheduled' status keep it resendable from the admin UI).
+          ...(exhausted ? { scheduled_send_at: null } : {}),
           updated_at: new Date(),
         });
       // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
@@ -2298,6 +2355,38 @@ const InvoiceService = {
       logger.error(
         `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
       );
+
+      // Retries exhausted — the pay link never reached the customer and no
+      // further auto-attempt will run. Hand it to a human exactly once (the
+      // < MAX filter means this row is no longer picked up, so no re-alert).
+      if (exhausted) {
+        try {
+          const detail = await db("invoices")
+            .where({ id: inv.id })
+            .first("customer_id");
+          let customerName = null;
+          if (detail?.customer_id) {
+            const cust = await db("customers")
+              .where({ id: detail.customer_id })
+              .first("first_name", "last_name");
+            customerName = cust
+              ? [cust.first_name, cust.last_name].filter(Boolean).join(" ").trim() || null
+              : null;
+          }
+          const { triggerNotification } = require("./notification-triggers");
+          await triggerNotification("invoice_delivery_failed", {
+            invoiceId: inv.id,
+            invoiceNumber: inv.invoice_number,
+            customerName,
+            attempts: newAttempts,
+            errorMessage: error,
+          });
+        } catch (notifyErr) {
+          logger.error(
+            `[invoice] failed to raise invoice_delivery_failed alert for ${inv.invoice_number}: ${notifyErr.message}`,
+          );
+        }
+      }
     }
     return { sent, failed };
   },

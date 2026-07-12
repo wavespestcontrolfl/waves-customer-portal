@@ -7012,6 +7012,7 @@ router.put('/:token/accept', async (req, res, next) => {
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;
     let invoiceLinkDelivered = false;
+    let invoiceDeliveryRetryQueued = false;
     let invoiceServiceLabel = txResult.invoiceServiceLabel || acceptedOneTimeServiceLabel || null;
     const invoiceKind = txResult.invoiceKind || null;
     const annualPrepayConversion = txResult.annualPrepayConversion || null;
@@ -7243,7 +7244,21 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (deliveryErr) {
         logger.error(`[estimate-accept] Invoice delivery failed: ${deliveryErr.message}`);
       }
-      logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : 'failed'}`);
+      // Immediate auto-send failed — nothing was delivered (the wrapper only
+      // reports ok when a channel actually went out). Queue it for the
+      // processScheduledSends cron to self-heal instead of leaving the customer
+      // with no pay link and no retry; the cron alerts the office on exhaustion.
+      if (!invoiceLinkDelivered) {
+        try {
+          const InvoiceService = require('../services/invoice');
+          const queued = await InvoiceService.enqueueScheduledSend(invoiceId);
+          invoiceDeliveryRetryQueued = !!queued;
+          if (queued) logger.info(`[estimate-accept] Invoice ${invoiceId} delivery queued for automatic retry`);
+        } catch (queueErr) {
+          logger.error(`[estimate-accept] Failed to queue invoice ${invoiceId} for retry: ${queueErr.message}`);
+        }
+      }
+      logger.info(`[estimate-accept] Invoice-mode invoice ${invoiceId} created for estimate ${estimate.id} — $${invoiceAmount}; delivery=${invoiceLinkDelivered ? 'sent' : (invoiceDeliveryRetryQueued ? 'retry-queued' : 'failed')}`);
     }
 
     // Auto-convert estimate to active customer (Feature #5). Skip entirely
@@ -7271,6 +7286,7 @@ router.put('/:token/accept', async (req, res, next) => {
           invoiceAmount = conversion.draftInvoiceAmount || null;
           invoicePayUrl = conversion.draftInvoicePayUrl || null;
           invoiceLinkDelivered = !!conversion.invoiceDelivery?.ok;
+          invoiceDeliveryRetryQueued = !!conversion.invoiceDeliveryRetryQueued;
         }
         logger.info(`[estimate-accept] Auto-conversion completed for estimate ${estimate.id} (billingTerm=${billingTerm}, invoiceMode=${billByInvoice})`);
       } catch (e) {
@@ -7379,6 +7395,7 @@ router.put('/:token/accept', async (req, res, next) => {
         billByInvoice,
         invoiceMode,
         invoiceLinkDelivered,
+        invoiceDeliveryRetryQueued,
         invoicePayUrl,
         payerBilled: invoiceIsPayerBilled,
         reservationCommitted,
@@ -7428,6 +7445,7 @@ router.put('/:token/accept', async (req, res, next) => {
     res.json(buildAcceptSuccessPayload({
       invoiceMode,
       invoiceLinkDelivered,
+      invoiceDeliveryRetryQueued,
       invoiceId,
       invoiceAmount,
       invoicePayUrl,
@@ -8850,6 +8868,7 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
 function buildAcceptSuccessPayload({
   invoiceMode = false,
   invoiceLinkDelivered = false,
+  invoiceDeliveryRetryQueued = false,
   invoiceId = null,
   invoiceAmount = null,
   invoicePayUrl = null,
@@ -8883,6 +8902,7 @@ function buildAcceptSuccessPayload({
     reservationCommitted,
     invoiceMode,
     invoiceLinkDelivered,
+    invoiceDeliveryRetryQueued,
     invoiceId,
     invoiceAmount,
     invoicePayUrl: decoratedInvoicePayUrl,
@@ -8995,6 +9015,7 @@ function buildAcceptNotificationPayload({
   billByInvoice = false,
   invoiceMode = false,
   invoiceLinkDelivered = false,
+  invoiceDeliveryRetryQueued = false,
   invoicePayUrl = null,
   payerBilled = false,
   reservationCommitted = false,
@@ -9002,6 +9023,11 @@ function buildAcceptNotificationPayload({
   billingTerm = 'standard',
   annualPrepayAmount = null,
 } = {}) {
+  // When the invoice exists but its pay link couldn't be delivered right away,
+  // the send is auto-retried (processScheduledSends). Tell the customer their
+  // link is on its way rather than implying a manual office follow-up or that
+  // they already received it — they can also pay from their account meanwhile.
+  const retryPending = invoiceDeliveryRetryQueued && !invoiceLinkDelivered;
   // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
   // the homeowner gets the report and owes nothing, so never advertise a
   // customer pay link. This must precede every billing-term branch below — the
@@ -9040,9 +9066,13 @@ function buildAcceptNotificationPayload({
       if (!invoiceMode || !invoiceLinkDelivered) {
         return {
           adminTitle: `One-time estimate accepted: ${customerName}`,
-          adminBody: `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
+          adminBody: retryPending
+            ? `${serviceLabel} approved. Invoice pay link delivery failed — automatic retry queued.`
+            : `${serviceLabel} approved. Invoice was not sent automatically; office follow-up needed.`,
           customerTitle: 'Estimate accepted',
-          customerBody: `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
+          customerBody: retryPending
+            ? `Your ${serviceLabel} estimate is approved. We're sending your invoice pay link now — you can also pay anytime from your account.`
+            : `Your ${serviceLabel} estimate is approved. Our team will follow up with the invoice details.`,
           customerLink: invoicePayUrl || '/?tab=billing',
         };
       }
@@ -9057,9 +9087,13 @@ function buildAcceptNotificationPayload({
     if (!invoiceMode || !invoiceLinkDelivered) {
       return {
         adminTitle: `Estimate accepted: ${customerName}`,
-        adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
+        adminBody: retryPending
+          ? `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice pay link delivery failed — automatic retry queued.`
+          : `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. Invoice was not sent automatically; office follow-up needed.`,
         customerTitle: 'Estimate accepted',
-        customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
+        customerBody: retryPending
+          ? `Your ${waveguardTier} WaveGuard plan is approved. We're sending your invoice pay link now — you can also pay anytime from your account.`
+          : `Your ${waveguardTier} WaveGuard plan is approved. Our team will follow up with the invoice details.`,
         customerLink: invoicePayUrl || '/?tab=billing',
       };
     }
@@ -9101,23 +9135,31 @@ function buildAcceptNotificationPayload({
         customerLink: '/?tab=billing',
       };
     }
-    const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; optional pay link available.';
+    const sentText = invoiceLinkDelivered
+      ? 'Invoice pay link sent.'
+      : (retryPending ? 'Pay link delivery failed — automatic retry queued.' : 'Invoice created; optional pay link available.');
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard annual prepay${amountText} approved. ${sentText}`,
       customerTitle: 'Estimate accepted',
-      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
+      customerBody: retryPending
+        ? `Your ${waveguardTier} WaveGuard plan is approved. We're sending your invoice pay link now — you can also pay anytime from your account.`
+        : `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
     };
   }
 
   if (invoiceMode || invoicePayUrl) {
-    const sentText = invoiceLinkDelivered ? 'Invoice pay link sent.' : 'Invoice created; optional pay link available.';
+    const sentText = invoiceLinkDelivered
+      ? 'Invoice pay link sent.'
+      : (retryPending ? 'Pay link delivery failed — automatic retry queued.' : 'Invoice created; optional pay link available.');
     return {
       adminTitle: `Estimate accepted: ${customerName}`,
       adminBody: `${waveguardTier} WaveGuard $${monthlyTotal}/mo approved. ${sentText}`,
       customerTitle: 'Estimate accepted',
-      customerBody: `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
+      customerBody: retryPending
+        ? `Your ${waveguardTier} WaveGuard plan is approved. We're sending your invoice pay link now — you can also pay anytime from your account.`
+        : `Your ${waveguardTier} WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.`,
       customerLink: invoicePayUrl || '/?tab=billing',
     };
   }

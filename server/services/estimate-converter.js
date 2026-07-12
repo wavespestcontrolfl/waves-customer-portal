@@ -1195,6 +1195,7 @@ const EstimateConverter = {
     let draftInvoiceAmount = null;
     let draftInvoicePayUrl = null;
     let invoiceDelivery = null;
+    let invoiceDeliveryRetryQueued = false;
     let annualPrepayTermId = null;
     try {
       // Base recurring annual (undiscounted): resolveAnnualPrepayInvoiceAmount never
@@ -1424,8 +1425,44 @@ const EstimateConverter = {
           };
           logger.error(`[estimate-converter] Draft invoice delivery failed for estimate ${estimateId}: ${deliveryErr.message}`);
         }
+        // Immediate auto-send failed (threw, or both channels returned !ok, so
+        // nothing was delivered — the wrapper only reports ok when a channel
+        // actually went out). Queue it for the processScheduledSends cron to
+        // self-heal transient failures instead of stranding a draft with no pay
+        // link out and no signal. On exhaustion the cron alerts the office.
+        if (!invoiceDelivery?.ok) {
+          try {
+            const InvoiceService = require('./invoice');
+            const queued = await InvoiceService.enqueueScheduledSend(draftInvoiceId);
+            invoiceDeliveryRetryQueued = !!queued;
+            if (queued) {
+              logger.info(`[estimate-converter] Draft invoice ${draftInvoiceId} delivery queued for automatic retry (estimate ${estimateId})`);
+            }
+          } catch (queueErr) {
+            logger.error(`[estimate-converter] Failed to queue draft invoice ${draftInvoiceId} for retry (estimate ${estimateId}): ${queueErr.message}`);
+          }
+        }
       }
     } catch (err) {
+      // The invoice couldn't be created — there's no pay link to retry, so this
+      // is a human task: alert the office to draft + send it manually. Fires for
+      // both the prepay path (which rethrows below → customer sees a 500) and
+      // the standard path (which swallows the error so conversion still
+      // completes). Best-effort; never let the alert mask the original failure.
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('invoice_create_failed', {
+          estimateId,
+          customerId,
+          customerName: customer?.first_name || customer?.last_name
+            ? [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim()
+            : null,
+          invoiceKind: billingTerm === 'prepay_annual' ? 'annual prepay invoice' : 'setup invoice',
+          errorMessage: err.message,
+        });
+      } catch (notifyErr) {
+        logger.error(`[estimate-converter] Failed to raise invoice_create_failed alert for estimate ${estimateId}: ${notifyErr.message}`);
+      }
       if (billingTerm === 'prepay_annual') {
         logger.error(`[estimate-converter] Annual prepay invoice/term creation failed for estimate ${estimateId}: ${err.message}`);
         if (draftInvoiceId && !usingCallerDatabase) {
@@ -1509,6 +1546,7 @@ const EstimateConverter = {
       draftInvoiceAmount,
       draftInvoicePayUrl,
       invoiceDelivery,
+      invoiceDeliveryRetryQueued,
       membershipEmail,
       welcomeSms,
       deferredFollowUpReminderRows,

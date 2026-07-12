@@ -173,6 +173,35 @@ const TRIGGER_REGISTRY = {
       link: p.link || '/admin/dispatch',
     }),
   },
+  // Fired by InvoiceService.processScheduledSends when an invoice exhausts its
+  // automatic send retries — the customer never received their pay link by SMS
+  // or email. Accept-time auto-send failures are enqueued for retry first, so
+  // this only fires for genuinely stuck deliveries that need a human resend.
+  invoice_delivery_failed: {
+    label: 'Invoice pay link failed to send',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Invoice pay link not delivered',
+      body: `${p.customerName || 'A customer'} did not receive their invoice pay link${p.invoiceNumber ? ` (${p.invoiceNumber})` : ''} after ${p.attempts || 'multiple'} automatic attempts${p.errorMessage ? ` — ${p.errorMessage}` : ''}. Re-send it from the invoice.`,
+      link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
+    }),
+  },
+  // Fired by the estimate-accept / converter flow when the invoice itself could
+  // not be created — there is no pay link to retry, so the office must draft and
+  // send the invoice manually before the customer can pay.
+  invoice_create_failed: {
+    label: 'Invoice could not be created on accept',
+    category: 'system',
+    priority: 'high',
+    group: 'Alerts',
+    build: (p) => ({
+      title: 'Invoice creation failed on estimate accept',
+      body: `${p.customerName || 'A customer'} accepted their estimate but the ${p.invoiceKind || 'invoice'} could not be created automatically${p.errorMessage ? ` — ${p.errorMessage}` : ''}. Draft and send it manually.`,
+      link: p.estimateId ? `/admin/estimates?estimate=${p.estimateId}` : '/admin/estimates',
+    }),
+  },
   twilio_failure: {
     label: 'Twilio call/SMS failure',
     category: 'system',
