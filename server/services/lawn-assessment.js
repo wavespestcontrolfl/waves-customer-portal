@@ -25,11 +25,11 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 
 // Gemini vision scorer model — live default is the registry's best
 // (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
-// On any miss (HTTP/parse/empty) callGeminiVision retries the prior model
-// (gemini-2.5-flash) so a live-model entitlement/availability issue never costs
-// us the Gemini scorer. Fan-out/averaging logic is unchanged.
+// On any miss (HTTP/parse/empty) callGeminiVision retries the registry's
+// GEMINI_VISION_FALLBACK so a live-model entitlement/availability issue never
+// costs us the Gemini scorer. Fan-out/averaging logic is unchanged.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `You are a lawn health assessment tool for a professional lawn care company in Southwest Florida. Analyze the provided lawn photo and return ONLY a JSON object with the following scores. Base your analysis on what is visible in the photo. The primary turf type in this region is St. Augustine grass.
 

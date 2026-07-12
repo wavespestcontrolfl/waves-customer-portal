@@ -22,7 +22,7 @@ const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENA
 // analyzeWithGemini retries the prior model (gemini-2.5-flash) so a live-model
 // entitlement/availability issue never costs us the Gemini analyzer.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `Analyze this satellite/aerial image of a residential property in Southwest Florida. Estimate the following measurements and features as accurately as possible from the image.
 

@@ -421,14 +421,15 @@ Rules:
 
 Return ONLY the review body. No quotes, no preamble, no sign-off.`;
 
-    // Call Claude API — FAST tier is plenty for 256-token review body.
+    // Call Claude API — VOICE tier: this is customer-voice copy destined for
+    // a real Google review, where a warm natural voice beats raw reasoning.
     let reviewText = '';
     try {
       const Anthropic = require('@anthropic-ai/sdk');
       const anthropic = new Anthropic();
 
       const message = await anthropic.messages.create({
-        model: MODELS.FAST,
+        model: MODELS.VOICE,
         max_tokens: 256,
         messages: [{ role: 'user', content: prompt }],
       });
