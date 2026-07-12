@@ -136,21 +136,24 @@ async function hasLocalContent(templateKey) {
  * Enroll a customer into a template's sequence. Idempotent on customer id
  * when present, otherwise on normalized lead email for lead-only estimates.
  * If there are no enabled steps, returns { enrolled: false }.
+ * `dbh` lets a caller run the whole enrollment on its own transaction (the
+ * appointment tagger holds a per-customer advisory lock and must not need a
+ * second pooled connection while doing so).
  */
-async function enrollCustomer({ templateKey, customer }) {
-  const template = await db('automation_templates').where({ key: templateKey }).first();
+async function enrollCustomer({ templateKey, customer, dbh = db }) {
+  const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
   if (!customer?.email) return { enrolled: false, reason: 'no email' };
   const normalizedEmail = String(customer.email || '').trim().toLowerCase();
   if (!normalizedEmail) return { enrolled: false, reason: 'no email' };
 
-  const steps = await db('automation_steps')
+  const steps = await dbh('automation_steps')
     .where({ template_key: templateKey, enabled: true })
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
-  const existingQuery = db('automation_enrollments').where({ template_key: templateKey });
+  const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });
   } else {
@@ -180,7 +183,7 @@ async function enrollCustomer({ templateKey, customer }) {
     last_name: customer.last_name || null,
   };
   if (existing) {
-    const [reactivated] = await db('automation_enrollments')
+    const [reactivated] = await dbh('automation_enrollments')
       .where({ id: existing.id })
       .update(reactivatePayload)
       .returning('*');
@@ -200,17 +203,17 @@ async function enrollCustomer({ templateKey, customer }) {
 
   let row;
   if (customer.id) {
-    [row] = await db('automation_enrollments')
+    [row] = await dbh('automation_enrollments')
       .insert(payload)
       .returning('*')
       .onConflict(['template_key', 'customer_id'])
       .merge(reactivatePayload);
   } else {
     try {
-      [row] = await db('automation_enrollments').insert(payload).returning('*');
+      [row] = await dbh('automation_enrollments').insert(payload).returning('*');
     } catch (err) {
       if (err.code !== '23505') throw err;
-      [row] = await db('automation_enrollments')
+      [row] = await dbh('automation_enrollments')
         .where({ template_key: templateKey })
         .whereNull('customer_id')
         .whereRaw('lower(email) = ?', [normalizedEmail])

@@ -437,16 +437,18 @@ describe('appointment tagger prep email automation', () => {
 });
 
 describe('treatment automation sequence (one guide email, Automations-tab source)', () => {
-  const { enrollCustomer, hasLocalContent } = require('../services/automation-runner');
+  const { enrollCustomer } = require('../services/automation-runner');
   let priorEnrollmentRow;
   let templateRow;
+  let firstStepRow;
 
   // automation_enrollments — the once-per-customer booking-hook dedupe lookup
-  // (.where().whereNot('status','failed').first()).
+  // (.where().where(fn).first(); the fn models whereNot-failed OR delivered).
   function enrollmentsQuery() {
     const q = {
       where: jest.fn(() => q),
       whereNot: jest.fn(() => q),
+      orWhereNotNull: jest.fn(() => q),
       first: jest.fn(async () => priorEnrollmentRow),
     };
     return q;
@@ -459,17 +461,26 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     };
     return q;
   }
+  // automation_steps — first-enabled-step content check.
+  function stepsQuery() {
+    const q = {
+      where: jest.fn(() => q),
+      orderBy: jest.fn(() => q),
+      first: jest.fn(async () => firstStepRow),
+    };
+    return q;
+  }
 
   beforeEach(() => {
     // Same harness as the prep describe: first-time booking, gates on.
     jest.clearAllMocks();
     isEnabled.mockReturnValue(true);
     enrollCustomer.mockResolvedValue({ enrolled: true, enrollmentId: 'enr-1' });
-    hasLocalContent.mockResolvedValue(true);
     priorBookingRow = null;
     priorPrepInteraction = null;
     priorEnrollmentRow = null;
     templateRow = { key: 'bed_bug', enabled: true };
+    firstStepRow = { step_order: 0, enabled: true, html_body: '<p>guide</p>', text_body: '' };
     customerRow = {
       id: 'cust-1',
       first_name: 'Taylor',
@@ -482,6 +493,7 @@ describe('treatment automation sequence (one guide email, Automations-tab source
       if (table === 'email_template_automations') return automationsQuery();
       if (table === 'automation_enrollments') return enrollmentsQuery();
       if (table === 'automation_templates') return templatesQuery();
+      if (table === 'automation_steps') return stepsQuery();
       return customersQuery();
     });
     const trx = (table) => db(table);
@@ -502,10 +514,11 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     // never triggered.
     expect(executor.processTrigger).not.toHaveBeenCalled();
     expect(enrollCustomer).toHaveBeenCalledTimes(1);
-    expect(enrollCustomer).toHaveBeenCalledWith({
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'bed_bug',
       customer: expect.objectContaining({ id: 'cust-1', email: 'taylor@example.com', first_name: 'Taylor' }),
-    });
+      dbh: expect.anything(), // runs on the advisory-lock transaction
+    }));
     // Companion text still goes out — the guide email is coming via the runner.
     expect(renderSmsTemplate).toHaveBeenCalledWith(
       'auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object),
@@ -554,7 +567,7 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     expect(renderSmsTemplate).not.toHaveBeenCalled();
 
     templateRow = { key: 'bed_bug', enabled: true };
-    hasLocalContent.mockResolvedValue(false); // steps disabled/empty
+    firstStepRow = { step_order: 0, enabled: true, html_body: '', text_body: '' }; // first step empty
     await AppointmentTagger.triggerPestPrep(service({ email: null, service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
     expect(renderSmsTemplate).not.toHaveBeenCalled();
@@ -580,9 +593,11 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     expect(enrollCustomer).toHaveBeenCalledTimes(1);
   });
 
-  test('enabled template with empty step content never enrolls (companion would lie)', async () => {
+  test('empty FIRST step never enrolls, even if a later step has content (companion would lie)', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    hasLocalContent.mockResolvedValue(false); // enabled step exists but bodies are empty
+    // The runner starts at step 0; a contentful later step doesn't make the
+    // guide send. isTreatmentSequenceSendable checks the FIRST enabled step.
+    firstStepRow = { step_order: 0, enabled: true, html_body: '   ', text_body: '' };
 
     await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
@@ -618,10 +633,10 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     const result = await AppointmentTagger.enrollTreatmentSequence(service(), 'bed_bug');
 
     expect(result).toEqual({ queued: true, reason: 'queued' });
-    expect(enrollCustomer).toHaveBeenCalledWith({
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'bed_bug',
       customer: expect.objectContaining({ email: 'jamie@example.com', first_name: 'Jamie' }),
-    });
+    }));
   });
 
   test('enrollment failure fails closed: logged, no SMS, booking unaffected', async () => {
