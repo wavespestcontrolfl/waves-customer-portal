@@ -73,12 +73,17 @@ async function enrollSequenceFromEvent({
       : [templateKey];
     const priorQuery = db('automation_enrollments')
       .whereIn('template_key', dedupeKeys)
-      .where({ customer_id: customerId });
-    if (dedupe === 'ever') {
-      priorQuery.where(function priorDelivered() {
+      .where({ customer_id: customerId })
+      // BOTH modes: only rows that delivered (or still can) suppress. A
+      // failed row that never sent anything (status='failed',
+      // last_sent_at NULL — e.g. SendGrid rejected before any email left)
+      // must not count as coverage inside a dedupe window either, or the
+      // billing sites would treat 'deduped' as email coverage and suppress
+      // the transactional fallback while the customer got nothing.
+      .where(function priorDelivered() {
         this.whereNot('status', 'failed').orWhereNotNull('last_sent_at');
       });
-    } else {
+    if (dedupe !== 'ever') {
       priorQuery.where('enrolled_at', '>', new Date(Date.now() - Number(dedupe) * 24 * 3600 * 1000));
     }
     if (await priorQuery.first('id')) return { enrolled: false, reason: 'deduped' };

@@ -21,6 +21,7 @@ let customerRow;
 let prefsRow;
 let enrollmentWhereArgs;
 let enrollmentWhereInArgs;
+let enrollmentQueries;
 
 function templatesQuery() {
   const q = { where: jest.fn(() => q), first: jest.fn(async () => templateRow) };
@@ -32,12 +33,19 @@ function stepsQuery() {
 }
 function enrollmentsQuery() {
   const q = {
-    where: jest.fn((...args) => { enrollmentWhereArgs.push(args); return q; }),
+    // Knex invokes a function arg with `this` bound to the builder — mirror
+    // that so grouped-where shapes (the delivered-filter) are observable.
+    where: jest.fn(function whereMock(...args) {
+      enrollmentWhereArgs.push(args);
+      if (typeof args[0] === 'function') args[0].call(q);
+      return q;
+    }),
     whereIn: jest.fn((...args) => { enrollmentWhereInArgs.push(args); return q; }),
     whereNot: jest.fn(() => q),
     orWhereNotNull: jest.fn(() => q),
     first: jest.fn(async () => priorRow),
   };
+  enrollmentQueries.push(q);
   return q;
 }
 function customersQuery() {
@@ -60,6 +68,7 @@ beforeEach(() => {
   prefsRow = null;
   enrollmentWhereArgs = [];
   enrollmentWhereInArgs = [];
+  enrollmentQueries = [];
   customerRow = { id: 'cust-1', first_name: 'Megan', last_name: 'Example', email: 'megan@example.com', deleted_at: null };
   db.mockImplementation((table) => {
     if (table === 'automation_templates') return templatesQuery();
@@ -121,6 +130,20 @@ describe('enrollSequenceFromEvent', () => {
     const cutoff = windowArgs[2].getTime();
     const expected = Date.now() - 90 * 24 * 3600 * 1000;
     expect(Math.abs(cutoff - expected)).toBeLessThan(60 * 1000);
+  });
+
+  test('windowed dedupe ALSO excludes failed-never-sent rows (dunning coverage stays honest)', async () => {
+    // A failed row that never delivered must not read as 'deduped' inside a
+    // window — the billing sites treat deduped as email coverage and would
+    // suppress the transactional fallback while the customer got nothing.
+    // Assert the windowed query carries the same delivered-filter shape the
+    // 'ever' mode uses (whereNot status failed OR last_sent_at set).
+    const result = await enrollSequenceFromEvent({ templateKey: 'payment_failed', customerId: 'cust-1', dedupe: 14 });
+
+    expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
+    const q = enrollmentQueries[enrollmentQueries.length - 1];
+    expect(q.whereNot).toHaveBeenCalledWith('status', 'failed');
+    expect(q.orWhereNotNull).toHaveBeenCalledWith('last_sent_at');
   });
 
   test('missing or deleted customer → no_customer', async () => {
