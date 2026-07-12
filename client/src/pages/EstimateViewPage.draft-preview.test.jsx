@@ -98,7 +98,7 @@ describe('EstimateViewPage staff draft preview', () => {
       expect(screen.getByText('Draft preview — not sent to the customer yet')).toBeInTheDocument();
     });
     // Fidelity: the preview is the real customer page, price included.
-    expect(screen.getAllByText('$2,210').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$2,210.00').length).toBeGreaterThan(0);
     // Universal hero headline — service specifics live in the eyebrow line.
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Hello Dana, your estimate is ready!');
   });

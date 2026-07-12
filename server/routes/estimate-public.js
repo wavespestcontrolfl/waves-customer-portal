@@ -1892,8 +1892,10 @@ function rawQuoteRequiredReason(item = {}) {
 }
 
 function fmtMoney(n) {
+  // Always two decimals (owner directive 2026-07-11) — mirrors the client's
+  // shared client/src/lib/money.js so both estimate twins price identically.
   const v = Math.round(Number(n || 0) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Price label for the "Estimate viewed" admin notification. One-time-only

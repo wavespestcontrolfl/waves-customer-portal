@@ -162,6 +162,41 @@ function RowInclusions({ items, collapsible = false }) {
   );
 }
 
+// Pure per-application derivation shared with the sticky book bar so the bar
+// quotes exactly the figure this card leads with. Returns the net
+// per-application price, or null when no single unambiguous one exists (the
+// caller falls back to its cadence total). Callers gate quoteRequired /
+// low-confidence themselves — this mirrors only the row/visit resolution.
+export function perApplicationNetForFrequency(frequency) {
+  if (!frequency) return null;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const rows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments
+      .map((row) => ({
+        displayPrice: Number(row.displayPrice ?? row.perTreatment),
+        monthlyPrice: Number(row.monthly),
+        visitsPerYear: Number(row.visitsPerYear),
+      }))
+      .filter((row) => (Number.isFinite(row.displayPrice) && row.displayPrice > 0)
+        || (Number.isFinite(row.monthlyPrice) && row.monthlyPrice > 0))
+    : [];
+  if (rows.length === 1) {
+    return rows[0].displayPrice > 0 && rows[0].visitsPerYear > 0 ? round2(rows[0].displayPrice) : null;
+  }
+  if (rows.length > 1) return null;
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const visitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  const visits = Number(frequency.visitsPerYear) > 0
+    ? Number(frequency.visitsPerYear)
+    : (visitRows.length === 1
+      ? Number(visitRows[0].visitsPerYear)
+      : (visitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
+  const pt = Number(frequency.perTreatment);
+  return pt > 0 && Number.isFinite(visits) && visits > 0 ? round2(pt) : null;
+}
+
 export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
   if (!frequency) return null;
 
@@ -259,18 +294,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   // entries) — the frequency's own net perTreatment. frequency.perTreatment
   // is skipped when rows are present because unsplit entries alias it to the
   // PRE-discount pest perVisit.
-  const perAppNet = (() => {
-    if (!preferPerApplicationPrice || quoteRequired || showLowConfidenceRange) return null;
-    if (treatmentRows.length === 1) {
-      const row = treatmentRows[0];
-      return Number(row.displayPrice) > 0 && Number(row.visitsPerYear) > 0 ? round2(row.displayPrice) : null;
-    }
-    if (treatmentRows.length === 0) {
-      const pt = Number(frequency.perTreatment);
-      return pt > 0 && Number.isFinite(visitsPerYear) && visitsPerYear > 0 ? round2(pt) : null;
-    }
-    return null;
-  })();
+  const perAppNet = (!preferPerApplicationPrice || quoteRequired || showLowConfidenceRange)
+    ? null
+    : perApplicationNetForFrequency(frequency);
   const perAppAnchor = perAppNet != null
     ? (Number(frequency.perVisit) > 0
       ? round2(frequency.perVisit)
