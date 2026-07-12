@@ -946,7 +946,7 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   const sCard = { background: COLORS.white, borderRadius: 16, padding: 'clamp(24px, 3vw, 40px)', boxShadow: SHADOWS.goldRing, minHeight: 420 };
   const sLabel = { display: 'block', fontFamily: FONTS.ui, fontSize: 15, fontWeight: 600, color: COLORS.navy, marginBottom: 8 };
-  const sInput = { width: '100%', padding: '14px 16px', border: `1.5px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 16, fontFamily: FONTS.body, color: COLORS.navy, boxSizing: 'border-box', background: COLORS.white, outline: 'none', minHeight: 52 };
+  const sInput = { width: '100%', padding: '14px 16px', border: `1.5px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 16, fontFamily: FONTS.body, color: COLORS.navy, boxSizing: 'border-box', background: COLORS.white, minHeight: 52 };
   const sChip = (on) => ({
     padding: '14px 18px', borderRadius: 12,
     border: `2px solid ${on ? COLORS.wavesBlue : COLORS.slate200}`,
@@ -1103,7 +1103,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="Your first and last name"
                       autoComplete="name"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1121,7 +1121,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="you@example.com"
                       autoComplete="email"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1142,7 +1142,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="(941) 555-0100"
                       autoComplete="tel"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1162,7 +1162,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       }}
                       onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                     <label style={{ ...sLabel, marginTop: 12 }}>Apt / Unit # (optional)</label>
                     {/* Hand-typed units flow through the same address.line2 the
@@ -1173,12 +1173,12 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="Apt 4B"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
 
-                {error && <div style={sError}>{error}</div>}
+                {error && <div role="alert" style={sError}>{error}</div>}
 
                 {/* Off-screen honeypot: bots that fill every field trip the
                     server-side fax_number drop on /api/leads; real users never
@@ -1292,11 +1292,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
                   <div>
                     <label style={sLabel}>Home square footage</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => { setHomeSqFt(e.target.value); setHomeSqFtConfirmed(true); }} placeholder="2000" />
+                    <input className="waves-focus-ring" style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => { setHomeSqFt(e.target.value); setHomeSqFtConfirmed(true); }} placeholder="2000" />
                   </div>
                   <div>
                     <label style={sLabel}>Lot size (sq ft)</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => { setLotSqFt(e.target.value); setLotSqFtConfirmed(true); }} placeholder="8000" />
+                    <input className="waves-focus-ring" style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => { setLotSqFt(e.target.value); setLotSqFtConfirmed(true); }} placeholder="8000" />
                   </div>
                 </div>
 
@@ -1329,13 +1329,13 @@ export default function QuotePage({ serviceSlug = '' }) {
                 {svcLawn && (
                   <div style={{ marginBottom: 18 }}>
                     <label style={sLabel}>Grass type</label>
-                    <select style={sInput} value={grassType} onChange={(e) => setGrassType(e.target.value)}>
+                    <select className="waves-focus-ring" style={sInput} value={grassType} onChange={(e) => setGrassType(e.target.value)}>
                       {GRASS_TYPES.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
                     </select>
                   </div>
                 )}
 
-                {error && <div style={sError}>{error}</div>}
+                {error && <div role="alert" style={sError}>{error}</div>}
 
                 <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <Button variant="secondary" onClick={resetAll} disabled={loading} style={{ fontSize: 16, textTransform: 'none' }}>Start Over</Button>
@@ -1374,7 +1374,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                   })}
                 </div>
 
-                {upsellError && <div style={sError}>{upsellError}</div>}
+                {upsellError && <div role="alert" style={sError}>{upsellError}</div>}
 
                 <div style={{ marginTop: 8, display: 'grid', gap: 10 }}>
                   <Button variant="primary" onClick={submitUpsell} disabled={upsellLoading} style={{ fontSize: 16, textTransform: 'none' }}>
@@ -1563,7 +1563,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                             {subscribeStatus === 'loading' ? 'Subscribing…' : 'Subscribe →'}
                           </button>
                           {subscribeStatus === 'error' && (
-                            <div style={{ fontSize: 12, color: COLORS.red, marginTop: 6 }}>
+                            <div role="alert" style={{ fontSize: 12, color: COLORS.red, marginTop: 6 }}>
                               Couldn't subscribe — try again or email contact@wavespestcontrol.com
                             </div>
                           )}

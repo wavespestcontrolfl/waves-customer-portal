@@ -151,7 +151,7 @@ function QuoteRequestForm({ token, firstName }) {
     }
   };
 
-  const inputStyle = { minHeight: 46, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 15, fontFamily: FONTS.body, color: TEXT, outline: 'none', background: COLORS.white, width: '100%', boxSizing: 'border-box' };
+  const inputStyle = { minHeight: 46, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 15, fontFamily: FONTS.body, color: TEXT, background: COLORS.white, width: '100%', boxSizing: 'border-box' };
 
   if (status === 'success') {
     return (
@@ -163,10 +163,10 @@ function QuoteRequestForm({ token, firstName }) {
 
   return (
     <form onSubmit={submit} style={{ display: 'grid', gap: 10 }}>
-      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" autoComplete="name" style={inputStyle} />
-      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" style={inputStyle} />
-      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
-      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" style={inputStyle} />
+      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" autoComplete="name" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
       <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>

@@ -49,7 +49,6 @@ const inputBaseStyle = {
   background: INPUT_BG,
   fontSize: 14,
   color: TEXT,
-  outline: 'none',
   boxSizing: 'border-box',
 };
 
@@ -349,7 +348,7 @@ export default function RatePage() {
 
   if (error) return (
     <Page>
-      <div style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
+      <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
         <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.blueDeeper, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
@@ -534,6 +533,7 @@ export default function RatePage() {
                   onChange={e => setPersonalNote(e.target.value)}
                   placeholder="e.g. No more ants in the kitchen!"
                   maxLength={150}
+                  className="waves-focus-ring"
                   style={inputBaseStyle}
                 />
               </div>
@@ -557,7 +557,7 @@ export default function RatePage() {
           )}
 
           {reviewError && !generating && !generatedReview && (
-            <div style={{
+            <div role="alert" style={{
               background: '#FFF8E8', border: '1px solid #F0DCA9', borderRadius: 8,
               padding: 14, color: TEXT, fontSize: 14, lineHeight: 1.5, fontWeight: 700,
             }}>
@@ -584,10 +584,11 @@ export default function RatePage() {
                 value={generatedReview}
                 onChange={(e) => setGeneratedReview(e.target.value)}
                 rows={5}
+                className="waves-focus-ring"
                 style={{
                   ...inputBaseStyle,
                   minHeight: 150, fontSize: 15, lineHeight: 1.6, marginBottom: 12,
-                  fontFamily: FONTS.body, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+                  fontFamily: FONTS.body, resize: 'vertical', boxSizing: 'border-box',
                 }}
               />
 
@@ -646,7 +647,7 @@ export default function RatePage() {
           <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>
             {score <= 3 ? "What went wrong? We'll personally follow up." : "What could we have done better?"}
           </div>
-          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} style={{
+          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} className="waves-focus-ring" style={{
             ...inputBaseStyle,
             minHeight: 100,
             padding: 14,
@@ -654,7 +655,7 @@ export default function RatePage() {
             resize: 'vertical',
           }} />
           {submitError && (
-            <div style={{ marginTop: 12, fontSize: 14, fontWeight: 700, color: COLORS.red, background: '#FEE2E2', borderRadius: 8, padding: '10px 14px' }}>
+            <div role="alert" style={{ marginTop: 12, fontSize: 14, fontWeight: 700, color: COLORS.red, background: '#FEE2E2', borderRadius: 8, padding: '10px 14px' }}>
               {submitError}
             </div>
           )}

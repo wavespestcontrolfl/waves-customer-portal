@@ -64,6 +64,7 @@ import {
 } from '../components/estimate/glass/GlassEstimateExtras';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
+import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
@@ -2100,6 +2101,7 @@ function ExistingAppointmentCard({ appointment }) {
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
 // card-only server-side, so the Payment Element renders card fields only.
 function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2175,6 +2177,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
@@ -2216,6 +2219,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
 // charged the final total on completion, and a flat fee only on a no-show /
 // late cancel.
 function CardHoldModal({ intent, onSuccess, onCancel }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2285,6 +2289,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"

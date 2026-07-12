@@ -1216,7 +1216,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       {elementError && (
-        <div style={{
+        <div role="alert" style={{
           background: 'rgba(200,16,46,0.06)',
           border: `1px solid ${DOC.danger}`,
           borderRadius: RADIUS.input,
@@ -1389,7 +1389,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
         methodType={methodType}
       />
       {formError && (
-        <div style={{
+        <div role="alert" style={{
           background: 'rgba(200,16,46,0.06)',
           border: `1px solid ${DOC.danger}`,
           borderRadius: RADIUS.input,
@@ -2354,7 +2354,7 @@ export default function PayPageV2() {
             </div>
 
             {paymentError && (
-              <div style={{
+              <div role="alert" style={{
                 background: 'rgba(200,16,46,0.06)',
                 border: `1px solid ${DOC.danger}`,
                 borderRadius: RADIUS.input,

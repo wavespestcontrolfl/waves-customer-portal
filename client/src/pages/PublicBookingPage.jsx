@@ -414,7 +414,7 @@ export default function PublicBookingPage() {
     width: '100%', padding: '12px 14px', borderRadius: 8,
     border: `1.5px solid ${COLORS.grayLight}`, fontSize: 15,
     color: COLORS.navy, background: '#fff',
-    outline: 'none', transition: 'border-color 0.2s',
+    transition: 'border-color 0.2s',
   };
   const labelStyle = {
     fontSize: 14, fontWeight: 500, color: COLORS.slate600,
@@ -599,7 +599,7 @@ export default function PublicBookingPage() {
                     checkExistingCustomerByAddress(nextAddress);
                   }}
                   placeholder="Start typing your address"
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>
               <div>
@@ -621,7 +621,7 @@ export default function PublicBookingPage() {
                   }}
                   onBlur={() => { if (address.line1) checkExistingCustomerByAddress(address); }}
                   placeholder="Apt / Unit # (optional)"
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>
             </div>
@@ -670,7 +670,7 @@ export default function PublicBookingPage() {
             )}
 
             {error && !loading && (
-              <div style={{
+              <div role="alert" style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
                 borderRadius: 10, padding: 14, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>
@@ -792,7 +792,7 @@ export default function PublicBookingPage() {
                     placeholder="mm/dd/yyyy"
                     value={pickedDate || ''}
                     onChange={(e) => onPickDate(e.target.value)}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                   <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 8 }}>
                     We'll check open windows up to 90 days out.
@@ -927,7 +927,7 @@ export default function PublicBookingPage() {
                   value={contact.phone}
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
                   onBlur={() => { checkExistingCustomer(contact.phone); captureBookingIntent(); }}
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                   disabled={!!existingCustomerId}
                 />
               </div>}
@@ -939,7 +939,7 @@ export default function PublicBookingPage() {
                     type="text"
                     value={contact.firstName}
                     onChange={e => setContact(c => ({ ...c, firstName: e.target.value }))}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                 </div>
                 <div>
@@ -949,7 +949,7 @@ export default function PublicBookingPage() {
                     type="text"
                     value={contact.lastName}
                     onChange={e => setContact(c => ({ ...c, lastName: e.target.value }))}
-                    style={inputStyle}
+                    className="waves-focus-ring" style={inputStyle}
                   />
                 </div>
               </div>}
@@ -961,7 +961,7 @@ export default function PublicBookingPage() {
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
                   onBlur={() => captureBookingIntent()}
-                  style={inputStyle}
+                  className="waves-focus-ring" style={inputStyle}
                 />
               </div>}
               <div>
@@ -972,13 +972,14 @@ export default function PublicBookingPage() {
                   placeholder="Gate code, pets, access instructions…"
                   value={notes}
                   onChange={e => setNotes(e.target.value)}
+                  className="waves-focus-ring"
                   style={{ ...inputStyle, resize: 'vertical', fontFamily: FONTS.body }}
                 />
               </div>
             </div>
 
             {error && (
-              <div style={{
+              <div role="alert" style={{
                 background: '#FEF2F2', border: '1px solid #FECACA',
                 borderRadius: 10, padding: 12, fontSize: 14, color: '#991B1B', marginBottom: 16,
               }}>{error}</div>

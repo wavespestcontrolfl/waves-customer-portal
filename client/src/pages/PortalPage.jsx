@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, createContext, useContext } f
 import { createPortal } from 'react-dom';
 import { useAuth } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
+import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
@@ -201,6 +202,7 @@ function WavesAiBar({ tab, onAsk }) {
           onKeyDown={(e) => e.key === 'Enter' && submit()}
           placeholder={placeholder}
           aria-label="Ask Waves AI"
+          className="waves-focus-ring"
           style={{
             flex: 1,
             minWidth: 0,
@@ -212,7 +214,6 @@ function WavesAiBar({ tab, onAsk }) {
             fontFamily: FONTS.body,
             color: PORTAL_SHELL.text,
             background: PORTAL_SHELL.surface,
-            outline: 'none',
           }}
         />
         <button type="button" onClick={submit} disabled={!question.trim()} data-glass-accent="" style={{
@@ -2409,6 +2410,7 @@ function ServicesTab() {
               aria-label="Search service notes"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
+              className="waves-focus-ring"
               style={{
                 marginLeft: compact ? 0 : 'auto',
                 padding: '9px 12px',
@@ -2418,7 +2420,6 @@ function ServicesTab() {
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
                 background: '#fff',
-                outline: 'none',
                 minWidth: compact ? '100%' : 180,
                 flex: compact ? '1 1 100%' : '0 1 220px',
               }}
@@ -3810,6 +3811,7 @@ function BillingTab({ customer }) {
   // Stripe card management state
   const [showAddCard, setShowAddCard] = useState(false);
   useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
+  const addCardDialogRef = useModalFocus(showAddCard);
   const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
@@ -4570,7 +4572,7 @@ function BillingTab({ customer }) {
           background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
           zIndex: 9999, padding: 20,
         }} onClick={(e) => { if (e.target === e.currentTarget) { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; } }}>
-          <div role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
+          <div ref={addCardDialogRef} role="dialog" aria-modal="true" aria-label="Add payment method" data-glass="modal" style={{
             background: '#fff', borderRadius: 8, padding: 24, width: '100%', maxWidth: 460,
             maxHeight: '100%', boxSizing: 'border-box', overflowY: 'auto', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
             boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
@@ -4767,10 +4769,11 @@ function BillingTab({ customer }) {
             onChange={e => setBillingEmail(e.target.value)}
             placeholder={customer?.email || 'billing@example.com'}
             aria-label="Billing email"
+            className="waves-focus-ring"
             style={{
               width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0',
               fontSize: 14, fontFamily: FONTS.body, color: B.blueDeeper, background: '#fff',
-              outline: 'none', boxSizing: 'border-box',
+              boxSizing: 'border-box',
             }}
           />
           <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - invoices and receipts can go here instead of the account email.</div>
@@ -4970,6 +4973,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
+          className="waves-focus-ring"
           style={{
             width: '100%',
             padding: '10px 42px 10px 12px',
@@ -4978,7 +4982,6 @@ function PasswordField({ value, onChange, placeholder, label }) {
             fontSize: 14,
             fontFamily: FONTS.body,
             color: B.blueDeeper,
-            outline: 'none',
             boxSizing: 'border-box',
             background: '#fff',
           }}
@@ -5266,7 +5269,6 @@ function PropertyTab({ customer }) {
     fontSize: 14,
     fontFamily: FONTS.body,
     color: B.blueDeeper,
-    outline: 'none',
     boxSizing: 'border-box',
     background: '#fff',
   };
@@ -5318,6 +5320,7 @@ function PropertyTab({ customer }) {
       placeholder={placeholder}
       aria-label={label || placeholder}
       rows={rows}
+      className="waves-focus-ring"
       style={{ ...inputStyle, minHeight: rows * 28 + 34, resize: 'vertical', lineHeight: 1.45 }}
       onFocus={focusBorder}
       onBlur={blurBorder}
@@ -5343,6 +5346,7 @@ function PropertyTab({ customer }) {
         onChange={e => updateField(field, e.target.value)}
         placeholder={placeholder}
         aria-label={label || placeholder}
+        className="waves-focus-ring"
         style={inputStyle}
         onFocus={focusBorder}
         onBlur={blurBorder}
@@ -5364,6 +5368,7 @@ function PropertyTab({ customer }) {
           onChange={e => updateField('irrigationInchesPerWeek', e.target.value === '' ? null : Number(e.target.value))}
           placeholder="1.00"
           aria-label="Weekly irrigation inches"
+          className="waves-focus-ring"
           style={{ ...inputStyle, paddingRight: 48 }}
           onFocus={focusBorder}
           onBlur={blurBorder}
@@ -5639,6 +5644,7 @@ function PropertyTab({ customer }) {
                         onChange={e => updatePet('name', e.target.value)}
                         placeholder="e.g., Max"
                         aria-label={`Pet ${idx + 1} name`}
+                        className="waves-focus-ring"
                         style={inputStyle}
                         onFocus={focusBorder}
                         onBlur={blurBorder}
@@ -5652,6 +5658,7 @@ function PropertyTab({ customer }) {
                         onChange={e => updatePet('breed', e.target.value)}
                         placeholder="e.g., Golden Retriever"
                         aria-label={`Pet ${idx + 1} breed`}
+                        className="waves-focus-ring"
                         style={inputStyle}
                         onFocus={focusBorder}
                         onBlur={blurBorder}
@@ -6686,6 +6693,7 @@ function LearnTab({ customer }) {
               onChange={e => setFaqSearch(e.target.value)}
               placeholder="Search questions..."
               aria-label="Search pest and lawn questions"
+              className="waves-focus-ring"
               style={{
                 width: '100%',
                 padding: '10px 14px 10px 38px',
@@ -6694,7 +6702,6 @@ function LearnTab({ customer }) {
                 fontSize: 14,
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
-                outline: 'none',
                 boxSizing: 'border-box',
               }}
               onFocus={e => e.target.style.borderColor = B.wavesBlue}
@@ -6984,6 +6991,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="I'm interested in adding lawn care"
+            className="waves-focus-ring"
             style={{
               width: '100%',
               minHeight: 42,
@@ -6993,7 +7001,6 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
               fontSize: 14,
               color: B.blueDeeper,
               fontFamily: FONTS.body,
-              outline: 'none',
               boxSizing: 'border-box',
             }}
           />
@@ -7175,6 +7182,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, secondaryButton, onClose }) {
   // Rendered only while open — lock the page behind the modal.
   useLockBodyScroll(true);
+  const dialogRef = useModalFocus();
   const currentTier = TIER_ORDER.includes(currentTierName) ? currentTierName : 'Bronze';
   const currentIdx = Math.max(0, TIER_ORDER.indexOf(currentTier));
   const nextTier = TIER_ORDER[Math.min(TIER_ORDER.length - 1, currentIdx + 1)] || currentTier;
@@ -7263,7 +7271,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         padding: compact ? 0 : 20,
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="modal" style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Explore WaveGuard tiers" data-glass="modal" style={{
         position: 'relative',
         width: '100%',
         maxWidth: 860,
@@ -8313,6 +8321,7 @@ function MyPlanTab({ customer }) {
                   onChange={e => setPauseReason(e.target.value)}
                   placeholder="Reason (optional)"
                   aria-label="Pause reason"
+                  className="waves-focus-ring"
                   style={{
                     width: '100%',
                     marginTop: 10,
@@ -8321,7 +8330,6 @@ function MyPlanTab({ customer }) {
                     fontSize: 14,
                     border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
-                    outline: 'none',
                     boxSizing: 'border-box',
                   }}
                 />
@@ -8388,6 +8396,7 @@ function MyPlanTab({ customer }) {
                   placeholder="Anything else you'd like us to know?"
                   aria-label="Cancellation details"
                   rows={3}
+                  className="waves-focus-ring"
                   style={{
                     width: '100%',
                     marginTop: 10,
@@ -8396,7 +8405,6 @@ function MyPlanTab({ customer }) {
                     fontSize: 14,
                     border: '1px solid #D8D0C0',
                     fontFamily: FONTS.body,
-                    outline: 'none',
                     resize: 'vertical',
                     boxSizing: 'border-box',
                   }}
@@ -9514,6 +9522,7 @@ function ReferTab({ customer, onSwitchTab }) {
               onChange={e => setForm(prev => ({ ...prev, name: e.target.value }))}
               placeholder="Jane Smith"
               autoComplete="name"
+              className="waves-focus-ring"
               style={{
                 width: '100%',
                 padding: '10px 12px',
@@ -9523,7 +9532,6 @@ function ReferTab({ customer, onSwitchTab }) {
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
                 background: '#fff',
-                outline: 'none',
                 boxSizing: 'border-box',
                 marginBottom: 12,
               }}
@@ -9540,6 +9548,7 @@ function ReferTab({ customer, onSwitchTab }) {
               onChange={e => setForm(prev => ({ ...prev, phone: e.target.value }))}
               placeholder="(941) 555-0123"
               autoComplete="tel"
+              className="waves-focus-ring"
               style={{
                 width: '100%',
                 padding: '10px 12px',
@@ -9549,7 +9558,6 @@ function ReferTab({ customer, onSwitchTab }) {
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
                 background: '#fff',
-                outline: 'none',
                 boxSizing: 'border-box',
                 marginBottom: 14,
               }}
@@ -9584,6 +9592,7 @@ function ReferTab({ customer, onSwitchTab }) {
             onChange={e => setEmailForm(prev => ({ ...prev, name: e.target.value }))}
             placeholder="Jane Smith"
             autoComplete="name"
+            className="waves-focus-ring"
             style={{
               width: '100%',
               padding: '10px 12px',
@@ -9593,7 +9602,6 @@ function ReferTab({ customer, onSwitchTab }) {
               fontFamily: FONTS.body,
               color: B.blueDeeper,
               background: '#fff',
-              outline: 'none',
               boxSizing: 'border-box',
               marginBottom: 12,
             }}
@@ -9610,6 +9618,7 @@ function ReferTab({ customer, onSwitchTab }) {
             onChange={e => setEmailForm(prev => ({ ...prev, email: e.target.value }))}
             placeholder="jane@example.com"
             autoComplete="email"
+            className="waves-focus-ring"
             style={{
               width: '100%',
               padding: '10px 12px',
@@ -9619,7 +9628,6 @@ function ReferTab({ customer, onSwitchTab }) {
               fontFamily: FONTS.body,
               color: B.blueDeeper,
               background: '#fff',
-              outline: 'none',
               boxSizing: 'border-box',
               marginBottom: 14,
             }}
@@ -10236,6 +10244,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
               onChange={e => setSearch(e.target.value)}
               placeholder="Search documents..."
               aria-label="Search documents"
+              className="waves-focus-ring"
               style={{
                 width: '100%',
                 minHeight: 40,
@@ -10246,7 +10255,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
                 fontFamily: FONTS.body,
                 color: B.blueDeeper,
                 background: '#fff',
-                outline: 'none',
                 boxSizing: 'border-box',
               }}
             />
@@ -10424,6 +10432,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
 // WKWebView displays PDFs inline). Save hands the bytes to the OS share sheet.
 function DocumentPreviewOverlay({ preview, onClose, onError }) {
   useLockBodyScroll(true);
+  const dialogRef = useModalFocus();
   const { doc, src, loading } = preview;
   const canSave = canSaveNative() && Boolean(preview.blob || doc.pdfUrl);
   const handleSave = async () => {
@@ -10454,7 +10463,7 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     // data-glass: the preview shell + header pick up the glass material like
     // every other portal overlay (owner 2026-07-09); the document itself
     // stays opaque inside its iframe. Inert without the glass theme.
-    <div role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title || 'Document preview'} data-glass="modal" style={{
       position: 'fixed', inset: 0, zIndex: 9999, background: '#FAF8F3',
       display: 'flex', flexDirection: 'column',
     }}>
@@ -10782,6 +10791,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
 // =========================================================================
 function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   useLockBodyScroll(open);
+  const dialogRef = useModalFocus(open);
   const compact = useIsMobile(760);
   const [category, setCategory] = useState('');
   const [urgency, setUrgency] = useState('routine');
@@ -10995,6 +11005,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
       `}</style>
 
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="New request"
@@ -11276,6 +11287,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   rows={5}
                   aria-label="Describe what's happening"
                   placeholder="Example: I am seeing ants by the kitchen window and along the lanai door."
+                  className="waves-focus-ring"
                   style={{
                     width: '100%',
                     minHeight: 132,
@@ -11286,7 +11298,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     fontSize: 14,
                     fontFamily: FONTS.body,
                     color: B.blueDeeper,
-                    outline: 'none',
                     boxSizing: 'border-box',
                     resize: 'vertical',
                     background: '#fff',
@@ -11689,6 +11700,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive }) {
 function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
   // Rendered only while open — lock the page behind the sheet.
   useLockBodyScroll(true);
+  const dialogRef = useModalFocus();
   // Close on Esc for keyboard users.
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
@@ -11743,7 +11755,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div role="dialog" aria-modal="true" aria-label="More navigation" data-glass="modal" style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="More navigation" data-glass="modal" style={{
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
@@ -11927,6 +11939,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
 function ChatWidget({ customer, onClose, initialQuestion }) {
   // Rendered only while open — lock the page behind the chat overlay.
   useLockBodyScroll(true);
+  const dialogRef = useModalFocus();
   const compact = useIsMobile(760);
   const firstName = customer?.firstName || customer?.first_name || '';
   const [messages, setMessages] = useState([
@@ -12025,6 +12038,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
       padding: compact ? 0 : 24,
     }} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
@@ -12151,6 +12165,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
             onKeyDown={e => e.key === 'Enter' && send()}
             placeholder="Type a message..."
             aria-label="Chat message"
+            className="waves-focus-ring"
             style={{
               flex: 1,
               minWidth: 0,
@@ -12162,7 +12177,6 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               // focus, which is what pushed the open chat off the screen.
               fontSize: 16,
               fontFamily: FONTS.body,
-              outline: 'none',
               background: '#fff',
               color: PORTAL_SHELL.text,
             }}
@@ -12205,6 +12219,7 @@ export default function PortalPage() {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
+  const accountMenuDialogRef = useModalFocus(showMenu);
   // "Request" is no longer a tab — it's the same bottom-sheet overlay used
   // for the FAB. Kept the old state name (showReportIssue) since a lot of
   // UI hangs off it; only the surfaced copy changed to "New Request".
@@ -12438,7 +12453,7 @@ export default function PortalPage() {
               )}
             </button>
             {showMenu && (
-              <div role="dialog" aria-label="Account menu" data-glass="modal" style={{
+              <div ref={accountMenuDialogRef} role="dialog" aria-modal="true" aria-label="Account menu" data-glass="modal" style={{
                 position: 'absolute',
                 right: 0,
                 top: 46,

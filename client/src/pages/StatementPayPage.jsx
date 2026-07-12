@@ -288,7 +288,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
       )}
 
       {elementError && (
-        <p style={{ fontSize: FS.body, color: DOC.danger, marginTop: SP.sm }}>{elementError}</p>
+        <p role="alert" style={{ fontSize: FS.body, color: DOC.danger, marginTop: SP.sm }}>{elementError}</p>
       )}
 
       <div style={{ marginTop: SP.md }}>
