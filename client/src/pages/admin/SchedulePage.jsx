@@ -8661,12 +8661,20 @@ export function CompletionPanel({
       "oz";
     const catalogRate =
       product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
+    // Generic "insecticide" categories cover dry/bait forms too (e.g. Advion
+    // WDG Granular, Delta Dust), whose inferred method still falls through to
+    // perimeter_spray — a 4 oz liquid default would be a wrong compliance
+    // record for those, so screen the name/category for dry-form markers.
+    const dryFormProduct = /\b(granul|dust|bait|gel|station|trap|briquet|tablet|blox|dunk)/i.test(
+      `${product.name || ""} ${product.category || product.product_category || ""}`,
+    );
     // General-pest perimeter sprays: when the catalog carries no rate, start
-    // at the house default of 4 oz (rate + unit move together so a catalog
-    // unit like "oz/1000sf" can't pair with the fallback value). Editable as
-    // before; catalog rates still win when present.
+    // at the house default of 4 oz (rate/total units move together with it so
+    // a catalog unit like "oz/1000sf" can't pair with the fallback value).
+    // Editable as before; catalog rates still win when present.
     const usePestSprayDefault =
       catalogRate === "" &&
+      !dryFormProduct &&
       applicationMethod === "perimeter_spray" &&
       serviceLineFromType(serviceTypeForArea) === "pest";
     setSelectedProducts((prev) => [
@@ -8682,7 +8690,7 @@ export function CompletionPanel({
           product.max_label_rate_per_1000 ??
           null,
         totalAmount: "",
-        amountUnit: defaultUnit,
+        amountUnit: usePestSprayDefault ? "oz" : defaultUnit,
         applicationMethod,
         applicationArea: "",
         areaValue: "",
