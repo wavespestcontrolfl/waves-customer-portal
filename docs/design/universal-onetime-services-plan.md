@@ -24,7 +24,9 @@ Service Report V1. What's left is (1) graduating the rodent shadow, (2) cutting
 over four straggler types, (3) replacing the legacy Projects admin UI — the
 "not pretty" lookup, (4) building the one-time report UIs up from the
 recurring-pest report's parts (timeline, recap-video slot, designed cards)
-over the typed fields, and (5) a decision on how far WDO joins.
+over the typed fields, (5) a decision on how far WDO joins, and (6) finishing
+multi-service appointments — one visit, one completion, one embedded report
+(the companion mechanism exists; booking routing and ad-hoc add-ons don't).
 
 ---
 
@@ -312,6 +314,77 @@ contemplate — this doc, owner-directed, is the amendment of record; update
    untouched.
 3. WDO token page presents the signed FDACS PDF inside that shell (W1c).
 
+### Phase E — Multi-service appointments (owner ask 2026-07-12)
+
+Owner: "sometimes we have multiple services tied within one appointment —
+quarterly pest control and a rodent bait station check. Add on services or
+have it automatically inputted, so when we press complete it sends a
+quarterly pest control and a rodent bait station report embedded into one
+React UI. Could be lawn care and tree & shrub. Could be multiple things."
+
+**What already exists (live in prod):** the companion mechanism
+(`docs/design/combined-service-completions.md`, cutover `20260612000031`) is
+exactly this — a `service_completion_profiles.companion_types` declaration
+makes the tech complete ONCE, with one `TypedFindingsSection` per companion
+under the primary form (mobile + desktop), and the customer gets ONE report
+with the primary content first and one section per companion below. Three
+combined catalog keys shipped, matching the owner's two examples verbatim:
+
+| service_key | name | companion | delivery today |
+|---|---|---|---|
+| `pest_rodent_quarterly` | Pest & Rodent Control | rodent_bait_station | **internal_only** — rides the rodent shadow; flips in the Phase-A graduation |
+| `pest_termite_bait_quarterly` | Quarterly Pest + Termite Bait Station | termite_bait_station | auto_send |
+| `lawn_tree_shrub_combo` | Lawn + Tree & Shrub | tree_shrub | auto_send |
+
+`20260615000001` already linked the real prod "Pest & Rodent Control Service"
+appointment rows to the combined key, so those completions resolve the
+combined profile today. Net: the owner's pest+rodent example works end-to-end
+right now EXCEPT the rodent section is staff-only until Phase A graduates the
+rodent family — one more reason A is the lever.
+
+**What's missing (the actual Phase E work):**
+
+1. **E1 — booking/estimate routing to combined keys.** Declared a follow-up
+   in the combined doc and still open: the estimate converter emits one
+   scheduled service per recurring line, so a customer sold pest + rodent
+   bait gets two separate visits/reports unless someone hand-picks the
+   combined key. Work: converter maps qualifying estimate pairs
+   (pest+rodent_bait, pest+termite_bait, lawn+tree_shrub) into ONE combined
+   scheduled service (cadence/billing decisions per pair), plus an admin
+   affordance to re-type an existing customer's paired services onto the
+   combined key (the Harris case — recorded as an owner decision in the
+   combined doc).
+2. **E2 — ad-hoc add-on sections at completion.** Today `/complete` is
+   strict by design: submitted companion types must be declared on the
+   profile (409 `companion_type_mismatch`), so a tech who also checked bait
+   stations during a plain quarterly visit can't add that section on the
+   fly. Work: an "Add service section" affordance in the CompletionPanel
+   drawing from a SERVER-side allowlist (profile-is-authoritative principle
+   holds; the client never invents sections — plausible allowlist: typed
+   families the customer has active programs/history for, owner to ratify),
+   validated exactly like companions, delivery = the family's standalone
+   graduation state. Design decisions: billing (an added billable section
+   must still hit the billing pre-gate vs. add-ons are always
+   $0-included — owner call) and whether the added section also satisfies a
+   sibling scheduled service (see E3) or is purely documentation.
+3. **E3 — same-day sibling auto-fold ("automatically inputted").** When the
+   same customer has two SEPARATELY-booked services on the same day, offer
+   "Complete together" at completion open: fold the sibling in as a section,
+   complete both `scheduled_services`, deliver ONE report, dedupe the
+   completion SMS/email. The hard part is bookkeeping, not UI: each service
+   resolves its own billing disposition (the 409 `completion_billing_required`
+   pre-gate must run per component), the sibling's `service_records` row must
+   point at the shared report, and invoice merge vs. two invoices is an owner
+   decision. E1 removes most of the need (recurring pairs book combined);
+   E3 covers the irregular remainder.
+
+Sequencing: E1 first (mechanism fully exists; converter + re-type only),
+then E3, then E2 — or fold E2 into E3 as the "unscheduled extra work"
+variant. Phase-D enrichment applies to companion sections too: v1
+deliberately keeps photos/AI summary/follow-up CTA primary-only
+(disclosed-for-ratification in the combined doc) — ratify or revise when D1
+ships.
+
 ### Explicitly out of scope
 - Any pricing value change (WDO fee reconciliation is flagged, not changed).
 - The typed-report content system (snapshots, copy maps, banned words) — it
@@ -346,3 +419,10 @@ contemplate — this doc, owner-directed, is the amendment of record; update
     Video recap — which family first (rodent trap checks are the natural
     fit: multi-visit story + existing activity history), and is the
     during-visit capture affordance wanted beyond pest jobs?
+11. **Combined booking (E1):** should the estimate converter auto-combine
+    the three known pairs? And the Harris case — re-type the existing
+    separate pest + rodent rows onto `pest_rodent_quarterly`?
+12. **Add-ons/auto-fold billing (E2/E3):** when a section is added at
+    completion (ad hoc or same-day fold), is it always $0-included, or does
+    it bill its own service price (pre-gate per component)? One merged
+    invoice or one per service?
