@@ -47,6 +47,15 @@ describe('queryLift — blogr-style before/after per target query', () => {
     expect(r.before_position).toBe(22);
     expect(r.position_delta).toBe(16);
   });
+  test('after is strictly page-scoped — a ranking sibling page must not read as this article ranking', () => {
+    const r = queryLift({
+      baseline: { page: { position: null }, site: { position: 15 } },
+      window: { page: { position: null, clicks: 0, impressions: 0 }, site: { position: 14 } },
+    });
+    expect(r.after_position).toBeNull();
+    expect(r.position_delta).toBeNull();
+    expect(r.clicks).toBe(0);
+  });
   test('site was not ranking at all → before null, delta null', () => {
     const r = queryLift({
       baseline: { page: { position: null }, site: { position: null } },
@@ -287,7 +296,9 @@ describe('sweepNewlyLive', () => {
     expect(cohort).toHaveLength(1);
     expect(cohort[0].query).toBe('Bed Bug Treatment Bradenton');
     expect(cohort[0].baseline).toHaveProperty('page');
-    expect(cohort[0].baseline).toHaveProperty('site');
+    // Relative page URL → no resolvable domain → sitewide aggregation is
+    // skipped (null), never a cross-network aggregate.
+    expect(cohort[0].baseline.site).toBeNull();
     expect(result).toEqual({ created: 1, scanned: 1 });
   });
 });

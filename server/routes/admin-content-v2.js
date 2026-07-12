@@ -261,18 +261,33 @@ router.get('/autonomous/impact', async (req, res, next) => {
       );
 
     const items = rows.map(shapeImpactItem);
-    const measured = items.filter((it) => it.latest_window);
+
+    // Totals cover the WHOLE impact corpus, not the limited page above — an
+    // unbounded query over just the columns the totals need (one row per
+    // published optimization, so this stays small).
+    const totalRows = await db('content_optimization_impact')
+      .select('verdict', 'checked_14d_at', 'checked_21d_at', 'metrics_14d', 'metrics_21d');
     const verdictCounts = { improved: 0, neutral: 0, regressed: 0, insufficient_data: 0 };
-    for (const it of measured) {
-      if (it.verdict && verdictCounts[it.verdict] != null) verdictCounts[it.verdict] += 1;
+    let measuredCount = 0;
+    let windowClicks = 0;
+    let windowImpressions = 0;
+    for (const row of totalRows) {
+      const latest = row.checked_21d_at
+        ? parseMaybeJson(row.metrics_21d, null)
+        : row.checked_14d_at ? parseMaybeJson(row.metrics_14d, null) : null;
+      if (!latest) continue;
+      measuredCount += 1;
+      if (row.verdict && verdictCounts[row.verdict] != null) verdictCounts[row.verdict] += 1;
+      windowClicks += Number(latest.clicks) || 0;
+      windowImpressions += Number(latest.impressions) || 0;
     }
     const totals = {
-      tracked: items.length,
-      measured: measured.length,
-      awaiting_measurement: items.length - measured.length,
+      tracked: totalRows.length,
+      measured: measuredCount,
+      awaiting_measurement: totalRows.length - measuredCount,
       verdicts: verdictCounts,
-      window_clicks: measured.reduce((sum, it) => sum + (Number(it.latest_window?.clicks) || 0), 0),
-      window_impressions: measured.reduce((sum, it) => sum + (Number(it.latest_window?.impressions) || 0), 0),
+      window_clicks: windowClicks,
+      window_impressions: windowImpressions,
     };
     res.json({ items, totals });
   } catch (err) { next(err); }

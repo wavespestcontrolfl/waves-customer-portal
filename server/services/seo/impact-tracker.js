@@ -151,12 +151,13 @@ function domainFromUrl(pageUrl) {
  * Pure: blogr-style before/after view for one cohort query.
  * "Before" prefers the page's own position for the query; a brand-new page has
  * none, so fall back to the sitewide position (another page ranked) or null
- * (site wasn't ranking at all). "After" prefers the page's position so credit
- * goes to the article, not a sibling page. Positive delta = moved up.
+ * (site wasn't ranking at all). "After" is strictly page-scoped — a sibling
+ * page still ranking must not read as this article ranking. Positive delta =
+ * moved up.
  */
 function queryLift({ baseline, window: win } = {}) {
   const before = baseline?.page?.position ?? baseline?.site?.position ?? null;
-  const after = win?.page?.position ?? win?.site?.position ?? null;
+  const after = win?.page?.position ?? null;
   return {
     before_position: before == null ? null : Number(before),
     after_position: after == null ? null : Number(after),
@@ -202,13 +203,16 @@ async function aggregateQueryPageMetrics(database, pageUrl, query, startDate, en
 }
 
 // Sitewide metrics for a query (any page), scoped to the article's domain so
-// spoke-site rows don't pollute hub numbers.
+// spoke-site rows don't pollute hub numbers. Without a resolvable domain the
+// aggregate would span the whole network — return null instead so a spoke
+// sibling never reads as this article's ranking.
 async function aggregateSiteQueryMetrics(database, query, domain, startDate, endDate) {
-  let q = database('gsc_queries')
+  if (!domain) return null;
+  const q = database('gsc_queries')
     .whereRaw('lower(query) = ?', [String(query).toLowerCase()])
     .andWhere('date', '>=', startDate)
-    .andWhere('date', '<=', endDate);
-  if (domain) q = q.andWhere('domain', domain);
+    .andWhere('date', '<=', endDate)
+    .andWhere('domain', domain);
   const row = await q.first(
     database.raw('COALESCE(SUM(clicks),0)::int as clicks'),
     database.raw('COALESCE(SUM(impressions),0)::int as impressions'),
