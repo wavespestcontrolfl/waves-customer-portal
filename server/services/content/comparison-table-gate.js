@@ -134,7 +134,7 @@ const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|of
 // foliage to locate mosquitoes" is field advice, not an accusation).
 // scam/ripoff qualify as practice modifiers too — "scam pricing", "ripoff
 // billing" (Codex r17 on #2633).
-const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
+const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off|overpriced|inflated)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales|quotes?|estimates?|invoices?))';
 // Association-object vocabulary: the possession objects plus UNAMBIGUOUS
 // standalone tokens — "Customers report scams after choosing Bug Busters"
 // (Codex r22 on #2633). Ambiguous tokens (shady/lousy) stay out: their
@@ -187,7 +187,7 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // negator-excluded ("companies: no hidden fees" is a denial); the
   // possessive apostrophe is REQUIRED, so the "pest control scams to
   // avoid" consumer-education idiom does not match the possessive arm.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|(?:${UNAMBIGUOUS_DISPARAGEMENT_SRC})\\b(?!\\s+to\\s+(?:avoid|watch|spot|dodge)\\b))`,
   `\\b(?:${PROVIDER_NOUN})['’]s?\\s+(?:${ASSOC_ACCUSATION_SRC})`,
 ].join('|'), 'i');
 
@@ -337,8 +337,11 @@ const OWN_BRAND_DESCRIPTOR_HOP = "(?:\\s+(?:[Rr]eviews?|[Bb]illing|[Pp]ricing|[R
 const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_DESCRIPTOR_HOP}\\s*[:—–-]\\s*`);
 // Prefix words are negator-excluded: "Waves: no hidden fees" is a denial,
 // not an accusation (Codex r12 on #2633).
+// Plain unambiguous insults count after the separator — "Waves: dishonest."
+// (Codex r30); the to-avoid lookahead keeps "scams to avoid" consumer
+// education clean.
 const OWN_BRAND_SEP_TAIL_RE = new RegExp(
-  `^(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i',
+  `^(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|(?:${UNAMBIGUOUS_DISPARAGEMENT_SRC})\\b(?!\\s+to\\s+(?:avoid|watch|spot|dodge)\\b))`, 'i',
 );
 // Separator anchors count for #1 too — "Waves — the #1 choice" (Codex r12).
 const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_DESCRIPTOR_HOP}(?:\\s*[,:—–-]\\s*|\\s+)`);
@@ -346,7 +349,7 @@ const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_D
 // end — "Waves Pest Control: #1 entry point for ants" ranks the tip, not
 // the company (Codex r29 on #2633).
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
-  `^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?|spots?|overall|rank(?:ing)?s?|positions?)\\b|\\s*(?:[.!?]|$))`, 'i',
+  `^(?:(?:the|your|a|an)\\s+)?(?:[\\w'’]+['’]s\\s+)?${NUMERIC_ONE_ALT}(?:(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?|spots?|overall|rank(?:ing)?s?|positions?)\\b|\\s*(?:[.!?]|$))`, 'i',
 );
 // Waves-subject linking-verb disparagement, case-sensitive anchor + case-
 // insensitive tail ("Waves is dishonest", "Waves may be dishonest") — pulled
@@ -1118,9 +1121,10 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // Control Guide: Why DIY Sprays Are Unreliable" aims the negative at DIY
     // sprays, not the business-shaped phrase, and must pass.
     const directedReliability = new RegExp(
-      `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?)(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
     );
-    if (directedReliability.test(nameScanText)) {
+    const relMatch = nameScanText.match(directedReliability);
+    if (relMatch && !SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `Draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
       break;
@@ -1420,9 +1424,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       if (!PERSONIFIED_SUFFIX_RE.test(name) && !confidentProseNames.has(name)) continue;
       const escaped = escapeForNameRe(name);
       const directedReliability = new RegExp(
-        `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?)(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
       );
-      if (directedReliability.test(proseNameText)) {
+      // The pre-negative tail (named group) is negator-guarded: "is not
+      // unreliable" is a denial, while "never answers the phone" keeps its
+      // negator INSIDE PROVIDER_NEGATIVE where it IS the accusation
+      // (Codex r30 on #2633).
+      const relMatch = proseNameText.match(directedReliability);
+      if (relMatch && !SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail)) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
           `Comparison draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
         break;

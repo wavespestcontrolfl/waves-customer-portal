@@ -1114,6 +1114,29 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-30 findings (#2633) ──
+
+  test('Codex r30: location-possessive #1 and plain-insult separator claims block', () => {
+    for (const prose of ["Waves: Venice's #1 choice.", "Waves Pest Control: Sarasota's No. 1 pick.", 'Waves: dishonest.', 'Waves Review: overpriced.', 'Pest control companies: dishonest.', 'Providers — overpriced.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(true);
+    }
+    const education = gate.evaluate({ body: `Pest control: scams to avoid this summer.\n\n${CATEGORY_TABLE}` }, {});
+    expect(education.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+  });
+
+  test('Codex r30: overpriced-quote accusations block', () => {
+    for (const prose of ['Customers report overpriced quotes after choosing Bug Busters.', 'Waves uses overpriced quotes.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r30: linking-verb-negated reliability stays clean', () => {
+    const r = gate.evaluate({ body: `Bug Busters is not unreliable.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+  });
+
   // ── Codex round-29 findings (#2633) ──
 
   test('Codex r29: header-shaped reliability claims route to review beside a table', () => {
