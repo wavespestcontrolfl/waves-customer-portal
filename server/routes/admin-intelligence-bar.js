@@ -138,6 +138,11 @@ const PII_TOOL_NAMES = new Set([
   // them) — redact like the comms tools.
   'get_twilio_alerts',
   'get_twilio_failed_messages',
+  // GrowthBook feature rules expose raw targeting `condition` predicates,
+  // which are arbitrary attribute strings that can embed customer emails or
+  // user identifiers — keep them out of query telemetry.
+  'get_growthbook_features',
+  'get_growthbook_experiments',
 ]);
 
 function isNonAdminDashboardRequest(req) {

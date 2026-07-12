@@ -28,6 +28,7 @@ Use for: "what experiments are running?", "did the hub-variant test stop?", "exp
       type: 'object',
       properties: {
         limit: { type: 'number', description: `Max experiments (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+        offset: { type: 'number', description: 'Skip this many results — page forward with it when has_more is true so experiments past the first page are visible.' },
       },
     },
   },
@@ -39,6 +40,7 @@ Use for: "what feature flags exist in GrowthBook?", "is the pricing-hub flag on 
       type: 'object',
       properties: {
         limit: { type: 'number', description: `Max features (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})` },
+        offset: { type: 'number', description: 'Skip this many results — page forward with it when has_more is true.' },
       },
     },
   },
@@ -48,6 +50,10 @@ const NOT_CONFIGURED_MESSAGE = 'GrowthBook access is not configured. Add the GRO
 
 function clampLimit(limit) {
   return Math.min(Math.max(Number(limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
+}
+
+function clampOffset(offset) {
+  return Math.max(Number(offset) || 0, 0);
 }
 
 async function gbGet(path) {
@@ -73,7 +79,8 @@ async function gbGet(path) {
 
 async function getGrowthbookExperiments(input) {
   const limit = clampLimit(input.limit);
-  const json = await gbGet(`/api/v1/experiments?limit=${limit}`);
+  const offset = clampOffset(input.offset);
+  const json = await gbGet(`/api/v1/experiments?limit=${limit}&offset=${offset}`);
   const experiments = (json.experiments || []).map(e => ({
     id: e.id,
     name: e.name,
@@ -82,22 +89,25 @@ async function getGrowthbookExperiments(input) {
     variations: (e.variations || []).map(v => v.name),
     archived: Boolean(e.archived),
   }));
-  return { experiments, total: experiments.length, has_more: Boolean(json.hasMore) };
+  // has_more true means results were truncated — page with `offset` to see the rest.
+  return { experiments, total: experiments.length, offset, has_more: Boolean(json.hasMore) };
 }
 
 // The top-level defaultValue is the feature's base default, NOT what any
 // environment actually serves — an environment can be disabled or override
 // the value. Surface each environment's enabled flag + effective default so
 // "is X on in production?" is answerable and not confused with the base value.
-function mapEnvironments(environments) {
+function mapEnvironments(environments, featureDefault) {
   if (!environments || typeof environments !== 'object') return {};
   const out = {};
   for (const [env, cfg] of Object.entries(environments)) {
     const rules = Array.isArray(cfg?.rules) ? cfg.rules : [];
     out[env] = {
       enabled: Boolean(cfg?.enabled),
-      // env-specific override; falls back to the feature default when absent
-      default_value: cfg?.defaultValue ?? null,
+      // Effective env default: the env override if it sets one, otherwise the
+      // feature-level default (an enabled env without its own defaultValue
+      // serves the base default — reporting null would misread it as off).
+      default_value: cfg?.defaultValue ?? featureDefault ?? null,
       // A flag can be default-off yet SERVED on via a force/rollout/experiment
       // rule (or vice-versa), so summarize the rules — otherwise "is X on in
       // production?" would be answered from default_value alone and mislead.
@@ -107,6 +117,10 @@ function mapEnvironments(environments) {
         enabled: r.enabled !== false,
         value: r.value ?? null,
         coverage: r.coverage ?? null,
+        // Experiment rules carry served values in variations/weights, not
+        // `value` — without these an A/B rule looks like an enabled null.
+        variations: r.variations ?? null,
+        weights: r.weights ?? null,
         // Preserve targeting predicates — otherwise a narrowly-scoped rule
         // (staff-only, saved-group, prerequisite-gated, or scheduled) reads as
         // generally applicable and "is X on in production?" gets a wrong answer.
@@ -123,16 +137,17 @@ function mapEnvironments(environments) {
 
 async function getGrowthbookFeatures(input) {
   const limit = clampLimit(input.limit);
-  const json = await gbGet(`/api/v1/features?limit=${limit}`);
+  const offset = clampOffset(input.offset);
+  const json = await gbGet(`/api/v1/features?limit=${limit}&offset=${offset}`);
   const features = (json.features || []).map(f => ({
     id: f.id,
     value_type: f.valueType,
     default_value: f.defaultValue,
-    environments: mapEnvironments(f.environments),
+    environments: mapEnvironments(f.environments, f.defaultValue),
     tags: f.tags || [],
     archived: Boolean(f.archived),
   }));
-  return { features, total: features.length, has_more: Boolean(json.hasMore) };
+  return { features, total: features.length, offset, has_more: Boolean(json.hasMore) };
 }
 
 async function executeGrowthbookTool(toolName, input = {}) {

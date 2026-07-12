@@ -187,6 +187,28 @@ describe('intelligence bar store ops tools', () => {
     expect(result.tracks[0].track).toBe('beta');
   });
 
+  test('with multiple PUBLISHED production releases, the highest version code is the live one', async () => {
+    process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ releases: [
+        { releaseName: '1.2 (12)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_PUBLISHED', activeArtifacts: [{ versionCode: 12 }] },
+        { releaseName: '1.3 (13)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_PUBLISHED', activeArtifacts: [{ versionCode: 13 }] },
+      ] }))
+      .mockResolvedValue(jsonResponse({}, 404));
+
+    const result = await executeStoreOpsTool('get_play_store_status', {});
+    expect(result.production_release).toBe('1.3 (13)');
+    expect(result.production_status).toBe('RELEASE_LIFECYCLE_STATE_PUBLISHED');
+  });
+
+  test('all tracks 404 (wrong package / no access) surfaces as { error }, not empty success', async () => {
+    process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
+    global.fetch.mockResolvedValue(jsonResponse({}, 404)); // every track missing
+    const result = await executeStoreOpsTool('get_play_store_status', {});
+    expect(result.error).toMatch(/PLAY_PACKAGE_NAME|access|No Play tracks/i);
+    expect(result.total_tracks).toBeUndefined();
+  });
+
   test('a Play permission error surfaces as { error }, never a throw', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
     global.fetch.mockResolvedValue(jsonResponse({}, 403));

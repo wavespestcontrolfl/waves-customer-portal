@@ -112,9 +112,10 @@ describe('intelligence bar GrowthBook tools', () => {
     const result = await executeGrowthbookTool('get_growthbook_features', {});
     expect(result.error).toBeUndefined();
     expect(result.features[0].default_value).toBe('false');
+    // dev has no own defaultValue → effective value falls back to the feature default ('false').
     expect(result.features[0].environments).toEqual({
       production: { enabled: true, default_value: 'true', rules: [], rule_count: 0 },
-      dev: { enabled: false, default_value: null, rules: [], rule_count: 0 },
+      dev: { enabled: false, default_value: 'false', rules: [], rule_count: 0 },
     });
   });
 
@@ -145,8 +146,37 @@ describe('intelligence bar GrowthBook tools', () => {
     expect(prod.rule_count).toBe(1);
     expect(prod.rules[0]).toEqual({
       type: 'force', description: 'Force on for everyone', enabled: true, value: 'true', coverage: 1,
+      variations: null, weights: null,
       condition: null, saved_group_targeting: null, prerequisites: null, schedule: null,
     });
+  });
+
+  test('get_growthbook_features preserves experiment-rule variations/weights (A/B value is not lost)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_read-only_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      hasMore: false,
+      features: [{
+        id: 'ab-flag',
+        valueType: 'string',
+        defaultValue: 'control',
+        environments: {
+          production: {
+            enabled: true,
+            rules: [{ type: 'experiment', variations: ['control', 'variant-b'], weights: [0.5, 0.5], coverage: 1 }],
+          },
+        },
+        tags: [],
+        archived: false,
+      }],
+    }));
+
+    const result = await executeGrowthbookTool('get_growthbook_features', {});
+    const rule = result.features[0].environments.production.rules[0];
+    expect(rule.type).toBe('experiment');
+    expect(rule.variations).toEqual(['control', 'variant-b']);
+    expect(rule.weights).toEqual([0.5, 0.5]);
+    // enabled env with no own defaultValue reflects the feature default
+    expect(result.features[0].environments.production.default_value).toBe('control');
   });
 
   test('get_growthbook_features preserves a rule targeting predicate (scoped rule is not read as global)', async () => {

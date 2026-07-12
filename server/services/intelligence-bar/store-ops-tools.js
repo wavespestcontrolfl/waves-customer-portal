@@ -157,6 +157,11 @@ function getGoogleapis() {
   return require('googleapis').google;
 }
 
+function maxVersionCode(release) {
+  const codes = release?.version_codes || [];
+  return codes.length ? Math.max(...codes) : 0;
+}
+
 async function playGet(url, token) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -189,8 +194,11 @@ async function getPlayStoreStatus() {
   if (!token) throw new Error('Could not obtain a Google Play access token from PLAY_SERVICE_ACCOUNT_JSON.');
 
   // No edit context: read each known track's release summaries directly. A
-  // track not configured for this app 404s and is simply skipped.
+  // track not configured for this app 404s and is skipped — but if EVERY
+  // track 404s the package/app access is almost certainly wrong, which must
+  // surface as an error, not a successful "no releases" (see below).
   const tracks = [];
+  let anyTrackFound = false;
   for (const track of PLAY_TRACKS) {
     const url = `${PLAY_API_BASE}/androidpublisher/v3/applications/${encodeURIComponent(packageName)}/tracks/${track}/releases`;
     const res = await playGet(url, token);
@@ -199,6 +207,7 @@ async function getPlayStoreStatus() {
     }
     if (res.status === 404) continue;
     if (!res.ok) throw new Error(`Google Play API returned HTTP ${res.status} for track ${track}`);
+    anyTrackFound = true; // a 2xx means the track exists (releases may be empty)
     const data = await res.json();
     const releases = (data.releases || []).map(r => ({
       name: r.releaseName || null,
@@ -207,6 +216,11 @@ async function getPlayStoreStatus() {
     }));
     if (releases.length) tracks.push({ track, releases });
   }
+  // All tracks 404 = wrong PLAY_PACKAGE_NAME or the SA can't see this app.
+  // Surface it instead of a silent empty success that reads as "no release".
+  if (!anyTrackFound) {
+    throw new Error(`No Play tracks found for "${packageName}" — check PLAY_PACKAGE_NAME and that the service account has access to this app.`);
+  }
 
   const production = tracks.find(t => t.track === 'production');
   const prodReleases = production?.releases || [];
@@ -214,7 +228,10 @@ async function getPlayStoreStatus() {
   // is the PUBLISHED one currently serving users; the pending release is the
   // first non-published one (in review / approved-not-published / rejected /
   // draft). Both can coexist on the production track during a release window.
-  const liveRelease = prodReleases.find(r => r.lifecycle_state === PLAY_LIVE_STATE) || null;
+  // If several releases are PUBLISHED at once (e.g. an old fully-rolled-out
+  // build plus a newer staged rollout), the newest by version code is "live".
+  const published = prodReleases.filter(r => r.lifecycle_state === PLAY_LIVE_STATE);
+  const liveRelease = published.sort((a, b) => maxVersionCode(b) - maxVersionCode(a))[0] || null;
   const pendingRelease = prodReleases.find(r => r.lifecycle_state && r.lifecycle_state !== PLAY_LIVE_STATE) || null;
   return {
     package: packageName,
