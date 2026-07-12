@@ -7481,17 +7481,38 @@ router.put('/:token/accept', async (req, res, next) => {
     // ─────────────────────────────────────────────
     const recurringCardSetupIntentId = typeof req.body?.recurringCardSetupIntentId === 'string'
       ? req.body.recurringCardSetupIntentId.trim() : '';
-    const recurringCardPolicy = await RecurringCards.resolveRecurringCardPolicyForEstimate({
-      estimate,
-      membership: acceptMembership,
-      treatAsOneTime,
-      billByInvoice,
-      paymentMethodPreference,
-      // Scope already resolved above to the accepted appointment — don't let
-      // the payer check re-derive an unrelated linked appointment.
-      scheduledServiceId: acceptLinkedSsId,
-      useLinkedFallback: false,
-    });
+    // Payer scope for the card policy (Codex #2668 round-5 P1): acceptLinkedSsId
+    // resolves fail-SOFT (null on lookup error) — the deposit's safe direction,
+    // where a missed per-job payer merely charges a refundable deposit. For the
+    // card policy a silently-missing scope can hide a per-job payer and enroll
+    // the homeowner, so the no-slot/no-existing-appointment fallback re-resolves
+    // STRICTLY; a failed lookup makes the payer scope uncertain → exempt the
+    // card entirely (same fail direction as payer_check_uncertain). Slot accepts
+    // keep scope null by construction (a fresh reservation carries no per-job
+    // payer) and existing-appointment accepts use the validated row id.
+    let recurringCardScopeUncertain = false;
+    let recurringCardScopeSsId = acceptLinkedSsId;
+    if (!slotId && !existingAppointmentId && !acceptLinkedSsId) {
+      try {
+        recurringCardScopeSsId = await linkedScheduledServiceId(estimate, null, { strict: true });
+      } catch (err) {
+        recurringCardScopeUncertain = true;
+        logger.warn(`[estimate-public] recurring-cof payer scope lookup failed — exempting card capture (fail closed): ${err.message}`);
+      }
+    }
+    const recurringCardPolicy = recurringCardScopeUncertain
+      ? { enforced: true, required: false, exemptReason: 'payer_check_uncertain' }
+      : await RecurringCards.resolveRecurringCardPolicyForEstimate({
+        estimate,
+        membership: acceptMembership,
+        treatAsOneTime,
+        billByInvoice,
+        paymentMethodPreference,
+        // Scope resolved above to the accepted appointment — don't let the
+        // payer check re-derive an unrelated linked appointment.
+        scheduledServiceId: recurringCardScopeSsId,
+        useLinkedFallback: false,
+      });
     // A site-confirmation-held commercial accept collects nothing at accept
     // (manual billing after the on-site price confirmation) — same exemption
     // shape the deposit applies above.
@@ -8499,7 +8520,7 @@ router.put('/:token/accept', async (req, res, next) => {
           // throwOnError: the default fail-soft contract returns self-pay on a
           // lookup outage, which would silently defeat this fail-closed catch
           // (Codex #2668 round-4 P1).
-          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId, throwOnError: true });
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: recurringCardScopeSsId, throwOnError: true });
           payerBilled = !!resolvedPayer?.payerId;
         } catch (err) {
           payerBilled = true;
