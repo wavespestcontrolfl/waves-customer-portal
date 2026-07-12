@@ -55,9 +55,13 @@ const EPA_CORRECTIONS = [
 
 // Known-wrong legacy dilution defaults, replaced (guarded on the exact old
 // seeded value): the 20260401000017 seed gave Alpine WSG "0.5 oz/gal", but
-// the label states its rates in grams only (10-30 g per gallon).
+// the label states its rates in grams only (10-30 g per gallon); the same
+// seed gave Demand CS a per-1k display default ("0.8 oz/1000sf") that
+// contradicts its label's perimeter dilution table (0.2-0.8 fl oz per
+// 1-5 gal of mix — see its DATA entry below).
 const LEGACY_CORRECTIONS = [
   ['Alpine WSG', { default_rate: '0.5', default_unit: 'oz/gal' }, { default_rate: '10-30', default_unit: 'g/gal' }],
+  ['Demand CS', { default_rate: '0.8', default_unit: 'oz/1000sf' }, { default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' }],
 ];
 
 const DATA = [

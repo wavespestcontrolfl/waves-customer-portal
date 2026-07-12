@@ -3744,7 +3744,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
               ? parseFloat(p.totalAmount)
               : null;
-            const appliedAmountUnit = p.amountUnit || p.rateUnit || null;
+            const appliedAmountUnitRaw = p.amountUnit || p.rateUnit || null;
+            // A "/gal" unit is a mix concentration: a total recorded against
+            // it is the amount of concentrate, so store the base quantity
+            // unit — inventory deduction and the FDACS ledger can't use a
+            // dilution as a quantity unit.
+            const appliedAmountUnit = appliedAmountUnitRaw && String(appliedAmountUnitRaw).toLowerCase().endsWith('/gal')
+              ? String(appliedAmountUnitRaw).slice(0, -'/gal'.length)
+              : appliedAmountUnitRaw;
             if (appliedAmount != null && (!Number.isFinite(appliedAmount) || appliedAmount <= 0)) {
               const err = new Error(`Invalid product total amount for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;

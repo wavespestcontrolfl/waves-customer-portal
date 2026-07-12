@@ -8745,7 +8745,12 @@ export function CompletionPanel({
       areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
         ? Number(lawnSqftForPrefill)
         : "";
-    const prefillTotal = derivedTotalAmount(prefillRate, prefillArea);
+    // A "/gal" rate is a mix concentration — rate × sqft would fabricate an
+    // applied amount that really depends on carrier volume, so leave Total
+    // blank for the tech to enter.
+    const prefillTotal = defaultUnit.endsWith("/gal")
+      ? ""
+      : derivedTotalAmount(prefillRate, prefillArea);
     setSelectedProducts((prev) => [
       ...prev,
       {
@@ -8845,9 +8850,17 @@ export function CompletionPanel({
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = derivedTotalAmount(next.rate, next.areaValue);
+            next.totalAmount = String(next.rateUnit || "").endsWith("/gal")
+              ? ""
+              : derivedTotalAmount(next.rate, next.areaValue);
           } else if (field === "rateUnit") {
-            next.amountUnit = value;
+            // Concentration rate units keep Total in the base quantity unit,
+            // and can't derive a total at all (it depends on carrier volume).
+            const isConcentration = String(value).endsWith("/gal");
+            next.amountUnit = isConcentration
+              ? value.slice(0, -"/gal".length)
+              : value;
+            if (isConcentration) next.totalAmount = "";
           }
         }
         return next;
