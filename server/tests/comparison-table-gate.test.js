@@ -1114,6 +1114,20 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-42 findings (#2633) ──
+
+  test('Codex r42: that-reported brand superlatives, past gouging, and cross-sentence bridges block', () => {
+    for (const prose of ['Waves says that it is the best choice.', 'Pest control companies gouged homeowners.', 'Some providers quote low. They have hidden fees.', 'Some providers quote low. They scam customers.', 'Waves ranked #1.', 'Bug Busters is top-rated.', 'Top-rated Waves Pest Control serves Venice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r42: perfect-tense name denials stay clean', () => {
+    const r = gate.evaluate({ body: `Bug Busters hasn’t charged hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
   // ── Codex round-41 findings (#2633) ──
 
   test('Codex r41: pronoun-active, ran-scams, sensory-reliability, and dash-clause accusations block', () => {

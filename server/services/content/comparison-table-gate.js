@@ -91,7 +91,7 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   `scams?\\s+${DISPARAGEMENT_VICTIM}`,
   `rips?\\s+${DISPARAGEMENT_VICTIM}\\s+off`,
   `rips?\\s+off\\s+${DISPARAGEMENT_VICTIM}`,
-  `gouges?\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
+  `goug(?:es?|ed|ing)\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
   `overcharges?(?:\\s+(?:${DISPARAGEMENT_VICTIM}|for\\b))?`,
   // Fee-adding verb variants — "adds (on) hidden fees", "tacks on hidden
   // fees" are the same accusation as "charges hidden fees" (Codex r17/r21
@@ -162,7 +162,7 @@ const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|ov
 // (Codex r18 on #2633).
 // Emphatic idioms pass through the gap — "Waves not only charges hidden
 // fees" / "no doubt charges" assert the accusation (Codex r28 on #2633).
-const NON_NEGATED_WORD = "(?!(?:never|not(?!\\s+(?:only|just)\\b)|no(?!\\s+doubt\\b)|without(?!\\s+(?:a\\s+)?(?:doubt|question)\\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
+const NON_NEGATED_WORD = "(?!(?:never|not(?!\\s+(?:only|just)\\b)|no(?!\\s+doubt\\b)|without(?!\\s+(?:a\\s+)?(?:doubt|question)\\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|hasn['’]?t|haven['’]?t|hadn['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|hardly|rarely|seldom)\\b)[\\w'’]+";
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Gap words exclude category-scoping prepositions: "hidden fees IN pest
@@ -196,17 +196,17 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // sentence — "pest control companies are not cheap because THEY have
   // hidden fees" (Codex r34). The object requirement keeps "they have no
   // hidden fees" a denial.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:(?:they|it)\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added|(?:are|is)\\s+(?:known|notorious)\\s+for)|(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:ha(?:s|ve|s)|includes?|comes?\\s+with))\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:(?:they|it)\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added|(?:are|is)\\s+(?:known|notorious)\\s+for)|(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:ha(?:s|ve|s)|includes?|comes?\\s+with))\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
   // pest control companies look cheap; they are dishonest." (Codex r40).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Pronoun-subject ACTIVE accusations after a provider antecedent —
   // "companies look cheap; they scam customers" (Codex r41).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they|it)\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
   // Pronoun-possessive LINKING insults with a provider antecedent — "Some
   // pest control companies look cheap; their billing is dishonest."
   // (Codex r39). NEG_ADJ is hyphen-guarded like the first-person arms.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?|crews?|teams?|technicians?|work|service)\\s+(?:is|are|was|were|remains?|seems?|looks?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?|crews?|teams?|technicians?|work|service)\\s+(?:is|are|was|were|remains?|seems?|looks?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Separator/heading and possessive association at a provider noun —
   // "Pest control companies: hidden fees are common", "Providers' scams
   // are common" (Codex r24 on #2633). Separator prefix words are
@@ -442,7 +442,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -710,7 +710,7 @@ function sentenceHasNegator(text, index, length) {
   // "since <year>" excluded. The reset only applies when the post-marker
   // clause carries the accusation vocabulary itself — "No hidden fees
   // because Waves keeps pricing transparent" keeps its denial (Codex r36).
-  const markerRe = /[;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
+  const markerRe = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
   let lastMarker = -1;
   let cm;
   while ((cm = markerRe.exec(clause)) !== null) lastMarker = cm.index + cm[0].length;
@@ -822,6 +822,9 @@ function scanOwnBrandDisparagementArms(scanText) {
 // Name-anchored winner/ranking arms, shared by the table and table-less
 // paths (Codex r39): 'The winner is Bug Busters.' must block without a
 // <ComparisonTable> too.
+// Non-numeric rating superlatives attached to a target ("top-rated",
+// "highest-rated" — Codex r42).
+const TOP_RATED_SRC = 'top[-\\s]?rated|highest[-\\s]?rated|best[-\\s]?rated|top[-\\s]?ranked';
 function scanNameRankingArms(text, names) {
   for (const name of names) {
 
@@ -872,8 +875,15 @@ function scanNameRankingArms(text, names) {
         const supRank = new RegExp(
           `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?)\\s+(?:the\\s+)?(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b`, 'i',
         );
+        // top-rated in subject or modifier position — "Bug Busters is
+        // top-rated.", "Top-rated Acme Pest Solutions serves Venice."
+        // (Codex r42).
+        const topRated = new RegExp(
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?)\\s+(?:the\\s+)?(?:${TOP_RATED_SRC})\\b|\\b(?:${TOP_RATED_SRC})\\s+${escaped}\\b`, 'i',
+        );
         const rm = text.match(selfRank)
           || text.match(supRank)
+          || firstUnnegatedMatch(text, topRated)
           || firstUnnegatedMatch(text, calledRank)
           || text.match(marketingRank)
           || firstUnnegatedMatch(text, rankBeforeName)
@@ -912,7 +922,13 @@ function scopedSelfRankingMatch(text) {
     const repMatch = subjLead.match(/^([\s\S]*)\b(says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|claims?|claimed|admits?|admitted|insists?|insisted|wonders?|recommends?|recommended|suggests?|suggested|advises?|advised|teach(?:es)?|taught|shows?|showed|whether|if|that|when)\b/i);
     if (repMatch) {
       const marker = repMatch[2].toLowerCase();
-      reportedBrandIt = /^(?:says?|said|reports?|reported|claims?|claimed|notes?|noted|admits?|admitted|insists?|insisted)$/.test(marker)
+      const strictRep = /^(?:says?|said|reports?|reported|claims?|claimed|notes?|noted|admits?|admitted|insists?|insisted)$/;
+      // A that/whether/if marker inherits strictness from the reporting
+      // verb governing it — "Waves says THAT it is the best choice"
+      // (Codex r42).
+      const governed = /^(?:that|whether|if)$/.test(marker)
+        && /(?:says?|said|reports?|reported|claims?|claimed|notes?|noted|admits?|admitted|insists?|insisted)\s*$/i.test(repMatch[1]);
+      reportedBrandIt = (strictRep.test(marker) || governed)
         && /\bW(?:aves|AVES)\b/.test(lead);
       subjLead = subjLead.slice(repMatch[0].length);
     }
@@ -963,6 +979,16 @@ function scanOwnBrandRankingArms(scanText) {
     if (!OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) continue;
     if (sentenceHasNegator(scanText, nb.index, nb[0].length)) continue;
     return [nb[0]];
+  }
+  // top-rated on the brand, either position — "Waves is top-rated",
+  // "Top-rated Waves Pest Control serves Venice" (Codex r42).
+  const trRe = new RegExp(`(?:\\b(?<brandTok>waves)\\b(?:['’]s?)?(?:\\s+[Pp]est\\s+[Cc]ontrol)?[^.!?\\n]{0,40}?\\b(?:is|are|was|were|remains?)\\s+(?:the\\s+)?(?:${TOP_RATED_SRC})\\b|\\b(?:${TOP_RATED_SRC})\\s+(?:the\\s+)?\\b(?<brandTok2>waves)\\b)`, 'gi');
+  let tr;
+  while ((tr = trRe.exec(scanText)) !== null) {
+    const tok = tr.groups.brandTok || tr.groups.brandTok2;
+    if (!OWN_BRAND_CASE_RE.test(tok)) continue;
+    if (sentenceHasNegator(scanText, tr.index, tr[0].length)) continue;
+    return [tr[0]];
   }
   const sbRe = new RegExp(OWN_BRAND_SUP_BEFORE_SRC, 'gi');
   let sb;
