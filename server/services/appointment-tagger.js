@@ -53,10 +53,7 @@ class AppointmentTagger {
       switch (type.tag) {
         case 'wdo_inspection': await this.triggerWDOPrep(service); break;
         case 'german_roach': case 'cockroach': await this.triggerPestPrep(service, 'cockroach'); break;
-        case 'bed_bug':
-          await this.triggerPestPrep(service, 'bed_bug');
-          await this.enrollTreatmentAutomation(service, 'bed_bug');
-          break;
+        case 'bed_bug': await this.triggerPestPrep(service, 'bed_bug'); break;
         case 'flea': await this.triggerPestPrep(service, 'flea'); break;
       }
     } catch (err) {
@@ -228,11 +225,22 @@ class AppointmentTagger {
   async triggerPestPrep(service, pestType) {
     if (await this.hasPriorSameTypeBooking(service, pestType)) return;
 
+    // Exactly ONE guide email per first-time booking (owner directive
+    // 2026-07-11: two is overkill). For sequence-wired pests with the gate on,
+    // the Automations-tab sequence IS that email — its step-0 carries the prep
+    // guide, editable in the tab — so the transactional prep.<pest> email is
+    // skipped and the SMS legs key off the enrollment instead. Gate off (or an
+    // unwired pest) runs the transactional lane unchanged, so unsetting
+    // GATE_TREATMENT_AUTOMATION_ENROLL reverts to the proven prep email.
+    //
     // The companion SMS copy asserts "we emailed your treatment guide" — only
-    // send it when the guide email actually queued. When the email was skipped
-    // solely because there's no email on file, fall back to the self-contained
-    // prep text instead. Codex review 2026-07-06.
-    const emailResult = await this.triggerPrepEmailGuide(service, pestType);
+    // send it when the guide email actually queued (either source). When the
+    // email was skipped solely because there's no email on file, fall back to
+    // the self-contained prep text instead. Codex review 2026-07-06.
+    const sequenceWired = !!TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] && isEnabled('treatmentAutomationEnroll');
+    const emailResult = sequenceWired
+      ? await this.enrollTreatmentSequence(service, pestType)
+      : await this.triggerPrepEmailGuide(service, pestType);
     let smsVariant;
     if (emailResult.queued) {
       smsVariant = 'companion';
@@ -314,48 +322,53 @@ class AppointmentTagger {
     });
   }
 
-  // Automations-tab sequence enrollment for first-time treatment bookings —
-  // the event wiring the manual per-row Send button shares its plumbing with.
+  // Automations-tab sequence enrollment — for wired pests with the gate on,
+  // this REPLACES triggerPrepEmailGuide as the guide-email source (one email
+  // per booking; the sequence's step-0 carries the prep guide, editable in the
+  // tab). Returns the same { queued, reason } contract so triggerPestPrep's
+  // SMS logic (companion on queued / standalone on no_email / silence
+  // otherwise) works identically for both sources.
   // Guards, in order:
   //   • upcoming open visits only — regenerate-brief replays onServiceScheduled
-  //     for past/cancelled jobs too (same terminal/past rule as prep);
-  //   • first-time only (hasPriorSameTypeBooking): a follow-up in the same
-  //     infestation series must not restart "welcome" messaging;
+  //     for past/cancelled jobs too (same terminal/past rule as the
+  //     transactional path); first-time-only is checked by the caller;
   //   • once EVER per customer+template from this hook: enrollCustomer alone
   //     only no-ops while an enrollment is ACTIVE, so a replay after the
   //     sequence completed would reactivate and re-send — skip when any prior
   //     enrollment row exists. The manual Send button intentionally keeps
   //     re-send ability (it calls the route, not this hook).
   // Recipient routes like prep: service contact first (the on-site person),
-  // then primary. Email-only by design — sequences are SendGrid emails; the
-  // phone-only prep fallback above covers no-email customers. The runner
-  // applies template.enabled + ASM/suppression checks at send time.
-  // Never throws: an enrollment hiccup must not break booking.
-  async enrollTreatmentAutomation(service, pestType) {
+  // then primary. Sequences are SendGrid emails, so a phone-only customer
+  // reports 'no_email' — but only while the sequence is actually sendable
+  // (template enabled + real step content); a paused/empty sequence silences
+  // BOTH channels, same kill-switch parity the transactional path has.
+  async enrollTreatmentSequence(service, pestType) {
     const templateKey = TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] || null;
-    if (!templateKey) return;
-    if (!isEnabled('treatmentAutomationEnroll')) return;
-    if (!service.customer_id) return;
+    if (!templateKey) return { queued: false, reason: 'no_automation' };
+    if (!isEnabled('treatmentAutomationEnroll')) return { queued: false, reason: 'gate_off' };
+    if (!service.customer_id) return { queued: false, reason: 'not_queued' };
 
     const status = String(service.status || '').toLowerCase();
-    if (PREP_TERMINAL_STATUSES.has(status)) return;
+    if (PREP_TERMINAL_STATUSES.has(status)) return { queued: false, reason: 'terminal' };
     const serviceDateStr = dateOnlyString(service.scheduled_date);
-    if (!serviceDateStr || serviceDateStr < etDateString()) return;
+    if (!serviceDateStr || serviceDateStr < etDateString()) return { queued: false, reason: 'past' };
 
     try {
-      if (await this.hasPriorSameTypeBooking(service, pestType)) return;
-
       const priorEnrollment = await db('automation_enrollments')
         .where({ template_key: templateKey, customer_id: service.customer_id })
         .first('id');
-      if (priorEnrollment) return;
+      if (priorEnrollment) return { queued: false, reason: 'not_queued' };
 
       const { resolveProjectEmailRecipient } = require('./project-email');
       const customer = await db('customers').where({ id: service.customer_id }).first();
       const recipient = customer
         ? resolveProjectEmailRecipient(customer)
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
-      if (!recipient.email) return;
+      if (!recipient.email) {
+        logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
+        const sendable = await this.isTreatmentSequenceSendable(templateKey);
+        return { queued: false, reason: sendable ? 'no_email' : 'not_queued' };
+      }
 
       const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
       const AutomationRunner = require('./automation-runner');
@@ -369,10 +382,31 @@ class AppointmentTagger {
         },
       });
       if (result?.enrolled) {
-        logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} automation (service ${service.id})`);
+        logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} sequence (service ${service.id})`);
+        return { queued: true, reason: 'queued' };
       }
+      // disabled template / no steps / already active — no guide email is
+      // coming from this run, so the SMS stays silent too.
+      return { queued: false, reason: 'not_queued' };
     } catch (err) {
-      logger.error(`[appointment-tagger] ${templateKey} automation enroll failed for service ${service.id}: ${err.message}`);
+      logger.error(`[appointment-tagger] ${templateKey} sequence enroll failed for service ${service.id}: ${err.message}`);
+      return { queued: false, reason: 'error' };
+    }
+  }
+
+  // True only when the sequence would actually send: template enabled AND at
+  // least one enabled step with real content. Mirrors isPrepAutomationActive
+  // for the transactional path — the standalone no-email SMS must respect the
+  // same pause as the email channel. Fails CLOSED.
+  async isTreatmentSequenceSendable(templateKey) {
+    try {
+      const template = await db('automation_templates').where({ key: templateKey }).first();
+      if (!template || !template.enabled) return false;
+      const AutomationRunner = require('./automation-runner');
+      return !!(await AutomationRunner.hasLocalContent(templateKey));
+    } catch (err) {
+      logger.warn(`[appointment-tagger] sequence sendable-check failed for ${templateKey}: ${err.message}`);
+      return false;
     }
   }
 
