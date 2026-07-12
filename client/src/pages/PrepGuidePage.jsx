@@ -102,6 +102,62 @@ function BlockRenderer({ blocks }) {
   });
 }
 
+// Upcoming-visits band (owner 2026-07-12): the customer's next 1-2 open
+// visits of THIS guide's service family — the dates the prep work builds
+// toward. Distinct glass band above the content blocks; renders nothing when
+// the payload carries no family visits.
+function UpcomingVisitsBand({ visits, typeLabel }) {
+  if (!Array.isArray(visits) || !visits.length) return null;
+  return (
+    <div
+      data-glass="soft"
+      style={{
+        background: SURFACE.detailBg,
+        border: `1px solid ${SURFACE.border}`,
+        borderRadius: RADIUS.input,
+        padding: `${SP.md}px ${SP.lg}px`,
+        margin: `0 0 ${SP.xl}px`,
+      }}
+    >
+      <div style={{
+        fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.muted,
+        textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: SP.sm,
+      }}>
+        {visits.length > 1 ? `Your upcoming ${typeLabel} visits` : `Your upcoming ${typeLabel} visit`}
+      </div>
+      <div style={{ display: 'grid', gap: SP.sm }}>
+        {visits.map((visit, i) => (
+          <div
+            key={`${visit.dateLabel}-${i}`}
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              gap: SP.md,
+              paddingBottom: i < visits.length - 1 ? SP.sm : 0,
+              borderBottom: i < visits.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
+            }}
+          >
+            <div>
+              <div style={{ fontSize: FS.bodyLg, fontWeight: FW.semibold, color: SURFACE.text, lineHeight: LH.body }}>
+                {visit.dateLabel}
+              </div>
+              {visit.serviceLabel && (
+                <div style={{ fontSize: FS.body, color: SURFACE.muted, lineHeight: LH.body }}>
+                  {visit.serviceLabel}
+                </div>
+              )}
+            </div>
+            {visit.windowLabel && (
+              <div style={{ fontSize: FS.body, fontWeight: FW.medium, color: SURFACE.body, whiteSpace: 'nowrap' }}>
+                Arrival {visit.windowLabel}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LoadingSkeleton() {
   return (
     <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto' }}>
@@ -209,6 +265,8 @@ export default function PrepGuidePage() {
                 </div>
               ) : <div style={{ marginBottom: SP.lg }} />;
             })()}
+
+            <UpcomingVisitsBand visits={data.upcomingVisits} typeLabel={data.projectTypeLabel} />
 
             <BlockRenderer blocks={data.blocks} />
 
