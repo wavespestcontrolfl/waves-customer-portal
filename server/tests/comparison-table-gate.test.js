@@ -1114,6 +1114,48 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-16 findings (#2633) ──
+
+  test('Codex r16: standalone appear copulas block across subject classes', () => {
+    for (const prose of ['Pest control companies appear dishonest.', 'Bug Busters appears dishonest.', 'Waves appears dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r16: prepositional fee accusations block; denials stay clean', () => {
+    for (const prose of ['Pest control companies with hidden fees should be avoided.', 'Providers with shady billing should be avoided.', 'Acme Rodent Removal with hidden fees should be avoided.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: `Providers with no hidden fees are worth keeping.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(denial.pass).toBe(true);
+  });
+
+  test('Codex r16: appositive possession insults on extra prose names block', () => {
+    for (const prose of ['Acme Rodent Removal, frankly, comes with hidden fees.', 'Bug Busters, a local option, uses shady billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r16: adverbed first-person and subject #1 claims block; denials stay clean', () => {
+    for (const prose of ["We're currently #1!", 'We are currently the #1!', 'Pest control companies are currently #1.', 'Bug Busters is currently #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: `We are not #1 yet, and that keeps us honest about pricing reviews.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
+  test('Codex r16: customer-choice #1 claims block in us-object and name-object forms', () => {
+    for (const prose of ['Homeowners choose us as #1.', 'Customers make us their #1 choice.', 'Customers make Bug Busters their #1 choice.', 'Homeowners choose Acme Rodent Removal as #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
   // ── Codex round-15 findings (#2633) ──
 
   test('Codex r15: appositive active insults against extra prose names block; denials stay clean', () => {

@@ -131,12 +131,16 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
   // Linking verbs incl. modal/hedged and sensory forms ("companies may be
   // dishonest", "providers sound shady" — Codex r10/r11 on #2633; same set
-  // as the own-brand arm). Post-verb gap words are negator-excluded too
-  // ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appears?\\s+to\\s+be)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // as the own-brand arm). Standalone appear counts as a copula too —
+  // "companies appear dishonest" (Codex r16). Post-verb gap words are
+  // negator-excluded too ("are never dishonest" is a denial).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  // Prepositional form takes the noun directly — "companies with hidden
+  // fees should be avoided" (Codex r16); the negator-free article gap keeps
+  // "providers with no hidden fees" a denial.
+  `\\b(?:${PROVIDER_NOUN})\\b(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gap here too — "companies, frankly, charge hidden
   // fees" (Codex r7 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -163,16 +167,16 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // The DISP token must still sit right after the verb (short determiner
   // gap only): that adjacency is what keeps "Waves keeps shady corners
   // treated" clean.
-  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   // First-person possessive claims with a linking verb ("Our billing is
   // shady", "Our pricing is dishonest") — business-practice nouns ONLY, so
   // literal shade stays clean ("our lanais are shady and humid") (Codex
   // r14 on #2633).
-  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
-  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|appear(?:s|ed)?(?:\\s+to\\s+be)?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
   // Object-position insult idiom against the own brand ("homeowners call
   // Waves a scam", "customers describe us as dishonest") — verb-anchored,
@@ -201,8 +205,10 @@ const NUMERIC_ONE_ALT = '(?:#\\s?1\\b|no\\.?\\s?1\\b|number one\\b)';
 const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
   // Typographic apostrophe accepted; optional determiner after the verb and
-  // after ranked/rated/voted (Codex r3 on #2633).
-  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:(?:still|now|proudly)\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  // after ranked/rated/voted (Codex r3 on #2633). The adverb slot takes any
+  // negator-free words, not a curated list — "We're currently #1" (Codex
+  // r16); negator exclusion keeps "We are not #1" a denial.
+  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Transitive "we rank #1" gets NO determiner tail: "below, we rank the
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
@@ -210,7 +216,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // Own brand in OBJECT position ("customers rated us #1", "voted us the
   // #1 choice") — "us" makes it own-brand by construction, so the verb
   // list can be broad without educational collisions (Codex r14 on #2633).
-  `\\b(?:rate[sd]?|rank(?:s|ed)?|vote[sd]?|name[sd]?|calls?|called|makes?|made)\\s+us\\s+(?:(?:as|the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // Customer-choice verbs and "their" ride along — "homeowners choose us
+  // as #1", "customers make us their #1 choice" (Codex r16).
+  `\\b(?:rate[sd]?|rank(?:s|ed)?|vote[sd]?|name[sd]?|calls?|called|makes?|made|chooses?|chose|selects?|selected|picks?|picked|prefers?|preferred)\\s+us\\s+(?:(?:as|the|your|a|an|their)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own-brand subject with the ranking verb anywhere in the same sentence —
   // "Waves, after years of serving …, is #1" sits outside any proximity
@@ -218,8 +226,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // number, so "in heat waves, the #1 breeding site is …" stays clean.
   `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Provider-noun subject: "pest control companies are #1", "providers
-  // rank #1" (Codex r11 on #2633).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // rank #1" (Codex r11 on #2633). Negator-free adverb slot, same as the
+  // we-arm ("companies are currently #1" — Codex r16 parity).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
 // Own-brand SEPARATOR and appositive-#1 forms keep a case-SENSITIVE brand
@@ -250,7 +259,7 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMER
 // forms the provider-noun arms accept — "may be dishonest" / "appears to be
 // dishonest" is still the accusation (Codex r15 on #2633); past-tense linking
 // forms ride along for the same parity.
-const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appears?\\s+to\\s+be';
+const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?';
 
 // Numeric self-ranking ("#1", "No. 1", "number one") split out of the
 // context-free ranking set: in educational pest prose these are overwhelmingly
@@ -332,7 +341,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -979,9 +988,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
       // Possession/usage accusations with the required object ("Bug Busters
       // uses shady billing", "Acme Rodent Removal comes with hidden fees")
-      // — Codex r4 on #2633.
+      // — Codex r4 on #2633. Appositive-tolerant gap and the prepositional
+      // form, same as the provider-noun arm ("Acme Rodent Removal, frankly,
+      // comes with hidden fees" / "… with hidden fees should be avoided" —
+      // Codex r16).
       const possessionP0 = new RegExp(
-        `${escaped}\\b(?:['’]s?)?\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
       // Name-confident PERSONIFIED names also get a same-sentence
       // accusation-object association ("Customers report hidden fees after
@@ -1088,15 +1100,18 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       for (const name of extraProseNames) {
         const escaped = escapeForNameRe(name);
         // Appositive-tolerant, like the disparagement path ("Bug Busters,
-        // frankly, is #1" — Codex r10 on #2633).
+        // frankly, is #1" — Codex r10 on #2633). Negator-free adverb slot
+        // ("Bug Busters is currently #1" — Codex r16 parity).
         const selfRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
         // Object-position idiom: "reviews call Bug Busters the #1 choice",
         // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
-        // proximity.
+        // proximity. Customer-choice verbs and "their", same as the
+        // us-object arm ("customers make Bug Busters their #1 choice" —
+        // Codex r16 parity).
         const calledRank = new RegExp(
-          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted|makes?|made|chooses?|chose|selects?|selected|picks?|picked|prefers?|preferred)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an|their)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
         // Separator/appositive #1: PERSONIFIED names take any following #1
         // ("Bug Busters, the #1 choice" — Codex r12). Non-personified names
