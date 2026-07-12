@@ -32,6 +32,8 @@ import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
+import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
 import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
@@ -2455,7 +2457,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -2473,7 +2475,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         : paymentPreference === 'prepay_annual'
           ? 'Pay the 12-month plan in full'
           : 'Pay at the visit';
-  const confirmLabel = invoiceOnly
+  const confirmLabel = confirmLabelOverride || (invoiceOnly
     ? 'Accept + send invoice'
     : heldForSiteConfirmation
       ? (usingExistingAppointment ? 'Confirm approval' : 'Approve estimate')
@@ -2483,7 +2485,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         : paymentPreference === 'prepay_annual'
           ? 'Confirm annual prepay'
           : 'Confirm appointment'
-      : 'Confirm booking';
+      : 'Confirm booking');
   const confirmSub = invoiceOnly
     ? 'No appointment needed. Next step creates your invoice and makes secure payment available.'
     : heldForSiteConfirmation
@@ -2524,13 +2526,15 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
                 : `Slot: ${slotId}`}
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
+      {autoPaySlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
           onClick={onConfirm}
-          disabled={submitting}
-          style={submitting ? { ...estimateCtaStyle, opacity: 0.65, cursor: 'wait' } : estimateCtaStyle}
-        >{confirmLabel}</button>
+          disabled={submitting || confirmDisabled}
+          style={(submitting || confirmDisabled) ? { ...estimateCtaStyle, opacity: 0.65, cursor: submitting ? 'wait' : 'default' } : estimateCtaStyle}
+        >{submitting && submittingLabel ? submittingLabel : confirmLabel}</button>
+        {prefSwitch}
         {confirmSub ? (
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {confirmSub}
@@ -3396,6 +3400,20 @@ export default function EstimateViewPage() {
   // /data and /accept) — force the capture branch on the next confirm so the
   // customer isn't stuck re-submitting the same 402 until a full reload.
   const recurringCardForceRef = useRef(false);
+  // Seamless single-screen booking (owner 2026-07-12): when the review card
+  // owes an Auto Pay card, the Payment Element renders INLINE in the review
+  // (one tap saves the card and books). inlineCardIntent holds the pre-minted
+  // SetupIntent; the ref drives confirmSetup from the combined CTA. The modal
+  // stays as the fallback (inline mint failure, stale-402 force path).
+  const [inlineCardIntent, setInlineCardIntent] = useState(null);
+  const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false });
+  const inlineCaptureRef = useRef(null);
+  const inlineIntentMintRef = useRef(false);
+  // One review_viewed event per review entry, not per re-render.
+  const reviewViewedRef = useRef(false);
+  // One auto-advance per slot selection: going Back from review must land on
+  // the configure page, not bounce straight back into review.
+  const autoAdvancedSlotRef = useRef(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -3884,9 +3902,12 @@ export default function EstimateViewPage() {
           // The Auto Pay card couldn't be verified — drop it so the next
           // confirm re-opens the capture modal. The server is authoritative:
           // force the capture branch even if our /data policy snapshot is
-          // stale and still says no card is owed.
+          // stale and still says no card is owed. The inline capture's
+          // SetupIntent failed that verification too — drop it so the force
+          // path mints fresh through the modal instead of replaying it.
           recurringCardSetupIntentIdRef.current = null;
           recurringCardForceRef.current = true;
+          setInlineCardIntent(null);
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
@@ -3926,6 +3947,11 @@ export default function EstimateViewPage() {
       setAcceptResult(body);
       setCtaPhase('success');
       setReservation(null);
+      // Funnel telemetry — estimate.id only, never the bearer token.
+      track(FUNNEL_EVENTS.ESTIMATE_ACCEPTED, {
+        estimate_id: data?.estimate?.id || null,
+        recurring: serviceMode !== 'one_time',
+      });
       // Booking-confirmed celebration — visual-only and isolated: the accept
       // has already succeeded, so an animation failure (e.g. a WebView
       // without Element.animate) must never surface as a booking error.
@@ -3938,7 +3964,7 @@ export default function EstimateViewPage() {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [adminDraftPreview, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
+  }, [adminDraftPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -3990,6 +4016,32 @@ export default function EstimateViewPage() {
         setCtaPhase('review');
         return;
       }
+    }
+    // Seamless inline Auto Pay (owner 2026-07-12): when the Payment Element
+    // is embedded in the review card, this single tap saves the card AND
+    // books — confirm the SetupIntent first, then continue into the standard
+    // preflights (the modal branch below is skipped once the ref is set; it
+    // remains the fallback for inline mint failure and the stale-402 force
+    // path, which drops inlineCardIntent so this branch can't replay a
+    // rejected SetupIntent).
+    if (serviceMode !== 'one_time' && !recurringCardSetupIntentIdRef.current
+        && !recurringCardForceRef.current
+        && paymentPreference !== 'prepay_annual'
+        && inlineCardIntent && inlineCaptureRef.current) {
+      if (!inlineCaptureRef.current.isReady()) {
+        setError('Enter your card details and check the Auto Pay authorization to confirm your booking.');
+        return;
+      }
+      setCtaPhase('submitting');
+      setError(null);
+      const cardResult = await inlineCaptureRef.current.confirmSetup();
+      if (!cardResult.ok) {
+        setError(cardResult.error || 'We could not save that card. Try another card.');
+        setCtaPhase('review');
+        return;
+      }
+      recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
+      track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
     }
     // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE). When this
     // recurring accept owes an Auto Pay card and none is captured yet, mint
@@ -4088,7 +4140,7 @@ export default function EstimateViewPage() {
       }
     }
     await performAccept();
-  }, [data, paymentPreference, serviceMode, token, performAccept]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -4112,8 +4164,9 @@ export default function EstimateViewPage() {
   const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
     recurringCardSetupIntentIdRef.current = setupIntentId;
     setRecurringCardIntent(null);
+    track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
     await handleConfirm();
-  }, [handleConfirm]);
+  }, [data, handleConfirm]);
 
   const handleRecurringCardCancel = useCallback(() => setRecurringCardIntent(null), []);
 
@@ -4147,6 +4200,73 @@ export default function EstimateViewPage() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   }, [ctaPhase, reservation]);
+
+  // Seamless single-screen booking (owner 2026-07-12). All UX below is gated
+  // on the RECURRING_CARD_ON_FILE flag (recurringCardPolicy.enforced) so the
+  // live experience is unchanged until Adam lights it.
+  const seamlessAutoPay = data?.recurringCardPolicy?.enforced === true;
+  const inlineAutoPayActive = seamlessAutoPay
+    && serviceMode !== 'one_time'
+    && paymentPreference !== 'prepay_annual'
+    && data?.recurringCardPolicy?.required === true;
+
+  // Pre-mint the Auto Pay SetupIntent as the review renders so the Payment
+  // Element is interactive by the time the customer reads the card. A mint
+  // failure (or a saved-card 409 exemption) is non-fatal: confirm falls into
+  // the existing modal branch, which re-mints or 409-falls-through.
+  useEffect(() => {
+    if (ctaPhase !== 'review' || !reservation) return;
+    if (!inlineAutoPayActive || inlineCardIntent) return;
+    if (recurringCardSetupIntentIdRef.current || recurringCardForceRef.current) return;
+    if (inlineIntentMintRef.current) return;
+    inlineIntentMintRef.current = true;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.ok && body?.clientSecret) {
+          setInlineCardIntent(body);
+          track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_STARTED, { estimate_id: data?.estimate?.id || null });
+        }
+      } catch { /* modal fallback at confirm */ }
+    })();
+  }, [ctaPhase, reservation, inlineAutoPayActive, inlineCardIntent, token, serviceMode, paymentPreference, data]);
+
+  // Funnel telemetry: one review_viewed per review entry (estimate.id only —
+  // never the bearer token).
+  useEffect(() => {
+    if (ctaPhase !== 'review' || !reservation) {
+      if (ctaPhase === 'configure') reviewViewedRef.current = false;
+      return;
+    }
+    if (reviewViewedRef.current) return;
+    reviewViewedRef.current = true;
+    track(FUNNEL_EVENTS.ESTIMATE_REVIEW_VIEWED, {
+      estimate_id: data?.estimate?.id || null,
+      recurring: serviceMode !== 'one_time',
+      card_step: inlineAutoPayActive,
+    });
+  }, [ctaPhase, reservation, serviceMode, inlineAutoPayActive, data]);
+
+  // Preference preselect (owner-approved 2026-07-12): for a standard
+  // recurring booking under the flag, tapping a slot IS the payment choice —
+  // pay per application is the default and the review card offers the
+  // annual-prepay switch. One advance per slot selection: Back from review
+  // lands on configure (with the payment buttons visible) instead of
+  // bouncing straight back into review.
+  useEffect(() => {
+    if (!seamlessAutoPay || serviceMode === 'one_time') return;
+    if (ctaPhase !== 'configure' || !selectedSlotId) return;
+    if (adminDraftPreview || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
+    if (data?.estimate?.billByInvoice || data?.estimate?.siteConfirmationHold) return;
+    if (autoAdvancedSlotRef.current === selectedSlotId) return;
+    autoAdvancedSlotRef.current = selectedSlotId;
+    handlePaymentChoice('pay_at_visit');
+  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
 
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
@@ -4768,9 +4888,42 @@ export default function EstimateViewPage() {
                 // Deposit retired (card-on-file booking spec): the Auto Pay
                 // disclosure must stand on its own once no deposit is owed —
                 // the recurring accept is "$0 today, charged per application".
+                // When the capture renders INLINE, its own copy carries the
+                // Auto Pay disclosure — keep only the surcharge line here.
                 : (serviceMode !== 'one_time' && data?.recurringCardPolicy?.required && paymentPreference !== 'prepay_annual'
-                  ? `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`
+                  ? (inlineAutoPayActive && inlineCardIntent
+                    ? CARD_SURCHARGE_DISCLOSURE
+                    : `Nothing is charged today. Your card on file powers Auto Pay — after each completed service, that service's amount is charged automatically. ${CARD_SURCHARGE_DISCLOSURE}`)
                   : null))}
+            autoPaySlot={inlineAutoPayActive && inlineCardIntent ? (
+              <InlineAutoPayCapture
+                ref={inlineCaptureRef}
+                intent={inlineCardIntent}
+                loadStripeSdk={loadStripeSdk}
+                glassActive={!!glassContent}
+                onStateChange={setInlineCardState}
+              />
+            ) : null}
+            confirmLabelOverride={inlineAutoPayActive && inlineCardIntent ? 'Confirm booking & save card' : null}
+            confirmDisabled={inlineAutoPayActive && inlineCardIntent
+              ? !(inlineCardState.ready && inlineCardState.agreed)
+              : false}
+            submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
+            prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
+              && !estimate.billByInvoice && !estimate.siteConfirmationHold
+              && (pricing.annualPrepayEligible === true || pricing.setupFee?.waivedWithPrepay)
+              ? (
+                <button
+                  type="button"
+                  onClick={() => setPaymentPreference(paymentPreference === 'prepay_annual' ? 'pay_at_visit' : 'prepay_annual')}
+                  disabled={ctaPhase === 'submitting'}
+                  style={{ background: 'none', border: 'none', padding: 0, fontSize: 14, color: COLORS.navy, textDecoration: 'underline', cursor: 'pointer', justifySelf: 'center' }}
+                >
+                  {paymentPreference === 'prepay_annual'
+                    ? 'Switch back to pay per application'
+                    : 'Prefer to pay the year up front? Switch to annual prepay'}
+                </button>
+              ) : null}
           />
           </div>
           {depositIntent ? (
@@ -4878,6 +5031,7 @@ export default function EstimateViewPage() {
                   selectedFrequency={selectedFrequency}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
+                  quickPick={seamlessAutoPay}
                 />
               </div>
             ) : (

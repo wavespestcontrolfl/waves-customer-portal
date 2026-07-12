@@ -39,6 +39,12 @@ export const FUNNEL_EVENTS = {
   // -- Public estimate-accept (tokenized estimate link) -----------------------
   /** A tokenized estimate/pay link was opened. props: {} */
   ESTIMATE_ACCEPT_OPENED: 'estimate_accept_opened',
+  /** The booking review screen rendered. props: { estimate_id, recurring, card_step } */
+  ESTIMATE_REVIEW_VIEWED: 'estimate_review_viewed',
+  /** The inline Auto Pay card step became interactive. props: { estimate_id } */
+  ESTIMATE_CARD_STEP_STARTED: 'estimate_card_step_started',
+  /** The Auto Pay card was captured (SetupIntent succeeded). props: { estimate_id } */
+  ESTIMATE_CARD_STEP_COMPLETED: 'estimate_card_step_completed',
   /** The customer accepted the estimate. props: { recurring } */
   ESTIMATE_ACCEPTED: 'estimate_accepted',
 };
