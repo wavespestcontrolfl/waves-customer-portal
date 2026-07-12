@@ -394,7 +394,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
       payer_id: null,
       created_at: new Date(),
       title: 'WaveGuard Membership Setup + First Application',
-      notes: 'Auto-generated from accepted estimate #est-already-1. Customer selected pay per application — $99 setup fee plus first application.',
+      notes: 'Auto-generated from accepted estimate #est-already-1. Customer selected pay per application — $99.00 setup fee plus first application.',
     }];
     db.__state.tables.scheduled_services = [{
       id: 'ss-9',
@@ -658,7 +658,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
         payer_id: null,
         created_at: new Date(),
         title: 'WaveGuard Membership Setup + First Application',
-        notes: 'Auto-generated from accepted estimate #est-settled-1. Customer selected pay per application — $99 setup fee plus first application.',
+        notes: 'Auto-generated from accepted estimate #est-settled-1. Customer selected pay per application — $99.00 setup fee plus first application.',
       }];
       db.__state.tables.scheduled_services = [{
         id: 'ss-settled',

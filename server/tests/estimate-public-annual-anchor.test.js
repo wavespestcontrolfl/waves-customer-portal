@@ -1,9 +1,9 @@
 /**
  * anchoredAnnualTotal — recomputed annual_total must anchor to the engine's
  * true annual (result.totals.year2), not round-trip through the rounded
- * monthly. Regression: quarterly $392/yr displays as $32.67/mo; a no-op
+ * monthly. Regression: quarterly $392.00/yr displays as $32.67/mo; a no-op
  * preference toggle or tier flip recomputed annual as 32.67 * 12 = 392.04
- * and clobbered the quoted $392 (prod rows b7d916a3 / 87401b86).
+ * and clobbered the quoted $392.00 (prod rows b7d916a3 / 87401b86).
  */
 const { anchoredAnnualTotal } = require('../routes/estimate-public');
 

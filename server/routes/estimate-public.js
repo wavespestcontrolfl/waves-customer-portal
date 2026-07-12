@@ -1892,8 +1892,10 @@ function rawQuoteRequiredReason(item = {}) {
 }
 
 function fmtMoney(n) {
+  // Always two decimals (owner directive 2026-07-11) — mirrors the client's
+  // shared client/src/lib/money.js so both estimate twins price identically.
   const v = Math.round(Number(n || 0) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Price label for the "Estimate viewed" admin notification. One-time-only
@@ -4083,7 +4085,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     })();
   const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
-    ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
+    ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>`
     : (prepayDiscountAmount > 0
       ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>−${fmtMoney(prepayDiscountAmount)}</strong></div>`
       : '');
@@ -4120,7 +4122,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <p class="payment-choice-body">${escapeHtml(standardInvoiceCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-          ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>` : ''}
+          ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
           ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
@@ -5166,7 +5168,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
-  const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
@@ -8196,9 +8198,9 @@ router.put('/:token/accept', async (req, res, next) => {
               ? 'WaveGuard Membership Setup + First Application'
               : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
             const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee plus first application.`
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee plus first application.`
               : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,
