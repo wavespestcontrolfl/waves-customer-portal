@@ -125,7 +125,8 @@ export default function ServiceOutlinePage() {
         </header>
       )}
 
-      <main>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div>
         <div className="mx-auto max-w-[760px] px-4 pt-6">
           {/* No server-side outline PDF render — Share + Print only. */}
           <DocumentActionBar shareTitle="Waves program outline" style={{ marginBottom: 0 }} />
@@ -227,7 +228,7 @@ export default function ServiceOutlinePage() {
               2026-07-09, supersedes same-day card ruling). */}
           <BrandFooter />
         </div>
-      </main>
+      </div>
     </div>
   );
 }

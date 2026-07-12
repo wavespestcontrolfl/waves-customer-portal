@@ -20,10 +20,6 @@ export default function WavesShell({
   topBar = 'solid',
   showFooter = true,
   footerTone,
-  // Pages that render their own <main> (the report/doc pages) pass false so
-  // the document keeps exactly one main landmark; the wrapper stays in place
-  // as a plain div because it is the .waves-skip-link target.
-  mainLandmark = true,
 }) {
   const isTransparent = topBar === 'transparent';
   const phoneTone = isTransparent ? 'light' : 'dark';
@@ -94,15 +90,12 @@ export default function WavesShell({
             </span>
           </nav>
         </header>
-        {mainLandmark ? (
-          <main id="waves-shell-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-            {children}
-          </main>
-        ) : (
-          <div id="waves-shell-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-            {children}
-          </div>
-        )}
+        {/* The ONE main landmark for every shell-wrapped page, in every
+            state (loading/error included) — wrapped pages must not render
+            their own <main>. Also the .waves-skip-link target. */}
+        <main id="waves-shell-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {children}
+        </main>
         {showFooter && (
           <TrustFooter tone={resolvedFooterTone} variant={variant} />
         )}

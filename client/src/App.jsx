@@ -384,11 +384,8 @@ export default function App() {
           {/* Digital business card — navy glass scene, so the fallback wash
               matches the scene instead of the light doc wash. */}
           <Route path="/card/:token" element={<Suspense fallback={<div style={{background:'#04395E',minHeight:'100vh'}}/>}><WavesShell><CardPage /></WavesShell></Suspense>} />
-          {/* mainLandmark={false} on the doc/report shells below: those pages
-              render their own <main>, and a document must expose exactly one
-              main landmark. */}
-          <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell mainLandmark={false}><ProjectReportViewPage /></WavesShell></Suspense>} />
-          <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell mainLandmark={false}><ReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
@@ -404,10 +401,10 @@ export default function App() {
               /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
               /newsletter keeps its dark hero. The /pay group joined the full
               scene 2026-07-09 (pro wash retired), so it uses the same wash. */}
-          <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell mainLandmark={false}><LawnReportViewPage /></WavesShell></Suspense>} />
-          <Route path="/pest-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell mainLandmark={false}><PestReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
+          <Route path="/pest-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><PestReportViewPage /></WavesShell></Suspense>} />
           <Route path="/lawn-care/what-is-included" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><LawnCareIncludedPage /></Suspense>} />
-          <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell mainLandmark={false}><ServiceOutlinePage /></WavesShell></Suspense>} />
+          <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
           <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
