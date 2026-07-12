@@ -719,6 +719,25 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // record is being attached — a months-later "thanks for your review"
   // from that repair would read as noise.
   if (review.customer_id !== customerId) {
+    // Mirror the sync paths' _markCustomerLeftReview: a manually matched
+    // customer left a review too, so future review ASKS must stop (the
+    // completion-SMS bundler and review-request suppression both read
+    // has_left_google_review). Best-effort — a marking hiccup must not fail
+    // the attribution.
+    try {
+      await conn('customers')
+        .where({ id: customerId })
+        .update({ has_left_google_review: true, review_marked_at: new Date() });
+      await conn('activity_log').insert({
+        customer_id: customerId,
+        admin_user_id: attrs.adminId || null,
+        action: 'review_manual_marked',
+        description: 'Manual review match — customer marked as having left a Google review; review asks stop.',
+      });
+    } catch (markErr) {
+      logger.warn(`[review-incentives] has_left_google_review mark failed for customer ${customerId}: ${markErr.message}`);
+    }
+
     const { enrollReviewThankYou } = require('./automation-enroll');
     await enrollReviewThankYou({
       customerId,

@@ -81,14 +81,14 @@ async function enrollSequenceFromEvent({
     const priorQuery = db('automation_enrollments')
       .whereIn('template_key', dedupeKeys)
       .where({ customer_id: customerId })
-      // BOTH modes: only rows that delivered (or still can) suppress. A
-      // failed row that never sent anything (status='failed',
-      // last_sent_at NULL — e.g. SendGrid rejected before any email left)
-      // must not count as coverage inside a dedupe window either, or the
-      // billing sites would treat 'deduped' as email coverage and suppress
-      // the transactional fallback while the customer got nothing.
-      .where(function priorDelivered() {
-        this.whereNot('status', 'failed').orWhereNotNull('last_sent_at');
+      // BOTH modes: only rows that DELIVERED something (last_sent_at set) or
+      // still will (status='active') count as coverage. Enumerated the other
+      // way this kept leaking: failed-unsent (SendGrid rejected before any
+      // email left) and cancelled-unsent (suppression recorded between the
+      // precheck and the runner tick) both mean the customer got nothing, and
+      // the billing sites treat 'deduped' as email coverage.
+      .where(function priorDeliveredOrActive() {
+        this.where('status', 'active').orWhereNotNull('last_sent_at');
       });
     if (dedupe !== 'ever') {
       priorQuery.where('enrolled_at', '>', new Date(Date.now() - Number(dedupe) * 24 * 3600 * 1000));
@@ -96,13 +96,14 @@ async function enrollSequenceFromEvent({
     if (await priorQuery.first('id')) return { enrolled: false, reason: 'deduped' };
 
     if (!retryFailedUnsent) {
+      // Deliberately UNWINDOWED: a failed-never-sent row proves the sequence
+      // undeliverable for this customer until something actually sends, no
+      // matter how old — reactivating it later and counting 'enrolled' as
+      // coverage would silence the transactional fallback again.
       const failedQuery = db('automation_enrollments')
         .whereIn('template_key', dedupeKeys)
         .where({ customer_id: customerId, status: 'failed' })
         .whereNull('last_sent_at');
-      if (dedupe !== 'ever') {
-        failedQuery.where('enrolled_at', '>', new Date(Date.now() - Number(dedupe) * 24 * 3600 * 1000));
-      }
       if (await failedQuery.first('id')) return { enrolled: false, reason: 'failed_prior' };
     }
 

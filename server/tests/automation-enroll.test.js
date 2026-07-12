@@ -138,17 +138,17 @@ describe('enrollSequenceFromEvent', () => {
     expect(Math.abs(cutoff - expected)).toBeLessThan(60 * 1000);
   });
 
-  test('windowed dedupe ALSO excludes failed-never-sent rows (dunning coverage stays honest)', async () => {
-    // A failed row that never delivered must not read as 'deduped' inside a
-    // window — the billing sites treat deduped as email coverage and would
-    // suppress the transactional fallback while the customer got nothing.
-    // Assert the windowed query carries the same delivered-filter shape the
-    // 'ever' mode uses (whereNot status failed OR last_sent_at set).
+  test('dedupe counts only delivered-or-active rows as coverage, in BOTH modes', async () => {
+    // failed-unsent AND cancelled-unsent rows both mean the customer got
+    // nothing — neither may read as 'deduped' (the billing sites treat
+    // deduped as email coverage and would suppress the transactional
+    // fallback). Assert the positive predicate shape: status='active' OR
+    // last_sent_at IS NOT NULL.
     const result = await enrollSequenceFromEvent({ templateKey: 'payment_failed', customerId: 'cust-1', dedupe: 14 });
 
     expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
-    const q = enrollmentQueries[enrollmentQueries.length - 1];
-    expect(q.whereNot).toHaveBeenCalledWith('status', 'failed');
+    const q = enrollmentQueries[0];
+    expect(enrollmentWhereArgs).toContainEqual(['status', 'active']);
     expect(q.orWhereNotNull).toHaveBeenCalledWith('last_sent_at');
   });
 
