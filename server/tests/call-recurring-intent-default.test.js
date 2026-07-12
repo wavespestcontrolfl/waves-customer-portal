@@ -405,6 +405,36 @@ describe('applyRecurringIntentDefault', () => {
     expect(applyRecurringIntentDefault(lead(), t).matched_service).toBe('Bee / Wasp Nest Removal Service');
   });
 
+  test('repeated and standalone negated opt-outs never read as intent', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: I don't want a recurring plan. I don't want a package either, just the nest.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: not a package deal, just the nest please.').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('payment plans are billing, not program interest', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: do you have payment plans?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: can I do installment plans for the wasp job?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('current stinging-insect one-time labels are covered', () => {
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Wasp Control Service' }), 'Caller: I want the quarterly package.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Yellow Jacket Control Service' }), 'Caller: sign me up for a recurring plan.').matched_service)
+      .toBe('Quarterly Pest Control Service');
+  });
+
+  test('matched_service is filled when only specific_service_name carried the program', () => {
+    const out = applyRecurringIntentDefault(
+      lead({ matched_service: null, specific_service_name: 'Bee / Wasp Nest Removal Service' }),
+      'Caller: I want the quarterly package.'
+    );
+    expect(out.specific_service_name).toBe('Quarterly Pest Control Service');
+    expect(out.matched_service).toBe('Quarterly Pest Control Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');

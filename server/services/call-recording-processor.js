@@ -2715,6 +2715,10 @@ const RECURRING_OVERRIDE_SOURCES = new Set([
   'one-time pest control',
   'pest control', // bare "Pest Control Service" — the scheduler's one-time fallback label
   'bee / wasp nest removal',
+  'wasp nest removal',
+  'wasp control',
+  'yellow jacket control',
+  'hornet nest removal',
   'mud dauber nest removal',
   'fire ant treatment',
   'general pest control',
@@ -2747,7 +2751,7 @@ const RECURRING_PEST_PROGRAMS = new Set([
 // "ongoing"/"year-round" are nowhere: as descriptions ("an ongoing ant
 // problem", "year-round bugs") they're pressure, and the genuine asks are
 // the service-anchored forms here (plus "keep … year-round").
-const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|plans\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|packages?|memberships?)\b/i;
+const RECURRING_INTENT_STRONG_RE = /\b(recurring|re-?occurring|ongoing (?:service|plan|treatments?|maintenance|coverage)|year[- ]?round (?:service|plan|coverage|protection|treatments?)|keep[^.?!;]{0,40}\byear[- ]?round|(?:service|maintenance|pest|treatment) plans?|(?:a|any|your|the|what|which) plans?\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )(?<!\bfinanc(?:e|ing) )(?<!\binstallment )plans\b(?!\s+(?:to|this|tonight|today|tomorrow|for|later|already|next|on|that|changed?|fell|got)\b|\s+(?:sun|mon|tues?|wednes|thurs?|fri|satur)day\b)|(?<!\bpayment )packages?|memberships?)\b/i;
 const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?annual(?:ly)?\b|\btwice a year\b|\bevery (?:other )?(?:single )?(?:few |couple (?:of )?)?(?:\d+ |two |three |four |six )?(?:week|month)s?\b/gi;
 // "we get/see/have fire ants every month" describes pressure, not a plan
 // ask. "have" is pressure ONLY as possession — request idioms ("can I
@@ -2915,11 +2919,13 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
       (acc, t, i) => (t.speaker === 'caller' && RECURRING_DECLINED_RE.test(t.text) ? i : acc), -1
     );
     postDeclineOffer = acceptedPlanOffer(turns, declineTurnIdx);
-    if (!RECURRING_INTENT_STRONG_RE.test(afterDecline)
+    // Negation-aware: a REPEATED opt-out after the first decline ("I don't
+    // want a package either") is not fresh intent.
+    if (!nonNegatedMatch(RECURRING_INTENT_STRONG_RE, afterDecline)
       && !serviceCadenceMatch(RECURRING_CADENCE_RE, afterDecline)
       && !postDeclineOffer) return extracted;
   }
-  const callerVoiced = RECURRING_INTENT_STRONG_RE.test(callerText)
+  const callerVoiced = nonNegatedMatch(RECURRING_INTENT_STRONG_RE, callerText)
     || serviceCadenceMatch(RECURRING_CADENCE_RE, callerText);
   const acceptedOffer = postDeclineOffer || (callerVoiced ? null : acceptedPlanOffer(turns, -1));
   if (!callerVoiced && !acceptedOffer) return extracted;
@@ -2954,6 +2960,13 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
   const out = { ...extracted };
   out.matched_service = retarget(matchedIsSingular, matchedIsRecurring, extracted.matched_service);
   out.specific_service_name = retarget(specificIsSingular, specificIsRecurring, extracted.specific_service_name);
+  // When only specific_service_name carries the program (V2 can map a
+  // category to a null legacy matched_service), fill matched_service too —
+  // lead enrichment and the V2 backfill read matched_service for
+  // service_interest, and the pipeline label must match what books.
+  if (!out.matched_service && RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(out.specific_service_name))) {
+    out.matched_service = out.specific_service_name;
+  }
   if (out.matched_service === extracted.matched_service && out.specific_service_name === extracted.specific_service_name) return extracted;
   logger.info(`[call-proc] recurring-intent default: "${extracted.specific_service_name || extracted.matched_service}" -> "${out.specific_service_name || out.matched_service}"`);
   return out;
