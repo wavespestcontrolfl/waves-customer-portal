@@ -26,12 +26,29 @@ const FOCUSABLE_SELECTOR = [
 export default function useModalFocus(active = true) {
   const dialogRef = useRef(null);
 
+  // Capture the opener during render on the closed→open transition. With an
+  // autoFocus child (e.g. the chat input in PortalPage), React moves focus
+  // INTO the dialog at commit — before the passive effect below runs — so
+  // reading document.activeElement there records the modal's own child and
+  // close never restores focus to the trigger. At render time focus is still
+  // on the opener. `openedRef` flips inside the effect (not during render) so
+  // a render that never commits can't strand it.
+  const openerRef = useRef(null);
+  const openedRef = useRef(false);
+  if (active && !openedRef.current) {
+    const el = document.activeElement;
+    if (!(dialogRef.current && dialogRef.current.contains(el))) {
+      openerRef.current = el;
+    }
+  }
+
   useEffect(() => {
     if (!active) return undefined;
     const dialog = dialogRef.current;
     if (!dialog) return undefined;
 
-    const previouslyFocused = document.activeElement;
+    openedRef.current = true;
+    const previouslyFocused = openerRef.current;
 
     const getFocusable = () =>
       Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
@@ -70,6 +87,7 @@ export default function useModalFocus(active = true) {
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
+      openedRef.current = false;
       if (
         previouslyFocused &&
         typeof previouslyFocused.focus === 'function' &&
