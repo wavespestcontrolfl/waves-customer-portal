@@ -354,40 +354,67 @@ class AppointmentTagger {
     if (!serviceDateStr || serviceDateStr < etDateString()) return { queued: false, reason: 'past' };
 
     try {
-      const priorEnrollment = await db('automation_enrollments')
-        .where({ template_key: templateKey, customer_id: service.customer_id })
-        .first('id');
-      if (priorEnrollment) return { queued: false, reason: 'not_queued' };
+      // Serialize per customer+template: two overlapping hooks (booking racing
+      // a regenerate-brief replay) could both pass the prior-enrollment check —
+      // enrollCustomer's onConflict-merge reports enrolled:true to BOTH, and
+      // each would send a companion SMS. The lock is released when the
+      // transaction commits, after enrollCustomer's row is already committed,
+      // so the loser's check sees it.
+      return await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`treatment_enroll:${service.customer_id}:${templateKey}`]);
 
-      const { resolveProjectEmailRecipient } = require('./project-email');
-      const customer = await db('customers').where({ id: service.customer_id }).first();
-      const recipient = customer
-        ? resolveProjectEmailRecipient(customer)
-        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
-      if (!recipient.email) {
-        logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
-        const sendable = await this.isTreatmentSequenceSendable(templateKey);
-        return { queued: false, reason: sendable ? 'no_email' : 'not_queued' };
-      }
+        // Once per customer — but only rows that delivered or still can
+        // ('active'/'completed', including an operator's manual tab-send, and
+        // 'cancelled' = unsub/bounce, where a re-enroll would be re-cancelled
+        // at send time while the companion SMS falsely claims an email is
+        // coming). A 'failed' row (SendGrid rejection) never delivered
+        // anything, so a new first-time booking may retry it.
+        const priorEnrollment = await trx('automation_enrollments')
+          .where({ template_key: templateKey, customer_id: service.customer_id })
+          .whereNot('status', 'failed')
+          .first('id');
+        if (priorEnrollment) return { queued: false, reason: 'not_queued' };
 
-      const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
-      const AutomationRunner = require('./automation-runner');
-      const result = await AutomationRunner.enrollCustomer({
-        templateKey,
-        customer: {
-          id: service.customer_id,
-          email: recipient.email,
-          first_name: nameParts[0] || service.first_name || null,
-          last_name: nameParts.slice(1).join(' ') || service.last_name || null,
-        },
+        // Sendability BEFORE enrolling: enrollCustomer only requires an
+        // enabled step, but the scheduler skips empty bodies — an
+        // enrolled-but-empty sequence would send nothing while the companion
+        // text promises the guide. Checked here for the email path and reused
+        // below for the phone-only reason.
+        if (!(await this.isTreatmentSequenceSendable(templateKey))) {
+          return { queued: false, reason: 'not_queued' };
+        }
+
+        const { resolveProjectEmailRecipient } = require('./project-email');
+        const customer = await db('customers').where({ id: service.customer_id }).first();
+        const recipient = customer
+          ? resolveProjectEmailRecipient(customer)
+          : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
+        if (!recipient.email) {
+          logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
+          // Sequence confirmed sendable above — the phone-only standalone
+          // fallback may fire.
+          return { queued: false, reason: 'no_email' };
+        }
+
+        const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
+        const AutomationRunner = require('./automation-runner');
+        const result = await AutomationRunner.enrollCustomer({
+          templateKey,
+          customer: {
+            id: service.customer_id,
+            email: recipient.email,
+            first_name: nameParts[0] || service.first_name || null,
+            last_name: nameParts.slice(1).join(' ') || service.last_name || null,
+          },
+        });
+        if (result?.enrolled) {
+          logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} sequence (service ${service.id})`);
+          return { queued: true, reason: 'queued' };
+        }
+        // disabled template / no steps / already active — no guide email is
+        // coming from this run, so the SMS stays silent too.
+        return { queued: false, reason: 'not_queued' };
       });
-      if (result?.enrolled) {
-        logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} sequence (service ${service.id})`);
-        return { queued: true, reason: 'queued' };
-      }
-      // disabled template / no steps / already active — no guide email is
-      // coming from this run, so the SMS stays silent too.
-      return { queued: false, reason: 'not_queued' };
     } catch (err) {
       logger.error(`[appointment-tagger] ${templateKey} sequence enroll failed for service ${service.id}: ${err.message}`);
       return { queued: false, reason: 'error' };

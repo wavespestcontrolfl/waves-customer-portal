@@ -441,10 +441,12 @@ describe('treatment automation sequence (one guide email, Automations-tab source
   let priorEnrollmentRow;
   let templateRow;
 
-  // automation_enrollments — the once-ever booking-hook dedupe lookup.
+  // automation_enrollments — the once-per-customer booking-hook dedupe lookup
+  // (.where().whereNot('status','failed').first()).
   function enrollmentsQuery() {
     const q = {
       where: jest.fn(() => q),
+      whereNot: jest.fn(() => q),
       first: jest.fn(async () => priorEnrollmentRow),
     };
     return q;
@@ -558,14 +560,43 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     expect(renderSmsTemplate).not.toHaveBeenCalled();
   });
 
-  test('a prior enrollment of any status blocks re-enrollment AND the SMS (post-completion replay)', async () => {
+  test('a prior delivered/deliverable enrollment blocks re-enrollment AND the SMS (post-completion replay)', async () => {
     const { renderSmsTemplate } = require('../services/sms-template-renderer');
-    priorEnrollmentRow = { id: 'enr-0' };
+    priorEnrollmentRow = { id: 'enr-0' }; // active/completed/cancelled — non-failed
 
     await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
 
     expect(enrollCustomer).not.toHaveBeenCalled();
     expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a prior FAILED enrollment does not suppress prep — the new booking retries it', async () => {
+    // The dedupe lookup excludes failed rows (whereNot status failed), so the
+    // mock returning null models "only a failed row exists".
+    priorEnrollmentRow = null;
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).toHaveBeenCalledTimes(1);
+  });
+
+  test('enabled template with empty step content never enrolls (companion would lie)', async () => {
+    const { renderSmsTemplate } = require('../services/sms-template-renderer');
+    hasLocalContent.mockResolvedValue(false); // enabled step exists but bodies are empty
+
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(enrollCustomer).not.toHaveBeenCalled();
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+  });
+
+  test('enrollment is serialized under a customer+template advisory lock', async () => {
+    await AppointmentTagger.triggerPestPrep(service({ service_type: 'Bed Bug Treatment' }), 'bed_bug');
+
+    expect(trxRaw).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtext(?))',
+      ['treatment_enroll:cust-1:bed_bug'],
+    );
   });
 
   test('terminal or past visits never enroll (regenerate-brief replay safety)', async () => {
