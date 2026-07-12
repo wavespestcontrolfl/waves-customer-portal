@@ -61,6 +61,55 @@ describe('customer contact recipient routing', () => {
       ]);
   });
 
+  test('copies the billing recipient on service reports when enabled', () => {
+    const prefs = {
+      billing_contact_name: 'Christine Landlord',
+      billing_email: 'christine@example.com',
+      service_report_notify_billing: true,
+    };
+
+    // Account under the occupant, no service contacts: report goes to the
+    // primary plus the billing recipient.
+    const occupantOnly = {
+      id: 'cust-3',
+      first_name: 'Gideon',
+      phone: '+15556660000',
+      email: 'gideon@example.com',
+    };
+    expect(getServiceReportEmailRecipients(occupantOnly, prefs)).toEqual([
+      expect.objectContaining({ email: 'gideon@example.com', role: 'primary' }),
+      expect.objectContaining({
+        email: 'christine@example.com',
+        name: 'Christine Landlord',
+        role: 'billing_contact',
+      }),
+    ]);
+
+    // With a distinct service contact and owner copy off, the billing
+    // recipient is still appended.
+    expect(getServiceReportEmailRecipients(customer, prefs)).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+      expect.objectContaining({ email: 'christine@example.com', role: 'billing_contact' }),
+    ]);
+  });
+
+  test('billing report copy is a no-op without a billing email or when it duplicates a recipient', () => {
+    // Toggle on but no billing_email set: the payer IS the primary, which the
+    // notify-primary toggle already covers.
+    expect(getServiceReportEmailRecipients(customer, { service_report_notify_billing: true }))
+      .toEqual([
+        expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+      ]);
+
+    // Billing email matching an existing recipient is deduped.
+    expect(getServiceReportEmailRecipients(customer, {
+      billing_email: 'Terry@example.com',
+      service_report_notify_billing: true,
+    })).toEqual([
+      expect.objectContaining({ email: 'terry@example.com', role: 'service_contact' }),
+    ]);
+  });
+
   test('appointment contacts keep service contact primary unless owner SMS copy is enabled', () => {
     expect(getAppointmentContacts(customer, {})).toEqual([
       expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
