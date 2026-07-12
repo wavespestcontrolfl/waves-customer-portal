@@ -212,10 +212,32 @@ describe('createRecurringCardSetupIntentForEstimate', () => {
   });
 
   it('returns the client secret for the capture UI', async () => {
-    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1' });
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'requires_payment_method' });
     expect(await createRecurringCardSetupIntentForEstimate(EST))
       .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1' });
-    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1' });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledWith({ estimateId: 'est-1', generation: 0 });
+  });
+
+  it('walks the generation salt past a canceled replay (Codex #2668 P2)', async () => {
+    mockCreateRecurringCardSetupIntent
+      .mockResolvedValueOnce({ id: 'seti_dead', client_secret: 'cs_dead', status: 'canceled' })
+      .mockResolvedValueOnce({ id: 'seti_2', client_secret: 'cs_2', status: 'requires_payment_method' });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual({ clientSecret: 'cs_2', setupIntentId: 'seti_2' });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(1, { estimateId: 'est-1', generation: 0 });
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenNthCalledWith(2, { estimateId: 'est-1', generation: 1 });
+  });
+
+  it('gives up (null) when every generation replays terminal', async () => {
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_dead', client_secret: 'cs_dead', status: 'canceled' });
+    expect(await createRecurringCardSetupIntentForEstimate(EST)).toBeNull();
+    expect(mockCreateRecurringCardSetupIntent).toHaveBeenCalledTimes(5);
+  });
+
+  it('passes a succeeded replay straight through (modal short-circuits to onSuccess)', async () => {
+    mockCreateRecurringCardSetupIntent.mockResolvedValue({ id: 'seti_1', client_secret: 'cs_1', status: 'succeeded' });
+    expect(await createRecurringCardSetupIntentForEstimate(EST))
+      .toEqual({ clientSecret: 'cs_1', setupIntentId: 'seti_1' });
   });
 });
 

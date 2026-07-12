@@ -3362,6 +3362,11 @@ export default function EstimateViewPage() {
   // while the Auto Pay capture modal is open.
   const [recurringCardIntent, setRecurringCardIntent] = useState(null);
   const recurringCardSetupIntentIdRef = useRef(null);
+  // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
+  // requirement (flag flipped mid-session, or an exemption changed between
+  // /data and /accept) — force the capture branch on the next confirm so the
+  // customer isn't stuck re-submitting the same 402 until a full reload.
+  const recurringCardForceRef = useRef(false);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -3848,8 +3853,11 @@ export default function EstimateViewPage() {
         }
         if (r.status === 402 && body.code === 'RECURRING_CARD_REQUIRED') {
           // The Auto Pay card couldn't be verified — drop it so the next
-          // confirm re-opens the capture modal.
+          // confirm re-opens the capture modal. The server is authoritative:
+          // force the capture branch even if our /data policy snapshot is
+          // stale and still says no card is owed.
           recurringCardSetupIntentIdRef.current = null;
+          recurringCardForceRef.current = true;
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
@@ -3951,9 +3959,9 @@ export default function EstimateViewPage() {
     // card) runs next. Prepay-annual is exempt — the server re-resolves with
     // the actual preference either way.
     const recurringCardPolicy = data?.recurringCardPolicy;
-    if (serviceMode !== 'one_time' && recurringCardPolicy?.required
-        && paymentPreference !== 'prepay_annual'
-        && !recurringCardSetupIntentIdRef.current) {
+    if (serviceMode !== 'one_time' && !recurringCardSetupIntentIdRef.current
+        && (recurringCardForceRef.current
+          || (recurringCardPolicy?.required && paymentPreference !== 'prepay_annual'))) {
       setCtaPhase('submitting');
       setError(null);
       try {

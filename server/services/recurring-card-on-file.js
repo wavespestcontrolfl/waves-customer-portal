@@ -128,15 +128,25 @@ async function resolveRecurringCardPolicyForEstimate({
 }
 
 // Mint the SetupIntent that captures the Auto Pay card for a recurring accept.
-// Deterministic idempotency key (estimate only — every create param derives
-// from it), so reopening the capture step within Stripe's idempotency window
-// replays the SAME intent instead of stacking them; a succeeded replay
-// short-circuits in the modal (retrieveSetupIntent → onSuccess). Returns
+// Deterministic idempotency key per (estimate, generation), so reopening the
+// capture step within Stripe's idempotency window replays the SAME intent
+// instead of stacking them; a succeeded replay short-circuits in the modal
+// (retrieveSetupIntent → onSuccess). This module is stateless (no hold-row
+// generation counter), so a TERMINAL-without-success replay (canceled — e.g.
+// abandoned and swept) self-heals by walking the generation salt forward until
+// Stripe returns a confirmable or succeeded intent (Codex #2668 P2: a fixed
+// key would replay the dead intent for the whole idempotency window). Returns
 // { clientSecret, setupIntentId } or null when Stripe isn't configured.
+const MAX_SETUP_INTENT_GENERATIONS = 5;
 async function createRecurringCardSetupIntentForEstimate(estimate) {
-  const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id });
-  if (!setupIntent) return null;
-  return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+  for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
+    const setupIntent = await StripeService.createRecurringCardSetupIntent({ estimateId: estimate.id, generation });
+    if (!setupIntent) return null;
+    if (setupIntent.status === 'canceled') continue;
+    return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+  }
+  logger.error(`[recurring-cof] exhausted SetupIntent generations for estimate ${estimate.id} — all replays terminal`);
+  return null;
 }
 
 // A live-retrieved SetupIntent counts only when Stripe says it succeeded, it

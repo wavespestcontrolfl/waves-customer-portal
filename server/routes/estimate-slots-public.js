@@ -783,6 +783,31 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     // request keeps its own card-hold intent endpoint.
     const treatAsOneTime = req.body?.serviceMode === 'one_time'
       || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Mirror accept's contact gate BEFORE capturing a card: a recurring accept
+    // with no linked customer and no phone is rejected pre-commit
+    // (CUSTOMER_CONTACT_REQUIRED — accept-time customer creation is
+    // phone-keyed), so letting an email-only estimate confirm a SetupIntent
+    // here would strand a captured payment method on an acceptance the server
+    // will refuse (Codex #2668 P2). Same shape as /deposit-intent's
+    // invoice-mode contact mirror.
+    if (!treatAsOneTime && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'Please call Waves to complete this estimate.' });
+    }
+    // Commercial manual-billing accepts collect nothing at accept — the SAME
+    // commercialAcceptDepositExempt predicate the accept gate and
+    // /deposit-intent run. Without it, a commercial auto-priced recurring
+    // estimate could capture a card the accept-side exemption never enrolls.
+    {
+      const lc = commercialLowConfidenceRange(estData);
+      if (commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold: !treatAsOneTime && lc.hasLowConfidence && !lc.forceSiteQuote,
+        treatAsOneTime,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      })) {
+        return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' });
+      }
+    }
     const membership = await buildEstimateMembershipContext(estimate);
     const policy = await resolveRecurringCardPolicyForEstimate({
       estimate,

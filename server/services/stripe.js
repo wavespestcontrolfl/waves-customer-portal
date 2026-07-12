@@ -507,11 +507,13 @@ const StripeService = {
    * so completed applications can charge with the cardholder absent, and
    * pinned to the estimate via metadata so accept verification re-derives
    * trust from purpose+estimate_id server-side rather than believing the
-   * client. Idempotency is keyed on the estimate alone — every create param
-   * is deterministic from it — so a reopened capture step replays the SAME
-   * intent (a succeeded replay short-circuits in the capture modal).
+   * client. Idempotency is keyed on (estimate, generation) — every create
+   * param is deterministic from them — so a reopened capture step replays the
+   * SAME intent (a succeeded replay short-circuits in the capture modal),
+   * while the caller walks `generation` forward past a canceled replay to
+   * mint a usable replacement (same reason the card-hold flow salts).
    */
-  async createRecurringCardSetupIntent({ estimateId }) {
+  async createRecurringCardSetupIntent({ estimateId, generation = 0 }) {
     const stripe = getStripe();
     if (!stripe) return null;
     return stripe.setupIntents.create({
@@ -522,7 +524,7 @@ const StripeService = {
         purpose: 'estimate_recurring_card',
         estimate_id: String(estimateId),
       },
-    }, { idempotencyKey: `estimate_recurring_card_${estimateId}` });
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
   },
 
   /**

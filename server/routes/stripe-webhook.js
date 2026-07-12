@@ -2264,6 +2264,57 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE):
+  // durability backstop for the accept path's awaited enrollment. The accept
+  // handler normally enrolls inline; this re-runs the same idempotent
+  // save → consent → enroll when the event lands AFTER the accept committed
+  // (3DS redirect the browser never finished, or a crash between the accept
+  // commit and the inline enrollment). A pre-accept delivery no-ops silently —
+  // an abandoned capture must not enroll anything, and the accept path owns
+  // the normal case. The exemption guards below are the ones that stay
+  // authoritative POST-accept — payer-billed, invoice-mode, commercial
+  // manual-billing, and a prepay conversion. (The accept-time resolver's
+  // plan-member check is deliberately NOT reused: the accept itself converts
+  // the customer into a plan member, so re-running it here would no-op the
+  // backstop for exactly the signups it exists to heal.) Enrollment itself is
+  // idempotent — an already-enrolled inline run skips as already_enrolled.
+  if (setupIntent.metadata?.purpose === 'estimate_recurring_card' && setupIntent.payment_method) {
+    try {
+      const RecurringCards = require('../services/recurring-card-on-file');
+      if (RecurringCards.isRecurringCardOnFileEnabled()) {
+        const estimate = await db('estimates').where({ id: setupIntent.metadata.estimate_id }).first();
+        const customer = estimate?.customer_id
+          ? await db('customers').where({ id: estimate.customer_id }).first('billing_mode')
+          : null;
+        const { isCommercialAutoAcceptEstimate } = require('./estimate-public');
+        const eligible = estimate
+          && estimate.status === 'accepted'
+          && estimate.customer_id
+          && estimate.bill_by_invoice !== true
+          && customer?.billing_mode !== 'annual_prepay'
+          && !isCommercialAutoAcceptEstimate(estimate);
+        if (eligible) {
+          const PayerService = require('../services/payer');
+          const payer = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: null })
+            .catch(() => null);
+          if (!payer?.payerId) {
+            const stripePmId = typeof setupIntent.payment_method === 'string'
+              ? setupIntent.payment_method
+              : setupIntent.payment_method.id;
+            await RecurringCards.completeRecurringCardEnrollment({
+              customerId: estimate.customer_id,
+              stripePaymentMethodId: stripePmId,
+              setupIntentId: setupIntent.id,
+              estimateId: estimate.id,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      logger.error(`[stripe-webhook] recurring card-on-file SetupIntent handling failed: ${err.message}`);
+    }
+    return;
+  }
   // Covered-by-credit capture (Codex #2507 P1 round-3): the SetupIntent the
   // pay page minted for a required-save, credit-covered invoice can finish
   // AFTER the browser is gone — a 3DS/bank-auth redirect that never returns,

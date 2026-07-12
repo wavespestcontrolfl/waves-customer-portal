@@ -6748,6 +6748,18 @@ async function handleEstimateView(req, res, next) {
     const recurringCardForcesReactView = RecurringCards.isRecurringCardOnFileEnabled()
       && !effectiveInvoiceMode
       && !isStructuralOneTimeOnlyEstimate(estData, estimate)
+      // Commercial manual-billing accepts owe no card (same predicate as the
+      // accept gate / /data / intent route) — don't yank them off the legacy
+      // renderer for a capture step they'll never see.
+      && !(() => {
+        const lc = commercialLowConfidenceRange(estData);
+        return commercialAcceptDepositExempt({
+          isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+          siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+          treatAsOneTime: false,
+          billByInvoice: effectiveInvoiceMode,
+        });
+      })()
       && (await RecurringCards.resolveRecurringCardPolicyForEstimate({
         estimate,
         treatAsOneTime: false,
@@ -8457,9 +8469,15 @@ router.put('/:token/accept', async (req, res, next) => {
     // snapshot, and enroll Auto Pay (post-commit, best-effort — the accept and
     // its verified deposit stand either way; a failure parks an office
     // exception inside completeRecurringCardEnrollment rather than blocking
-    // the booking).
+    // the booking). AWAITED — not fire-and-forget — so a deploy/restart right
+    // after the response can't strand an accepted estimate with no enrolled
+    // card and no exception (Codex #2668 P2); the routine still never throws,
+    // so a Stripe hiccup degrades to the office alert, not a failed accept.
+    // Residual crash-between-commit-and-here window: the setup_intent.succeeded
+    // webhook re-runs this idempotently when it delivers post-accept, and a
+    // still-unenrolled per_application customer surfaces in billing recovery.
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
-      void RecurringCards.completeRecurringCardEnrollment({
+      await RecurringCards.completeRecurringCardEnrollment({
         customerId,
         stripePaymentMethodId: recurringCardVerification.paymentMethodId,
         setupIntentId: recurringCardVerification.setupIntentId,
@@ -15383,6 +15401,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       billByInvoice: effectiveInvoiceMode,
       paymentMethodPreference: null,
     });
+    // Commercial manual-billing accepts collect nothing at accept — the SAME
+    // commercialAcceptDepositExempt predicate the accept gate applies. Without
+    // this, a commercial auto-priced recurring estimate would advertise
+    // required:true here, walk the customer through card capture, and then the
+    // accept-side exemption would skip enrollment — a captured card that never
+    // enrolls (Codex #2668 P2). Matches /recurring-card-intent's mirror.
+    if (recurringCardPolicyForData.required && commercialAcceptDepositExempt({
+      isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+      siteConfirmationHold,
+      treatAsOneTime: depositStructuralOneTime,
+      billByInvoice: effectiveInvoiceMode,
+    })) {
+      recurringCardPolicyForData.required = false;
+      recurringCardPolicyForData.exemptReason = 'commercial_manual_billing';
+    }
 
     // A held estimate collects NO money at accept (the invoice comes after the
     // on-site confirmation), so the confirm flow must not require/mint a deposit
@@ -15403,13 +15436,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       depositPolicy.required = false;
       depositPolicy.slotRequired = false;
       depositPolicy.exemptReason = depositPolicy.exemptReason || 'commercial_manual_billing';
-      // A held accept collects nothing — no deposit AND no Auto Pay card
-      // (manual billing follows the on-site confirmation). Matches the accept
-      // gate's commercialAcceptDepositExempt override.
-      if (recurringCardPolicyForData.required) {
-        recurringCardPolicyForData.required = false;
-        recurringCardPolicyForData.exemptReason = 'commercial_manual_billing';
-      }
+      // (recurringCardPolicyForData is already exempted above — the
+      // commercialAcceptDepositExempt override covers the hold case too.)
     }
 
     // "Show your work" trust payload for the React estimate view. The key
