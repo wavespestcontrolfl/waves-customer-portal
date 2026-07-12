@@ -95,10 +95,10 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   // Fee-adding verb variants — "adds (on) hidden fees", "tacks on hidden
   // fees" are the same accusation as "charges hidden fees" (Codex r17/r21
   // on #2633).
-  '(?:charges?|charged|adds?(?:\\s+on)?|added(?:\\s+on)?|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+hidden\\s+fees?',
+  '(?:charges?|charged|adds?(?:\\s+on)?|added(?:\\s+on)?|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?',
   // Phrasal order with the fees BEFORE the particle — "sneaks hidden fees
   // into contracts" (Codex r21).
-  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|buries|buried)\\s+hidden\\s+fees?\\s+into\\b',
+  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|buries|buried)\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?\\s+into\\b',
   `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
   `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
   `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
@@ -263,7 +263,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // after ranked/rated/voted (Codex r3 on #2633). The adverb slot takes any
   // negator-free words, not a curated list — "We're currently #1" (Codex
   // r16); negator exclusion keeps "We are not #1" a denial.
-  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Gap words must not be gerunds: "Below, we are LISTING the #1 breeding
+  // site" is instructional structure, not market position (Codex r26).
+  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Transitive "we rank #1" gets NO determiner tail: "below, we rank the
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
@@ -314,7 +316,10 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // noun (Codex r14 on #2633). Bare/typographic possessives accepted.
 // "(?!\\s+of\\b)": sentence-initial common-noun openings — "Waves of summer
 // heat…" — are weather/pest copy, never the brand (Codex r25 on #2633).
-const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
+// The lookbehind drops weather/physics compounds in ANY case — "Heat
+// Waves Are the #1 Stressor" is title-cased educational copy (Codex r26
+// on #2633).
+const OWN_BRAND_ANCHOR = "(?<!\\b[Hh][Ee][Aa][Tt]\\s)(?<!\\b[Cc][Oo][Ll][Dd]\\s)(?<!\\b[Tt][Ii][Dd][Aa][Ll]\\s)(?<!\\b[Oo][Cc][Ee][Aa][Nn]\\s)(?<!\\b[Ss][Oo][Uu][Nn][Dd]\\s)(?<!\\b[Ss][Hh][Oo][Cc][Kk]\\s)\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
 // Curated heading descriptors may sit between the brand and the separator —
 // "Waves Review: Hidden fees", "Waves billing: hidden fees" (Codex r21 on
 // #2633). Curated, not free words: arbitrary hops would re-create the
@@ -463,7 +468,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero|Not|All|Few|Both`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion

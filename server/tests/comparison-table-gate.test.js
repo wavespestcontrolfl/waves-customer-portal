@@ -1114,6 +1114,38 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-26 findings (#2633) ──
+
+  test('Codex r26: title-cased heat-wave copy stays educational; brand claims still block', () => {
+    for (const prose of ['Heat Waves Are the #1 Stressor.', 'Heat Waves are lousy for turf.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(false);
+    }
+    const brand = gate.evaluate({ body: `Waves is the worst.\n\n${CATEGORY_TABLE}` }, {});
+    expect(brand.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r26: instructional we-are gerunds stay educational; adverbed claims still block', () => {
+    for (const body of ['Below, we are listing the #1 breeding site: standing water.', 'We are ranking the #1 breeding sites by risk.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+    const claim = gate.evaluate({ body: `We are currently the #1!\n\n${CATEGORY_TABLE}` }, {});
+    expect(claim.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r26: "Not all" category denials are not fake business names', () => {
+    const r = gate.evaluate({ body: 'Not all pest control companies charge hidden fees.' }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r26: article and singular hidden-fee accusations block', () => {
+    for (const prose of ['Waves charges a hidden fee.', 'Bug Busters tacks on a hidden fee at renewal.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-25 findings (#2633) ──
 
   test('Codex r25: own-brand scans run table-less', () => {
