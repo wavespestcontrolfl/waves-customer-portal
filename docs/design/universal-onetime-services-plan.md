@@ -32,9 +32,11 @@ calls/texts/emails in AI draft") on every completion surface, with
 service-scoped time windows so it never drags in year-old irrelevant threads,
 (8) program memory — multi-visit services (cockroach, flea, rodent…)
 string their visits together so each completion and report knows what the
-previous ones found, bounded by an episode window, and (9) pre-service prep
+previous ones found, bounded by an episode window, (9) pre-service prep
 docs + contracts joining the same completion context — the tech sees what
-prep was sent and what coverage applies before writing a word.
+prep was sent and what coverage applies before writing a word, and
+(10) commercial accounts included as a lens over all of it (copy audit,
+role-aware routing, per-building scoping) — never a forked pipeline.
 
 ---
 
@@ -620,6 +622,48 @@ assembler, sectioned, each section independently scoped and toggleable):**
    "Optionally" per the owner: sections independently toggleable; strips
    stay collapsed/compact so the 60-second completion budget holds.
 
+### Commercial accounts — included, as a lens not a fork (owner ask 2026-07-12)
+
+Owner: "I don't know if we want to include commercial in this, but I think
+we probably should." Recommendation: **yes — and it's mostly free**, because
+commercial customers already ride the same catalog, completion profiles, and
+report pipeline; there is no separate commercial pipeline to migrate. House
+precedent agrees: a dedicated commercial pest pilot config was added
+`20260626000020` and removed the next day (`20260627000000`). Commercial is
+a LENS over the phases above, plus four deltas:
+
+1. **Copy audit (rides Phase D):** typed customer copy and templates assume
+   a homeowner in places ("your home", homeowner-framed prep/reentry
+   advisories). Audit for audience-neutral or role-aware phrasing —
+   employees/tenants at a commercial site read these too. Copy changes are
+   owner-approved per the content rules.
+2. **Recipient routing (rides Phase H2 + delivery):** `customers` now
+   carries service-contact ROLES (tenant / landlord / property_manager —
+   `20260709000002`, added explicitly to enable role-aware sending). Wire
+   prep guides + reports to the on-site role and statements/invoices to the
+   billing role (the third-party-payer program already owns the money
+   side). This also cleans up the residential edge cases (landlord vs
+   tenant).
+3. **Multi-building sites (rides G1 property scoping + Phase E):**
+   commercial proposals already quote multi-building line items; service
+   delivery should lean on `customer_properties` per building — one visit
+   per property keeps trends, episodes, and reports per building with zero
+   new mechanism (G1's property scoping does the work). Per-building
+   companion sections inside ONE completion are possible via the E
+   machinery but only worth building if single-appointment-multi-building
+   is a real operating pattern (§6 Q16).
+4. **Compliance logbook (candidate follow-up):** commercial accounts
+   (food service etc.) want inspection-ready service/bait-station logs. The
+   typed bait flows + `service_activity_scores` history already ARE the
+   data; a per-site logbook export/portfolio view is the candidate — pairs
+   naturally with payer statements for property managers.
+
+One structural finding: there is **no explicit commercial flag** on
+customers — commercial-ness is inferred (taxability config, the Commercial
+WaveGuard tier `20260628000002`, agreement type). If commercial behavior
+starts branching (copy, routing, logbook), an explicit designation beats
+inference stacking (§6 Q16).
+
 ### Metrics & rollout discipline
 
 Every phase ships with the house kill-switch doctrine (delivery modes +
@@ -714,3 +758,8 @@ and a success measure, reusing the contract-§10 instrumentation:
     prep instructions sent July 9") and structured coverage lines ("covered
     under your termite bond")? Which prep docs are still being authored, so
     the resolver registry starts complete?
+16. **Commercial:** (a) do you ever service multiple buildings in ONE
+    appointment (drives whether per-building sections get built, vs one
+    visit per property which works today)? (b) should customers get an
+    explicit commercial designation instead of tier/tax inference?
+    (c) priority of the compliance-logbook export?
