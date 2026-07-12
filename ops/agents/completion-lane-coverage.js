@@ -103,6 +103,7 @@ async function main() {
       )
       WHERE (s.is_active = false OR s.is_archived = true)
         AND ss.status NOT IN ('completed', 'cancelled', 'skipped')
+        AND ss.scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date
       GROUP BY 1, 2, 3
       ORDER BY upcoming DESC
     `);

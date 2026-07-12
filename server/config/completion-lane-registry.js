@@ -58,14 +58,17 @@ const PENDING_COMPLIANCE_REVIEW_KEYS = [
 // (a stale entry is flagged once the key reads as typed).
 // `before`: 'project' (project_required/special_project), 'generic'
 // (service_report with no pointer), or 'consultation' (internal_only mode).
+// `to`: the expected typed pointer after the cutover (Codex r3 — accepting
+// ANY typed pointer would pass a repoint onto the wrong form); null = the
+// typed target is not designed yet, any registered typed pointer passes.
 const CUTOVER_IN_FLIGHT_KEYS = {
-  wildlife_trapping: { before: 'project', note: 'Phase B — typed sectioned form built, cutover migration pending' },
-  bed_bug_treatment: { before: 'project', note: 'Phase B — Q2: customer copy approved 2026-07-12, visibility later' },
-  cockroach_control: { before: 'project', note: 'Phase B — Q3: flip to the typed cockroach flow' },
-  one_time_pest_control: { before: 'project', note: 'Phase B — straggler found by the B0 scan 2026-07-12' },
-  rodent_monitoring: { before: 'generic', note: 'PR #2673 — repoint to the typed rodent_bait_station flow' },
-  palm_treatment: { before: 'generic', note: 'owner 2026-07-12 — repoint to the typed palm form' },
-  lawn_inspection: { before: 'consultation', note: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report' },
+  wildlife_trapping: { before: 'project', to: 'wildlife_trapping', note: 'Phase B — typed sectioned form built, cutover migration pending' },
+  bed_bug_treatment: { before: 'project', to: 'bed_bug', note: 'Phase B — Q2: customer copy approved 2026-07-12, visibility later' },
+  cockroach_control: { before: 'project', to: 'cockroach', note: 'Phase B — Q3: flip to the typed cockroach flow' },
+  one_time_pest_control: { before: 'project', to: 'one_time_pest_treatment', note: 'Phase B — straggler found by the B0 scan 2026-07-12' },
+  rodent_monitoring: { before: 'generic', to: 'rodent_bait_station', note: 'PR #2673 — repoint to the typed rodent_bait_station flow' },
+  palm_treatment: { before: 'generic', to: 'palm_injection', note: 'owner 2026-07-12 — repoint to the typed palm form' },
+  lawn_inspection: { before: 'consultation', to: null, note: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report (typed target TBD)' },
 };
 
 // Owner 2026-07-12: scheduled as services, but billing riders — invoice line
@@ -105,6 +108,11 @@ const RECURRING_GENERIC_BY_DESIGN = [
   'waveguard_membership',
 ];
 
+// Registered typed findings schemas — a typed pointer that isn't a real
+// schema strands the service (no form payload, completion validation
+// rejects the unknown type; Codex r3). project-types is a pure data module.
+const { PROJECT_TYPES } = require('../services/project-types');
+
 const ALL_LISTS = {
   owner_excluded: OWNER_EXCLUDED_KEYS,
   compliance_project: Object.keys(COMPLIANCE_PROJECT_KEYS),
@@ -137,7 +145,11 @@ function classifyCatalogRow(row) {
   const profileInactive = hasProfile && row.profile_active === false;
   if (profileInactive) flags.push('profile_inactive');
 
-  const isTyped = row.completion_mode === 'service_report' && !!row.project_type;
+  const pointerRegistered = !!row.project_type && !!PROJECT_TYPES[row.project_type];
+  const isTyped = row.completion_mode === 'service_report' && pointerRegistered;
+  if (row.completion_mode === 'service_report' && row.project_type && !pointerRegistered) {
+    flags.push(`typed_pointer_unregistered_schema:${row.project_type}`);
+  }
   const isProjectMode = row.completion_mode === 'project_required' || row.completion_mode === 'special_project';
   const isConsultation = row.completion_mode === 'internal_only';
   const isGenericReport = row.completion_mode === 'service_report' && !row.project_type;
@@ -174,10 +186,14 @@ function classifyCatalogRow(row) {
     const beforeOk = (declared.before === 'project' && isProjectMode)
       || (declared.before === 'generic' && isGenericReport)
       || (declared.before === 'consultation' && isConsultation);
+    // Typed AFTER state must land on the declared target form (Codex r3) —
+    // a null target means the design is pending and any registered typed
+    // pointer passes.
+    const afterOk = isTyped && (declared.to === null || row.project_type === declared.to);
     if (!hasProfile) {
       flags.push('cutover_key_missing_profile:no_decision_recorded_in_db');
-    } else if (!beforeOk && !isTyped) {
-      flags.push(`cutover_key_unexpected_state:${row.completion_mode || 'none'}/${row.project_type || '-'}`);
+    } else if (!beforeOk && !afterOk) {
+      flags.push(`cutover_key_unexpected_state:${row.completion_mode || 'none'}/${row.project_type || '-'}${isTyped ? `_expected_${declared.to}` : ''}`);
     }
     return { lane, flags };
   }

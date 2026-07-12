@@ -15,6 +15,11 @@ const {
   classifyCatalogRow,
 } = require('../config/completion-lane-registry');
 
+// Load the knexfile BEFORE deciding to skip — it resolves the Railway
+// fallbacks (DATABASE_PRIVATE_URL / DATABASE_PUBLIC_URL / POSTGRES_URL /
+// PG* vars) into process.env.DATABASE_URL, so environments that provide
+// only a fallback still run the migrated-catalog assertions (Codex r3).
+const knexConfig = require(path.join(__dirname, '..', 'knexfile.js'));
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
@@ -159,6 +164,30 @@ describe('completion-lane registry (static)', () => {
     expect(healthyCompliance.flags).toEqual([]);
   });
 
+  test('cutover typed after-state must land on the declared target form', () => {
+    const wrongForm = classifyCatalogRow({
+      service_key: 'wildlife_trapping',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: 'cockroach',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(wrongForm.flags.some((f) => f.startsWith('cutover_key_unexpected_state'))).toBe(true);
+  });
+
+  test('a typed pointer without a registered findings schema is a defect', () => {
+    const typo = classifyCatalogRow({
+      service_key: 'unlisted_future_service',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: 'rodent_bait_staton',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(typo.flags).toContain('typed_pointer_unregistered_schema:rodent_bait_staton');
+  });
+
   test('recurring-generic keys must stay on the service_report mode', () => {
     const consult = classifyCatalogRow({
       service_key: 'pest_general_quarterly',
@@ -186,8 +215,7 @@ describeOrSkip('completion-lane coverage (migrated catalog)', () => {
   let rows;
 
   beforeAll(async () => {
-    const config = require(path.join(__dirname, '..', 'knexfile.js'));
-    knex = require('knex')(config.development || config);
+    knex = require('knex')(knexConfig.development || knexConfig);
     rows = await knex('services as s')
       .leftJoin('service_completion_profiles as p', 'p.service_key', 's.service_key')
       .where('s.is_active', true)
