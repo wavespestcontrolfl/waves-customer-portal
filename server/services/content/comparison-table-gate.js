@@ -274,7 +274,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // r16); negator exclusion keeps "We are not #1" a denial.
   // Gap words must not be gerunds: "Below, we are LISTING the #1 breeding
   // site" is instructional structure, not market position (Codex r26).
-  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bwe(?:['’]re|['’]ve\\s+been|\\s+(?:are|were|remains?|remained|stays?|stayed|have\\s+been(?:\\s+(?:ranked|rated|voted))?))\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Transitive "we rank #1" gets NO determiner tail: "below, we rank the
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
@@ -394,7 +394,9 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 // stays clean; the marketing form requires the reflexive.
 // Achievement verbs included — "Waves earned the #1 spot" (Codex r21).
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
-  `^[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  // The window must not cross that/why clauses — "Waves teaches that the
+  // garage threshold is the #1 entry point" ranks the tip (Codex r32).
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -634,7 +636,7 @@ function finding(severity, code, message) {
 // Emphatic idioms are not denials — "Without a doubt, hidden fees from X
 // are common" asserts the claim (Codex r27 on #2633). "no(?!\.)": the
 // "No. 1" ordinal abbreviation is never a negator.
-const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 function sentenceHasNegator(text, index, length) {
   // Clause boundaries count: "No hidden fees here; Waves charges hidden
   // fees." must not let the first clause deny the second (Codex r31).
@@ -657,6 +659,21 @@ function sentenceHasNegator(text, index, length) {
 // lead-ins ("Not only that, X is dishonest") sit before the match entirely.
 function spanUnnegated(m) {
   return m && !SENTENCE_NEGATOR_RE.test((m.groups && m.groups.dtail) || m[0]) ? m : null;
+}
+
+// Trailing denial after a separator accusation — "Bug Busters: hidden fees
+// are not present" (Codex r32 on #2633). Narrow verb-anchored forms only:
+// a bare trailing "no" can itself be an accusation ("…: hidden fees, no
+// transparency").
+const TRAILING_DENIAL_RE = /\b(?:(?:is|are|was|were|has|have)\s+)?(?:not|never)\s+(?:present|true|real|accurate|charged|applied|added|involved|included|found|happening|the\s+case|an?\s+(?:issue|problem|thing))\b/i;
+function trailingDenial(text, index, length) {
+  const end = index + length;
+  let sentEnd = text.length;
+  for (const ch of ['.', '!', '?', ';', ':', '\n']) {
+    const i = text.indexOf(ch, end);
+    if (i !== -1 && i < sentEnd) sentEnd = i;
+  }
+  return TRAILING_DENIAL_RE.test(text.slice(end, sentEnd));
 }
 
 // First unnegated match of `re` in `text` — a denied early sentence must
@@ -689,7 +706,8 @@ function scanOwnBrandDisparagementArms(scanText) {
   const sepAnchorRe = new RegExp(OWN_BRAND_SEP_ANCHOR_RE.source, 'g');
   let sa;
   while ((sa = sepAnchorRe.exec(scanText)) !== null) {
-    if (OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sa.index + sa[0].length))) {
+    const st = OWN_BRAND_SEP_TAIL_RE.exec(scanText.slice(sa.index + sa[0].length));
+    if (st && !trailingDenial(scanText, sa.index + sa[0].length, st.index + st[0].length)) {
       return [scanText.slice(sa.index, sa.index + sa[0].length + 40)];
     }
   }
@@ -756,7 +774,9 @@ function scanOwnBrandRankingArms(scanText) {
   const nbRe = new RegExp(OWN_BRAND_NUM_BEFORE_SRC, 'gi');
   let nb;
   while ((nb = nbRe.exec(scanText)) !== null) {
-    if (OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) return [nb[0]];
+    if (!OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, nb.index, nb[0].length)) continue;
+    return [nb[0]];
   }
   return null;
 }
@@ -1411,8 +1431,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // (Codex r19 on #2633).
       let dm = spanUnnegated(proseNameText.match(directedP0))
         || proseNameText.match(activeP0)
-        || proseNameText.match(possessionP0)
-        || (sepP0 && proseNameText.match(sepP0));
+        || proseNameText.match(possessionP0);
+      if (!dm && sepP0) {
+        const sm = proseNameText.match(sepP0);
+        if (sm && !trailingDenial(proseNameText, sm.index, sm[0].length)) dm = sm;
+      }
       if (!dm) {
         // Association and object-position shapes take the sentence-level
         // denial guard ("There are no reports of hidden fees from Acme",
@@ -1425,6 +1448,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
           || firstUnnegatedMatch(proseNameText, fromP0)
           || firstUnnegatedMatch(proseNameText, objInsultP0)
           || (objAssocP0 && firstUnnegatedMatch(proseNameText, objAssocP0));
+        // Trailing verb-anchored denials clear association matches too —
+        // "Bug Busters: hidden fees are not present" (Codex r32).
+        if (dm && trailingDenial(proseNameText, dm.index, dm[0].length)) dm = null;
       }
       if (dm) { disp = dm; break; }
     }
@@ -1561,7 +1587,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
           || proseNameText.match(marketingRank)
-          || proseNameText.match(rankBeforeName)
+          || firstUnnegatedMatch(proseNameText, rankBeforeName)
           || (sepRank && proseNameText.match(sepRank));
         if (rm) { rank = rm; break; }
       }
@@ -1611,6 +1637,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'ig');
     let nm;
     while ((nm = negRe.exec(proseText)) !== null) {
+      // "Orkin is not unreliable" is a denial (Codex r32) — PRE-match text
+      // only: the negator inside PROVIDER_NEGATIVE ("never answers") IS
+      // the accusation.
+      if (sentenceHasNegator(proseText, nm.index, 0)) continue;
       if (nearCompetitor(nm.index, nm[0].length)) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
           `Comparison draft makes a negative service-reliability claim about a named provider ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));

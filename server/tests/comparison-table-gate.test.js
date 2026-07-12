@@ -1114,6 +1114,43 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-32 findings (#2633) ──
+
+  test('Codex r32: auxiliary self-rankings block', () => {
+    for (const prose of ['We have been the #1 choice.', "We've been ranked #1.", 'We have been ranked #1 for years.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r32: branded educational clauses and negated reliability stay clean', () => {
+    for (const prose of ['Waves teaches that the garage threshold is the #1 entry point.', 'Orkin is not unreliable.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+    }
+  });
+
+  test('Codex r32: trailing separator denials stay clean; separator accusations still block', () => {
+    const denial = gate.evaluate({ body: `Bug Busters: hidden fees are not present.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+    const accusation = gate.evaluate({ body: `Bug Busters: hidden fees at every renewal.\n\n${CATEGORY_TABLE}` }, {});
+    expect(accusation.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r32: negated #1-before-brand claims stay clean', () => {
+    for (const prose of ['No #1 choice is Waves, and that is fine.', 'No number one option is Waves.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
+  test('Codex r32: provider practice denials with "use" stay clean; name recommendations keep the P0', () => {
+    const denial = gate.evaluate({ body: `Acme Pest Solutions does not use shady billing.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+    const rec = gate.evaluate({ body: `Do not use Bug Busters because of hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rec.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
   // ── Codex round-31 findings (#2633) ──
 
   test('Codex r31: auxiliary statistical rankings and negated brand rankings stay clean', () => {
