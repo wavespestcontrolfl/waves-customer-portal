@@ -3,20 +3,25 @@
  * the ratified universal one-time services plan): termite_renewal and the
  * three termite_bond_* keys get scheduled as services but are billing
  * riders — invoice line + a reference in the MAIN service's post-service
- * report only. They must not run their own customer report lane, so their
- * generic service_report profiles flip delivery auto_send → 'disabled'
- * (no report artifacts minted; billing/invoicing untouched — delivery_mode
- * only gates report render/token/comms, never the completion billing gate).
+ * report only. They must not run their own customer report lane.
+ *
+ * Mechanism (Codex r2): completion_mode → 'internal_only' — the
+ * consultation posture (Waves Assessment pattern) is the ONLY suppression
+ * resolveCompletionDeliveryPosture honors for non-typed completions
+ * (delivery_mode is ignored on generic profiles): no public report token,
+ * completion SMS/email suppressed, the service_records audit row still
+ * written, billing/invoicing untouched. delivery_mode is also parked at
+ * 'disabled' for defense in depth.
  *
  * Enforced by the completion-lane registry/audit shipped alongside
- * (billing_rider_report_lane_active flags an auto_send rider).
- * The reminder-SMS exclusion and the report/invoice reference lines are
+ * (billing_rider_report_lane_active flags any other posture). The
+ * reminder-SMS exclusion and the report/invoice reference lines are
  * separate follow-up lanes recorded in the plan.
  *
  * Self-healing per-key: absent/inactive → loud skip; non-generic or typed
  * pointer → loud skip (admin drift is never clobbered); already
- * disabled/internal_only → no-op. Marker-based rollback restores the exact
- * prior delivery.
+ * internal_only → no-op. Marker-based rollback restores the exact prior
+ * mode + delivery.
  */
 
 const MARKER_RE = / ?\[billing_rider_action=[^\]]*\]/;
@@ -49,22 +54,24 @@ exports.up = async function up(knex) {
       console.warn(`[billing-rider] ${key}: profile row is INACTIVE — skipping (runtime ignores inactive rows)`);
       continue;
     }
+    if (row.completion_mode === 'internal_only' && !row.project_type) {
+      console.log(`[billing-rider] ${key}: already internal_only — no-op`);
+      continue;
+    }
     if (row.completion_mode !== 'service_report' || row.project_type) {
       console.warn(`[billing-rider] ${key}: UNEXPECTED state ${row.completion_mode || '-'}/${row.project_type || '-'} — skipping (suppression only applies to the generic recurring profile)`);
       continue;
     }
-    if (row.delivery_mode === 'disabled' || row.delivery_mode === 'internal_only') {
-      console.log(`[billing-rider] ${key}: delivery already ${row.delivery_mode} — no-op`);
-      continue;
-    }
+    const prior = `${row.completion_mode}:${row.delivery_mode || '-'}`;
     await knex('service_completion_profiles')
       .where({ service_key: key })
       .update({
+        completion_mode: 'internal_only',
         delivery_mode: 'disabled',
-        notes: withMarker(row.notes, `updated:${row.delivery_mode || '-'}`),
+        notes: withMarker(row.notes, `updated:${prior}`),
         updated_at: knex.fn.now(),
       });
-    console.log(`[billing-rider] ${key}: ${row.delivery_mode || '-'} → disabled (prior recorded)`);
+    console.log(`[billing-rider] ${key}: ${prior} → internal_only/disabled (prior recorded)`);
   }
 };
 
@@ -77,14 +84,15 @@ exports.down = async function down(knex) {
   for (const row of rows) {
     const match = String(row.notes || '').match(/\[billing_rider_action=updated:([^\]]*)\]/);
     if (!match) continue;
-    const prior = match[1] === '-' ? null : match[1];
+    const [mode, delivery] = match[1].split(':').map((v) => (v === '-' ? null : v));
     await knex('service_completion_profiles')
       .where({ service_key: row.service_key })
       .update({
-        delivery_mode: prior,
+        completion_mode: mode,
+        delivery_mode: delivery,
         notes: String(row.notes || '').replace(MARKER_RE, '').trim() || null,
         updated_at: knex.fn.now(),
       });
-    console.log(`[billing-rider:down] ${row.service_key}: restored delivery_mode=${prior || 'NULL'}`);
+    console.log(`[billing-rider:down] ${row.service_key}: restored ${mode || 'NULL'}/${delivery || 'NULL'}`);
   }
 };

@@ -88,16 +88,21 @@ async function main() {
     // Inactive/archived services with FUTURE scheduled visits are live
     // routing lanes no matter what the catalog flags say — the completion
     // resolver matches by service_id/name without an is_active filter.
+    // Codex r2 P3s: mirror the resolver's service_id precedence (a visit
+    // whose service_id points elsewhere must not name-match an archived
+    // duplicate) and treat 'skipped' as terminal like completed/cancelled.
     const { rows: ghostVisits } = await client.query(`
       SELECT s.service_key, s.is_active, s.is_archived, count(ss.id) AS upcoming
       FROM services s
       JOIN scheduled_services ss ON (
         ss.service_id = s.id
-        OR lower(s.name) = lower(ss.service_type)
-        OR lower(s.name) = lower(trim(regexp_replace(ss.service_type, '\\s+service$', '', 'i')))
+        OR (ss.service_id IS NULL AND (
+          lower(s.name) = lower(ss.service_type)
+          OR lower(s.name) = lower(trim(regexp_replace(ss.service_type, '\\s+service$', '', 'i')))
+        ))
       )
       WHERE (s.is_active = false OR s.is_archived = true)
-        AND ss.status NOT IN ('completed', 'cancelled')
+        AND ss.status NOT IN ('completed', 'cancelled', 'skipped')
       GROUP BY 1, 2, 3
       ORDER BY upcoming DESC
     `);

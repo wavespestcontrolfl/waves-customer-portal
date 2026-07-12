@@ -96,25 +96,88 @@ describe('completion-lane registry (static)', () => {
     expect(after.flags).toEqual([]);
   });
 
-  test('billing rider with a live auto_send report lane is a defect', () => {
-    const active = classifyCatalogRow({
+  test('billing rider suppression requires the internal_only consultation mode', () => {
+    // service_report is a live report lane regardless of delivery_mode —
+    // resolveCompletionDeliveryPosture ignores delivery on generic profiles.
+    for (const delivery of ['auto_send', 'disabled']) {
+      const live = classifyCatalogRow({
+        service_key: 'termite_renewal',
+        billing_type: 'recurring',
+        completion_mode: 'service_report',
+        project_type: null,
+        delivery_mode: delivery,
+        profile_active: true,
+      });
+      expect(live.flags).toContain('billing_rider_report_lane_active:service_report_expected_internal_only');
+    }
+    const suppressed = classifyCatalogRow({
       service_key: 'termite_renewal',
+      billing_type: 'recurring',
+      completion_mode: 'internal_only',
+      project_type: null,
+      delivery_mode: 'disabled',
+      profile_active: true,
+    });
+    expect(suppressed.flags).toEqual([]);
+  });
+
+  test('excluded and compliance keys must stay project-backed with the right pointer', () => {
+    const genericExcluded = classifyCatalogRow({
+      service_key: 'general_appointment',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(genericExcluded.flags).toContain('excluded_key_unexpected_mode:service_report');
+    const missingExcluded = classifyCatalogRow({
+      service_key: 'general_appointment',
+      billing_type: 'one_time',
+      completion_mode: null,
+      project_type: null,
+      profile_active: null,
+    });
+    expect(missingExcluded.flags).toContain('excluded_key_missing_profile:falls_through_to_generic_report');
+    const driftedCompliance = classifyCatalogRow({
+      service_key: 'wdo_inspection',
+      billing_type: 'one_time',
+      completion_mode: 'special_project',
+      project_type: 'termite_treatment',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(driftedCompliance.flags).toContain('compliance_key_pointer_drift:termite_treatment_expected_wdo_inspection');
+    const healthyCompliance = classifyCatalogRow({
+      service_key: 'wdo_inspection',
+      billing_type: 'one_time',
+      completion_mode: 'special_project',
+      project_type: 'wdo_inspection',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(healthyCompliance.flags).toEqual([]);
+  });
+
+  test('recurring-generic keys must stay on the service_report mode', () => {
+    const consult = classifyCatalogRow({
+      service_key: 'pest_general_quarterly',
+      billing_type: 'recurring',
+      completion_mode: 'internal_only',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(consult.flags).toContain('recurring_generic_unexpected_mode:internal_only_suppresses_the_decided_report');
+    const healthy = classifyCatalogRow({
+      service_key: 'pest_general_quarterly',
       billing_type: 'recurring',
       completion_mode: 'service_report',
       project_type: null,
       delivery_mode: 'auto_send',
       profile_active: true,
     });
-    expect(active.flags).toContain('billing_rider_report_lane_active:expected_delivery_disabled');
-    const suppressed = classifyCatalogRow({
-      service_key: 'termite_renewal',
-      billing_type: 'recurring',
-      completion_mode: 'service_report',
-      project_type: null,
-      delivery_mode: 'disabled',
-      profile_active: true,
-    });
-    expect(suppressed.flags).toEqual([]);
+    expect(healthy.flags).toEqual([]);
   });
 });
 

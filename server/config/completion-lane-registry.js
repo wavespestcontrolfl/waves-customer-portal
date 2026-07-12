@@ -33,10 +33,12 @@ const OWNER_EXCLUDED_KEYS = [
 
 // Q6/W1 (ratified 2026-07-12): universal EXPERIENCE, legal pipeline intact —
 // FDACS-13645 / FBC certificate machinery, V1_EXCLUDED_PROJECT_TYPES stays.
-const COMPLIANCE_PROJECT_KEYS = [
-  'wdo_inspection',
-  'termite_slab_pretreat',
-];
+// Pointer is validated (Codex r2): drift off the compliance project type
+// would route the appointment away from the legal pipeline this protects.
+const COMPLIANCE_PROJECT_KEYS = {
+  wdo_inspection: 'wdo_inspection',
+  termite_slab_pretreat: 'pre_treatment_termite_certificate',
+};
 
 // Q5 (ratified 2026-07-12): typed cutover blocked on the owner's
 // FS 482.226 / FS 482.2265 / FAC 5E-14 review of the inspection + remedial
@@ -68,10 +70,14 @@ const CUTOVER_IN_FLIGHT_KEYS = {
 
 // Owner 2026-07-12: scheduled as services, but billing riders — invoice line
 // + post-service report REFERENCE only. No standalone completion report, and
-// NEVER included in reminder SMS. Enforced end state: generic service_report
-// profile with delivery 'disabled' (or 'internal_only'); an auto_send rider
-// is a defect (20260712400000 flips the four keys). Reminder-SMS exclusion +
-// report/invoice reference lines are follow-up work items in the plan.
+// NEVER included in reminder SMS. Enforced end state (Codex r2): completion
+// mode 'internal_only' with no pointer — the consultation posture is the
+// ONLY mechanism resolveCompletionDeliveryPosture honors for non-typed
+// completions (delivery_mode is ignored on generic profiles), and it
+// suppresses the report token AND completion comms while keeping the
+// service_records audit row. 20260712400000 flips the four keys.
+// Reminder-SMS exclusion + report/invoice reference lines are follow-up
+// work items in the plan.
 const BILLING_RIDER_KEYS = [
   'termite_renewal',
   'termite_bond_1yr',
@@ -101,7 +107,7 @@ const RECURRING_GENERIC_BY_DESIGN = [
 
 const ALL_LISTS = {
   owner_excluded: OWNER_EXCLUDED_KEYS,
-  compliance_project: COMPLIANCE_PROJECT_KEYS,
+  compliance_project: Object.keys(COMPLIANCE_PROJECT_KEYS),
   pending_compliance_review: PENDING_COMPLIANCE_REVIEW_KEYS,
   cutover_in_flight: Object.keys(CUTOVER_IN_FLIGHT_KEYS),
   billing_rider: BILLING_RIDER_KEYS,
@@ -137,11 +143,27 @@ function classifyCatalogRow(row) {
   const isGenericReport = row.completion_mode === 'service_report' && !row.project_type;
 
   if (lane === 'owner_excluded' || lane === 'pending_compliance_review') {
-    if (isTyped) flags.push('listed_but_typed:remove_registry_entry_or_revert');
+    // These keys must stay project-backed — a missing profile or a generic
+    // service_report profile regains the default auto-send report lane the
+    // exclusion exists to prevent (Codex r2).
+    if (isTyped) {
+      flags.push('listed_but_typed:remove_registry_entry_or_revert');
+    } else if (!hasProfile) {
+      flags.push('excluded_key_missing_profile:falls_through_to_generic_report');
+    } else if (!isProjectMode) {
+      flags.push(`excluded_key_unexpected_mode:${row.completion_mode || 'none'}`);
+    }
     return { lane, flags };
   }
   if (lane === 'compliance_project') {
-    if (!isProjectMode) flags.push(`compliance_key_unexpected_mode:${row.completion_mode || 'none'}`);
+    const expectedPointer = COMPLIANCE_PROJECT_KEYS[key];
+    if (!hasProfile) {
+      flags.push('compliance_key_missing_profile:falls_through_to_generic_report');
+    } else if (!isProjectMode) {
+      flags.push(`compliance_key_unexpected_mode:${row.completion_mode || 'none'}`);
+    } else if (row.project_type !== expectedPointer) {
+      flags.push(`compliance_key_pointer_drift:${row.project_type || 'none'}_expected_${expectedPointer}`);
+    }
     return { lane, flags };
   }
   if (lane === 'cutover_in_flight') {
@@ -160,22 +182,31 @@ function classifyCatalogRow(row) {
     return { lane, flags };
   }
   if (lane === 'billing_rider') {
-    // Riders must not run their own customer report lane: generic
-    // service_report with delivery disabled/internal_only is the decided
-    // end state; auto_send or a typed pointer is a live report lane the
-    // owner ruled out (Codex P2).
+    // Riders must not run their own customer report lane. The ONLY posture
+    // the runtime honors for non-typed suppression is completion_mode
+    // 'internal_only' (resolveCompletionDeliveryPosture ignores
+    // delivery_mode on generic profiles — Codex r2), so anything else is a
+    // live report lane the owner ruled out.
     if (!hasProfile) {
-      flags.push('billing_rider_missing_profile');
+      flags.push('billing_rider_missing_profile:falls_through_to_generic_report');
     } else if (row.project_type) {
       flags.push('billing_rider_has_typed_pointer');
-    } else if (row.completion_mode === 'service_report' && row.delivery_mode === 'auto_send') {
-      flags.push('billing_rider_report_lane_active:expected_delivery_disabled');
+    } else if (row.completion_mode !== 'internal_only') {
+      flags.push(`billing_rider_report_lane_active:${row.completion_mode || 'none'}_expected_internal_only`);
     }
     return { lane, flags };
   }
   if (lane === 'recurring_generic_by_design') {
+    // The decided lane IS the recurring Service Report V1 — the profile
+    // must stay generic service_report. internal_only (consultation) or a
+    // project mode silently suppresses/diverts the customer report
+    // (Codex r2); a missing profile still resolves to the default generic
+    // report, which matches the decision, so it is accepted.
     if (row.billing_type === 'one_time') flags.push('recurring_list_but_one_time_billing');
     if (row.project_type) flags.push('recurring_generic_listed_but_typed:remove_registry_entry');
+    else if (hasProfile && row.completion_mode !== 'service_report') {
+      flags.push(`recurring_generic_unexpected_mode:${row.completion_mode || 'none'}_suppresses_the_decided_report`);
+    }
     return { lane, flags };
   }
 
