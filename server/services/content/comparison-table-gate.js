@@ -116,16 +116,22 @@ const ACTIVE_ADVERBS = '(?:(?:also|often|always|routinely|repeatedly|regularly|f
 const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
 // A word gap that tolerates comma/parenthetical adverbs within the sentence
 // ("companies, frankly, are dishonest") — whitespace-only gaps let ordinary
-// punctuation defeat the directed arms (Codex r3 on #2633).
-const NOUN_VERB_GAP = "(?:\\s*,?\\s+[\\w'’]+){0,3}\\s*,?\\s+";
+// punctuation defeat the directed arms (Codex r3 on #2633). Gap words must
+// not be NEGATORS: "We never charge hidden fees" / "Waves never overcharges"
+// are the accusation's denial, not the accusation.
+const NON_NEGATED_WORD = "(?!(?:never|not|no|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
+const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  // Linking verbs: "companies are (frankly) dishonest".
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // Linking verbs: "companies are (frankly) dishonest". Post-verb gap words
+  // are negator-excluded too ("are never dishonest" is a denial).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
-  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,2}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Appositive-tolerant gap here too — "companies, frankly, charge hidden
+  // fees" (Codex r7 on #2633).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
 ].join('|'), 'i');
 
 // Disparagement DIRECTED at the own brand ("Waves is dishonest", "Waves
@@ -152,11 +158,13 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // are shady, damp corners".
   `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
-  `${OWN_BRAND_SUBJECT}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
+  // Codex r7 on #2633.
+  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
   // Possession/usage with a required accusation object ("Waves has hidden
   // fees", "Waves uses shady billing") — object required so "Waves has
   // shady spots covered" stays clean (Codex r3/r6 on #2633).
-  `${OWN_BRAND_SUBJECT}\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -177,6 +185,19 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // number, so "in heat waves, the #1 breeding site is …" stays clean.
   `\\bwaves\\b(?:'s)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
+
+// Own-brand SEPARATOR and appositive-#1 forms are case-SENSITIVE ("Waves:
+// hidden fees", "Choose Waves, the #1 choice") — lowercase would collide
+// with the common noun ("in summer heat waves — shady, damp corners", "in
+// summer heat waves, the #1 hidden breeding site"). Objects/numbers are
+// anchored, so capitalized sentence-start "Waves of mosquitoes …" cannot
+// match either. (Codex r7 on #2633.)
+const OWN_BRAND_SEP_DISPARAGEMENT_RE = new RegExp(
+  `\\bWaves\\b\\s*[:—–-]\\s*(?:[\\w'’]+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`,
+);
+const OWN_BRAND_NUMERIC_RANKING_RE = new RegExp(
+  `\\bWaves\\b(?:'s)?[,\\s]+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+);
 
 // Linking/behavioral verbs that tie a subject name to a following negative
 // term (shared by the table-less directed scans).
@@ -848,7 +869,8 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // category-table strictness is asserted by existing tests.
   let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE)
     || scanText.match(DIRECTED_DISPARAGEMENT_RE)
-    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
+    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE)
+    || scanText.match(OWN_BRAND_SEP_DISPARAGEMENT_RE);
   if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
@@ -910,6 +932,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // (PROD 2026-07-11 false positives).
   let rank = scanText.match(SELF_RANKING_RE)
     || scanText.match(NUMERIC_SELF_RANKING_RE)
+    || scanText.match(OWN_BRAND_NUMERIC_RANKING_RE)
     || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
   if (!rank) {
@@ -920,8 +943,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // hidden breeding site" re-blocked as rigged ranking (Codex r3 on
     // #2633 — the exact educational-idiom false positive again).
     const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
+    // Hyphen joins count as adjacency — "The #1-rated pest control
+    // company" (Codex r7 on #2633).
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}\\s+(?:[\\w'’-]+\\s+){0,2}?(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?)\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?)\\b`, 'i',
     );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {

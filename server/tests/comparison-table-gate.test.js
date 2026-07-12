@@ -1114,6 +1114,37 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-7 findings (#2633) ──
+
+  test('Codex r7: own-brand appositive and separator forms block; lowercase common noun stays clean', () => {
+    for (const prose of [
+      'Choose Waves, the #1 choice for mosquito control.',
+      'Waves: hidden fees on renewals.',
+      'Waves — shady billing.',
+      'Waves, frankly, charges hidden fees.',
+    ]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(true);
+    }
+    const ok = gate.evaluate({ body: `Summer heat waves — shady, damp corners hold the moisture mosquitoes need.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
+  test('Codex r7: appositive active accusations at provider nouns block', () => {
+    for (const prose of ['Pest control companies, frankly, charge hidden fees.', 'Pest control companies, a local option, scam customers.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r7: hyphenated "#1-rated" provider claims block', () => {
+    for (const prose of ['The #1-rated pest control company in Venice.', 'The No. 1-rated pest control company.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
   // ── Codex round-6 findings (#2633) ──
 
   test('Codex r6: digit/punctuated provider names are tone-scan targets', () => {
