@@ -1114,6 +1114,33 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-13 findings (#2633): 2 fixed, 3 rebutted with the guard tests below ──
+
+  test('Codex r13: full brand name before separators blocks', () => {
+    const disp = gate.evaluate({ body: `Waves Pest Control: hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const rank = gate.evaluate({ body: `Waves Pest Control — the #1 choice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r13: verb-anchored object-position insults block', () => {
+    for (const prose of ['Homeowners call Bug Busters a scam.', 'Customers describe A+ Pest Control as dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r13 REBUTTAL evidence: the requested broader shapes would false-positive on real copy', () => {
+    // Comma appositive for own-brand disparagement: marketing denial copy.
+    const denial = gate.evaluate({ body: `With Waves, hidden fees are a thing of the past.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(denial.pass).toBe(true);
+    // Separator-#1 on noisy CI captures: educational method framing.
+    const method = gate.evaluate({ body: `Start with baiting and termite prevention, the #1 defense is a pre-slab barrier.\n\n${CATEGORY_TABLE}` }, {});
+    expect(method.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(method.pass).toBe(true);
+  });
+
   // ── Codex round-12 findings (#2633) ──
 
   test('Codex r12: own-brand separator #1 blocks; negated separator claims stay clean', () => {

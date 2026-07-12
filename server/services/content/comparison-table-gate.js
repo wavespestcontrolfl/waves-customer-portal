@@ -208,7 +208,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // heading-cased, Codex r9/r10 on #2633) and stays OBJECT/number-anchored:
 // full disparagement vocabulary here would re-block heading shapes like
 // "Waves — Shady Foliage Treatment Guide" (literal shade).
-const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:'s)?";
+const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:\\s+Pest\\s+Control)?(?:'s)?";
 const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}\\s*[:—–-]\\s*`);
 // Prefix words are negator-excluded: "Waves: no hidden fees" is a denial,
 // not an accusation (Codex r12 on #2633).
@@ -303,7 +303,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Need|Needs|Want|Wants|Consider|Considering|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -957,10 +957,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i')
         : null;
+      // Object-position insult idiom, verb-anchored ("homeowners call Bug
+      // Busters a scam", "customers describe X as dishonest") — Codex r13.
+      const objInsultP0 = new RegExp(
+        `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+      );
       let dm = proseNameText.match(directedP0)
         || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
+        || proseNameText.match(objInsultP0)
         || (sepP0 && proseNameText.match(sepP0));
       if (!dm && objAssocP0) {
         // Sentence-level negation check: "Customers do NOT report hidden
