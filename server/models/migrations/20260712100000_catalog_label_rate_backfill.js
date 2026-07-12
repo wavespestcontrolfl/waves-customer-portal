@@ -164,7 +164,7 @@ const DATA = [
   { name: "Dominion 2L 27.5 oz", basis: "per_gallon", rate: null, min: 0.3, max: 0.6, unit: "fl_oz", epa: "53883-229",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/053883-00229-20140108.pdf — \"Use a 0.05% to 0.1% dilution based on current practices. For a typical control situation, a 0.05% dilution is used. A 0.1% dilution may be used when a severe or persistent infestation exists. ... 0.3 fl oz/gal = 0.05%; 0\"" },
   { name: "Drive XLR8 Post Emergent Liquid Herbicide", basis: "per_1000_sqft", rate: 1.45, min: null, max: null, unit: "fl_oz", epa: "7969-272",
-    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/007969-00272-20190607.pdf — \"Table 3. Application Rates and Timing for Postemergence Weed Control in Turfgrass: Broadcast Application: 64 fl ozs of product per acre or 1.45 fl ozs per 1000 sq ft (0.75 lb ae/A). ... DO NOT apply to Bahiagrass, carpet\" | NOTE: EPA reg matches DB (7969-272, BASF). Standard rate 1.45 fl oz/1,000 sq ft (64 fl oz/A) broadcast or spot. CRITICAL FOR THIS OPERATOR: Table 1 lists St. Augustinegrass, bahi" },
+    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/007969-00272-20190607.pdf — \"Table 3. Application Rates and Timing for Postemergence Weed Control in Turfgrass: Broadcast Application: 64 fl ozs of product per acre or 1.45 fl ozs per 1000 sq ft (0.75 lb ae/A). ... DO NOT apply to Bahiagrass, carpetgrass, centipedegrass, colonial and seaside bentgrass, dichondra, St. Augustinegrass, or lawns or turfgrass where desirable clovers are present\" | NOTE: EPA reg matches DB (7969-272, BASF). CRITICAL FOR THIS OPERATOR: label Table 1 lists Bahiagrass, Carpetgrass, Centipedegrass, and St. Augustinegrass as Susceptible — OFF-LABEL on most FL home lawns; tolerant turf = bermuda (common), Ky bluegrass, tall fescue, zoysia." },
   { name: "Dylox 420 SL T&O Insecticide", basis: "per_1000_sqft", rate: 6.9, min: null, max: null, unit: "fl_oz", epa: "5481-643-432",
     note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Dylox%20420%20Label%205-9-16%20AV2.pdf — \"APPLICATIONS: Landscape Ornamentals (including flowers, shrubs, and trees) and Recreational Lawns & Turf - Annual bluegrass weevil (adults) / Billbug larvae / Mole crickets / Chinch bugs / White grubs (including larvae o\"" },
   { name: "Eagle 20EW Fungicide", basis: "per_1000_sqft", rate: 1.2, min: null, max: null, unit: "fl_oz", epa: "62719-463",
@@ -179,14 +179,14 @@ const DATA = [
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/070506-00537-20240208.pdf — \"Mix 4 to 8 fl oz FLORAMITE SC in 100 gal of water ... Use 4 fl oz per 100 gal of water for preventative applications or where mite infestations are light. Up to 8 fl oz per 100 gal of water [may be required for heavy inf\"" },
   { name: "Forbid 4F", basis: "other", rate: null, min: 1, max: 4, unit: "fl_oz", epa: "432-1279",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000432-01279-20070504.pdf — \"Spider mites (including twospotted spider mite, spruce spider mite, honeylocust spider mite, Euonymus mite, boxwood spider mite, tumid mite and Lewis mite) ... 1 to 4 fl. oz. (30-120 mL)/100 gallons of spray solution or \"" },
-  { name: "Fusilade II Post Emergent Liquid Herbicide", basis: "per_1000_sqft", rate: null, min: 0.4, max: 0.6, unit: "fl_oz", epa: "100-1084",
-    note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP1084AL1F0616.pdf — \"APPLICATION RATES - LANDSCAPE AND ORNAMENTALS: Apply 16-24 fl oz/A (0.4 - 0.6 fl oz/1,000 sq ft) of Fusilade II Turf and Ornamental Herbicide in sufficient water along with 0.25% (1/2 pt/25 gal) of a nonionic surfactant.\" | NOTE: DB had no EPA reg (N/A); label reg is 100-1084 (Syngenta). Rate recorded is the landscape/ornamental-bed broadcast rate (grassy weed control over/around ornamentals) - the obvious u" },
+  { name: "Fusilade II Post Emergent Liquid Herbicide", basis: "other", rate: null, min: null, max: null, unit: "fl_oz", epa: "100-1084",
+    note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP1084AL1F0616.pdf — \"APPLICATION RATES - LANDSCAPE AND ORNAMENTALS: Apply 16-24 fl oz/A (0.4 - 0.6 fl oz/1,000 sq ft) ... GRASS WEED CONTROL IN DESIRABLE TURFGRASS: For the suppression and/or control of Common Bermudagrass, Hybrid Bermudagrass and other grass weeds in Zoysia, Fine Fescue and Tall Fescue turfgrass ... Apply 3-6 fl oz/A\" | NOTE: DB had no EPA reg (N/A); label reg is 100-1084 (Syngenta). basis=other ON PURPOSE: 0.4-0.6 fl oz/1,000 sq ft is the landscape/ornamental-BED rate; over-the-top turf use is Zoysia/Fine Fescue/Tall Fescue ONLY at 3-6 fl oz/A (~0.07-0.14 fl oz/1,000 sq ft) — storing the bed rate in the per-1k turf fields would prefill lawn completions at 4-8x the labeled turf rate, and St. Augustine/bahia lawns are not labeled turf at all." },
   { name: "Gentrol IGR", basis: "per_gallon", rate: 1, min: null, max: null, unit: "oz", epa: "2724-351",
     note: "manufacturer: https://www.zoecon.com/-/media/project/oneweb/zoecon/files/product-labels/specimen/gentrol-igr-concentrate-specimen-label.pdf — \"DILUTION PREPARATION FOR SURFACE SPRAY/PAINT BRUSH, SPOT AND CRACK AND CREVICE PREPARATIONS: Use 1 ounce of GENTROL to 1 gallon of diluent. Partially fill the mixing container with diluent, add the GENTROL, shake or stir\"" },
   { name: "Headway Fungicide", basis: "per_1000_sqft", rate: null, min: 1.5, max: 3, unit: "fl_oz", epa: "100-1216",
     note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/headway-fungicide-label.pdf — \"Apply Headway at 1.5-3 fl oz per 1,000 sq ft. Spray carrier volume should fall within 30-150 gallons of water per 1,000 sq ft.\"" },
   { name: "Heritage Action Fungicide", basis: "per_1000_sqft", rate: null, min: 0.2, max: 0.4, unit: "oz", epa: "100-1550",
-    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000100-01550-20141223.pdf — \"Apply Heritage Action at 0.2 to 0.4 oz per 1,000 sq ft. Spray carrier volume should fall within 30-150 gallons of water per 1,000 sq ft.\" | NOTE: Azoxystrobin + acibenzolar-S-methyl (SAR activator), Group 11, EPA Reg 100-1550 (WG dry formulation, so unit is dry oz not fl oz). Broadcast/foliar band 0.2-0.4 oz/1000; band only so rate=null. IMPORT" },
+    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000100-01550-20141223.pdf — \"Apply Heritage Action at 0.2 to 0.4 oz per 1,000 sq ft. Spray carrier volume should fall within 30-150 gallons of water per 1,000 sq ft.\" | NOTE: Azoxystrobin + acibenzolar-S-methyl (SAR activator), Group 11, EPA Reg 100-1550 (WG dry formulation, so unit is dry oz not fl oz). Broadcast/foliar band 0.2-0.4 oz/1000; band only so rate=null. IMPORTANT — label restriction: 'DO NOT apply to residential lawns.' (also max 3.7 oz/1,000 sq ft/yr). OFF-LABEL for residential lawn work; commercial/golf turf only." },
   { name: "Heritage G", basis: "per_1000_sqft", rate: null, min: 2, max: 4, unit: "lb", epa: "100-1323",
     note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP1323AL1D1115.pdf — \"DIRECTIONS FOR APPLICATION FOR TURF DISEASES ... Use Rate (lb product/1,000 sq ft) ... Brown Patch (Rhizoctonia solani) 2-4 [Application Interval] 14-28 Apply when conditions are favorable for disease development.\"" },
   { name: "Heritage TL", basis: "per_1000_sqft", rate: null, min: 1, max: 2, unit: "fl_oz", epa: "100-1191",
@@ -238,7 +238,7 @@ const DATA = [
   { name: "LESCO Crosscheck Plus", basis: "per_1000_sqft", rate: null, min: 0.18, max: 1.0, unit: "fl_oz", epa: "279-3206-10404",
     note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Lesco%20Crosscheck%20Plus%20Label%203-24-17.pdf — \"Armyworms, Cutworms, Sod Webworm ... 0.18 - 0.25 fluid oz. per 1000 sq. ft. Annual Bluegrass Weevil, Billbugs (Adult), Black Turfgrass Ataenius ... 0.25 - 0.5. Ants, Chinch Bugs, Imported Fire Ants, Mole Cricket, Ticks .\"" },
   { name: "LESCO Manicure 6FL Contact Fungicide", basis: "other", rate: null, min: null, max: null, unit: "fl_oz", epa: "60063-7-10404",
-    note: "siteone: https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/rb-ue-labels-11204_13299_label_84901-578400/rb-ue-labels-11204-13299-label-84901-578400.pdf — \"Apply this product at a rate of 1-3/8 pints per 100 gallons of water unless other directions are given in the tables below. Apply enough diluted spray per acre to provide thorough coverage of all plant parts that are int\" | NOTE: CRITICAL for FL residential lawn operator: label states " },
+    note: "siteone: https://www.siteone.com/medias/sys_master/PimProductImages/assets/ProductAssets/US/LESCO/labelAsset/rb-ue-labels-11204_13299_label_84901-578400/rb-ue-labels-11204-13299-label-84901-578400.pdf — \"Apply this product at a rate of 1-3/8 pints per 100 gallons of water unless other directions are given in the tables below. Apply enough diluted spray per acre to provide thorough coverage of all plant parts that are int\" | NOTE: CRITICAL for FL residential lawn operator: label states 'DO NOT use on home lawns and turf sites associated with apartment buildings, daycare centers, playgrounds, recreational park athletic fields, athletic fields located on or next to schools (ie., elementary, middle and high schools), campgrounds, churches, and theme parks.' OFF-LABEL for residential lawn work." },
   { name: "LESCO Stonewall 0-0-7", basis: "per_1000_sqft", rate: null, min: 4.02, max: 5.34, unit: "lb", epa: "10404-89",
     note: "distributor_label_pdf: https://trimlinelandscape.com/hubfs/Fertilizer%20with%20Stonewall%20LABEL.pdf — \"Use at an initial rate of 175 to 233 lb/acre per application followed by sequential applications at doses that would not exceed the maximum annual application rate of 349 lb/acre/year. ... Bermudagrass / Bahiagrass / Cen\"" },
   { name: "LESCO Stonewall 0.37% 18-0-10", basis: "per_1000_sqft", rate: null, min: 3.1, max: 9.3, unit: "lb", epa: "10404-114",
@@ -314,7 +314,7 @@ const DATA = [
   { name: "Temprid FX", basis: "per_gallon", rate: null, min: 0.27, max: 0.54, unit: "fl_oz", epa: "101563-165",
     note: "manufacturer: https://bynder.envu.com/m/779dbe7a72baeff8/original/Digital_PPM_Temprid-FX_label_NA_US_EN.pdf — \"Use Rate: 0.075% - - 0.27 fl oz (8 milliliters) per gallon of water. 0.15% - - 0.54 fl oz (16 milliliters) per gallon of water, or 0.27 fl oz (8 ml) per half gallon of water.\"" },
   { name: "Tenacity Herbicide", basis: "other", rate: null, min: 4, max: 8, unit: "fl_oz", epa: "100-1267",
-    note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP%201267A-L1D%200922.pdf — \"Postemergence Application – Apply Tenacity at 4-8 fl oz per acre (0.125-0.25 lb ai/A) in at least 30 gallons of water per acre. Apply with a NIS type surfactant. ... DO NOT exceed 4 fl oz per acre (0.125 lb ai/A) to St. \" | NOTE: Rate basis is per ACRE; label's own conversion = 0.092-0.184 fl oz/1000 sq ft. Spot: 1 tsp Tenacity + 3 tsp NIS per 2 gal, applied at 1 gal/1000 sq ft. Max 16 fl oz/A/yr. CRI" },
+    note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP%201267A-L1D%200922.pdf — \"Postemergence Application – Apply Tenacity at 4-8 fl oz per acre (0.125-0.25 lb ai/A) in at least 30 gallons of water per acre. Apply with a NIS type surfactant. ... DO NOT exceed 4 fl oz per acre (0.125 lb ai/A) to St. Augustinegrass sod. ... St. Augustinegrass (sod uses only)\" | NOTE: Rate basis is per ACRE; label's own conversion = 0.092-0.184 fl oz/1000 sq ft. Spot: 1 tsp Tenacity + 3 tsp NIS per 2 gal, applied at 1 gal/1000 sq ft. Max 16 fl oz/A/yr. CRITICAL: the label's turf table lists St. Augustinegrass as 'grown for sod' / 'sod uses only' — OFF-LABEL on established residential St. Augustine lawns." },
   { name: "Termidor Foam", basis: "other", rate: null, min: null, max: null, unit: null, epa: "499-563",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000499-00563-20130912.pdf — \"This product is a ready-to-use insecticide formulation. When dispensed, the formulation rapidly expands generating a dry foam with an expansion ratio of approximately 30:1, with 1 oz (weight) of product being dispensed i\"" },
   { name: "Termidor SC", basis: "per_gallon", rate: 0.8, min: 0.8, max: 1.6, unit: "fl_oz", epa: "7969-210",
@@ -326,7 +326,7 @@ const DATA = [
   { name: "Trelona Compressed Termite Bait Cartridges", basis: "other", rate: null, min: null, max: 20, unit: null, epa: "499-557",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000499-00557-20190909.pdf — \"Install stations around a structure such that, except where sufficient access to the ground is not available, the maximum interval between any two stations does not exceed 20 feet. ... In Florida, ... use two 124 gram ca\"" },
   { name: "Tribute Total WDG", basis: "per_1000_sqft", rate: null, min: 0.023, max: 0.073, unit: "oz", epa: "101563-147",
-    note: "manufacturer: https://bynder.envu.com/m/3c398f693da5477b/original/Digital_TO_Tribute-Total_label_NA_US_EN.pdf — \"PRODUCT USE RATES — BROADCAST APPLICATIONS: To Treat 1 Acre oz/Acre 1 / 2 / 3.2 — To Treat 1,000 Square Feet oz/1,000 sq ft 0.023 / 0.046 / 0.073 — Maximum single application rate is 3.2 oz/acre. Maximum yearly applicati\"" },
+    note: "manufacturer: https://bynder.envu.com/m/3c398f693da5477b/original/Digital_TO_Tribute-Total_label_NA_US_EN.pdf — \"PRODUCT USE RATES — BROADCAST APPLICATIONS: To Treat 1 Acre oz/Acre 1 / 2 / 3.2 — To Treat 1,000 Square Feet oz/1,000 sq ft 0.023 / 0.046 / 0.073 — Maximum single application rate is 3.2 oz/acre. ... Removal of Overseeded Ryegrass in Bermudagrass and Zoysiagrass of Commercial and Residential Sites ... Do not use Tribute Total on pure stands or mixtures of turfgrasses not listed on this label without first testing for adequate turf tolerance\" | NOTE: CRITICAL: labeled turf = well-established BERMUDAGRASS and ZOYSIAGRASS cultivars only — OFF-LABEL on St. Augustine/bahia/centipede lawns (it controls cool-season and non-listed grasses)." },
   { name: "Vendetta Plus", basis: "other", rate: 0.5, min: 0.25, max: 0.5, unit: "g", epa: "1021-2593",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/001021-02593-20200319.pdf — \"For light infestations of German roaches, 4 - 6 bait points are recommended per 100 sq. ft. (9.3 m2) of treatment area. For heavy infestations of German roaches, 12 - 24 bait points are recommended per 100 sq. ft. (9.3 m\"" },
   { name: "Zylam Insecticide", basis: "other", rate: null, min: null, max: null, unit: "fl_oz", epa: "2217-937",
@@ -344,11 +344,17 @@ exports.up = async function up(knex) {
       .update({ epa_reg_number: right, updated_at: new Date() });
   }
 
+  // Track which legacy corrections actually fired so the DATA loop below can
+  // append provenance for the corrected value even when it has nothing else
+  // to write (a corrected row's rate fields are no longer empty by the time
+  // the loop inspects them).
+  const legacyApplied = new Set();
   for (const [name, oldVals, newVals] of LEGACY_CORRECTIONS) {
-    await knex('products_catalog')
+    const n = await knex('products_catalog')
       .whereRaw('LOWER(name) = LOWER(?)', [name])
       .where(oldVals)
       .update({ ...newVals, updated_at: new Date() });
+    if (n) legacyApplied.add(name.toLowerCase());
   }
 
   for (const d of DATA) {
@@ -380,7 +386,9 @@ exports.up = async function up(knex) {
     // note citing the superseded reg number must not outlive the correction.
     if (d.note && (emptyText(row.label_source_note) || isEpaCorrection)) {
       updates.label_source_note = d.note;
-    } else if (d.note && Object.keys(updates).length && !row.label_source_note.endsWith(d.note)) {
+    } else if (d.note
+        && (Object.keys(updates).length || legacyApplied.has(d.name.toLowerCase()))
+        && !row.label_source_note.endsWith(d.note)) {
       // A row verified by an earlier batch keeps its note, but the rate
       // fields written above need provenance too — append, never replace.
       updates.label_source_note = `${row.label_source_note} | ${d.note}`;
