@@ -99,7 +99,7 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   '(?:charges?|charged|adds?(?:\\s+on)?|added(?:\\s+on)?|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?',
   // Phrasal order with the fees BEFORE the particle — "sneaks hidden fees
   // into contracts" (Codex r21).
-  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|buries|buried)\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?\\s+into\\b',
+  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|bur(?:y|ies|ied|ying))\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?\\s+into\\b',
   `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
   `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
   `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
@@ -135,7 +135,10 @@ const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|of
 // foliage to locate mosquitoes" is field advice, not an accusation).
 // scam/ripoff qualify as practice modifiers too — "scam pricing", "ripoff
 // billing" (Codex r17 on #2633).
-const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off|overpriced|inflated)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales|quotes?|estimates?|invoices?))';
+// Modifier+object PAIRS may use the literal-risk vocabulary (sloppy/lousy/
+// gouging): the required practice/people object is what makes them directed
+// ("sloppy crews", "lousy tactics" — Codex r38).
+const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off|overpriced|inflated|sloppy|lousy|gouging|incompetent|careless)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales|quotes?|estimates?|invoices?|crews?|teams?|technicians?|work|service|installs?|treatments?))';
 // Association-object vocabulary: the possession objects plus UNAMBIGUOUS
 // standalone tokens — "Customers report scams after choosing Bug Busters"
 // (Codex r22 on #2633). Ambiguous tokens (shady/lousy) stay out: their
@@ -155,7 +158,7 @@ const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|ov
 // (Codex r18 on #2633).
 // Emphatic idioms pass through the gap — "Waves not only charges hidden
 // fees" / "no doubt charges" assert the accusation (Codex r28 on #2633).
-const NON_NEGATED_WORD = "(?!(?:never|not(?!\\s+(?:only|just)\\b)|no(?!\\s+doubt\\b)|without(?!\\s+(?:a\\s+)?(?:doubt|question)\\b)|zero|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
+const NON_NEGATED_WORD = "(?!(?:never|not(?!\\s+(?:only|just)\\b)|no(?!\\s+doubt\\b)|without(?!\\s+(?:a\\s+)?(?:doubt|question)\\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Gap words exclude category-scoping prepositions: "hidden fees IN pest
@@ -263,7 +266,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // Reported it/its-possessive self-accusations — "Waves says that its
   // billing includes hidden fees" (Codex r37): the pronoun re-anchors the
   // subject past the gap limit, so it gets its own bridge arm.
-  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,60}?\\b(?:it\\s+|its\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+)(?:ha(?:s|ve|d)|includes?|included|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,60}?\\b(?:it\\s+|its\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?)(?:ha(?:s|ve|d)|includes?|included|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
   // Codex r7 on #2633.
   `${OWN_BRAND_SUBJECT}${OWN_BRAND_CLAUSE_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -411,6 +414,9 @@ const OWN_BRAND_ASSOC_TAIL_RE = new RegExp([
   `^\\s*(?:${ASSOC_ACCUSATION_SRC})`,
   `^[^.!?\\n]{0,60}?\\b(?:gets?|got|receives?|received|draws?|drew|faces?|faced|racks?\\s+up|racked\\s+up)\\s+complaints?\\s+(?:about|over|regarding)\\s+(?:(?:its|their|the|a|an)\\s+)?(?:${ASSOC_ACCUSATION_SRC})`,
 ].join('|'), 'i');
+// Superlative-BEFORE-the-brand winner framing — "The winner is Waves",
+// "Best choice: Waves Pest Control" (Codex r38); brand token case-verified.
+const OWN_BRAND_SUP_BEFORE_SRC = `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
 // #1-BEFORE-the-brand winner framing — "The #1 overall is Waves" (Codex
 // r21); brand token case-verified in code.
 const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
@@ -476,6 +482,10 @@ const SELF_RANKING_SRC = [
   '\\bthe (?:best|top) (?:choice|option|pick)\\b',
 ];
 const SELF_RANKING_RE = new RegExp(SELF_RANKING_SRC.join('|'), 'i');
+// Bare winner tokens inside a <ComparisonTable> block — cells are
+// comparison context by construction, so "Clear winner" / "Best option"
+// as a cell declares a winner (Codex r38).
+const WINNER_CELL_RE = /\b(?:clear\s+winner|winner|best\s+(?:choice|option|pick)|top\s+(?:choice|pick))\b/i;
 // Full set, kept for the module export (compat) — evaluate() scans the two
 // halves separately so numeric-one can be context-scoped.
 const RANKING_RE = new RegExp([...NUMERIC_ONE_SRC, ...SELF_RANKING_SRC].join('|'), 'i');
@@ -519,7 +529,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero|Not|All|Few|Both`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero|Not|All|Few|Both|Winner|Winners|Is|Was|Are|Were`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -814,7 +824,11 @@ function scopedSelfRankingMatch(text) {
     ) + 1;
     const lead = text.slice(sentStart, sm.index + sm[0].length);
     if (SENTENCE_NEGATOR_RE.test(lead)) continue;
-    const subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
+    let subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
+    // The pronoun/brand must GOVERN the ranking phrase — "Our guide says
+    // gel bait is the best option" embeds it under a reporting verb
+    // (Codex r38).
+    subjLead = subjLead.replace(/^[\s\S]*\b(?:says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|wonders?|whether|if|that)\b/i, '');
     if (/\b(?:we|our|us)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
       || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
       return sm;
@@ -854,6 +868,13 @@ function scanOwnBrandRankingArms(scanText) {
     if (!OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) continue;
     if (sentenceHasNegator(scanText, nb.index, nb[0].length)) continue;
     return [nb[0]];
+  }
+  const sbRe = new RegExp(OWN_BRAND_SUP_BEFORE_SRC, 'gi');
+  let sb;
+  while ((sb = sbRe.exec(scanText)) !== null) {
+    if (!OWN_BRAND_CASE_RE.test(sb.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, sb.index, sb[0].length)) continue;
+    return [sb[0]];
   }
   return null;
 }
@@ -1131,31 +1152,9 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // Superlatives need an own-brand/provider subject in the clause when no
   // table supplies comparison context — "gel bait is the best option" is
   // treatment advice (Codex r35).
-  let ownRank = null;
-  {
-    const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
-    let sm;
-    while ((sm = selfRe.exec(scanText)) !== null) {
-      const sentStart = Math.max(
-        scanText.lastIndexOf('.', sm.index),
-        scanText.lastIndexOf('!', sm.index),
-        scanText.lastIndexOf('?', sm.index),
-        scanText.lastIndexOf('\n', sm.index),
-      ) + 1;
-      const lead = scanText.slice(sentStart, sm.index + sm[0].length);
-      // Denials stay clean ("We are not the best choice for every home")
-      // and a provider word inside a leading prepositional frame is topic,
-      // not subject ("For pest control, gel bait is the best option") —
-      // Codex r36.
-      if (SENTENCE_NEGATOR_RE.test(lead)) continue;
-      const subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
-      if (/\b(?:we|our|us)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
-        || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
-        ownRank = sm;
-        break;
-      }
-    }
-  }
+  // Subject-scoped superlative scan — shared helper with the table path
+  // (Codex r35/r38).
+  let ownRank = scopedSelfRankingMatch(scanText);
   if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
     const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
@@ -1604,7 +1603,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // (Codex r37). In-block #1 stays unconditional: cells are comparison
   // context by construction.
   let rank = scopedSelfRankingMatch(scanText)
-    || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
+    || blocks.map((b) => b.match(NUMERIC_ONE_RE) || b.match(SELF_RANKING_RE) || b.match(WINNER_CELL_RE)).find(Boolean);
   if (!rank) {
     // Sentence-guarded and iterated — "No one rated us #1" is a denial
     // (Codex r28 on #2633).
@@ -1711,10 +1710,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const rankBeforeName = new RegExp(
           `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
         );
+        // Superlative-before-name too — "The winner is Bug Busters"
+        // (Codex r38 parity).
+        const supBeforeName = new RegExp(
+          `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
+        );
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
           || proseNameText.match(marketingRank)
           || firstUnnegatedMatch(proseNameText, rankBeforeName)
+          || firstUnnegatedMatch(proseNameText, supBeforeName)
           || (sepRank && proseNameText.match(sepRank));
         if (rm) { rank = rm; break; }
       }

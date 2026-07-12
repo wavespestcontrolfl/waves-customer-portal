@@ -1114,6 +1114,33 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-38 findings (#2633) ──
+
+  test('Codex r38: winner-before-brand and in-cell superlatives block', () => {
+    for (const prose of ['The winner is Waves.', 'Best choice: Waves Pest Control.', 'The winner is Bug Busters.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const cell = gate.evaluate({ body: CATEGORY_TABLE.replace('Usually', 'Clear winner') }, {});
+    expect(cell.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r38: typographic denials, compound its-subjects, base bury, and practice-pair vocab behave', () => {
+    const denial = gate.evaluate({ body: `Bug Busters didn’t charge hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    for (const prose of ['Waves says that its billing plan includes hidden fees.', 'Local providers bury hidden fees into contracts.', 'Pest control companies have sloppy crews.', 'Some chains use lousy tactics.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r38: reported superlatives stay educational', () => {
+    for (const body of ['Our guide says gel bait is the best option for German roaches.', `Customers ask us whether gel bait is the best option.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-37 findings (#2633) ──
 
   test('Codex r37: that-complementizer self-accusations and past denials behave', () => {
