@@ -20,7 +20,10 @@
 //   per bait point) → no rate fields; the label statement lives in
 //   label_source_note. Fabricating a per-1,000 conversion would be wrong.
 // - epa_reg_number filled where the DB had NULL/'N/A'.
-// - label_verified_at/by + label_source_note stamped only where NULL.
+// - label_verified_at/by stamped only where NULL. label_source_note written
+//   where NULL; where an earlier batch's note exists and this migration adds
+//   new data fields, our citation is APPENDED (" | ...") so the new values
+//   carry provenance without erasing the earlier batch's.
 //
 // Six DB EPA registration numbers were proven WRONG against PPLS by both
 // passes and are corrected explicitly (guarded on the old wrong value):
@@ -118,8 +121,8 @@ const DATA = [
     note: "manufacturer: https://brandt.co/media/6781/brandt-indicate-5-label.pdf — \"RECOMMENDATIONS: The correct volume of BRANDT INDICATE 5 to be added to the spray water is indicated by the color: pink at pH between 4.5 to 5.5. ... The following table serves as a guide to the volume required for diffe\"" },
   { name: "Badge SC Bactericide/Fungicide", basis: "other", rate: null, min: 1.5, max: 2, unit: null, epa: "80289-3-10163",
     note: "manufacturer: https://www.gowanco.com/sites/default/files/gowanco_com/_attachments/product/resource/label/badge_sc_80289-3-10163_01-r0116.pdf — \"For ornamental crops in dormancy, apply as a thorough cover spray at rates ranging from 1.5 to 6 pts/A of BADGE SC. When new growth is present, apply as a thorough cover spray at rates ranging from 1.5 to 2 pts/A of BADG\"" },
-  { name: "Banol Fungicide", basis: "per_1000_sqft", rate: null, min: 1.33, max: 2, unit: "fl_oz", epa: "101563-21",
-    note: "manufacturer: https://bynder.envu.com/m/1c708e6275cb8fec/original/Digital_TO_Banol_label_NA_US_EN.pdf — \"Preventative Treatment* 1-1/3 - 2 fl oz in 2 - 5 gallons of water ... Curative Treatment* 3 - 4 fl oz in 2 - 5 gallons of water ... RETREATMENT: Re-treat at 7 - 21 day intervals if conditions remain favorable for disease\"" },
+  { name: "Banol Fungicide", basis: "per_1000_sqft", rate: null, min: 1.33, max: 4, unit: "fl_oz", epa: "101563-21",
+    note: "manufacturer: https://bynder.envu.com/m/1c708e6275cb8fec/original/Digital_TO_Banol_label_NA_US_EN.pdf — \"Preventative Treatment* 1-1/3 - 2 fl oz in 2 - 5 gallons of water ... Curative Treatment* 3 - 4 fl oz in 2 - 5 gallons of water ... Do not apply more than a total of 12.25 fl oz (0.57 lb ai) of BANOL FUNGICIDE per 1,000 sq ft of turfgrass per year\" | NOTE: max 4 = curative ceiling; preventative band is 1.33-2." },
   { name: "Barricade 4FL", basis: "per_1000_sqft", rate: null, min: 0.5, max: 1.1, unit: "fl_oz", epa: "100-1139",
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/000100-01139-20240221.pdf — \"Maximum Application Rate of Barricade 4FL Per Calendar Year by Turf Species: Bermudagrass / Bahiagrass / Centipedegrass / Kikuyugrass / Seashore Paspalum / St. Augustinegrass / Tall Fescue (including turf-type) / Zoysiag\"" },
   { name: "Barricade 65WG", basis: "per_1000_sqft", rate: null, min: 0.36, max: 0.83, unit: "oz", epa: "100-834",
@@ -164,8 +167,8 @@ const DATA = [
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/007969-00272-20190607.pdf — \"Table 3. Application Rates and Timing for Postemergence Weed Control in Turfgrass: Broadcast Application: 64 fl ozs of product per acre or 1.45 fl ozs per 1000 sq ft (0.75 lb ae/A). ... DO NOT apply to Bahiagrass, carpet\" | NOTE: EPA reg matches DB (7969-272, BASF). Standard rate 1.45 fl oz/1,000 sq ft (64 fl oz/A) broadcast or spot. CRITICAL FOR THIS OPERATOR: Table 1 lists St. Augustinegrass, bahi" },
   { name: "Dylox 420 SL T&O Insecticide", basis: "per_1000_sqft", rate: 6.9, min: null, max: null, unit: "fl_oz", epa: "5481-643-432",
     note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Dylox%20420%20Label%205-9-16%20AV2.pdf — \"APPLICATIONS: Landscape Ornamentals (including flowers, shrubs, and trees) and Recreational Lawns & Turf - Annual bluegrass weevil (adults) / Billbug larvae / Mole crickets / Chinch bugs / White grubs (including larvae o\"" },
-  { name: "Eagle 20EW Fungicide", basis: "per_1000_sqft", rate: 1.2, min: 1, max: 2.4, unit: "fl_oz", epa: "62719-463",
-    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/062719-00463-20241113.pdf — \"In non-residential turfgrass (including commercial lawns, ornamental turfgrass, grounds or lawns around business and office complexes, and golf course fairways, roughs, tee boxes, and greens), optimum disease control is \"" },
+  { name: "Eagle 20EW Fungicide", basis: "per_1000_sqft", rate: 1.2, min: null, max: null, unit: "fl_oz", epa: "62719-463",
+    note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/062719-00463-20241113.pdf — \"In residential turfgrass, optimum disease control is achieved when Eagle 20EW is applied in a preventative disease control program at a rate of 1.2 fl oz per 1000 sq ft. ... Do not apply more than 13.8 fl oz of Eagle 20EW per 1000 sq ft per year\" | NOTE: non-residential turf allows 1-2.4 fl oz/1,000 sq ft; the residential table is a flat 1.2 for every listed disease, so 1.2 is both default and per-application max." },
   { name: "Elector PSP", basis: "per_gallon", rate: null, min: 0.2, max: 0.4, unit: "fl_oz", epa: "72642-2",
     note: "distributor_label_pdf: https://library.leedstone.com/docs/Elector-PSP-Product-Label.pdf — \"House flies (adults and larvae), Stable flies, Little house flies: 2 fl. oz. (60 mL) Elector PSP in 10 gallons of water will treat 5,000 - 10,000 ft². Darkling beetles, Hide beetles: 2 fl. oz. (60mL) of product treats 5,\" | NOTE: Agricultural ANIMAL-PREMISE product (poultry houses, barns, feedlots, corrals), not a turf/structural product — rates are pest-specific dilutions tied to area, so no sin" },
   { name: "Envu Specticle Flo Pre-Emergent Liquid Herbicide", basis: "other", rate: 6, min: null, max: null, unit: "fl_oz", epa: "101563-207",
@@ -242,8 +245,8 @@ const DATA = [
     note: "epa_ppls: https://www3.epa.gov/pesticides/chem_search/ppls/010404-00114-20150617.pdf — \"MAXIMUM ANNUAL RATES ... Bermudagrass / Bahiagrass / Centipedegrass / Seashore Paspalum / St. Augustinegrass / Tall Fescue (including turf-type) / Zoysia: 405 [lb Plus Fertilizer / Acre], 9.3 [lb/1,000 sq ft], 1.5 [lb a.\"" },
   { name: "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide", basis: "per_1000_sqft", rate: null, min: 0.5, max: 1.1, unit: "fl_oz", epa: "100-1139-10404",
     note: "siteone: https://www.siteone.com/en/pdf/sdsPDF?resourceId=33935 — \"MAXIMUM APPLICATION RATE OF LESCO STONEWALL 4FL HERBICIDE PER CALENDAR YEAR BY TURF SPECIES: Bermudagrass / Bahiagrass / Centipedegrass / Kikuyugrass / Seashore Paspalum / St. Augustinegrass / Tall Fescue (including turf\"" },
-  { name: "LESCO T-Storm Flowable Thiophanate-Methyl 46.2 Systemic Liquid Fungicide", basis: "per_1000_sqft", rate: null, min: 1.75, max: 5.33, unit: "fl_oz", epa: "228-626",
-    note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Lesco%20T-Storm%20Label%2010-21-11.pdf — \"TURF APPLICATIONS ... Rate of Product fl. oz./1,000 sq ft ... Gray Leaf Spot Pyricularia grisea 3.5 to 5.33 ... Residential and Public Areas (home lawns, parks, athletic fields, schools, day care centers) Maximum Single \" | NOTE: DB listed EPA N/A; label prints EPA Reg. No. 228-626. Turf disease table gives 1.75-3.5 (anthracnose/dollar spot/brown patch group) to 3.5-5.33 fl oz/1,00" },
+  { name: "LESCO T-Storm Flowable Thiophanate-Methyl 46.2 Systemic Liquid Fungicide", basis: "per_1000_sqft", rate: null, min: 1.75, max: 1.75, unit: "fl_oz", epa: "228-626",
+    note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Lesco%20T-Storm%20Label%2010-21-11.pdf — \"Use Sites and Maximum Application Rates ... Residential and Public Areas (home lawns, parks, athletic fields, schools, day care centers): Maximum Single Application Rate 1.75 fl. oz./1,000 sq. ft; Maximum Seasonal Application Rate 7 fl. oz./1,000 sq. ft\" | NOTE: DB listed EPA N/A; label prints EPA Reg. No. 228-626. Disease table runs 1.75-5.33 fl oz/1,000 sq ft but rates above 1.75 are golf-course-only; residential/public turf is capped at 1.75 per single application." },
   { name: "Mainspring GNL Insecticide", basis: "per_1000_sqft", rate: null, min: 0.046, max: 0.459, unit: "fl_oz", epa: "100-1543",
     note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP%201543A-L1A_0923.pdf — \"Turf caterpillars (including armyworms, cutworms, and sod webworms) 2 - 16 fl oz [per Acre] 0.046 - 0.367 fl oz [per 1,000 sq ft] ... White grubs ... 8 - 16 fl oz 0.184 - 0.367 fl oz ... Annual bluegrass weevil 12 - 20 f\"" },
   { name: "Manor", basis: "other", rate: null, min: 0.25, max: 1.0, unit: "oz", epa: "228-373",
@@ -254,13 +257,13 @@ const DATA = [
     note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP1134AL1E0621.pdf — \"Apply Monument 75WG in 1 to 2 gallons water per 1000 sq ft. Use rates of 0.35 to 0.53 oz/A (10-15 grams or 2-3 packets) to control**\"" },
   { name: "Nufarm Arena 0.25G Clothianidin 0.25 Systemic Granular Insecticide", basis: "per_1000_sqft", rate: null, min: 1.84, max: 3.67, unit: "lb", epa: "66330-70-59639",
     note: "distributor_label_pdf: https://www.conncoll.edu/media/website-media/offices/ehs/envhealthdocs/Arena_.25G_Label.pdf — \"TURFGRASS ... APPLICATION RATE 1.84-3.67 lbs per 1,000 sq ft / 80-160 lbs per acre (0.2-0.4 lbs ai/A) ... Arena 0.25 G can be applied to turf at 80-160 lbs per acre. The rate is dependent on the target pest(s), their sta\"" },
-  { name: "Nufarm Cleary 3336F Fungicide", basis: "per_1000_sqft", rate: null, min: 2, max: 6, unit: "fl_oz", epa: "1001-69",
-    note: "distributor_label_pdf: http://www.cdms.net/ldat/ld3N2001.pdf — \"Table 1 Residential or Public Areas: Maximum Application Rate of 3336 F = 0.68 Gallon/Acre (2 fl oz / 1,000 sq ft); Minimum Retreatment Interval 14 days. Table 3 Turf Disease Control (fl oz/1,000 sq ft): Anthracnose foli\"" },
+  { name: "Nufarm Cleary 3336F Fungicide", basis: "per_1000_sqft", rate: null, min: 2, max: 2, unit: "fl_oz", epa: "1001-69",
+    note: "distributor_label_pdf: http://www.cdms.net/ldat/ld3N2001.pdf — \"Table 1 Residential or Public Areas: Maximum Application Rate of 3336 F = 0.68 Gallon/Acre (2 fl oz / 1,000 sq ft); Minimum Retreatment Interval 14 days\" | NOTE: Table 3 disease rates run 2-6 fl oz/1,000 sq ft but rates above 2 are golf tees/greens/fairways-only; residential/public turf is capped at 2 per application (Table 1)." },
   { name: "Onslaught Fastcap", basis: "per_gallon", rate: null, min: 0.5, max: 1.0, unit: "fl_oz", epa: "1021-2574",
     note: "distributor_label_pdf: https://indfumco.com/wp-content/uploads/2020/10/Onslaught-Fastcap-Spider-Scorpion-Insecticide-Label-EPA-1021-2574-8.27.20.pdf — \"Use 0.5 fl. oz. of Onslaught FastCap Spider & Scorpion Insecticide in 1 gallon of water for light infestations or as a maintenance control rate. Use 1.0 fl. oz. per gallon of water for heavy infestations or as an initial\"" },
   { name: "PGF Complete 16-4-8", basis: "per_1000_sqft", rate: 3.6, min: 1.8, max: 3.6, unit: "lb", epa: null,
     note: "manufacturer: https://assets.theandersons.com/asset/06649983-6b6d-4df9-b13c-ab3f8cc09458/pgf-complete-16-4-8-fertilizer-label-pdf.pdf — \"SPREADER SETTINGS: This bag is designed to deliver 3.6 lbs. of product per 1,000 sq. ft., for a total coverage of 5,000 sq. ft. [Spreader table columns:] LOW RATE 1.8 lbs/1,000 sq. ft. — HIGH RATE 3.6 lbs/1,000 sq. ft.\"" },
-  { name: "Permethrin SFR", basis: "per_gallon", rate: 1.67, min: 1.67, max: 3.33, unit: "fl_oz", epa: "70506-6-53883",
+  { name: "Permethrin SFR", basis: "per_gallon", rate: 1.67, min: 1.67, max: 3.33, unit: "fl_oz", epa: "53883-90",
     note: "manufacturer: https://www.controlsolutionsinc.com/hubfs/Specimen%20Labels/Specimen-PermethrinSFR-53883-90.pdf?hsLang=en — \"Broadcast Treatment for Control of Nuisance Pests: Apply using a 0.5% emulsion as a residual spray to outside surfaces of buildings... [Rate/Volume Conversion Chart] Desired Gallons of Finished Emulsion: 1 -- 0.5%: 1 2/3\"" },
   { name: "Pillar G Intrinsic", basis: "per_1000_sqft", rate: 3.0, min: null, max: null, unit: "lb", epa: "7969-304",
     note: "distributor_label_pdf: https://www.domyown.com/msds/Pillar_G_Intrinsic_Label.pdf — \"Apply Pillar G Intrinsic at a use rate of 3.0 lbs product/1000 sq ft (131 lbs product/A) on a 14-day to 28-day interval for the following diseases.\"" },
@@ -272,7 +275,7 @@ const DATA = [
     note: "distributor_label_pdf: https://labelsds.com/images/user_uploads/Quali-Pro%20Propiconazole%2014.3%20Label%208-22-23.pdf — \"Brown Patch (Rhizoctonia solani): 1-2 fl. oz. per 1000 sq. ft. (0.01-0.02 lbs. A.I./1000 Sq. Ft.), 44-88 fl oz/acre, 14-21 days. Dollar Spot: 0.5-1 fl oz/1000 sq ft with tank mix, or 1-2 fl. oz. per 1000 sq. ft. without \"" },
   { name: "Recognition Post Emergent Herbicide", basis: "per_1000_sqft", rate: null, min: 0.03, max: 0.045, unit: "oz", epa: "100-1658",
     note: "manufacturer: https://assets.syngenta-us.com/pdf/labels/SCP%201658B-L1C%200224.pdf — \"Broadleaves, sedges, and grass weeds listed in Section 6.1 — Use Rate: 1.29 – 1.95 oz/A; 0.030 – 0.045 oz/1,000 sq feet (0.260 - 0.398 oz trifloxysulfuron-sodium) — Apply postemergence when weeds are actively growing. A \"" },
-  { name: "Roundup QuikPro SC", basis: "per_gallon", rate: 16, min: null, max: null, unit: "fl_oz", epa: "432-1532",
+  { name: "Roundup QuikPro SC", basis: "per_1000_sqft", rate: 16, min: null, max: null, unit: "fl_oz", epa: "432-1532",
     note: "distributor_label_pdf: https://www.arborchem.com/Images/Label-SDS/Roundup%20QuickPro%20SC%20Total%20Label.pdf — \"Add 16 oz of product per 1 gallon of water. ... Rate: 16 fl oz Product — Add To: 1 gal of water — Covers: 1000 sq ft. Note: Do Not Apply more than a maximum of 32 fl oz/ 1000 sq ft per year.\"" },
   { name: "Safari 20 SG", basis: "per_1000_sqft", rate: null, min: 0.2, max: 0.4, unit: "oz", epa: "86203-11-59639",
     note: "distributor_label_pdf: https://www.cdms.net/ldat/ldAC2000.pdf — \"Foliar Spray 1/4 to 1/2 lb per 100 gallons (4 to 8 oz per 100 gallons) ... 8-16 oz per Acre ... 0.2-0.4 oz per 1,000 sq ft ... For treatment of small areas: 1/2-1.0 tsp per gallon. One (1) level teaspoon contains 2.4 gra\"" },
@@ -375,7 +378,13 @@ exports.up = async function up(knex) {
     if (d.epa && emptyText(row.epa_reg_number)) updates.epa_reg_number = d.epa;
     // EPA-corrected rows REPLACE their audit note/stamps — an older seed's
     // note citing the superseded reg number must not outlive the correction.
-    if (d.note && (emptyText(row.label_source_note) || isEpaCorrection)) updates.label_source_note = d.note;
+    if (d.note && (emptyText(row.label_source_note) || isEpaCorrection)) {
+      updates.label_source_note = d.note;
+    } else if (d.note && Object.keys(updates).length && !row.label_source_note.endsWith(d.note)) {
+      // A row verified by an earlier batch keeps its note, but the rate
+      // fields written above need provenance too — append, never replace.
+      updates.label_source_note = `${row.label_source_note} | ${d.note}`;
+    }
     if (row.label_verified_at == null || isEpaCorrection) {
       updates.label_verified_at = new Date();
       updates.label_verified_by = VERIFIED_BY;
@@ -430,7 +439,12 @@ exports.down = async function down(knex) {
     if (d.epa && row.epa_reg_number === d.epa && !EPA_CORRECTION_NAMES.has(d.name.toLowerCase())) {
       reverts.epa_reg_number = null;
     }
-    if (d.note && row.label_source_note === d.note) reverts.label_source_note = null;
+    if (d.note && row.label_source_note === d.note) {
+      reverts.label_source_note = null;
+    } else if (d.note && row.label_source_note && row.label_source_note.endsWith(` | ${d.note}`)) {
+      // Strip only our appended provenance; the earlier batch's note stays.
+      reverts.label_source_note = row.label_source_note.slice(0, -(` | ${d.note}`.length));
+    }
     await knex('products_catalog')
       .where({ id: row.id })
       .update({ ...reverts, updated_at: new Date() });
