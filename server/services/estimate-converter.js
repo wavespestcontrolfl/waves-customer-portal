@@ -1666,7 +1666,7 @@ const EstimateConverter = {
               : `WaveGuard Membership — 12 months prepaid (setup fee waived)`;
           const prepayNotes = prepayDiscountApplied
             ? `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — ${prepayDiscountPctLabel} annual-prepay discount applied to the recurring annual.`
-            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99 setup fee waived per WaveGuard membership policy.`;
+            : `Auto-generated from accepted estimate #${estimateId}. Customer selected "Pay the year upfront" — $99.00 setup fee waived per WaveGuard membership policy.`;
           // Commercial prepay tax: pass an explicit BLENDED rate (see
           // resolveCommercialPrepayTaxRate) so only the taxable pest share of a
           // mixed commercial plan is taxed. Non-commercial prepay passes no rate
@@ -1916,9 +1916,9 @@ const EstimateConverter = {
             ? 'WaveGuard Membership Setup + First Application'
             : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
           const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee plus first application.`
+            ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee plus first application.`
             : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — $99.00 setup fee only.`
                 : `Auto-generated from accepted estimate #${estimateId}. Customer selected pay per application — first application only.`);
           let inv = null;
           let appliedDepositCredit = 0;

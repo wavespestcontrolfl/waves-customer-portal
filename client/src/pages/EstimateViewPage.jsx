@@ -28,7 +28,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import PriceCard, { perApplicationNetForFrequency } from '../components/estimate/PriceCard';
+import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
@@ -4021,28 +4021,18 @@ export default function EstimateViewPage() {
   const isLockedMirrorSection = (section) => (
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
-  // Live price for the glass sticky book bar — it must quote exactly what
-  // the cards quote. Multi-service plans show NO price here (owner directive
-  // 2026-07-11: no combined monthly total anywhere customer-facing — each
-  // card carries its own per-application price). Single service: the same
-  // per-application figure PriceCard leads with, falling back to the cadence
-  // total only when no unambiguous per-application price exists
-  // (flat-monthly monitoring, multi-row legacy sections).
-  const stickyBarPrice = (() => {
-    const HIDDEN = { label: null, period: null };
-    if (services.length > 1) return HIDDEN;
-    const src = currentFrequency;
-    if (!src || src.quoteRequired === true || src.monthly == null) return HIDDEN;
-    // Narrow low-confidence commercial estimates price as a $low–$high
-    // RANGE on the cards; a fixed bar quoting one exact number would
-    // contradict them mid-booking, so it stays hidden for ranged pricing.
-    if (Number(src.lowConfidenceRangePct) > 0) return HIDDEN;
-    const perApp = services[0]?.key !== 'bundle' ? perApplicationNetForFrequency(src) : null;
-    if (perApp != null) return { label: fmtMoney(perApp), period: '/application' };
-    const billingKey = src.billingFrequencyKey || src.key;
-    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
-    const period = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
-    return { label: fmtMoney(Math.round(Number(src.monthly) * intervalMonths * 100) / 100), period };
+  // Render gate for the glass sticky book bar. The bar displays NO price
+  // (owner 2026-07-10) — this only decides whether the selection is PRICED:
+  // quote-required and ranged (low-confidence commercial) selections keep
+  // the bar hidden, everything else keeps its approve CTA. Multi-service
+  // plans gate off the combined frequency's priced-ness WITHOUT computing a
+  // displayable total (owner 2026-07-11: no combined totals anywhere;
+  // codex 2639 r1: hiding the bar itself for multi-service was a bug).
+  const stickyBarPriced = (() => {
+    const src = services.length > 1 ? combinedFrequency : currentFrequency;
+    if (!src || src.quoteRequired === true || src.monthly == null) return false;
+    if (Number(src.lowConfidenceRangePct) > 0) return false;
+    return true;
   })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
@@ -4685,7 +4675,7 @@ export default function EstimateViewPage() {
           would cover the confirm/cancel buttons. */}
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
-          priceLabel={stickyBarPrice.label}
+          show={stickyBarPriced}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />
