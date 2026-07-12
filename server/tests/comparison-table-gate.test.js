@@ -1114,6 +1114,62 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-18 findings (#2633) ──
+
+  test('Codex r18: table-less modal and possession accusations block; denials stay clean', () => {
+    for (const prose of ['Acme Pest Solutions may charge hidden fees.', 'Acme Pest Solutions uses scam pricing.', 'Avoid dishonest pricing from Acme Pest Solutions.']) {
+      const r = gate.evaluate({ body: prose }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    // ("never" stays in SUBJECT_VERBS by prior design — the r15 denial
+    // guards use "doesn't" for the same reason.)
+    for (const prose of ["Acme Pest Solutions doesn't charge hidden fees.", 'There are no reports of hidden fees from Acme Pest Solutions.']) {
+      const r = gate.evaluate({ body: prose }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+  });
+
+  test('Codex r18: adjective-first service-area geography stays clean', () => {
+    const r = gate.evaluate({ body: `Shady service areas around the lanai stay humid longest.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
+  test('Codex r18: statistical is-ranked #1 stays clean; heading-form Rated #1 still blocks', () => {
+    const stat = gate.evaluate({ body: `Florida is ranked #1 for termite pressure.\n\n${CATEGORY_TABLE}` }, {});
+    expect(stat.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(stat.pass).toBe(true);
+    for (const prose of ['Rated the #1 choice by local homeowners.', 'We are ranked #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r18: negated competitor-adjective proximity is not a hard block', () => {
+    const r = gate.evaluate({ body: `No shady billing from Orkin.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+  });
+
+  test('Codex r18: lowercase heat-waves linking copy stays clean; capitalized Waves subject blocks', () => {
+    const literal = gate.evaluate({ body: `Summer heat waves can be lousy for St. Augustinegrass.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(literal.pass).toBe(true);
+    const brand = gate.evaluate({ body: `Waves can be lousy at explaining fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(brand.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r18: sentence-level denials of sourced accusations stay clean', () => {
+    const r = gate.evaluate({ body: `There are no reports of hidden fees from acme pest solutions.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r18: without/zero separator denials stay clean', () => {
+    for (const prose of ['Waves: zero hidden fees.', 'Bug Busters: without hidden fees or surprises.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+  });
+
   // ── Codex round-17 findings (#2633) ──
 
   test('Codex r17: bait-and-switch as a verb with a victim object blocks', () => {

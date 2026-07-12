@@ -135,10 +135,12 @@ const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|ov
 // punctuation defeat the directed arms (Codex r3 on #2633). Gap words must
 // not be NEGATORS: "We never charge hidden fees" / "Waves never overcharges"
 // are the accusation's denial, not the accusation.
-const NON_NEGATED_WORD = "(?!(?:never|not|no|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
+// without/zero are negators here too — "Waves: zero hidden fees" is a denial
+// (Codex r18 on #2633).
+const NON_NEGATED_WORD = "(?!(?:never|not|no|without|zero|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
-  `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
+  `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
   // Linking verbs incl. modal/hedged and sensory forms ("companies may be
   // dishonest", "providers sound shady" — Codex r10/r11 on #2633; same set
   // as the own-brand arm). Standalone appear counts as a copula too —
@@ -150,10 +152,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Prepositional form takes the noun directly — "companies with hidden
   // fees should be avoided" (Codex r16); the negator-free article gap keeps
   // "providers with no hidden fees" a denial.
-  `\\b(?:${PROVIDER_NOUN})\\b(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gap here too — "companies, frankly, charge hidden
   // fees" (Codex r7 on #2633).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
 ].join('|'), 'i');
 
 // Disparagement DIRECTED at the own brand ("Waves is dishonest", "Waves
@@ -177,7 +179,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // The DISP token must still sit right after the verb (short determiner
   // gap only): that adjacency is what keeps "Waves keeps shady corners
   // treated" clean.
-  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // (The Waves-subject linking arm lives outside this joined regex: it needs
+  // a case-SENSITIVE brand anchor — lowercase "waves" is the common noun
+  // ("summer heat waves can be lousy for turf") — so it runs as an
+  // anchor+tail pair like the separator arms; Codex r18 on #2633.)
   // First-person possessive claims with a linking verb ("Our billing is
   // shady", "Our pricing is dishonest") — business-practice and people/org
   // nouns ONLY ("Our team is dishonest" — Codex r17), so literal shade
@@ -237,7 +242,11 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // Customer-choice verbs and "their" ride along — "homeowners choose us
   // as #1", "customers make us their #1 choice" (Codex r16).
   `\\b(?:rate[sd]?|rank(?:s|ed)?|vote[sd]?|name[sd]?|calls?|called|makes?|made|chooses?|chose|selects?|selected|picks?|picked|prefers?|preferred)\\s+us\\s+(?:(?:as|the|your|a|an|their)\\s+){0,2}${NUMERIC_ONE_ALT}`,
-  `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // Subjectless "Rated #1" heading forms. The lookbehind drops "X is ranked
+  // #1" statistical statements ("Florida is ranked #1 for termite pressure"
+  // — Codex r18); subject-anchored is-ranked forms are covered by the
+  // we/waves/provider-noun arms, whose word gaps absorb "ranked".
+  `(?<!\\b(?:is|are|was|were)\\s)\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own-brand subject with the ranking verb anywhere in the same sentence —
   // "Waves, after years of serving …, is #1" sits outside any proximity
   // window (Codex r5 on #2633). The verb must still be adjacent to the
@@ -271,6 +280,14 @@ const OWN_BRAND_SEP_TAIL_RE = new RegExp(
 // Separator anchors count for #1 too — "Waves — the #1 choice" (Codex r12).
 const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}(?:\\s*[,:—–-]\\s*|\\s+)`);
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
+// Waves-subject linking-verb disparagement, case-sensitive anchor + case-
+// insensitive tail ("Waves is dishonest", "Waves may be dishonest") — pulled
+// out of OWN_BRAND_DISPARAGEMENT_RE because that regex's 'i' flag made
+// lowercase common-noun "waves" a subject ("summer heat waves can be lousy
+// for turf" hard-blocked; Codex r18 on #2633).
+const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
+  `^${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`, 'i',
+);
 
 // Linking/behavioral verbs that tie a subject name to a following negative
 // term (shared by the table-less directed scans). Includes the hedged/linking
@@ -473,6 +490,21 @@ const RELIABILITY_LABEL_RE = /\b(answers?|responds?|responsive|response|reachabl
 
 function finding(severity, code, message) {
   return { severity, code, message };
+}
+
+// Sentence-level denial check shared by the proximity/object/sourced arms
+// (Codex r12/r17/r18 on #2633): a negator anywhere earlier in the same
+// sentence makes the match a denial ("There are no reports of hidden fees
+// from Acme"), not an accusation.
+const SENTENCE_NEGATOR_RE = /\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i;
+function sentenceHasNegator(text, index, length) {
+  const sentStart = Math.max(
+    text.lastIndexOf('.', index),
+    text.lastIndexOf('!', index),
+    text.lastIndexOf('?', index),
+    text.lastIndexOf('\n', index),
+  ) + 1;
+  return SENTENCE_NEGATOR_RE.test(text.slice(sentStart, index + length));
 }
 
 function normalize(s) {
@@ -769,16 +801,35 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
     );
     // Negative adjective immediately modifying the name ("the dishonest
-    // Acme Pest Solutions").
-    const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
+    // Acme Pest Solutions"). Denial-guarded like the table path ("No hidden
+    // fees from Acme" — Codex r18).
+    const negBeforeName = new RegExp(`(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
     // ACTIVE disparaging predicate right after the name ("<Name> scams
     // customers", "<Name> charges hidden fees") — the linking-verb shape
     // above misses transitive verbs, and these victim-anchored idioms only
-    // read with the name as subject. Up to two adverbs may intervene.
+    // read with the name as subject. Same appositive-tolerant gap and
+    // modal-capable adverbs as the table path ("<Name> may charge hidden
+    // fees" — Codex r18); the negator-excluded gap keeps "<Name> never
+    // charges hidden fees" a denial.
     const activeP0 = new RegExp(
-      `${escaped}\\b(?:['’]s?)?\\s+(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
+      `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
     );
-    if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText) || activeP0.test(nameScanText)) {
+    // Possession/usage and sourced-at-name accusations, mirroring the table
+    // path ("<Name> uses scam pricing", "dishonest pricing from <Name>" —
+    // Codex r18); the sourced form is sentence-level denial-guarded.
+    const possessionP0 = new RegExp(
+      `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+    );
+    const fromP0 = new RegExp(`(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
+    let disparaged = directedP0.test(nameScanText)
+      || activeP0.test(nameScanText) || possessionP0.test(nameScanText);
+    if (!disparaged) {
+      // Association shapes take the sentence-level denial guard, same as
+      // the table path (Codex r18).
+      const fm = nameScanText.match(negBeforeName) || nameScanText.match(fromP0);
+      disparaged = Boolean(fm && !sentenceHasNegator(nameScanText, fm.index, fm[0].length));
+    }
+    if (disparaged) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
         `Draft directs disparaging language at "${name}". State neutral attributes only — in prose, the title, and the meta.`));
       break;
@@ -965,19 +1016,25 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     let dm;
     while ((dm = bareDispRe.exec(proseText)) !== null) {
       if (!nearBusinessName(dm.index, dm[0].length)) continue;
-      // Sentence-level negation check, same as the objAssoc arm (Codex r12):
       // "No hidden fees from Acme Pest Solutions" is a denial even though
       // the token sits near a business name (Codex r17 guard on #2633).
-      const sentStart = Math.max(
-        proseText.lastIndexOf('.', dm.index),
-        proseText.lastIndexOf('!', dm.index),
-        proseText.lastIndexOf('?', dm.index),
-        proseText.lastIndexOf('\n', dm.index),
-      ) + 1;
-      const sentence = proseText.slice(sentStart, dm.index + dm[0].length);
-      if (/\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i.test(sentence)) continue;
+      if (sentenceHasNegator(proseText, dm.index, dm[0].length)) continue;
       disp = dm;
       break;
+    }
+  }
+  if (!disp) {
+    // Waves-subject linking-verb arm — case-sensitive anchor (see
+    // OWN_BRAND_LINKING_TAIL_RE; Codex r18 on #2633). Every anchor is
+    // checked, like the separator loop.
+    const linkAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
+    let la;
+    while ((la = linkAnchorRe.exec(scanText)) !== null) {
+      const tm = OWN_BRAND_LINKING_TAIL_RE.exec(scanText.slice(la.index + la[0].length));
+      if (tm) {
+        disp = [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
+        break;
+      }
     }
   }
   if (!disp) {
@@ -1029,10 +1086,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
       // Accusation-phrase SOURCED at the name — "dishonest pricing from
-      // acme pest solutions" (Codex r17 on #2633). Denial-guarded: "no
-      // hidden fees from Acme" is marketing-clean.
+      // acme pest solutions" (Codex r17 on #2633). Sentence-level denial
+      // guard at the match site: "There are no reports of hidden fees from
+      // Acme" is marketing-clean (Codex r18).
       const fromP0 = new RegExp(
-        `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
+        `(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
       );
       // Name-confident PERSONIFIED names also get a same-sentence
       // accusation-object association ("Customers report hidden fees after
@@ -1051,27 +1109,26 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
       let dm = proseNameText.match(directedP0)
-        || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
-        || proseNameText.match(fromP0)
         || proseNameText.match(objInsultP0)
         || (sepP0 && proseNameText.match(sepP0));
+      if (!dm) {
+        // negBeforeName and fromP0 are association shapes — a sentence-level
+        // negator denies them ("There are no reports of hidden fees from
+        // Acme") even when it sits several words earlier (Codex r18). The
+        // subject-verb arms above keep their negator-excluded gaps instead:
+        // a blanket sentence guard would clear real accusations ("Not only
+        // that, X scams customers").
+        const am = proseNameText.match(negBeforeName) || proseNameText.match(fromP0);
+        if (am && !sentenceHasNegator(proseNameText, am.index, am[0].length)) dm = am;
+      }
       if (!dm && objAssocP0) {
         // Sentence-level negation check: "Customers do NOT report hidden
         // fees after choosing Bug Busters" is a denial even though the
         // negator sits before the object (Codex r12 on #2633).
         const am = proseNameText.match(objAssocP0);
-        if (am) {
-          const sentStart = Math.max(
-            proseNameText.lastIndexOf('.', am.index),
-            proseNameText.lastIndexOf('!', am.index),
-            proseNameText.lastIndexOf('?', am.index),
-            proseNameText.lastIndexOf('\n', am.index),
-          ) + 1;
-          const sentence = proseNameText.slice(sentStart, am.index + am[0].length);
-          if (!/\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i.test(sentence)) dm = am;
-        }
+        if (am && !sentenceHasNegator(proseNameText, am.index, am[0].length)) dm = am;
       }
       if (dm) { disp = dm; break; }
     }
@@ -1204,15 +1261,17 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         .replace(/\s+/g, ' ');
       return competitorNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
     };
-    // Disparaging adjective near a competitor name → P0.
+    // Disparaging adjective near a competitor name → P0. Denial-guarded:
+    // "No shady billing from Orkin" keeps at most the competitor-in-prose
+    // review finding, never a hard block (Codex r18 on #2633).
     const adjRe = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'ig');
     let am;
     while ((am = adjRe.exec(proseText)) !== null) {
-      if (nearCompetitor(am.index, am[0].length)) {
-        findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
-          `Comparison draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only.`));
-        break;
-      }
+      if (!nearCompetitor(am.index, am[0].length)) continue;
+      if (sentenceHasNegator(proseText, am.index, am[0].length)) continue;
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `Comparison draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only.`));
+      break;
     }
     // Negative service-reliability claim near a competitor name → P1 review.
     const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'ig');
