@@ -8,6 +8,13 @@
 //   railway run --service Postgres node ops/agents/retention-purge.js            # dry run
 //   railway run --service Postgres node ops/agents/retention-purge.js --execute
 //   ... --execute --tag audit-purge-2026-07-11                                   # explicit tag
+
+// Fail closed: without this, pg falls back to libpq env defaults and the
+// UPDATE could land in whatever local/dev database is reachable.
+if (!process.env.DATABASE_PUBLIC_URL) {
+  console.error('DATABASE_PUBLIC_URL is not set — run via: railway run --service Postgres node ops/agents/retention-purge.js');
+  process.exit(1);
+}
 const { Client } = require('pg');
 
 const execute = process.argv.includes('--execute');
