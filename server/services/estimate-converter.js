@@ -1706,12 +1706,28 @@ const EstimateConverter = {
             throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
           }
           const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
+          // Labeled manual discount on the prepay invoice (owner 2026-07-11):
+          // DESCRIPTION-level only — the prepay line stays at the NET
+          // annualAmount because annual-prepay-renewals seeds each covered
+          // visit's fallback estimated_price from invoices.subtotal
+          // (annual-prepay-renewals.js ~375-379); a grossed subtotal would
+          // rebill voided/refunded prepay visits at the pre-credit rate
+          // (codex 2652 r1). The prepay % discount is already communicated
+          // the same way (in the line description), so the manual credit
+          // rides beside it. The standard (per-application) leg keeps the
+          // real labeled discount line — its invoice subtotal feeds nothing.
+          const prepayManualLabel = opts.manualDiscountItemization
+            && Number(opts.manualDiscountItemization.annualAmount) > 0
+            ? String(opts.manualDiscountItemization.label || '').trim()
+            : '';
           const inv = await InvoiceService.create({
             database,
             customerId,
             title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
             lineItems: [{
-              description: prepayLineDescription,
+              description: prepayManualLabel
+                ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                : prepayLineDescription,
               quantity: 1,
               unit_price: annualAmount,
             }],

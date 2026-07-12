@@ -619,15 +619,39 @@ async function calculateUpdateFinancials({
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
     taxAmount = Math.round(afterDiscount * rate * 100) / 100;
   }
+  // Mirror create()'s resolved-name labeling (codex 2652 r2: an admin edit
+  // recomputed the label back to the generic literal, wiping the promised
+  // "Referral Credit" from the pay page/PDF). Names come from each negative
+  // line's catalog row or its own description; same varchar(100) bound.
+  const editDiscountNames = [...new Set(
+    items
+      .filter((item) => Number(item.amount) < 0 && item.category !== "deposit_credit")
+      .map((item) => {
+        const row = item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null;
+        // Catalog rows keep their CANONICAL name (codex 2652 r3: the editor
+        // sends verbose descriptions like "WaveGuard Silver (Pest Control)",
+        // which would drift the label on a no-op save and eat the 100-char
+        // cap); only plain negative lines label from their own description.
+        return String((row && row.name) || item.description || "").trim();
+      })
+      .filter(Boolean),
+  )];
   const labelParts = [
-    lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+    ...(lineItemDiscountAmount > 0
+      ? (editDiscountNames.length ? editDiscountNames : ["Line-item discounts"])
+      : []),
   ].filter(Boolean);
 
+  const editJoinedLabel = labelParts.join(" + ");
   return {
     line_items: JSON.stringify(items),
     subtotal,
     discount_amount: discountAmount,
-    discount_label: labelParts.length ? labelParts.join(" + ") : null,
+    discount_label: labelParts.length
+      ? (editJoinedLabel.length > 100 ? `${editJoinedLabel.slice(0, 97)}...` : editJoinedLabel)
+      : null,
     tax_rate: rate,
     tax_amount: taxAmount,
     total: Math.max(
@@ -1204,11 +1228,26 @@ const InvoiceService = {
       discountAmount = subtotal;
     }
 
+    // Line-item discounts label with their RESOLVED names (owner 2026-07-11:
+    // the invoice shows the same discount label the estimate promised —
+    // "Referral Credit", not the generic "Line-item discounts"). The literal
+    // survives only as the fallback for a nameless line.
+    const lineItemDiscountNames = [...new Set(
+      lineItemDiscounts.map((m) => String(m.name || "").trim()).filter(Boolean),
+    )];
     const labelParts = [
       ...manualDiscounts.map((m) => m.row.name),
-      lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+      ...(lineItemDiscountAmount > 0
+        ? (lineItemDiscountNames.length ? lineItemDiscountNames : ["Line-item discounts"])
+        : []),
     ].filter(Boolean);
-    const discountLabel = labelParts.length ? labelParts.join(" + ") : null;
+    // invoices.discount_label is varchar(100) while discount names allow 200
+    // chars (codex 2652 r1) — bound the joined label so the insert can never
+    // fail on a long or multi-name label.
+    const joinedDiscountLabel = labelParts.join(" + ");
+    const discountLabel = labelParts.length
+      ? (joinedDiscountLabel.length > 100 ? `${joinedDiscountLabel.slice(0, 97)}...` : joinedDiscountLabel)
+      : null;
 
     const afterDiscount = subtotal - discountAmount;
 
