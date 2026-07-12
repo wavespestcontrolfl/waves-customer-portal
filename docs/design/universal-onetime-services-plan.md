@@ -763,3 +763,32 @@ and a success measure, reusing the contract-§10 instrumentation:
     visit per property which works today)? (b) should customers get an
     explicit commercial designation instead of tier/tax inference?
     (c) priority of the compliance-logbook export?
+
+## Ratified decisions (2026-07-12)
+
+Interview run in the terminal session with the owner; answers recorded
+verbatim per the kickoff protocol.
+
+**A0 finding that reframed Q1:** the A0 review list
+(`ops/agents/rodent-shadow-report-list.js`, first prod run 2026-07-12) found
+**zero rodent completions of any kind since the 2026-06-12 cutover** — no
+typed shadow reports, no rodent projects. ~40 rodent visits sit queued
+(pending/confirmed/on_site/en_route). The three completed
+`pest_rodent_quarterly` visits (2025-10-25, 2025-11-18, 2026-01-16) predate
+the cutover and stored no service_records. There are no stored reports to
+review.
+
+- **Q1 (rodent graduation):** "Review fixture renders now" — render sample
+  reports from the golden fixtures for each rodent form (trapping,
+  exclusion, sanitation, inspection, bait station), owner skims, then ONE
+  migration graduates the whole family + the `pest_rodent_quarterly`
+  companion + the `rodent_monitoring` repoint. Phase A §5 item 2's "review
+  stored reports" gate is satisfied by the fixture-render review.
+- **Q2 (bed bug):** "Approve copy; visibility later" — customer wording
+  approved, cutover migration ships; `customer_visible` flip stays a
+  separate later owner call.
+- **Q3 (cockroach_control):** "Yes, flip it" — cutover to the typed
+  `cockroach` flow ships with the Phase-B batch.
+- **Q4 (general_appointment / waveguard_initial_setup):** "Leave both
+  as-is" — recorded as explicitly owner-excluded lanes in the B0 coverage
+  audit.
