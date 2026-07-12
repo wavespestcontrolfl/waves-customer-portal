@@ -342,7 +342,12 @@ const OWN_BRAND_SEP_TAIL_RE = new RegExp(
 );
 // Separator anchors count for #1 too — "Waves — the #1 choice" (Codex r12).
 const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_DESCRIPTOR_HOP}(?:\\s*[,:—–-]\\s*|\\s+)`);
-const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
+// The #1 must DECLARE the brand a winner: a winner-noun tail or sentence
+// end — "Waves Pest Control: #1 entry point for ants" ranks the tip, not
+// the company (Codex r29 on #2633).
+const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
+  `^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?|spots?|overall|rank(?:ing)?s?|positions?)\\b|\\s*(?:[.!?]|$))`, 'i',
+);
 // Waves-subject linking-verb disparagement, case-sensitive anchor + case-
 // insensitive tail ("Waves is dishonest", "Waves may be dishonest") — pulled
 // out of OWN_BRAND_DISPARAGEMENT_RE because that regex's 'i' flag made
@@ -638,6 +643,18 @@ function sentenceHasNegator(text, index, length) {
 // lead-ins ("Not only that, X is dishonest") sit before the match entirely.
 function spanUnnegated(m) {
   return m && !SENTENCE_NEGATOR_RE.test((m.groups && m.groups.dtail) || m[0]) ? m : null;
+}
+
+// First unnegated match of `re` in `text` — a denied early sentence must
+// not shadow a later live accusation (Codex r28/r29 on #2633).
+function firstUnnegatedMatch(text, re) {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m;
+  while ((m = g.exec(text)) !== null) {
+    if (!sentenceHasNegator(text, m.index, m[0].length)) return m;
+    if (m.index === g.lastIndex) g.lastIndex += 1;
+  }
+  return null;
 }
 
 // ── Own-brand scans, shared by the table and table-less paths ──
@@ -1085,9 +1102,9 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i')
         : null;
-      const fm = nameScanText.match(negBeforeName) || nameScanText.match(fromP0)
-        || (objAssocP0 && nameScanText.match(objAssocP0));
-      disparaged = Boolean(fm && !sentenceHasNegator(nameScanText, fm.index, fm[0].length));
+      disparaged = Boolean(firstUnnegatedMatch(nameScanText, negBeforeName)
+        || firstUnnegatedMatch(nameScanText, fromP0)
+        || (objAssocP0 && firstUnnegatedMatch(nameScanText, objAssocP0)));
     }
     if (disparaged) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
@@ -1374,24 +1391,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       let dm = spanUnnegated(proseNameText.match(directedP0))
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
-        || proseNameText.match(objInsultP0)
         || (sepP0 && proseNameText.match(sepP0));
       if (!dm) {
-        // negBeforeName and fromP0 are association shapes — a sentence-level
-        // negator denies them ("There are no reports of hidden fees from
-        // Acme") even when it sits several words earlier (Codex r18). The
-        // subject-verb arms above keep their negator-excluded gaps instead:
-        // a blanket sentence guard would clear real accusations ("Not only
-        // that, X scams customers").
-        const am = proseNameText.match(negBeforeName) || proseNameText.match(fromP0);
-        if (am && !sentenceHasNegator(proseNameText, am.index, am[0].length)) dm = am;
-      }
-      if (!dm && objAssocP0) {
-        // Sentence-level negation check: "Customers do NOT report hidden
-        // fees after choosing Bug Busters" is a denial even though the
-        // negator sits before the object (Codex r12 on #2633).
-        const am = proseNameText.match(objAssocP0);
-        if (am && !sentenceHasNegator(proseNameText, am.index, am[0].length)) dm = am;
+        // Association and object-position shapes take the sentence-level
+        // denial guard ("There are no reports of hidden fees from Acme",
+        // "No one calls Bug Busters a scam" — Codex r18/r29) and ITERATE
+        // past denied sentences so a denial can't shadow a later live
+        // accusation (Codex r29). The subject-verb arms above keep their
+        // negator-excluded gaps instead: a blanket sentence guard would
+        // clear real accusations ("Not only that, X scams customers").
+        dm = firstUnnegatedMatch(proseNameText, negBeforeName)
+          || firstUnnegatedMatch(proseNameText, fromP0)
+          || firstUnnegatedMatch(proseNameText, objInsultP0)
+          || (objAssocP0 && firstUnnegatedMatch(proseNameText, objAssocP0));
       }
       if (dm) { disp = dm; break; }
     }
@@ -1400,6 +1412,24 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
       `Comparison draft contains disparaging language about a provider ("${disp[0].trim()}"). State attributes, never insults — in the table, the prose, or the title/meta.`));
   }
+  // Reliability claims against name-confident/personified prose targets —
+  // "Bug Busters never answers the phone" beside a table routes to review
+  // exactly like the table-less path (Codex r29 on #2633).
+  if (!disp) {
+    for (const name of extraProseNames) {
+      if (!PERSONIFIED_SUFFIX_RE.test(name) && !confidentProseNames.has(name)) continue;
+      const escaped = escapeForNameRe(name);
+      const directedReliability = new RegExp(
+        `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+      );
+      if (directedReliability.test(proseNameText)) {
+        findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+          `Comparison draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
+        break;
+      }
+    }
+  }
+
   // Non-numeric self-ranking ("clear winner", "the best choice in …") stays a
   // whole-text scan — those phrases declare a winner in any context. Numeric
   // "#1" / "number one" needs comparison context: a table block, the
@@ -1448,6 +1478,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
+      // "We are not the #1 pest control company in Venice" is honest
+      // anti-ranking copy (Codex r29).
+      if (sentenceHasNegator(proseText, nm1.index, nm1[0].length)) continue;
       const tail = proseText.slice(nm1.index, nm1.index + 60);
       // No own-brand PROXIMITY here: "waves" the common noun collides
       // ("in summer heat waves, the #1 hidden breeding site …"). Own-brand

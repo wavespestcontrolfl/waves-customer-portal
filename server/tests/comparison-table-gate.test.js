@@ -1114,6 +1114,49 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-29 findings (#2633) ──
+
+  test('Codex r29: header-shaped reliability claims route to review beside a table', () => {
+    const r = gate.evaluate({ body: `Bug Busters never answers the phone.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+  });
+
+  test('Codex r29: brand-prefixed educational #1 stays clean; winner claims still block', () => {
+    for (const prose of ['Waves Pest Control: #1 entry point for ants is the garage door sweep.', "Waves' #1 mosquito tip is dumping standing water."]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+    const winner = gate.evaluate({ body: `Waves — the #1 choice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(winner.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r29: subject-negated object-position denials stay clean beside a table', () => {
+    const r = gate.evaluate({ body: `No one calls Bug Busters a scam.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+  });
+
+  test('Codex r29: denied association matches do not shadow later live ones', () => {
+    const r = gate.evaluate({ body: `Customers do not report hidden fees after choosing Bug Busters. Customers report hidden fees after choosing Bug Busters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r29: negated contextual #1 stays clean beside a table', () => {
+    for (const prose of ['We are not the #1 pest control company in Venice, and we like it that way.', 'No #1 pest control company exists.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
+  test('Codex r29 REBUTTAL evidence: CI captures must not feed unclassified review (phantom-business flood)', () => {
+    // Deliberate design (see classifyOption comment): the fail-closed
+    // default was removed because it parked 2-3 educational drafts/day as
+    // phantom businesses. Routing CI captures to review re-creates that:
+    for (const body of ['During peak season, professional pest control keeps mosquitoes down. No table here.', `Dry rock borders and tight door sweeps are the real bug busters here.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_UNCLASSIFIED_OPTION')).toBe(false);
+    }
+  });
+
   // ── Codex round-28 findings (#2633) ──
 
   test('Codex r28: denied early matches do not shadow later accusations', () => {
