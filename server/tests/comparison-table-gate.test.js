@@ -1114,6 +1114,60 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-14 findings (#2633) ──
+
+  test('Codex r14: sentence-case full brand before separators blocks; lowercase common noun stays clean', () => {
+    const disp = gate.evaluate({ body: `Waves pest control: hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const rank = gate.evaluate({ body: `Choose Waves pest control, the #1 choice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    const literal = gate.evaluate({ body: `During summer heat waves pest control matters even more.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(literal.pass).toBe(true);
+  });
+
+  test('Codex r14: own-brand object-position insults block; literal noun stays clean', () => {
+    for (const prose of ['Homeowners call Waves a scam.', 'Customers describe Waves as dishonest.', 'Some reviews called us a ripoff.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const literal = gate.evaluate({ body: `Experts call heat waves a serious lawn stressor.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(literal.pass).toBe(true);
+  });
+
+  test('Codex r14: "as #1" object-position ranking on extra prose names blocks', () => {
+    const r = gate.evaluate({ body: `Reviews rated Bug Busters as #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r14: bare and typographic possessives on extra prose names block', () => {
+    for (const prose of ["Bug Busters' billing is dishonest.", 'Bug Busters’ practices are shady.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r14: first-person ranking variants block; transitive educational "rank the #1" stays clean', () => {
+    for (const prose of ['We rank #1 for a reason.', 'We remain #1.', 'Customers rated us #1 again this year.', 'Local homeowners voted us the #1 choice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const educational = gate.evaluate({ body: `Below, we rank the #1 breeding sites around your yard.\n\n${CATEGORY_TABLE}` }, {});
+    expect(educational.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(educational.pass).toBe(true);
+  });
+
+  test('Codex r14: first-person possessive own-brand claims block; literal shade stays clean', () => {
+    for (const prose of ['Our billing is shady.', 'Our pricing is dishonest.', 'Our team charges hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const literal = gate.evaluate({ body: `Our lanais are shady and humid in August.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(literal.pass).toBe(true);
+  });
+
   // ── Codex round-13 findings (#2633): 2 fixed, 3 rebutted with the guard tests below ──
 
   test('Codex r13: full brand name before separators blocks', () => {

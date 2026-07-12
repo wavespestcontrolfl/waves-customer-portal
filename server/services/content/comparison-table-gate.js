@@ -147,10 +147,13 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
 // our own writer legitimately puts pest vocabulary near "Waves" ("Waves keeps
 // shady, damp corners treated"), so the linking-verb arm allows only a short
 // determiner/adverb gap instead of a 60-char window (Codex P2 on #2633).
-// The own-brand SUBJECT: "Waves" or first-person "we" — in a Waves-authored
-// comparison draft, "We charge hidden fees" targets the own brand exactly
-// like "Waves charges hidden fees" (Codex r6 on #2633).
-const OWN_BRAND_SUBJECT = "(?:\\bwaves\\b(?:'s)?|\\bwe\\b)";
+// The own-brand SUBJECT: "Waves", first-person "we", or a first-person
+// possessive phrase ("our team", "our billing") — in a Waves-authored
+// comparison draft, "We charge hidden fees" / "Our team overcharges"
+// target the own brand exactly like "Waves charges hidden fees" (Codex
+// r6/r14 on #2633). Safe in the active/possession arms because those
+// require an accusation object.
+const OWN_BRAND_SUBJECT = "(?:\\bwaves\\b(?:['’]s?)?|\\bwe\\b|\\bour\\s+[\\w'’]+)";
 const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
   // adding NEG_ADJ here would newly block prose like "waves of termites are
@@ -160,12 +163,23 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // The DISP token must still sit right after the verb (short determiner
   // gap only): that adjacency is what keeps "Waves keeps shady corners
   // treated" clean.
-  `\\bwaves\\b(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // First-person possessive claims with a linking verb ("Our billing is
+  // shady", "Our pricing is dishonest") — business-practice nouns ONLY, so
+  // literal shade stays clean ("our lanais are shady and humid") (Codex
+  // r14 on #2633).
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
   `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
+  // Object-position insult idiom against the own brand ("homeowners call
+  // Waves a scam", "customers describe us as dishonest") — verb-anchored,
+  // DISPARAGEMENT_RE vocabulary only: NEG_ADJ here would collide with the
+  // common noun ("experts call heat waves a serious lawn stressor")
+  // (Codex r14 on #2633).
+  `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:waves|us)\\b\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source})`,
   // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
   // Codex r7 on #2633.
   `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -188,13 +202,21 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
   // Typographic apostrophe accepted; optional determiner after the verb and
   // after ranked/rated/voted (Codex r3 on #2633).
-  `\\bwe(?:['’]re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bwe(?:['’]re|\\s+(?:are|were|remains?|remained|stays?|stayed))\\s+(?:(?:still|now|proudly)\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Transitive "we rank #1" gets NO determiner tail: "below, we rank the
+  // #1 breeding sites" is educational list framing, not self-ranking
+  // (Codex r14 on #2633).
+  `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Own brand in OBJECT position ("customers rated us #1", "voted us the
+  // #1 choice") — "us" makes it own-brand by construction, so the verb
+  // list can be broad without educational collisions (Codex r14 on #2633).
+  `\\b(?:rate[sd]?|rank(?:s|ed)?|vote[sd]?|name[sd]?|calls?|called|makes?|made)\\s+us\\s+(?:(?:as|the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own-brand subject with the ranking verb anywhere in the same sentence —
   // "Waves, after years of serving …, is #1" sits outside any proximity
   // window (Codex r5 on #2633). The verb must still be adjacent to the
   // number, so "in heat waves, the #1 breeding site is …" stays clean.
-  `\\bwaves\\b(?:'s)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Provider-noun subject: "pest control companies are #1", "providers
   // rank #1" (Codex r11 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
@@ -208,7 +230,11 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // heading-cased, Codex r9/r10 on #2633) and stays OBJECT/number-anchored:
 // full disparagement vocabulary here would re-block heading shapes like
 // "Waves — Shady Foliage Treatment Guide" (literal shade).
-const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:\\s+Pest\\s+Control)?(?:'s)?";
+// The "Pest Control" suffix is case-INSENSITIVE (inline classes — these
+// regexes carry no flags): "Waves pest control: hidden fees" is sentence
+// case, and only the leading W disambiguates the brand from the common
+// noun (Codex r14 on #2633). Bare/typographic possessives accepted.
+const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
 const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}\\s*[:—–-]\\s*`);
 // Prefix words are negator-excluded: "Waves: no hidden fees" is a denial,
 // not an accusation (Codex r12 on #2633).
@@ -710,7 +736,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // within the same sentence, a linking/behavioral verb between the name
     // and the negative term ties the negativity to the business.
     const directedP0 = new RegExp(
-      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
     );
     // Negative adjective immediately modifying the name ("the dishonest
     // Acme Pest Solutions").
@@ -720,7 +746,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // above misses transitive verbs, and these victim-anchored idioms only
     // read with the name as subject. Up to two adverbs may intervene.
     const activeP0 = new RegExp(
-      `${escaped}(?:'s)?\\s+(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
+      `${escaped}\\b(?:['’]s?)?\\s+(?:(?:also|often|always|never|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i',
     );
     if (directedP0.test(nameScanText) || negBeforeName.test(nameScanText) || activeP0.test(nameScanText)) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
@@ -734,7 +760,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // Control Guide: Why DIY Sprays Are Unreliable" aims the negative at DIY
     // sprays, not the business-shaped phrase, and must pass.
     const directedReliability = new RegExp(
-      `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?:\\s+\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
     );
     if (directedReliability.test(nameScanText)) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
@@ -919,12 +945,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     for (const name of extraProseNames) {
       const escaped = escapeForNameRe(name);
       // NOUN_VERB_GAP tolerates appositives — "bug busters, a local
-      // option, is dishonest" (Codex r5 on #2633).
+      // option, is dishonest" (Codex r5 on #2633). Possessives accept the
+      // bare and typographic forms — "Bug Busters' billing is dishonest"
+      // has no trailing s (Codex r14 on #2633).
       const directedP0 = new RegExp(
-        `${escaped}(?:'s)?\\b${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+        `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
       const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
-      const activeP0 = new RegExp(`${escaped}(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
+      const activeP0 = new RegExp(`${escaped}\\b(?:['’]s?)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
       // Punctuation-separated claims ("Bug Busters: shady billing",
       // "Mosquito Squad — shady billing") carry no verb for the shapes
       // above (Codex r2 on #2633). Only PERSONIFIED suffixes get this arm:
@@ -938,13 +966,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // false positive (Codex r6/r12 on #2633). Prefix words are
       // negator-excluded on both arms ("X: not overpriced" is a denial).
       const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
-        ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
-        : new RegExp(`${escaped}(?:'s)?\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
+        ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
+        : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
       // Possession/usage accusations with the required object ("Bug Busters
       // uses shady billing", "Acme Rodent Removal comes with hidden fees")
       // — Codex r4 on #2633.
       const possessionP0 = new RegExp(
-        `${escaped}(?:'s)?\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+        `${escaped}\\b(?:['’]s?)?\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
       // Name-confident PERSONIFIED names also get a same-sentence
       // accusation-object association ("Customers report hidden fees after
@@ -1053,18 +1081,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         // Appositive-tolerant, like the disparagement path ("Bug Busters,
         // frankly, is #1" — Codex r10 on #2633).
         const selfRank = new RegExp(
-          `${escaped}(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
         );
-        // Object-position idiom: "reviews call Bug Busters the #1 choice"
-        // (Codex r11) — verb-anchored, not proximity.
+        // Object-position idiom: "reviews call Bug Busters the #1 choice",
+        // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
+        // proximity.
         const calledRank = new RegExp(
-          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
         // Separator/appositive #1 for PERSONIFIED names only ("Bug Busters,
         // the #1 choice" — Codex r12); CI captures excluded ("… and termite
         // prevention, the #1 defense is …" is educational).
         const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
-          ? new RegExp(`${escaped}(?:'s)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
+          ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
           : null;
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
