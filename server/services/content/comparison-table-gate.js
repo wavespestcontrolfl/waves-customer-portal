@@ -135,7 +135,12 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only (parity with the old whole-text scan):
   // adding NEG_ADJ here would newly block prose like "waves of termites are
   // terrible" — "waves" the noun is unavoidable in pest copy.
-  `\\bwaves\\b(?:'s)?(?:\\s+\\w+){0,2}\\s+(?:is|are|was|were|seems?|remains?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // Comma/appositive-tolerant gap ("Waves, frankly, is dishonest") and the
+  // full linking-verb set ("Waves stays dishonest") — Codex r5 on #2633.
+  // The DISP token must still sit right after the verb (short determiner
+  // gap only): that adjacency is what keeps "Waves keeps shady corners
+  // treated" clean.
+  `\\bwaves\\b(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
   `\\bwaves\\b(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
   // Possession with a required accusation object ("Waves has hidden fees")
@@ -156,6 +161,11 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // after ranked/rated/voted (Codex r3 on #2633).
   `\\bwe(?:['’]re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:the\\s+)?${NUMERIC_ONE_ALT}`,
   `\\b(?:ranked|rated|voted)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // Own-brand subject with the ranking verb anywhere in the same sentence —
+  // "Waves, after years of serving …, is #1" sits outside any proximity
+  // window (Codex r5 on #2633). The verb must still be adjacent to the
+  // number, so "in heat waves, the #1 breeding site is …" stays clean.
+  `\\bwaves\\b(?:'s)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
 // Linking/behavioral verbs that tie a subject name to a following negative
@@ -802,12 +812,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
   for (const nm of collectHeaderShapedProseTargets(proseNameText)) extraProseNames.add(nm);
   for (const nm of targetNames) extraProseNames.delete(nm);
-  const nearBusinessName = (idx, len, { includeOwnBrand = false } = {}) => {
+  const nearBusinessName = (idx, len) => {
     const window = proseNameText
       .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
       .toLowerCase()
       .replace(/\s+/g, ' ');
-    if (includeOwnBrand && OWN_BRAND_RE.test(window)) return true;
     return targetNames.some((n) => window.includes(n.toLowerCase().replace(/\s+/g, ' ')));
   };
 
@@ -839,8 +848,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // table-less path uses for generic business names.
     for (const name of extraProseNames) {
       const escaped = escapeForNameRe(name);
+      // NOUN_VERB_GAP tolerates appositives — "bug busters, a local
+      // option, is dishonest" (Codex r5 on #2633).
       const directedP0 = new RegExp(
-        `${escaped}(?:'s)?\\b(?:\\s+\\w+){0,2}\\s+(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+        `${escaped}(?:'s)?\\b${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
       const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
       const activeP0 = new RegExp(`${escaped}(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
@@ -895,7 +906,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
       const tail = proseText.slice(nm1.index, nm1.index + 60);
-      if (numAdjacentProviderRe.test(tail) || nearBusinessName(nm1.index, nm1[0].length, { includeOwnBrand: true })) {
+      // No own-brand PROXIMITY here: "waves" the common noun collides
+      // ("in summer heat waves, the #1 hidden breeding site …"). Own-brand
+      // self-ranking is covered by NUMERIC_SELF_RANKING_RE's directed arms.
+      if (numAdjacentProviderRe.test(tail) || nearBusinessName(nm1.index, nm1[0].length)) {
         rank = nm1;
         break;
       }

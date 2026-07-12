@@ -1114,6 +1114,26 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  test('Codex r5: own-brand appositive/linking-verb disparagement and long-distance #1 block', () => {
+    for (const prose of ['Waves, frankly, is dishonest.', 'Waves stays dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const rank = gate.evaluate({ body: `Waves, after years of serving Sarasota homeowners with recurring pest plans, is #1.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    // Reversed structure stays clean: the verb is not adjacent to the number.
+    const ok = gate.evaluate({ body: `In summer heat waves, the #1 hidden breeding site is the clogged gutter.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
+  test('Codex r5: appositive gaps in extra-name disparagement block', () => {
+    for (const prose of ['bug busters, a local option, is dishonest.', 'acme pest solutions, a local option, is dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   test('Codex r4 (P2): extra-name self-ranking and possession accusations block; CI-capture proximity does not', () => {
     const selfRank = gate.evaluate({ body: `Bug Busters is #1.\n\n${CATEGORY_TABLE}` }, {});
     expect(selfRank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
