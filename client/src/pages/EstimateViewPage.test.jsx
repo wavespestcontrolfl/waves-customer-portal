@@ -1152,10 +1152,19 @@ describe('SuccessCard — already-accepted retry', () => {
     expect(screen.queryByText(/Check your phone for the confirmation text/)).not.toBeInTheDocument();
   });
 
-  it('keeps the confirmation-text copy for a fresh accept', () => {
-    render(<SuccessCard acceptResult={{ success: true }} />);
+  it('fresh accept shows the pared-down booked card (owner 2026-07-12): no check-your-phone copy', () => {
+    render(<SuccessCard acceptResult={{ success: true }} appointmentLabel="Tue, Jul 14 · 9:00 AM" recurring />);
 
-    expect(screen.getByText(/Check your phone for the confirmation text/)).toBeInTheDocument();
+    expect(screen.getByText("You're booked!")).toBeInTheDocument();
+    // Date/time rendered WITHOUT the "First visit:" prefix (owner ask).
+    expect(screen.getByText('Tue, Jul 14 · 9:00 AM')).toBeInTheDocument();
+    expect(screen.queryByText(/First visit:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Check your phone/)).not.toBeInTheDocument();
+    // Recurring accepts get the app line + both store badges.
+    expect(screen.getByText(/Download the Waves app/)).toBeInTheDocument();
+    // Anchor + its SVG each carry the label — assert at least the link.
+    expect(screen.getAllByLabelText('Download on the App Store').length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText('Get it on Google Play').length).toBeGreaterThan(0);
   });
 
   it('does not promise a booking-link text for an already-accepted one-time retry, but keeps the booking button', () => {

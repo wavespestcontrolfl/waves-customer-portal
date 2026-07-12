@@ -59,6 +59,10 @@ function StoreBadge({ url, label, children }) {
   );
 }
 
+// Reused by the booked-success card (owner ask 2026-07-12: store badges
+// under the app line) — one badge source, no duplicated SVGs.
+export { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL };
+
 // onBookToday: scroll-to-booking callback — the "Book today!" CTA renders
 // only when the page can actually self-book (omitted on accepted/terminal
 // and review-before-booking states).

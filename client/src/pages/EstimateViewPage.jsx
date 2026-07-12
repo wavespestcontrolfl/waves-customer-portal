@@ -34,7 +34,7 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
-import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
+import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -2662,30 +2662,38 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
   return (
     // data-glass="card": the booked screen rides the estimate page's glass
     // scene like the Auto Pay modal (owner ask 2026-07-12); inline styles
-    // stay as the non-glass fallback.
+    // stay as the non-glass fallback. Copy pared down (owner ask
+    // 2026-07-12): logo, "You're booked!", the first-visit line, and — for
+    // recurring — the app line with store badges. No check-your-phone line.
     <div data-glass="card" style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
-      <div style={{ fontSize: 40 }}></div>
-      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
-        You're booked.
+      <img src="/waves-logo.png" alt="Waves" style={{ height: 40, display: 'block', margin: '0 auto' }} />
+      <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 12 }}>
+        You're booked!
       </div>
       {appointmentLabel ? (
+        // Date/time only — no "First visit:" prefix (owner ask 2026-07-12).
         <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
-          First visit: {appointmentLabel}
+          {appointmentLabel}
         </div>
       ) : null}
-      <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
-        {/* A retry of an already-accepted estimate returns the full success
-            payload with alreadyAccepted: true — the original confirmation
-            text may not re-send, so don't promise one. */}
-        {acceptResult?.alreadyAccepted
-          ? 'This estimate was already accepted — you\'re all set. Our team will confirm the schedule.'
-          : 'Check your phone for the confirmation text. Our team will confirm the schedule.'}
-      </div>
-      {recurring ? (
-        <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 14, lineHeight: 1.5 }}>
-          Download the Waves app to track visits, reschedule, and manage your
-          plan anytime.
+      {acceptResult?.alreadyAccepted ? (
+        // A retry of an already-accepted estimate returns the full success
+        // payload with alreadyAccepted: true — say so plainly.
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          This estimate was already accepted — you're all set.
         </div>
+      ) : null}
+      {recurring ? (
+        <>
+          <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 14, lineHeight: 1.5 }}>
+            Download the Waves app to track visits, reschedule, and manage your
+            plan anytime.
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 12, marginTop: 14, flexWrap: 'wrap' }}>
+            <StoreBadge url={APP_STORE_URL} label="Download on the App Store"><AppStoreBadge /></StoreBadge>
+            <StoreBadge url={PLAY_STORE_URL} label="Get it on Google Play"><GooglePlayBadge /></StoreBadge>
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -4617,9 +4625,9 @@ export default function EstimateViewPage() {
         />
         <SuccessCard
           acceptResult={acceptResult}
-          // First-visit line (owner ask 2026-07-12): the slot the customer
-          // just booked (kept in state through accept) or their validated
-          // existing appointment; null renders the classic card.
+          // First-visit line (owner ask 2026-07-12, re-confirmed): the slot
+          // the customer just booked (kept in state through accept) or their
+          // validated existing appointment.
           appointmentLabel={existingAppointment
             ? formatAppointmentLabel(existingAppointment)
             : (selectedSlotMeta?.date
