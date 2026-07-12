@@ -5,6 +5,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
 import { formatAddress } from '../utils/format-address';
+import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
@@ -1480,6 +1481,15 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
   const tier = TIER[customer.tier];
+  // 0% is not a perk — the At-a-Glance sub shows the plan name instead of
+  // advertising "0% discount" (eyeball 07-12). >0% keeps the discount line.
+  // Plan name comes from the membership resolver, not raw customer.tier —
+  // non-membership sentinels (Commercial, One-Time) must not render as
+  // "WaveGuard Commercial".
+  const atGlanceTierName = resolveActiveTierName(customer);
+  const tierDiscountSub = tier?.discount && tier.discount !== '0%'
+    ? `${tier.discount} discount`
+    : atGlanceTierName ? `WaveGuard ${atGlanceTierName}` : 'recurring plan';
   const annualPrepay = customer.annualPrepay || null;
   const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
@@ -1960,9 +1970,9 @@ function DashboardTab({ customer, onSwitchTab }) {
                 ? {
                     label: 'Billing',
                     value: annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid',
-                    sub: annualPrepayLine || `${tier?.discount || '0%'} discount`,
+                    sub: annualPrepayLine || tierDiscountSub,
                   }
-                : { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
+                : { label: 'Monthly rate', value: customer.monthlyRate ? fmtMoney(customer.monthlyRate) : '—', sub: tierDiscountSub },
               {
                 label: 'Services YTD',
                 value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
@@ -4146,7 +4156,9 @@ function BillingTab({ customer }) {
             ? 'Auto Pay is on — rate being finalized'
             : daysUntilDue === 0
               ? 'Auto Pay is processing today'
-              : `Next charge ${money(amountDue)} on ${dueDateLabel}`,
+              : dueDate
+                ? `Next charge ${money(amountDue)} on ${dueDateLabel}`
+                : `Next charge ${money(amountDue)}`,
       detail: perApplicationBilling
         ? 'Your saved payment method is charged for each service visit after it is completed.'
         : annualPrepayBilling
@@ -4194,6 +4206,16 @@ function BillingTab({ customer }) {
     };
     const s = map[status] || map.paid;
     return { background: s.bg, color: s.color };
+  };
+
+  // Display status: a row still flagged 'upcoming' whose date has already
+  // passed hasn't resolved to paid/failed yet — render it as 'processing'
+  // rather than promising a future charge on a past date (eyeball 07-12
+  // finding 8). Display-only: filters and totals keep the raw status.
+  const displayStatus = (p) => {
+    if (p.status !== 'upcoming') return p.status;
+    const d = parseDate(p.date);
+    return !isNaN(d) && d < parseDate(etDateString()) ? 'processing' : p.status;
   };
 
   // Year-to-date summary
@@ -4375,7 +4397,9 @@ function BillingTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
+            // No scheduled date → "Next Not scheduled" reads broken; show a
+            // neutral sub instead (eyeball 07-12 finding 3).
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : dueDate ? `Next ${dueDateLabel}` : 'No charge scheduled') : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
@@ -4746,8 +4770,8 @@ function BillingTab({ customer }) {
                 letterSpacing: 0,
                 padding: '4px 8px',
                 borderRadius: 999,
-                ...statusBadge(p.status),
-              }}>{p.status}</span>
+                ...statusBadge(displayStatus(p)),
+              }}>{displayStatus(p)}</span>
             </div>
           </div>
         ))}
@@ -7945,9 +7969,11 @@ function MyPlanTab({ customer }) {
         }}>
           {[
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
-            { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every service' },
+            // 0% is not a perk — hide the discount tile entirely at zero
+            // (eyeball 07-12 finding 6).
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every service' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
-          ].map((item) => (
+          ].filter(Boolean).map((item) => (
             <div key={item.label} style={{
               border: '1px solid #E7E2D7',
               borderRadius: 8,
@@ -8039,7 +8065,10 @@ function MyPlanTab({ customer }) {
                           </span>
                         </div>
                         <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                          <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} visits</div>
+                          {/* "applications" not "visits" — matches the "4 Apps"
+                              frequency label beside it (owner rule 07-12:
+                              per-application wording everywhere). */}
+                          <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} applications</div>
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
                               (owner 2026-07-11: no per-year totals). */}
@@ -8222,18 +8251,22 @@ function MyPlanTab({ customer }) {
             </div>
           </section>
 
-          <section data-glass="card" style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}>Savings</div>
-            {/* Percentage only — the old dollar figure ($/yr from static
-                catalog basePrice × 12) was fabricated, and per-year totals
-                are banned customer-facing (owner 2026-07-11). */}
-            <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
-              {Math.round(discount * 100)}% off
-            </div>
-            <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
-              Your {tierName} bundle rate, applied to every service visit.
-            </div>
-          </section>
+          {/* 0% is not a savings pitch — the card only renders when the tier
+              actually discounts (eyeball 07-12 finding 5). */}
+          {discount > 0 && (
+            <section data-glass="card" style={{ ...card, padding: 20 }}>
+              <div style={sectionTitle}>Savings</div>
+              {/* Percentage only — the old dollar figure ($/yr from static
+                  catalog basePrice × 12) was fabricated, and per-year totals
+                  are banned customer-facing (owner 2026-07-11). */}
+              <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
+                {Math.round(discount * 100)}% off
+              </div>
+              <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
+                Your {tierName} bundle rate, applied to every application.
+              </div>
+            </section>
+          )}
 
           {tier && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>

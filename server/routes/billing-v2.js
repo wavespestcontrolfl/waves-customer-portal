@@ -72,6 +72,20 @@ router.get('/', async (req, res, next) => {
       visiblePayments = visiblePayments.slice(0, requestedLimit);
     }
 
+    // Recurring = the monthly WaveGuard plan obligation. Metadata-first, same
+    // rule as billing-cron's dedupe: every monthly-autopay row (chargeMonthly,
+    // retry rungs, admin charge-now) carries a metadata.billed_month stamp.
+    // The canonical "<tier> WaveGuard Monthly" description marker stays as the
+    // legacy fallback for rows written before the stamp existed. Description
+    // wording alone (e.g. a row that merely says "Monthly") is NOT a signal.
+    const isRecurringPayment = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        if (m && m.billed_month) return true;
+      } catch { /* unparseable metadata — fall through to the marker */ }
+      return (p.description || '').includes('WaveGuard Monthly');
+    };
+
     res.json({
       payments: visiblePayments.map(p => ({
         id: p.id,
@@ -79,10 +93,9 @@ router.get('/', async (req, res, next) => {
         amount: parseFloat(p.amount),
         status: p.status,
         description: p.description,
-        // Same canonical marker billing-cron uses to identify the monthly
-        // obligation. The client's Recurring/One-Time filter and YTD split
-        // read this — it was previously never serialized (always $0.00).
-        type: (p.description || '').includes('WaveGuard Monthly') ? 'recurring' : 'one_time',
+        // The client's Recurring/One-Time filter and YTD split read this —
+        // it was previously never serialized (always $0.00).
+        type: isRecurringPayment(p) ? 'recurring' : 'one_time',
         cardBrand: p.card_brand,
         lastFour: p.last_four,
         processor: 'stripe',

@@ -428,7 +428,11 @@ export default function AutopayCard({ onStateChange }) {
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
                   : monthlyUnpriced
                     ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
-                    : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
+                    // No date → drop the "on <date>" clause instead of
+                    // rendering "on Not scheduled" (eyeball 07-12 finding 4).
+                    : formatDate(next_charge_date) === 'Not scheduled'
+                      ? `Next charge: $${nextChargeAmount.toFixed(2)}`
+                      : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
               : state === 'paused'
                 ? `Paused until ${formatDate(paused_until)}`
                 : 'Auto Pay is off. Charges will not run automatically.'}
