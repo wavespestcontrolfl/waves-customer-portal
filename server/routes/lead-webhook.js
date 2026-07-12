@@ -507,17 +507,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       });
     }
 
-    // Push + bell notification for admins
-    try {
-      const { triggerNotification } = require('../services/notification-triggers');
-      await triggerNotification('new_lead', {
-        name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
-        source: leadSource.detail || leadSource.source,
-        zip: customer.zip,
-        service: serviceInterest || null,
-        leadId: customer.id,
-      });
-    } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
+    // Push + bell notification for admins fires AFTER the lead row is
+    // created (below) so the bell can deep-link the real lead id —
+    // customer.id here made /admin/leads?lead=<id> resolve to nothing.
 
     // Notify Adam — during business hours (8AM-8PM ET) trigger a call, otherwise SMS
     const now = new Date();
@@ -825,6 +817,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     } catch (leadErr) {
       logger.error(`Lead record creation failed: ${leadErr.message}`);
     }
+
+    // Push + bell notification for admins. Deep-links the LEAD row; if lead
+    // creation failed the customer id keeps a (degraded) bell rather than none.
+    try {
+      const { triggerNotification } = require('../services/notification-triggers');
+      await triggerNotification('new_lead', {
+        name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
+        source: leadSource.detail || leadSource.source,
+        zip: customer.zip,
+        service: serviceInterest || null,
+        leadId: leadRecord?.id || customer.id,
+      });
+    } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
 
     // Fire-and-forget AI triage
     if (leadRecord) {

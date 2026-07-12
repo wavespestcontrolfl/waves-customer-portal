@@ -2207,7 +2207,13 @@ function initScheduledJobs() {
 
       const parts = [`${parseInt(unread?.c || 0)} unread`];
       if (leads > 0) parts.push(`${leads} leads created`);
-      if (invoices > 0) parts.push(`${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`);
+      // Only claim a dollar figure when extraction actually produced one —
+      // "4 invoices ($0.00 logged)" was a fabricated total, not a real zero.
+      if (invoices > 0) {
+        parts.push(invoiceAmounts > 0
+          ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
+          : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
+      }
       if (spam > 0) parts.push(`${spam} spam blocked`);
 
       await db('notifications').insert({

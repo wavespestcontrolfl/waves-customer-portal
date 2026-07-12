@@ -783,6 +783,26 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
   };
 }
 
+// One quote-promised bell per call. Reprocessing the same recording (stale-lock
+// reclaim, hung-fetch retry) re-enters both notify sites — one real call has
+// rung three bells, with the early runs on the no-lead path because lead
+// creation only succeeded on the final run. Fail-open: a dedupe-query error
+// must cost a duplicate bell, never the bell itself.
+async function quotePromisedAlreadyNotified(callSid) {
+  if (!callSid) return false;
+  try {
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'callSid' = ?", [callSid])
+      .whereRaw("metadata->>'quote_promised' = 'true'")
+      .first('id');
+    return !!existing;
+  } catch (e) {
+    logger.warn(`[call-proc] quote-promised dedupe check failed (notifying anyway): ${e.message}`);
+    return false;
+  }
+}
+
 // Secondary contact from EITHER extractor (a realtor's home buyer, a landlord's
 // tenant, a spouse). Both sources were normalized upstream, so an object here
 // always carries at least a name, phone, or email. When BOTH extractors caught
@@ -5587,7 +5607,7 @@ const CallRecordingProcessor = {
           // as an admin notification with the deadline. Without this the
           // promise lives only in the recording and dies if nobody remembers
           // (this is exactly what happened on real multi-property quote calls).
-          if (callQuotePromised && enriched) {
+          if (callQuotePromised && enriched && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
             try {
               const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
                 .filter(Boolean)
@@ -5640,7 +5660,8 @@ const CallRecordingProcessor = {
     // lead-path notification above never fires for them, so the promise would
     // live only in the recording — the exact failure mode this notification
     // exists to prevent. Surface it at the customer level instead.
-    if (callQuotePromised && !leadId && !extracted.is_spam) {
+    if (callQuotePromised && !leadId && !extracted.is_spam
+      && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
       try {
         const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
           .filter(Boolean)
