@@ -10,8 +10,14 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(),
 }));
+// Card-hold fee-policy clause (spec Phase 1): mocked so reminder tests
+// control it directly; '' is the non-card-hold default the cron passes.
+jest.mock('../services/estimate-card-holds', () => ({
+  cardHoldReminderLine: jest.fn(async () => ''),
+}));
 
 const db = require('../models/db');
+const { cardHoldReminderLine } = require('../services/estimate-card-holds');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -601,6 +607,10 @@ describe('appointment reminder cron delivery windows', () => {
         first_name: 'Ada',
         service_type: 'Pest Control',
         time: '9:00 AM',
+        // Non-card-hold booking: the fee-policy clause resolves to '' so
+        // the {card_hold_policy_line} placeholder renders clean and the SMS
+        // stays byte-identical to the pre-Phase-1 copy.
+        card_hold_policy_line: '',
       }),
       expect.objectContaining({
         workflow: 'appointment_reminder_24h',
@@ -608,6 +618,7 @@ describe('appointment reminder cron delivery windows', () => {
         entity_id: 'svc-soon',
       }),
     );
+    expect(cardHoldReminderLine).toHaveBeenCalledWith('svc-soon');
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415551212',
       body: '24-hour appointment reminder',

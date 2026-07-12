@@ -618,6 +618,11 @@ const TwilioService = {
     // unresolved placeholder, so this path must always pass it too.
     const { buildRescheduleLink } = require("./reschedule-link");
     const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+    // Card-hold fee policy clause (card-on-file spec Phase 1) — same
+    // unresolved-placeholder contract as reschedule_line: '' for non-held
+    // bookings, the disclosure for held ones.
+    const cardHoldPolicyLine = await require("./estimate-card-holds")
+      .cardHoldReminderLine(scheduledServiceId);
 
     const body =
       typeof smsTemplatesRouter.getTemplate === "function"
@@ -626,6 +631,7 @@ const TwilioService = {
             service_type: service.service_type || "service",
             time,
             reschedule_line: reschedule.line,
+            card_hold_policy_line: cardHoldPolicyLine,
           }, { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: scheduledServiceId })
         : null;
     if (!body) {

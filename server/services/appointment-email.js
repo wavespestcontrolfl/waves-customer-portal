@@ -333,6 +333,15 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   const is72 = String(kind) === '72h';
   const templateKey = is72 ? 'appointment.reminder_72h' : 'appointment.reminder_24h';
+  // Card-hold fee-policy disclosure (spec Phase 1) — resolved HERE, not
+  // threaded from callers, so every email path carries it: the email/both
+  // channel sends AND the undelivered-SMS fallback (Codex #2677 round-1).
+  // '' for non-card-hold bookings; the template's callout block renders
+  // nothing for an empty variable. Lazy require avoids a load cycle.
+  let cardHoldPolicyNote = '';
+  try {
+    cardHoldPolicyNote = await require('./estimate-card-holds').cardHoldReminderNote(scheduledServiceId);
+  } catch { /* best-effort — the reminder must never fail on the disclosure */ }
   // Empty reschedule_url hides the template's "Reschedule appointment" CTA
   // block (renderBlocks skips a cta with no href) — never a broken button.
   const payload = is72
@@ -344,6 +353,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
       appointment_time: apptTime ? formatETTime(apptTime) : '',
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
+      card_hold_policy_note: cardHoldPolicyNote,
     }
     : {
       ...(stampedLabel ? { property_label: stampedLabel } : {}),
@@ -362,6 +372,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
         : '',
       technician_name: techName,
       reschedule_url: clean(rescheduleUrl),
+      card_hold_policy_note: cardHoldPolicyNote,
     };
   return sendTemplate({
     customerId,
