@@ -828,8 +828,8 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.monthly).toBe(50.25);
     expect(lawn.costs.total).toBeGreaterThanOrEqual(371);
     expect(lawn.costs.total).toBeLessThan(372);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeGreaterThanOrEqual(571);
-    expect(lawn.minimumCollectedAnnualPriceFor55).toBeLessThan(572);
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(571);
+    expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(572);
     expect(lawn.margin).toBeGreaterThanOrEqual(0.35);
     expect(lawn.pricingBasis).toBe('PROGRAM_MINIMUM_MONTHLY');
     expect(lawn.selected.marketAnnual).toBe(576);

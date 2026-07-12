@@ -441,6 +441,19 @@ function mapV1ToLegacyShape(v1Result) {
       pricingSource: t.pricingSource,
       pricingBasis: t.pricingBasis,
       costFloorApplied: !!t.costFloorApplied,
+      // Per-tier pricing provenance: the dollar detail behind pricingSource, so
+      // a stored estimate can answer "which mechanism set this price and by how
+      // much" without re-running the engine against drifted config.
+      prov: {
+        marketMonthly: t.marketMonthly ?? null,
+        marketAnnual: t.marketAnnual ?? null,
+        costFloorAnnual: t.costFloorAnnual ?? null,
+        programMinimumApplied: !!t.programMinimumApplied,
+        programMinimumMonthly: t.programMinimumMonthly ?? null,
+        margin: t.costFloorDetails && Number(t.annual) > 0
+          ? Math.round((1 - t.costFloorDetails.annualCost / t.annual) * 1000) / 1000
+          : null,
+      },
     }));
     R.lawnMeta = {
       lsf: lawnLI.lawnSqFt || 0,
@@ -456,6 +469,16 @@ function mapV1ToLegacyShape(v1Result) {
       customQuoteFlag: !!lawnLI.customQuoteFlag,
       pricingBasis: lawnLI.pricingBasis,
       pricingSource: lawnLI.pricingSource,
+      // Selected-tier provenance (mode/version + mechanism dollar detail).
+      pricingMode: lawnLI.pricingMode || null,
+      pricingVersion: lawnLI.pricingVersion || null,
+      marketReference: lawnLI.marketReference || null,
+      costFloorAnnual: lawnLI.costFloorAnnual ?? null,
+      costFloorApplied: !!lawnLI.costFloorApplied,
+      programMinimumApplied: !!lawnLI.programMinimumApplied,
+      programMinimumMonthly: lawnLI.programMinimumMonthly ?? null,
+      costs: lawnLI.costs || null,
+      margin: lawnLI.margin ?? null,
     };
   }
 
@@ -1009,6 +1032,10 @@ function mapV1ToLegacyShape(v1Result) {
     },
     manualDiscount: summary.manualDiscount || null,
     serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
+    // Engine version rides the mapped shape so persistence can stamp
+    // estimates.pricing_version with the version that actually priced the
+    // estimate (the column otherwise sits at its migration default forever).
+    engineVersion: v1Result.pricingVersion || null,
     results: R,
     specItems: v1SpecItems,
   };

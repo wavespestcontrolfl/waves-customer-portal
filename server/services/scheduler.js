@@ -578,6 +578,29 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY LAWN PRICING INVARIANT SWEEP (gated: cronJobs AND lawnPricingInvariantSweep)
+  // Re-runs the pricing engine across the full track×size×tier grid against
+  // LIVE DB config and raises/resolves one dashboard alert on ladder
+  // violations or material-budget drift vs live inventory COGS. Read-only.
+  // Monday 6:30am ET (after the 6:00am vendor price scan refreshes catalog prices).
+  // =========================================================================
+  cron.schedule('30 6 * * 1', async () => {
+    if (!isEnabled('lawnPricingInvariantSweep')) return;
+    logger.info('Running: Weekly lawn pricing invariant sweep');
+    try {
+      // runExclusive: the alert upsert is dedupe-keyed, but a deploy overlap
+      // must not double-run the full engine grid.
+      await runExclusive('lawn-pricing-invariant-sweep', async () => {
+        const { runLawnPricingInvariantSweep } = require('./lawn-pricing-invariant-sweep');
+        const result = await runLawnPricingInvariantSweep();
+        logger.info(`[lawn-pricing-sweep] cron run: cells=${result.cellsChecked} violations=${result.violations} budget=${result.budgetCheck}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly lawn pricing invariant sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY IRRIGATION RECOMMENDATION EMAIL (gated: cronJobs AND irrigationWeeklyEmail)
   // Monday 7:00am ET — emails lawn-care customers who entered weekly irrigation
   // inches in the portal a "cut back" / "add water" / "you're on track"

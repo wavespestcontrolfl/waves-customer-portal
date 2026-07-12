@@ -95,7 +95,7 @@ describe('computeLawnCostFloor', () => {
       adminAnnual: 51,
       targetGrossMargin: 0.55,
     });
-    const perApp = Math.ceil(floor.minimumCollectedAnnualPriceFor55 / 9);
+    const perApp = Math.ceil(floor.minimumCollectedAnnualPrice / 9);
     expect(perApp).toBe(92);
     expect(perApp * 9).toBe(828);
   });

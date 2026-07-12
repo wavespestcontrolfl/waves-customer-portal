@@ -487,7 +487,15 @@ function buildEstimatePersistenceFields(body, context = {}) {
     notes: body.notes,
   });
 
+  // Stamp the engine version that actually priced this estimate (varchar(10)
+  // column, NOT NULL with default — only written when the server recompute ran,
+  // so CLIENT_FALLBACK rows keep the default rather than claiming a version).
+  const pricingVersion = typeof estimateData?.result?.engineVersion === 'string'
+    ? estimateData.result.engineVersion.slice(0, 10)
+    : null;
+
   return {
+    ...(pricingVersion ? { pricing_version: pricingVersion } : {}),
     customer_id: body.customerId || null,
     estimate_data: estimateData ? JSON.stringify(estimateData) : null,
     address: body.address,

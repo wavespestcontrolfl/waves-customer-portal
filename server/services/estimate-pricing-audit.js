@@ -562,4 +562,8 @@ module.exports = {
   // Exported for regression tests (turf must map to lawn_care, not fall through
   // to an unmapped key that trips a false "Missing COGS" warning).
   keyFromName,
+  // Live bottom-up COGS primitives — reused by the weekly lawn pricing
+  // invariant sweep to compare hardcoded material budgets against inventory.
+  loadInventoryCostRows,
+  inventoryCostFromRows,
 };
