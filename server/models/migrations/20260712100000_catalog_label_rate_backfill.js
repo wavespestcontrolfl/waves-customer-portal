@@ -151,8 +151,8 @@ const DATA = [
     note: "manufacturer: https://www.controlsolutionsinc.com/hubfs/Specimen%20Labels/Specimen-Cyzmic%20CS-53883-389.pdf — \"0.2 fl. oz. (6 mL) to 0.4 fl. oz. (12 mL) per gallon of water (0.015-0.03% AI) ... 0.8 fl. oz. (24 mL) per gallon of water (0.06% AI) | Rate Table for Perimeter Barrier Applications: Fl. oz. (mL) of CYZMIC CS / Gals. of \"" },
   { name: "Delta Dust", basis: "per_1000_sqft", rate: 0.5, min: null, max: null, unit: "lb", epa: "432-772",
     note: "distributor_label_pdf: https://www.pestkil.com/documents/Delta-dust-label-20200817020017.pdf — \"The amount to be applied will vary with the site but should usually be in the range of 2-3 grams of DeltaDust per square yard (or 0.5 lbs per 1000 square feet).\"" },
-  { name: "Demand CS", basis: "per_1000_sqft", rate: null, min: 0.2, max: 0.8, unit: "fl_oz", epa: "100-1066",
-    note: "manufacturer: https://assets.syngentapmp.com/pdf/labels/SCP-1066AL1P11142.pdf — \"Rate Table for Structural Perimeter Barrier Applications: Application Rate of Demand CS Insecticide / Gallons of Water / Area of Coverage (sq ft): 0.2 fl oz (6 mL) 1-5 800-1,600; 0.4 fl oz (12 mL) 1-5 800-1,600; 0.8 fl o\"" },
+  { name: "Demand CS", basis: "per_gallon", rate: null, min: 0.2, max: 0.8, unit: "fl_oz", epa: "100-1066",
+    note: "manufacturer: https://assets.syngentapmp.com/pdf/labels/SCP-1066AL1P11142.pdf — \"Rate Table for Structural Perimeter Barrier Applications: Application Rate of Demand CS Insecticide / Gallons of Water / Area of Coverage (sq ft): 0.2 fl oz (6 mL) 1-5 800-1,600; 0.4 fl oz (12 mL) 1-5 800-1,600; 0.8 fl o\" | NOTE: per_gallon ON PURPOSE: the quoted perimeter table is a dilution (fl oz of concentrate per 1-5 gal of mix), not a broadcast per-1k rate — a default_rate_per_1000 here would silently replace the pest closeout's 4 oz perimeter-spray prefill with a mix-concentration number." },
   { name: "Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide", basis: "per_1000_sqft", rate: null, min: 0.37, max: 0.73, unit: "fl_oz", epa: "62719-542",
     note: "distributor_label_pdf: https://newsomseed.com/resources/Label%20Dimension%202EW.pdf — \"Use Rate Table (Cont.): Coastal South: HI, FL, southern coastal areas of AL, GA, LA, MS, NC, SC, TX: Program 1: 1 + 1 pt/acre, 0.37 + 0.37 oz /1000 sq ft; Program 2: 1.25 + 1.25 pt/acre, 0.46 + 0.46 oz/1000 sq ft; Progra\"" },
   { name: "Dismiss 64 oz", basis: "per_1000_sqft", rate: null, min: 0.18, max: 0.275, unit: "fl_oz", epa: "279-3295",
@@ -392,7 +392,9 @@ exports.up = async function up(knex) {
     if (d.note && (emptyText(row.label_source_note) || isEpaCorrection)) {
       updates.label_source_note = d.note;
     } else if (d.note
-        && (Object.keys(updates).length || legacyApplied.has(d.name.toLowerCase()))
+        // basis "other" rows carry their verified rate ONLY in the note, so
+        // the append must fire even when there are no field updates.
+        && (Object.keys(updates).length || d.basis === 'other' || legacyApplied.has(d.name.toLowerCase()))
         && !row.label_source_note.endsWith(d.note)) {
       // A row verified by an earlier batch keeps its note, but the rate
       // fields written above need provenance too — append, never replace.

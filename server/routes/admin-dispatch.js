@@ -3695,7 +3695,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const insertedServiceProducts = [];
         if (products?.length) {
           const seenProductIds = new Set();
-          const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
+          const validRateUnits = new Set(['oz', 'fl_oz', 'ml', 'g', 'lb', 'gal', 'oz/gal', 'fl_oz/gal', 'g/gal', 'oz/1000sf', 'lb/1000sf', 'g/1000sf']);
           for (const p of products) {
             if (!p.productId) continue;
             if (seenProductIds.has(p.productId)) continue;

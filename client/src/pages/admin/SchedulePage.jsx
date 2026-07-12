@@ -11202,6 +11202,9 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
+                        <option value="oz/gal">oz/gal</option>{" "}
+                        <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                        <option value="g/gal">g/gal</option>{" "}
                       </select>{" "}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
@@ -11247,6 +11250,9 @@ export function CompletionPanel({
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
+                        <option value="oz/gal">oz/gal</option>{" "}
+                        <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                        <option value="g/gal">g/gal</option>{" "}
                       </select>{" "}
                       {areasServiced.length > 0 && (
                         <select
@@ -13157,6 +13163,9 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
+                    <option value="oz/gal">oz/gal</option>{" "}
+                    <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                    <option value="g/gal">g/gal</option>{" "}
                   </select>{" "}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
@@ -13183,6 +13192,9 @@ export function CompletionPanel({
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
+                    <option value="oz/gal">oz/gal</option>{" "}
+                    <option value="fl_oz/gal">fl oz/gal</option>{" "}
+                    <option value="g/gal">g/gal</option>{" "}
                   </select>{" "}
                   {areasServiced.length > 0 && (
                     <select
