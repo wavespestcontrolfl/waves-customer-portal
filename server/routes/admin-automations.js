@@ -468,17 +468,25 @@ router.post('/templates/:key/segment-send', async (req, res) => {
     // recipients), refreshes stale contact fields, and the runner applies
     // ASM/suppression checks at send time. The scheduler drains 50/minute,
     // so a full segment fans out over ~N/50 minutes rather than instantly.
+    // Enrollments run in bounded-concurrency batches: strictly sequential, a
+    // cap-sized send is thousands of serial Postgres round trips in one
+    // request; 10 in flight keeps a 2,000-customer confirm to a few seconds
+    // without stampeding the pool.
+    const ENROLL_CONCURRENCY = 10;
     const summary = { enrolled: 0, alreadyActive: 0, skipped: 0 };
-    for (const customer of customers) {
-      try {
-        const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
-        if (result.enrolled) summary.enrolled += 1;
-        else if (result.reason === 'already enrolled') summary.alreadyActive += 1;
-        else summary.skipped += 1;
-      } catch (err) {
-        summary.skipped += 1;
-        logger.warn(`[automations/segment-send] enroll failed for customer ${customer.id}: ${err.message}`);
-      }
+    for (let i = 0; i < customers.length; i += ENROLL_CONCURRENCY) {
+      const batch = customers.slice(i, i + ENROLL_CONCURRENCY);
+      await Promise.all(batch.map(async (customer) => {
+        try {
+          const result = await AutomationRunner.enrollCustomer({ templateKey: req.params.key, customer });
+          if (result.enrolled) summary.enrolled += 1;
+          else if (result.reason === 'already enrolled') summary.alreadyActive += 1;
+          else summary.skipped += 1;
+        } catch (err) {
+          summary.skipped += 1;
+          logger.warn(`[automations/segment-send] enroll failed for customer ${customer.id}: ${err.message}`);
+        }
+      }));
     }
 
     // One audit row for the mass action (best-effort).

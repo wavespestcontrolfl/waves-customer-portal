@@ -29,7 +29,7 @@
 //   from a JSON payload. Watch for any unescaped HTML rendering on
 //   the preview side that could XSS the operator from a malformed
 //   template body.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge, Button, Card, Switch, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -252,16 +252,24 @@ function SendAutomationModal({ template, onClose, onSent }) {
   const [locationId, setLocationId] = useState("");
   const [preview, setPreview] = useState(null); // { count, overCap }
   const [previewing, setPreviewing] = useState(false);
+  // Monotonic preview-request id: a segment change bumps it, so a preview
+  // response that resolves AFTER the operator switched scope/location is
+  // dropped instead of arming the confirm button against the wrong segment
+  // (the server's count check can't catch two segments with the same count).
+  const previewSeq = useRef(0);
 
   // Any segment change invalidates the previewed count — the confirm button
   // only arms against the number the operator just saw.
   useEffect(() => {
+    previewSeq.current += 1;
     setPreview(null);
     setResult(null);
+    setPreviewing(false);
   }, [scope, locationId, mode]);
 
   const runPreview = async () => {
     if (previewing) return;
+    const requestId = ++previewSeq.current;
     setPreviewing(true);
     setResult(null);
     try {
@@ -272,11 +280,13 @@ function SendAutomationModal({ template, onClose, onSent }) {
           body: JSON.stringify({ segment: { scope, locationId: locationId || undefined } }),
         },
       );
-      setPreview(data);
+      if (previewSeq.current === requestId) setPreview(data);
     } catch (e) {
-      setResult({ ok: false, text: "Preview failed: " + e.message });
+      if (previewSeq.current === requestId) {
+        setResult({ ok: false, text: "Preview failed: " + e.message });
+      }
     } finally {
-      setPreviewing(false);
+      if (previewSeq.current === requestId) setPreviewing(false);
     }
   };
 
