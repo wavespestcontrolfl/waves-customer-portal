@@ -20,16 +20,18 @@ const { Client } = require('pg');
 
 const execute = process.argv.includes('--execute');
 const tagIdx = process.argv.indexOf('--tag');
-// ET wall-clock, second precision: unique per run (a date-only or UTC tag
-// would be shared across same-day runs and one day ahead on ET evenings,
-// making the tag-based rollback unable to isolate one batch).
+// ET wall-clock plus a random suffix: unique per run (a date-only or UTC
+// tag would be shared across same-day runs and one day ahead on ET
+// evenings; the suffix covers concurrent starts and the DST fold hour) so
+// the tag-based rollback isolates exactly one batch.
 const etStamp = new Date()
   .toLocaleString('sv-SE', { timeZone: 'America/New_York' })
   .replace(' ', 'T')
   .replace(/:/g, '');
+const suffix = require('crypto').randomBytes(3).toString('hex');
 const tag = tagIdx > -1 && process.argv[tagIdx + 1]
   ? process.argv[tagIdx + 1]
-  : `audit-purge-${etStamp}`;
+  : `audit-purge-${etStamp}-${suffix}`;
 
 (async () => {
   const c = new Client({ connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
@@ -44,6 +46,13 @@ const tag = tagIdx > -1 && process.argv[tagIdx + 1]
     rows.rows.forEach(r => console.log(`  id=${r.id} created=${r.day.toISOString().slice(0, 10)}  pending_approval -> rejected`));
     console.log(`DRY RUN — ${rows.rows.length} rows above would get status='rejected' and a per-run tag like '${tag}'. Re-run with --execute (the execute run prints ITS tag — that tag is the rollback key).`);
   } else {
+    // An explicit --tag must not collide with a prior batch or the printed
+    // rollback would restore more than this run.
+    const reused = await c.query(`SELECT 1 FROM retention_outreach WHERE approved_by=$1 LIMIT 1`, [tag]);
+    if (reused.rows.length) {
+      console.error(`FATAL tag '${tag}' is already used by an earlier batch — pick a fresh --tag.`);
+      process.exit(1);
+    }
     const r = await c.query(
       `UPDATE retention_outreach SET status='rejected', approved_by=$1, updated_at=now() WHERE status='pending_approval'`,
       [tag]
