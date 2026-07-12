@@ -106,6 +106,11 @@ export default function RatePage() {
   // bounces are still captured without locking the token before corrections.
   const scoreSavePromiseRef = useRef(Promise.resolve());
   const submitPromiseRef = useRef(null);
+  // Synchronous single-flight latch for handleSubmit/handleHighlightsNext —
+  // `submitting` is React state, so a double-tap in the same frame reads the
+  // stale false twice and double-POSTs /submit. Same live-ref reasoning as
+  // submitPromiseRef above; flips before any await.
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/rate/${token}`)
@@ -178,6 +183,8 @@ export default function RatePage() {
   };
 
   const handleSubmit = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -191,7 +198,6 @@ export default function RatePage() {
       // would trap saved feedback behind an error — it's a success.
       if (r.status === 409) {
         setScreen('success');
-        setSubmitting(false);
         return;
       }
       if (!r.ok) throw new Error(`Submit failed (${r.status})`);
@@ -206,12 +212,16 @@ export default function RatePage() {
       // Keep the feedback on screen — a false "Thank you!" here silently
       // discarded a detractor's complaint with no retry.
       setSubmitError("We couldn't send your feedback. Please check your connection and tap Send again.");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
   // Submit score, then go to AI review step
   const handleHighlightsNext = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await scoreSavePromiseRef.current;
@@ -220,6 +230,7 @@ export default function RatePage() {
         body: JSON.stringify({ score, feedback: '', highlights }),
       });
     } catch { /* proceed anyway */ }
+    submittingRef.current = false;
     setSubmitting(false);
     // Pre-select service type from data if available
     const knownServices = getKnownServices();

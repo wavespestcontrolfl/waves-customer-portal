@@ -14,7 +14,7 @@
  * native data-glass markup restyles the cards — the inline styles below
  * remain the base non-glass rendering.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -271,25 +271,39 @@ export default function ReschedulePage() {
   // Tuesday afternoon" line must not sit above the unfiltered day list.
   const [aiSession, setAiSession] = useState(0);
 
+  // Abort the in-flight load on unmount/token change — a late response must
+  // not setState against an unmounted page (or land under a different token);
+  // superseding a still-running load also keeps responses in issue order.
+  const loadAbortRef = useRef(null);
+
   const load = useCallback(async () => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setLoading(true);
     setNotFound(false);
     try {
-      const res = await fetch(`${API_BASE}/public/reschedule/${token}`);
+      const res = await fetch(`${API_BASE}/public/reschedule/${token}`, { signal: controller.signal });
       if (res.status === 404) {
         setNotFound(true);
         return;
       }
       if (!res.ok) throw new Error('load failed');
-      setData(await res.json());
+      const body = await res.json();
+      if (controller.signal.aborted) return;
+      setData(body);
     } catch {
+      if (controller.signal.aborted) return;
       setNotFound(true);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [token]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    return () => loadAbortRef.current?.abort();
+  }, [load]);
 
   // Waves AI date/time search — replaces the day list with the matching
   // window's slots (same availability shape the GET returns) and hands the

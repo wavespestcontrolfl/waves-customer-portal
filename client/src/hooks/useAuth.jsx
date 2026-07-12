@@ -8,6 +8,22 @@ const AuthContext = createContext(null);
 // field ("Invalid code", rate-limit sentences) — show those verbatim. But
 // api.js also throws raw non-JSON bodies (proxy HTML error pages) and
 // "Request failed (502)" fallbacks, which are not customer copy (F-059).
+// Customer identity baked into a session JWT ({ customerId } payload, see
+// server/middleware/auth.js). Lets the cross-tab storage handler tell an
+// identity change (login / property switch elsewhere) apart from a routine
+// refresh of the SAME customer's token — api.js persists refreshed tokens to
+// localStorage too, and those must not blank a working tab. Null (missing /
+// undecodable token) is treated by the caller as an identity change.
+function tokenCustomerId(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    return payload.customerId ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function authErrorCopy(err) {
   const msg = String(err?.message || '').trim();
   const looksCurated = msg
@@ -95,6 +111,52 @@ export function AuthProvider({ children }) {
     }
     setLoading(false);
   }, []);
+
+  // Cross-tab session sync. Logout in tab A only clears tab B's localStorage —
+  // tab B's in-memory api.token kept working until its next 401. React to the
+  // token key changing in ANOTHER tab (`storage` never fires in the tab that
+  // wrote): removal ends this tab's session too; a new/changed token (login or
+  // property switch elsewhere) is adopted so the tabs can't act as two
+  // different customers.
+  useEffect(() => {
+    const onStorage = (event) => {
+      // key === null means localStorage.clear(); otherwise only react to ours.
+      if (event.key !== null && event.key !== 'waves_token') return;
+      const token = localStorage.getItem('waves_token');
+      if (token === (api.token || null)) return; // echo of our own state
+      if (retryTimer.current) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+      }
+      if (!token) {
+        api.clearTokens();
+        customerRef.current = null;
+        setCustomer(null);
+        setProperties([]);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+      const nextId = tokenCustomerId(token);
+      const identityChanged = nextId === null || nextId !== tokenCustomerId(api.token);
+      api.token = token;
+      api.refreshToken = localStorage.getItem('waves_refresh_token');
+      if (identityChanged) {
+        // The token now points at a DIFFERENT customer — the old one must not
+        // keep rendering (and firing actions) against it while loadCustomer
+        // is in flight or retrying. Same go-pending pattern as switchProperty;
+        // a same-customer refresh skips this so working tabs don't flash.
+        customerRef.current = null;
+        setCustomer(null);
+        setProperties([]);
+        setError(null);
+        setLoading(true);
+      }
+      loadCustomer();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [loadCustomer]);
 
   const sendCode = async (phone) => {
     setError(null);

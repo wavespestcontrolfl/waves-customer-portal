@@ -1150,6 +1150,11 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Abort an in-flight ask on unmount — the AI answer can take several
+  // seconds, and its late resolution must not setState (or flash the call-us
+  // fallback) against an unmounted bar.
+  const askAbortRef = useRef(null);
+  useEffect(() => () => { askAbortRef.current?.abort(); }, []);
   const prompts = Array.isArray(chips) && chips.length > 0
     ? chips.map((chip) => String(chip || '').trim()).filter(Boolean).slice(0, 6)
     : ESTIMATE_ASK_PROMPTS;
@@ -1157,6 +1162,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const ask = useCallback(async (prompt) => {
     const q = String(prompt ?? question).trim();
     if (!q || asking) return;
+    const controller = new AbortController();
+    askAbortRef.current = controller;
     setAsking(true);
     setFailed(false);
     setAnswer('Checking...');
@@ -1172,16 +1179,19 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           selectedFrequency,
           serviceMode,
         }),
+        signal: controller.signal,
       });
       const body = await response.json().catch(() => ({}));
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(body.error || 'question_failed');
       setAnswer(body.answer || 'I could not answer that from this estimate.');
       setQuestion('');
     } catch {
+      if (controller.signal.aborted) return;
       setFailed(true);
       setAnswer(`I could not answer that right now. Call or text Waves at ${WAVES_PHONE_DISPLAY}.`);
     } finally {
-      setAsking(false);
+      if (!controller.signal.aborted) setAsking(false);
     }
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
@@ -2311,7 +2321,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -2384,7 +2394,8 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         <button
           type="button"
           onClick={onConfirm}
-          style={estimateCtaStyle}
+          disabled={submitting}
+          style={submitting ? { ...estimateCtaStyle, opacity: 0.65, cursor: 'wait' } : estimateCtaStyle}
         >{confirmLabel}</button>
         {confirmSub ? (
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
@@ -3211,6 +3222,11 @@ export default function EstimateViewPage() {
   // open; the succeeded SetupIntent id rides to accept via the ref.
   const [cardHoldIntent, setCardHoldIntent] = useState(null);
   const cardHoldSetupIntentIdRef = useRef(null);
+  // Live-ref accept lock (same reasoning as ctaPhaseRef): performAccept is
+  // also reached with ctaPhaseRef already 'submitting' (handleConfirm's
+  // deposit/card-hold exempt fall-through), so it carries its own synchronous
+  // single-flight latch — a double-invoke must not double-PUT /accept.
+  const acceptInFlightRef = useRef(false);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -3653,6 +3669,11 @@ export default function EstimateViewPage() {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
+    // Synchronous single-flight guard: React state (`processing`-style flags)
+    // lags a double-tap in the same frame — the ref flips before any await,
+    // so a second entry can never double-PUT /accept.
+    if (acceptInFlightRef.current) return;
+    acceptInFlightRef.current = true;
     setCtaPhase('submitting');
     setError(null);
     try {
@@ -3730,6 +3751,8 @@ export default function EstimateViewPage() {
     } catch (err) {
       setError(err.message);
       setCtaPhase('review');
+    } finally {
+      acceptInFlightRef.current = false;
     }
   }, [adminDraftPreview, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
@@ -3739,6 +3762,10 @@ export default function EstimateViewPage() {
   // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
+    // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
+    // a double-tap on Confirm must not double-enter the flow — the second
+    // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
+    if (ctaPhaseRef.current === 'submitting') return;
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). When a card
     // is required to book this one-time visit and none is captured yet, mint
     // the SetupIntent and open the capture modal; accept continues from the
@@ -4446,6 +4473,7 @@ export default function EstimateViewPage() {
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
+            submitting={ctaPhase === 'submitting'}
             invoiceMode={!!estimate.billByInvoice}
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
