@@ -8477,14 +8477,44 @@ router.put('/:token/accept', async (req, res, next) => {
     // webhook re-runs this idempotently when it delivers post-accept, and a
     // still-unenrolled per_application customer surfaces in billing recovery.
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
-      await RecurringCards.completeRecurringCardEnrollment({
-        customerId,
-        stripePaymentMethodId: recurringCardVerification.paymentMethodId,
-        setupIntentId: recurringCardVerification.setupIntentId,
-        estimateId: estimate.id,
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
-      }).catch(() => {});
+      // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
+      // an unlinked estimate resolves/creates its customer INSIDE the accept
+      // transaction, so the pre-transaction policy could not see a
+      // customer-dependent payer exemption — a phone match can land on an
+      // existing payer-billed account, and enrolling the captured card would
+      // auto-charge the HOMEOWNER for invoices that route to the third-party
+      // payer. Only needed when the resolved customer differs from the id the
+      // policy resolved with; FAIL CLOSED on a lookup error (skip enrollment —
+      // the gap surfaces in billing recovery, the wrong enrollment charges the
+      // wrong party). The other customer-dependent exemptions stay safe
+      // post-commit without a re-check: enrollConsentedMethod defers to a
+      // healthy already-enrolled incumbent (autopay_already_active), and the
+      // plan-member exemption is undecidable here by design — the accept
+      // itself just converted this customer (same trap documented on the
+      // webhook backstop), and the customer explicitly checked the v8 consent.
+      let payerBilled = false;
+      if (String(estimate.customer_id || '') !== String(customerId)) {
+        try {
+          const PayerService = require('../services/payer');
+          const resolvedPayer = await PayerService.resolveForInvoice({ customerId, scheduledServiceId: acceptLinkedSsId });
+          payerBilled = !!resolvedPayer?.payerId;
+        } catch (err) {
+          payerBilled = true;
+          logger.warn(`[estimate-public] recurring-cof post-commit payer re-check failed — skipping enrollment (fail closed): ${err.message}`);
+        }
+      }
+      if (payerBilled) {
+        logger.info(`[estimate-public] recurring-cof enrollment skipped: resolved customer ${customerId} is payer-billed (estimate ${estimate.id})`);
+      } else {
+        await RecurringCards.completeRecurringCardEnrollment({
+          customerId,
+          stripePaymentMethodId: recurringCardVerification.paymentMethodId,
+          setupIntentId: recurringCardVerification.setupIntentId,
+          estimateId: estimate.id,
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+        }).catch(() => {});
+      }
     }
     let invoiceMode = txResult.invoiceMode === true;
     let invoiceId = txResult.invoiceId || null;
