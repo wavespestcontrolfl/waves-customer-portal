@@ -1114,6 +1114,42 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-25 findings (#2633) ──
+
+  test('Codex r25: own-brand scans run table-less', () => {
+    const disp = gate.evaluate({ body: 'Waves Pest Control charges hidden fees.' }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const rank = gate.evaluate({ body: 'We are #1 in Venice.' }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r25: negated provider-category denials are not fake business names', () => {
+    const r = gate.evaluate({ body: 'No pest control companies charge hidden fees like the bad old days.' }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r25: future-tense service copy with literal pest words stays clean table-less', () => {
+    // Beside a comparison table the bare-token PROXIMITY arm still applies
+    // by design (detected business name within 90 chars) — this guard
+    // covers the prose path's subject-verb arm only.
+    const r = gate.evaluate({ body: 'Acme Pest Solutions will treat shady corners around the lanai.' }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r25: sentence-initial "Waves of" stays educational', () => {
+    for (const prose of ['Waves of summer heat are the #1 stressor.', 'Waves of heat can be lousy for turf.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(false);
+    }
+  });
+
+  test('Codex r25: own-brand evaluative negatives block', () => {
+    for (const prose of ['Waves is unreliable.', 'Waves is the worst.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-24 findings (#2633) ──
 
   test('Codex r24: present-tense and call/name reflexive #1 claims block', () => {

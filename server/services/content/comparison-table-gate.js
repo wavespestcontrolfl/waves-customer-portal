@@ -312,7 +312,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // regexes carry no flags): "Waves pest control: hidden fees" is sentence
 // case, and only the leading W disambiguates the brand from the common
 // noun (Codex r14 on #2633). Bare/typographic possessives accepted.
-const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
+// "(?!\\s+of\\b)": sentence-initial common-noun openings — "Waves of summer
+// heat…" — are weather/pest copy, never the brand (Codex r25 on #2633).
+const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
 // Curated heading descriptors may sit between the brand and the separator —
 // "Waves Review: Hidden fees", "Waves billing: hidden fees" (Codex r21 on
 // #2633). Curated, not free words: arbitrary hops would re-create the
@@ -334,7 +336,7 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMER
 // lowercase common-noun "waves" a subject ("summer heat waves can be lousy
 // for turf" hard-blocked; Codex r18 on #2633).
 const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
-  `^${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`, 'i',
+  `^${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
 );
 // Reverse form ("…dishonest Waves"): the vocabulary needs 'i' but the brand
 // token must be case-VERIFIED in code (capture group checked against
@@ -375,7 +377,11 @@ const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
 // forms the provider-noun arms accept — "may be dishonest" / "appears to be
 // dishonest" is still the accusation (Codex r15 on #2633); past-tense linking
 // forms ride along for the same parity.
-const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|will|would|can(?:not)?|can\'?t|won\'?t|never|always|keeps?|kept|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?';
+// Bare behavioral modals (will/would/can/keeps) are OUT: with the 60-char
+// window they turned service copy into accusations — "X will treat shady
+// corners around the lanai" (Codex r25 on #2633). Their be-forms stay, and
+// modal+active accusations are ACTIVE_ADVERBS' job.
+const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|(?:will|would)\\s+be|can(?:not)?\\s+be|can\'?t\\s+be|won\'?t\\s+be|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?';
 
 // Numeric self-ranking ("#1", "No. 1", "number one") split out of the
 // context-free ranking set: in educational pest prose these are overwhelmingly
@@ -457,7 +463,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -616,6 +622,84 @@ function sentenceHasNegator(text, index, length) {
 // lead-ins ("Not only that, X is dishonest") sit before the match entirely.
 function spanUnnegated(m) {
   return m && !SENTENCE_NEGATOR_RE.test((m.groups && m.groups.dtail) || m[0]) ? m : null;
+}
+
+// ── Own-brand scans, shared by the table and table-less paths ──
+// "Waves Pest Control charges hidden fees" must block in a plain no-table
+// draft exactly as it does beside a comparison table (Codex r25 on #2633).
+function scanOwnBrandDisparagementArms(scanText) {
+  const joined = scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
+  if (joined) return joined;
+  // Case-sensitive brand anchor + case-insensitive object-anchored tail
+  // ("Waves: Hidden fees"). EVERY anchor is checked: a benign earlier
+  // heading must not shadow a later accusation (Codex r11).
+  const sepAnchorRe = new RegExp(OWN_BRAND_SEP_ANCHOR_RE.source, 'g');
+  let sa;
+  while ((sa = sepAnchorRe.exec(scanText)) !== null) {
+    if (OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sa.index + sa[0].length))) {
+      return [scanText.slice(sa.index, sa.index + sa[0].length + 40)];
+    }
+  }
+  // Linking/association tails behind the case-sensitive anchor (Codex
+  // r18/r21). The linking tail's gap is negator-excluded; the assoc tail's
+  // free window is not, so it takes the span negation guard — "Waves does
+  // not get complaints about hidden fees" is a denial (Codex r22).
+  const linkAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
+  let la;
+  while ((la = linkAnchorRe.exec(scanText)) !== null) {
+    const tailText = scanText.slice(la.index + la[0].length);
+    let tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText);
+    if (!tm) {
+      const am2 = OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
+      if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])) tm = am2;
+    }
+    if (tm) return [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
+  }
+  // Reverse arm with the case-verified brand token (Codex r19).
+  const revRe = new RegExp(OWN_BRAND_REVERSE_SRC, 'gi');
+  let rv;
+  while ((rv = revRe.exec(scanText)) !== null) {
+    if (OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) return [rv[0]];
+  }
+  // Object association ("Customers report hidden fees after choosing
+  // Waves") — case-verified + sentence-level denial guard (Codex r21).
+  const assocRe = new RegExp(OWN_BRAND_OBJ_ASSOC_SRC, 'gi');
+  let av;
+  while ((av = assocRe.exec(scanText)) !== null) {
+    if (!OWN_BRAND_CASE_RE.test(av.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, av.index, av[0].length)) continue;
+    return [av[0]];
+  }
+  return null;
+}
+
+function scanOwnBrandRankingArms(scanText) {
+  // Separator/appositive #1 ("Waves — the #1 choice", Codex r12) — every
+  // anchor checked (Codex r11).
+  const numAnchorRe = new RegExp(OWN_BRAND_NUMERIC_ANCHOR_RE.source, 'g');
+  let na;
+  while ((na = numAnchorRe.exec(scanText)) !== null) {
+    if (OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(na.index + na[0].length))) {
+      return [scanText.slice(na.index, na.index + na[0].length + 20)];
+    }
+  }
+  // Waves-subject linking/marketing #1 arms behind the case-sensitive
+  // anchor (Codex r19).
+  const subjAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
+  let sa2;
+  while ((sa2 = subjAnchorRe.exec(scanText)) !== null) {
+    const tail = scanText.slice(sa2.index + sa2[0].length);
+    const tm = OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.exec(tail) || OWN_BRAND_MARKETING_TAIL_RE.exec(tail);
+    if (tm) return [scanText.slice(sa2.index, sa2.index + sa2[0].length + tm[0].length)];
+  }
+  // #1-before-the-brand framing ("The #1 overall is Waves") — case-verified
+  // brand token (Codex r21).
+  const nbRe = new RegExp(OWN_BRAND_NUM_BEFORE_SRC, 'gi');
+  let nb;
+  while ((nb = nbRe.exec(scanText)) !== null) {
+    if (OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) return [nb[0]];
+  }
+  return null;
 }
 
 function normalize(s) {
@@ -877,6 +961,20 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   const curatedNames = [...known, ...unknown];
   for (const nm of curatedNames) genericNames.delete(nm);
 
+  // Own-brand scans run here too — a no-table draft saying "Waves Pest
+  // Control charges hidden fees" or "We are #1" carries the same legal
+  // risk as one beside a comparison table (Codex r25 on #2633).
+  const ownDisp = scanOwnBrandDisparagementArms(scanText);
+  if (ownDisp) {
+    findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+      `Draft contains disparaging language about Waves itself ("${ownDisp[0].trim()}"). State attributes, never insults — in prose, the title, and the meta.`));
+  }
+  const ownRank = scanText.match(NUMERIC_SELF_RANKING_RE) || scanOwnBrandRankingArms(scanText);
+  if (ownRank) {
+    findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
+      `Draft uses self-ranking framing ("${ownRank[0].trim()}"). Present neutral trade-offs — do not declare a winner, in prose, the title, or the meta.`));
+  }
+
   // Curated competitor names: bare PROXIMITY is enough (a real brand plus
   // negativity nearby is legal surface even without tidy grammar — mirrors
   // the comparison path's prose scan). Generic business-SHAPED phrases need
@@ -1134,20 +1232,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     || scanText.match(DIRECTED_DISPARAGEMENT_RE)
     || scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
   if (!disp) {
-    // Case-sensitive brand anchor + case-insensitive object-anchored tail
-    // ("Waves: Hidden fees") — see the OWN_BRAND_ANCHOR comment block.
-    // EVERY anchor is checked: a benign earlier heading ("Waves — shady
-    // foliage guide") must not shadow a later accusation (Codex r11).
-    const sepAnchorRe = new RegExp(OWN_BRAND_SEP_ANCHOR_RE.source, 'g');
-    let sa;
-    while ((sa = sepAnchorRe.exec(scanText)) !== null) {
-      if (OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sa.index + sa[0].length))) {
-        disp = [scanText.slice(sa.index, sa.index + sa[0].length + 40)];
-        break;
-      }
-    }
-  }
-  if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
     while ((dm = bareDispRe.exec(proseText)) !== null) {
@@ -1160,48 +1244,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     }
   }
   if (!disp) {
-    // Waves-subject linking-verb arm — case-sensitive anchor (see
-    // OWN_BRAND_LINKING_TAIL_RE; Codex r18 on #2633). Every anchor is
-    // checked, like the separator loop.
-    const linkAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
-    let la;
-    while ((la = linkAnchorRe.exec(scanText)) !== null) {
-      const tailText = scanText.slice(la.index + la[0].length);
-      // The linking tail's gap is negator-excluded; the assoc tail's free
-      // window is not, so its match takes the span negation guard —
-      // "Waves does not get complaints about hidden fees" is a denial
-      // (Codex r22 on #2633).
-      let tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText);
-      if (!tm) {
-        const am2 = OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
-        if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])) tm = am2;
-      }
-      if (tm) {
-        disp = [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
-        break;
-      }
-    }
-  }
-  if (!disp) {
-    // Reverse arm with the case-verified brand token (Codex r19).
-    const revRe = new RegExp(OWN_BRAND_REVERSE_SRC, 'gi');
-    let rv;
-    while ((rv = revRe.exec(scanText)) !== null) {
-      if (OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) { disp = [rv[0]]; break; }
-    }
-  }
-  if (!disp) {
-    // Own-brand object association ("Customers report hidden fees after
-    // choosing Waves") — case-verified + sentence-level denial guard
-    // (Codex r21).
-    const assocRe = new RegExp(OWN_BRAND_OBJ_ASSOC_SRC, 'gi');
-    let av;
-    while ((av = assocRe.exec(scanText)) !== null) {
-      if (!OWN_BRAND_CASE_RE.test(av.groups.brandTok)) continue;
-      if (sentenceHasNegator(scanText, av.index, av[0].length)) continue;
-      disp = [av[0]];
-      break;
-    }
+    // Anchored own-brand arms (linking/assoc/reverse/object-association) —
+    // shared helper with the table-less path (Codex r25).
+    disp = scanOwnBrandDisparagementArms(scanText);
   }
   if (!disp) {
     // Directed grammar for the looser name classes (see extraProseNames):
@@ -1325,37 +1370,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // WAVES, The #1 choice") — see the OWN_BRAND_ANCHOR comment block.
     // EVERY anchor is checked (Codex r11): an earlier benign "Waves —
     // seasonal guide" must not shadow a later self-ranking.
-    const numAnchorRe = new RegExp(OWN_BRAND_NUMERIC_ANCHOR_RE.source, 'g');
-    let na;
-    while ((na = numAnchorRe.exec(scanText)) !== null) {
-      if (OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(na.index + na[0].length))) {
-        rank = [scanText.slice(na.index, na.index + na[0].length + 20)];
-        break;
-      }
-    }
-  }
-  if (!rank) {
-    // Waves-subject linking/marketing #1 arms behind the case-sensitive
-    // anchor (Codex r19) — every anchor checked, like the separator loop.
-    const subjAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
-    let sa2;
-    while ((sa2 = subjAnchorRe.exec(scanText)) !== null) {
-      const tail = scanText.slice(sa2.index + sa2[0].length);
-      const tm = OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.exec(tail) || OWN_BRAND_MARKETING_TAIL_RE.exec(tail);
-      if (tm) {
-        rank = [scanText.slice(sa2.index, sa2.index + sa2[0].length + tm[0].length)];
-        break;
-      }
-    }
-  }
-  if (!rank) {
-    // #1-before-the-brand framing ("The #1 overall is Waves") —
-    // case-verified brand token (Codex r21).
-    const nbRe = new RegExp(OWN_BRAND_NUM_BEFORE_SRC, 'gi');
-    let nb;
-    while ((nb = nbRe.exec(scanText)) !== null) {
-      if (OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) { rank = [nb[0]]; break; }
-    }
+    // Anchored own-brand #1 arms — shared helper with the table-less path
+    // (Codex r25).
+    rank = scanOwnBrandRankingArms(scanText);
   }
   if (!rank) {
     // "#1" needs SYNTAX tying it to a provider — "#1 (rated) pest control
