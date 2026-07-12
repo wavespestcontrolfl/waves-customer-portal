@@ -33,7 +33,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
-const { scrubPansDetailed } = require('../utils/pan-scrub');
+const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
@@ -147,19 +147,12 @@ function scrubTranscriptArtifacts({ transcription, contactPassTranscript, segmen
   count += main.count;
   const contactPass = scrubPansDetailed(contactPassTranscript);
   count += contactPass.count;
-  let scrubbedSegments = segments;
-  if (Array.isArray(segments)) {
-    scrubbedSegments = segments.map((seg) => {
-      if (!seg || typeof seg.text !== 'string') return seg;
-      const s = scrubPansDetailed(seg.text);
-      count += s.count;
-      return s.count ? { ...seg, text: s.text } : seg;
-    });
-  }
+  const segScrub = scrubSegments(segments);
+  count += segScrub.count;
   return {
     transcription: main.text,
     contactPassTranscript: contactPass.text,
-    segments: scrubbedSegments,
+    segments: segScrub.segments,
     count,
   };
 }
@@ -181,12 +174,9 @@ function scrubStructuredTranscript(json) {
   if (!parsed || typeof parsed !== 'object') return { json, count: 0 };
   let count = 0;
   if (Array.isArray(parsed.segments)) {
-    parsed.segments = parsed.segments.map((seg) => {
-      if (!seg || typeof seg.text !== 'string') return seg;
-      const s = scrubPansDetailed(seg.text);
-      count += s.count;
-      return s.count ? { ...seg, text: s.text } : seg;
-    });
+    const segScrub = scrubSegments(parsed.segments);
+    parsed.segments = segScrub.segments;
+    count += segScrub.count;
   }
   if (typeof parsed.contact_pass_transcript === 'string') {
     const s = scrubPansDetailed(parsed.contact_pass_transcript);
@@ -2660,16 +2650,12 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     // round-1 P1). The dictation contact-pass rides this same function, so
     // it is covered here too.
     const panScrub = scrubPansDetailed(text);
-    let segments = normalizeOpenAISegments(data);
-    let segScrubCount = 0;
-    if (Array.isArray(segments)) {
-      segments = segments.map((seg) => {
-        if (!seg || typeof seg.text !== 'string') return seg;
-        const s = scrubPansDetailed(seg.text);
-        segScrubCount += s.count;
-        return s.count ? { ...seg, text: s.text } : seg;
-      });
-    }
+    // scrubSegments bridges adjacent-segment splits — a readback the
+    // provider divided across two segments must not hide below the
+    // 13-digit floor on either side (Codex #2676 round-5 P1).
+    const segScrub = scrubSegments(normalizeOpenAISegments(data));
+    const segments = segScrub.segments;
+    const segScrubCount = segScrub.count;
     if (panScrub.count + segScrubCount > 0) {
       logger.warn(`[call-proc] PAN scrub masked ${panScrub.count + segScrubCount} card artifact(s) at OpenAI provider return`);
     }
@@ -2796,7 +2782,13 @@ async function transcribeRecording(mp3Url, opts = {}) {
   // of clobbering the flags with fresh provenance (round-4 P2).
   try {
     const panCount = Number(result?.metadata?.pan_count || 0);
-    if (panCount > 0 && opts.call?.id) {
+    // Quarantine is EXPLICITLY opt-in (opts.quarantine) — inferring it from
+    // opts.call flipped read-only callers into mutators (the extraction
+    // replay script) while silently skipping callers that pass no row (the
+    // bounce reverify) — Codex #2676 round-5 P1. Mutating pipelines
+    // (processRecording, the retranscription backfill, bounce reverify)
+    // pass quarantine: true; diagnostic/replay callers stay pure reads.
+    if (panCount > 0 && opts.quarantine === true && opts.call?.id) {
       const q = await quarantineCardRecording(opts.call, { source: 'transcription' });
       if (result.metadata) {
         result.metadata.pan_detected = true;
@@ -3839,7 +3831,7 @@ const CallRecordingProcessor = {
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
 
     if (call.recording_url) {
-      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
       // PAN redaction guard (card-on-file spec Phase 0): a card number

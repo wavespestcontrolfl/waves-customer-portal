@@ -290,7 +290,10 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     // forceContactPass: the primary transcript may have normalized the
     // misheard address into something that no longer trips the dictation
     // signals — for a bounce re-verify the letter-fidelity pass IS the point.
-    const result = await CallProc.transcribeRecording(call.recording_url, { forceContactPass: true });
+    // quarantine + call: a PAN first detected on this re-listen must strip
+    // the recording like the live pipeline would (Codex #2676 round-5 P1) —
+    // this path mutates contact data anyway, so it is a mutating caller.
+    const result = await CallProc.transcribeRecording(call.recording_url, { call, forceContactPass: true, quarantine: true });
     // Same hallucination guard the live pipeline applies before trusting a
     // transcript — a near-silent recording can yield a long invented one,
     // and candidates decoded from it would be confidently wrong.

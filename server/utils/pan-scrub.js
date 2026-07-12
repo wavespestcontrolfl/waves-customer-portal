@@ -79,7 +79,16 @@ function maskFor(digits) {
 // "4242, 4242, 4242, 4242" or period/newline-separated groups — commas,
 // periods, and whitespace must join a run or each group is an unmatchable
 // <13-digit island (Codex #2676 round-2 P1).
-const NUMERIC_RUN_RE = /(?<![\d-])\d(?:[\s,.-]{1,3}?\d|\d)*(?![\d-])/g;
+// A diarization label sitting mid-readback ("4242 4242\nSpeaker 1: 4242
+// 4242" — same caller, split by the provider) must not break the run into
+// unmatchable islands (Codex #2676 round-5 P1). The label text is swallowed
+// into the mask when a PAN bridges it — a small diarization loss, the right
+// trade against a stored card number.
+const LABEL_SEP = '(?:(?:speaker\\s*\\d+|agent|caller)\\s*:[\\s,.-]{1,3})';
+const NUMERIC_RUN_RE = new RegExp(
+  `(?<![\\d-])\\d(?:(?:[\\s,.-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
+  'gi'
+);
 const MAX_RUN_DIGITS = 40;
 
 // Real-world PAN length priority: 16 (Visa/MC dominant), 15 (Amex), 19
@@ -191,11 +200,14 @@ const DIGIT_WORDS = {
 const DIGIT_WORD_ALT = Object.keys(DIGIT_WORDS).join('|');
 // Maximal spoken-digit run: 13+ digit words (candidate windows are carved
 // inside, so the run itself may include trailing expiry/CVV words).
-// Comma/period/ALL-whitespace pause punctuation joins the run, mirroring the
-// numeric side — a provider line break mid-readback must not split the run
-// into unmatchable islands (Codex #2676 round-4 P2).
+// Comma/period/ALL-whitespace pause punctuation joins the run (round-4),
+// and so do a couple of FILLER tokens or a mid-readback diarization label
+// (round-5): the transcription prompt preserves "um"/"uh" verbatim, so
+// "four two um four two…" is exactly how a real readback lands.
+const SPOKEN_FILLER = '(?:um+|uh+|erm|ah|hm+)';
+const SPOKEN_SEP = `(?:[\\s,.]+(?:(?:${SPOKEN_FILLER}|(?:speaker\\s*\\d+|agent|caller)\\s*:)[\\s,.]+){0,2})`;
 const WORD_RUN_RE = new RegExp(
-  `\\b(?:(?:${DIGIT_WORD_ALT})[\\s,.]+){12,}(?:${DIGIT_WORD_ALT})\\b`,
+  `\\b(?:(?:${DIGIT_WORD_ALT})${SPOKEN_SEP}){12,}(?:${DIGIT_WORD_ALT})\\b`,
   'gi'
 );
 
@@ -243,9 +255,21 @@ function strongCardIin(digits) {
 }
 
 function scrubSpokenRun(run) {
-  const words = run.split(/[\s,.]+/);
-  const digits = words.map((w) => DIGIT_WORDS[w.toLowerCase()] ?? '').join('');
-  if (digits.length > MAX_RUN_DIGITS) return { text: run, count: 0 };
+  // Words may include fillers/label tokens the separator let through —
+  // track which word positions are DIGIT words so windows count digits,
+  // not words (a filler inside the readback is swallowed by the mask).
+  const words = run.split(/[\s,.]+/).filter(Boolean);
+  const digitWordIdx = [];
+  const digitChars = [];
+  words.forEach((w, i) => {
+    const d = DIGIT_WORDS[w.toLowerCase()];
+    if (d !== undefined) {
+      digitWordIdx.push(i);
+      digitChars.push(d);
+    }
+  });
+  const digits = digitChars.join('');
+  if (digits.length < 13 || digits.length > MAX_RUN_DIGITS) return { text: run, count: 0 };
   const phoneRun = looksLikeSpokenPhoneRun(digits);
   for (const len of panLengthPriority(digits.slice(0, 2))) {
     if (len > digits.length) continue;
@@ -260,17 +284,50 @@ function scrubSpokenRun(run) {
     // the residual trade accepted in favor of never persisting a PAN.
     if (phoneRun && (!strongCardIin(candidate) || !isValidCodeTail(digits.slice(len)))) continue;
     if (panCandidateValid(candidate)) {
-      // Mask the first `len` words. A short spoken tail (≤8 digit words) is
-      // the expiry/CVV that followed the readback — absorb it; a longer
-      // tail is other content and stays verbatim.
-      const tailWords = words.slice(len);
-      const tail = tailWords.length > 0 && tailWords.length <= 8
+      // Mask through the len-th DIGIT word (fillers inside the readback are
+      // swallowed by the mask). A short DIGIT tail (≤8) is the expiry/CVV
+      // that followed — absorb it; a longer tail is other content and stays
+      // verbatim.
+      const lastMaskedWordIdx = digitWordIdx[len - 1];
+      const tailWords = words.slice(lastMaskedWordIdx + 1);
+      const tailDigitCount = digits.length - len;
+      const tail = tailDigitCount > 0 && tailDigitCount <= 8
         ? ' [code removed]'
         : (tailWords.length ? ` ${tailWords.join(' ')}` : '');
       return { text: maskFor(candidate) + tail, count: 1 };
     }
   }
   return { text: run, count: 0 };
+}
+
+// Diarized-segment scrub with cross-boundary bridging (round-5 P1): the
+// provider can split one same-caller readback across two segments, leaving
+// each side under 13 digits. Per-segment scrub first; then every adjacent
+// pair is re-checked as a joined string — a bridging hit masks in the first
+// segment and empties the second (a small diarization loss, the right trade
+// against a stored card number). Returns { segments, count }.
+function scrubSegments(segments) {
+  if (!Array.isArray(segments)) return { segments, count: 0 };
+  let count = 0;
+  const out = segments.map((seg) => {
+    if (!seg || typeof seg.text !== 'string') return seg;
+    const s = scrubPansDetailed(seg.text);
+    count += s.count;
+    return s.count ? { ...seg, text: s.text } : seg;
+  });
+  for (let i = 0; i + 1 < out.length; i += 1) {
+    const a = out[i];
+    const b = out[i + 1];
+    if (!a || !b || typeof a.text !== 'string' || typeof b.text !== 'string') continue;
+    const joined = `${a.text}\n${b.text}`;
+    const r = scrubPansDetailed(joined);
+    if (r.count > 0) {
+      out[i] = { ...a, text: r.text };
+      out[i + 1] = { ...b, text: '' };
+      count += r.count;
+    }
+  }
+  return { segments: out, count };
 }
 
 // Read-aloud CVV with context ("cvv 123", "security code is one two three").
@@ -318,4 +375,4 @@ function scrubPans(text) {
   return scrubPansDetailed(text).text;
 }
 
-module.exports = { luhnValid, scrubPans, scrubPansDetailed };
+module.exports = { luhnValid, scrubPans, scrubPansDetailed, scrubSegments };

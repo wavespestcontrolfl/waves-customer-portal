@@ -964,23 +964,53 @@ router.post('/recording-status', async (req, res) => {
       const requestFrom = req.body.From || null;
       const requestTo = req.body.To || null;
 
+      // PAN-quarantined rows must never re-attach audio: the built-in
+      // transcription webhook can flag + quarantine BEFORE this callback
+      // delivers the recording URL, and storing it here would put the card
+      // audio right back on the row/message (Codex #2676 round-5 P1). The
+      // updates skip quarantined rows; the freshly delivered recording is
+      // then deleted at Twilio below instead of stored.
+      const notQuarantined = function notQuarantined() {
+        this.whereNull('transcription_metadata')
+          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') IS DISTINCT FROM 'true'");
+      };
       let updated = 0;
       let matchedSid = null;
       if (ParentCallSid) {
         updated = await db('call_log')
           .where('twilio_call_sid', ParentCallSid)
+          .where(notQuarantined)
           .update(recordingData);
         if (updated > 0) matchedSid = ParentCallSid;
       }
       if (updated === 0) {
         updated = await db('call_log')
           .where('twilio_call_sid', CallSid)
+          .where(notQuarantined)
           .update(recordingData);
         if (updated > 0) matchedSid = CallSid;
       }
 
+      let quarantinedMatch = null;
+      if (updated === 0) {
+        quarantinedMatch = await db('call_log')
+          .whereIn('twilio_call_sid', [ParentCallSid, CallSid].filter(Boolean))
+          .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+          .first();
+      }
+
       if (updated > 0) {
         logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+      } else if (quarantinedMatch) {
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-quarantined call ${maskSid(quarantinedMatch.twilio_call_sid)} — deleting instead of attaching`);
+        await require('../services/call-recording-processor').quarantineCardRecording(
+          {
+            ...quarantinedMatch,
+            recording_sid: quarantinedMatch.recording_sid || RecordingSid,
+            recording_url: RecordingUrl ? `${RecordingUrl}.mp3` : quarantinedMatch.recording_url,
+          },
+          { source: 'recording_status_post_quarantine' },
+        ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
       } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {
@@ -995,7 +1025,8 @@ router.post('/recording-status', async (req, res) => {
 
             const existing = await trx('call_log').where('twilio_call_sid', primaryCallSid).first();
             if (existing) {
-              await trx('call_log').where({ id: existing.id }).update(recordingData);
+              // Same quarantine guard as the direct updates above.
+              await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
               matchedSid = primaryCallSid;
               logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
               return;
@@ -1146,8 +1177,15 @@ router.post('/transcription', async (req, res) => {
           try {
             const callRow = await db('call_log').where('twilio_call_sid', matchedSid).first();
             if (callRow) {
+              // This webhook can arrive BEFORE /recording-status stamps the
+              // row — carry its own RecordingSid so the Twilio delete can
+              // still identify the audio (Codex #2676 round-5 P1). The
+              // /recording-status guard covers the reverse ordering.
               await require('../services/call-recording-processor')
-                .quarantineCardRecording(callRow, { source: 'twilio_transcription_webhook' });
+                .quarantineCardRecording(
+                  { ...callRow, recording_sid: callRow.recording_sid || RecordingSid || null },
+                  { source: 'twilio_transcription_webhook' },
+                );
             }
           } catch (qErr) {
             logger.error(`[transcription] PAN quarantine failed for ${maskSid(matchedSid)}: ${qErr.message}`);

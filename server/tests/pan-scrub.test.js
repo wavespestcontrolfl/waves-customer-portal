@@ -2,7 +2,7 @@
 // Luhn-gated scrubber plus the processor's three-artifact wrapper
 // (transcript string + diarized segments + contact-pass stream).
 
-const { luhnValid, scrubPans, scrubPansDetailed } = require('../utils/pan-scrub');
+const { luhnValid, scrubPans, scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 
 // The processor's wrapper is exercised via the _test export (harness
 // convention — see call-transcription-hallucination-guard.test.js).
@@ -108,6 +108,12 @@ describe('scrubPans — numeric forms', () => {
       expect(scrubPans('card 4242 - 4242 - 4242 - 4242 end'))
         .toBe('card [card ending 4242] end');
     });
+    it('masks a readback bridged by a mid-run diarization label (round 5)', () => {
+      const r = scrubPansDetailed('Caller: 4242 4242\nCaller: 4242 4242 ok');
+      expect(r.count).toBe(1);
+      expect(r.text).not.toContain('4242 4242');
+      expect(r.text).toContain('[card ending 4242]');
+    });
   });
 
   // Codex #2676 round-3 P2: IIN-aware length priority — an Amex (native 15)
@@ -205,6 +211,30 @@ describe('scrubPans — spoken-digit form', () => {
       const wrapped = 'four two four two four two four two\nfour two four two four two four two';
       expect(scrubPans(wrapped)).toBe('[card ending 4242]');
     });
+    it('masks a spoken readback with fillers between groups (round 5 — the prompt preserves "um"/"uh")', () => {
+      const withFillers = 'four two four two um four two four two uh four two four two four two four two';
+      expect(scrubPans(`Caller: ${withFillers} thanks`)).toBe('Caller: [card ending 4242] thanks');
+    });
+  });
+});
+
+describe('scrubSegments — diarized-segment scrub with cross-boundary bridging (round 5)', () => {
+  it('masks a readback the provider split across two adjacent segments', () => {
+    const r = scrubSegments([
+      { id: 's1', speaker: 'caller', text: 'my card is 4242 4242' },
+      { id: 's2', speaker: 'caller', text: '4242 4242 got it?' },
+      { id: 's3', speaker: 'agent', text: 'please use the link instead' },
+    ]);
+    expect(r.count).toBeGreaterThan(0);
+    const joinedOut = r.segments.map((s) => s.text).join(' ');
+    expect(joinedOut).not.toContain('4242 4242');
+    expect(joinedOut).toContain('[card ending 4242]');
+    expect(r.segments[2].text).toBe('please use the link instead');
+  });
+  it('leaves clean segment arrays untouched and passes non-arrays through', () => {
+    const segs = [{ id: 's1', text: 'hello' }, { id: 's2', text: 'phone 941-555-1234' }];
+    expect(scrubSegments(segs)).toEqual({ segments: segs, count: 0 });
+    expect(scrubSegments(null)).toEqual({ segments: null, count: 0 });
   });
 });
 

@@ -72,7 +72,8 @@ function candidateQuery(dbi, { limit = BATCH_LIMIT } = {}) {
     // retried them hourly with this same transcriber since the pipeline
     // shipped; what is still untranscribed is unrescuable audio.
     .whereIn('processing_status', ['processed', 'extraction_failed'])
-    .select('id', 'recording_url', 'transcription', 'transcript_structured', 'from_phone', 'to_phone', 'customer_id',
+    .select('id', 'recording_url', 'recording_sid', 'twilio_call_sid', 'transcription', 'transcript_structured',
+      'from_phone', 'to_phone', 'customer_id',
       'created_at', 'recording_duration_seconds', 'duration_seconds')
     .orderBy('created_at', 'desc')
     .limit(limit);
@@ -87,7 +88,7 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
   }
 
   const processor = () => require('./call-recording-processor');
-  const transcribeFn = transcribe || ((call) => processor().transcribeRecording(call.recording_url, { call }));
+  const transcribeFn = transcribe || ((call) => processor().transcribeRecording(call.recording_url, { call, quarantine: true }));
   const implausibleFn = implausible || ((text, seconds) => processor().isImplausibleTranscript(text, seconds));
 
   const summary = { attempted: 0, upgraded: 0, unusable: 0, retried: 0, exhausted: 0 };
@@ -115,6 +116,35 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
     summary.attempted += 1;
     try {
       const result = await transcribeFn(call);
+      // Heal legacy PAN-bearing artifacts IMMEDIATELY — the unusable/
+      // retry verdict branches below stamp retranscribed_at (or leave the
+      // row for another pass) without ever reaching the main update, which
+      // would leave a raw card number stored permanently (Codex #2676
+      // round-5 P1). Runs AFTER transcribeFn so the quarantine's recording
+      // delete can't race the re-listen this job exists to perform.
+      // Candidates are terminal-state rows the live pipeline is done with,
+      // so the whereNull(retranscribed_at) guard is sufficient against
+      // concurrent writers.
+      try {
+        const legacyText = require('../utils/pan-scrub').scrubPansDetailed(call.transcription ?? null);
+        const legacyStructured = processor().scrubStructuredTranscript(call.transcript_structured ?? null);
+        if (legacyText.count + legacyStructured.count > 0) {
+          await dbi('call_log')
+            .where({ id: call.id })
+            .whereNull('retranscribed_at')
+            .update({
+              ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
+              ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
+              updated_at: dbi.fn.now(),
+            });
+          if (legacyText.count > 0) call.transcription = legacyText.text;
+          if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
+          await processor().quarantineCardRecording(call, { source: 'retranscription_backfill_legacy' });
+          call.recording_url = null;
+        }
+      } catch (healErr) {
+        logger.error(`[retranscribe] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);
+      }
       const text = result?.transcription || null;
       if (!text || result?.provider === 'openai_unlabeled_fallback') {
         // No text, or raw unlabeled text because BOTH the labeling pass and
