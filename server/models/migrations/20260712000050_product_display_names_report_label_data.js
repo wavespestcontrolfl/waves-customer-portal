@@ -111,12 +111,11 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
-  for (const name of APPROVE_FOR_REPORT) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .where('approved_for_service_report', true)
-      .update({ approved_for_service_report: false, updated_at: new Date() });
-  }
+  // approved_for_service_report is intentionally NOT reverted: up() only
+  // wrote rows that were false/null, but a boolean can't be value-matched
+  // back to "what up() wrote" — unapproving here would also strip approvals
+  // that predate this migration (seeds/admin edits) and silently remove
+  // report grounding this migration never granted.
 
   await knex('products_catalog')
     .whereRaw('LOWER(name) = LOWER(?)', ['Taurus SC'])

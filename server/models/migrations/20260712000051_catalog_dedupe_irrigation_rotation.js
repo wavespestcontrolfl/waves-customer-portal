@@ -20,11 +20,18 @@
 // referenced by protocols). irrigation values are the label-standard
 // watering-in facts; ambiguous/method-dependent products are left NULL.
 //
-// down() restores duplicates/repoints and value-matched scalar fields, but
-// intentionally leaves the two booleans standing (see the note in down()).
+// down() is structural only — duplicates reactivate, usage repoints reverse;
+// all fill-only-if-empty data writes are left standing (see note in down()).
 
 const CLUSTERS = [
-  { keeper: 'Demand CS', losers: ['Demand CS Insecticide'] },
+  {
+    keeper: 'Demand CS',
+    losers: ['Demand CS Insecticide'],
+    // Codex r3: the until-dry summary this migration seeds is gated by
+    // approval — approve the canonical row too (no-op in prod, where it is
+    // already approved).
+    keeperUpdates: { approved_for_service_report: true },
+  },
   {
     keeper: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
     losers: ['LESCO High Manganese Combo Chelated Micronutrients AM 1% Mg 5.75% S 3% Fe 4% Mn Micronutrient Liquid Soil Amendment'],
@@ -204,6 +211,29 @@ exports.up = async function up(knex) {
           .where({ product_id: loser.id })
           .update({ product_id: keeper.id });
       }
+      if (await knex.schema.hasTable('product_aliases')) {
+        // Protocol shorthand ("Chelated Iron Plus", "K-Flow", "Primo Maxx
+        // PGR") resolves through product_aliases against the ACTIVE catalog —
+        // aliases parked on a deactivated duplicate would silently drop out
+        // of protocol/AI product matching, so they move to the keeper.
+        await knex('product_aliases')
+          .where({ product_id: loser.id })
+          .update({ product_id: keeper.id, updated_at: new Date() });
+        // And the duplicate's own canonical name becomes a keeper alias so
+        // any name-based lookup that used to hit the duplicate still lands.
+        const existing = await knex('product_aliases')
+          .where({ product_id: keeper.id })
+          .whereRaw('LOWER(alias_name) = LOWER(?)', [loserName])
+          .first('id');
+        if (!existing) {
+          await knex('product_aliases').insert({
+            product_id: keeper.id,
+            alias_name: loserName,
+            created_at: new Date(),
+            updated_at: new Date(),
+          });
+        }
+      }
       await knex('products_catalog')
         .where({ id: loser.id, active: true })
         .update({ active: false, updated_at: new Date() });
@@ -241,20 +271,15 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
-  // approved_for_service_report and irrigation_required are intentionally NOT
-  // reverted: a boolean can't be value-matched back to "what up() wrote"
-  // (a pre-existing seed/admin true is indistinguishable from ours — e.g.
-  // 20260530000022 approves CarbonPro-L on some databases), and stripping a
-  // pre-existing approval on rollback would remove report grounding this
-  // migration never granted. Rollback restores duplicates/repoints and the
-  // exact scalar values written below; the booleans are left standing.
-
-  for (const name of UNTIL_DRY_FIX) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .where('reentry_summary', UNTIL_DRY_SUMMARY)
-      .update({ reentry_summary: null, updated_at: new Date() });
-  }
+  // Rollback is STRUCTURAL only: duplicates reactivate and the
+  // service_product_usage repoints reverse. Data fills (keeper label facts,
+  // irrigation flags, approvals, the until-dry summary, moved/added aliases)
+  // are intentionally left standing — every up() write was fill-only-if-empty,
+  // so none displaced a pre-existing value, and a value-matched revert cannot
+  // distinguish what up() wrote from identical data that predated it or was
+  // admin-entered later (e.g. 20260530000022 approves CarbonPro-L on some
+  // databases). Reverting by value would erase canonical catalog data this
+  // migration never authored.
 
   for (const cluster of CLUSTERS) {
     const keeper = await byName(knex, cluster.keeper);
@@ -268,21 +293,6 @@ exports.down = async function down(knex) {
         await knex('service_product_usage')
           .where({ product_id: keeper.id })
           .update({ product_id: loser.id });
-      }
-    }
-    if (keeper && cluster.keeperUpdates) {
-      const row = await knex('products_catalog').where({ id: keeper.id }).first();
-      const reverts = {};
-      for (const [field, value] of Object.entries(cluster.keeperUpdates)) {
-        // Booleans stay (see note at the top of down()).
-        if (field === 'approved_for_service_report' || field === 'irrigation_required') continue;
-        // eslint-disable-next-line eqeqeq
-        if (row[field] == value) reverts[field] = null;
-      }
-      if (Object.keys(reverts).length) {
-        await knex('products_catalog')
-          .where({ id: keeper.id })
-          .update({ ...reverts, updated_at: new Date() });
       }
     }
   }
