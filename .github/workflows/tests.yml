@@ -69,11 +69,16 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        # --forceExit: all 9 suites pass and fully report in ~2s, but a
+        # module-level handle (timer/second pool) keeps jest alive afterward —
+        # the first run hung here until the 40-min job timeout. Results are
+        # flushed before exit, so forcing it is safe. (Open-handle hunt via
+        # --detectOpenHandles is a known follow-up, not a gate.)
         run: |
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand
+            | xargs npx jest --ci --silent --runInBand --forceExit
 
   client:
     runs-on: ubuntu-latest
