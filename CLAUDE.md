@@ -157,6 +157,8 @@ See `server/services/intelligence-bar/README.md` for the full template + 6-line 
 
 **Twilio** — SMS (appointment reminders with Lookup landline detection, post-service automation, review requests 90–180min delay, manual messaging). Voice forwarding with call recording + transcription (no AI voice agent). Multiple numbers across 4 GBP locations + tracking numbers.
 
+**Operator/agent tooling** — recurring prod-ops scripts (token pulls, Railway var hygiene, audit purges) live in `ops/agents/`; check its README before writing a new scratchpad script for prod access. Mutating scripts there are dry-run by default (`--execute` to write).
+
 ## Environment Variables (Railway)
 
 Core: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`, `JWT_SECRET`.
