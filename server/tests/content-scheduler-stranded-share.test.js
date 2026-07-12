@@ -29,9 +29,50 @@ jest.mock('../models/db', () => {
 });
 
 const ContentScheduler = require('../services/content-scheduler');
+const db = require('../models/db');
 
 describe('retryStrandedNewsletterShares', () => {
   beforeEach(() => { mockStrandedRows = []; mockLastTable = null; });
+
+  test('selection predicate compiles the full stranded-share filter (real knex)', async () => {
+    // The recorder mock above discards every where() argument, so it cannot
+    // notice a deleted or inverted clause. Compile the real query once and pin
+    // the predicate — dropping shared_to_social=false would re-share every
+    // recent newsletter to social.
+    const realKnex = require('knex')({ client: 'pg' });
+    let captured;
+    db.mockImplementationOnce((table) => {
+      captured = realKnex(table);
+      // Compile-only: resolve instead of executing (no DB in unit tests).
+      captured.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return captured;
+    });
+
+    const res = await ContentScheduler.retryStrandedNewsletterShares();
+    expect(res.candidates).toBe(0);
+
+    const { sql, bindings } = captured.toSQL();
+    expect(sql).toContain('"status" = ?');
+    expect(sql).toContain('"shared_to_social" = ?');
+    expect(sql).toContain('"auto_share_social" = ?');
+    expect(sql).toContain('"sent_at" >= ?');
+    // Share-status subtree: pending/failed, never-attempted, or stale processing.
+    expect(sql).toContain('"social_share_status" in (?, ?)');
+    expect(sql).toContain('"social_share_status" is null');
+    expect(sql).toContain('"social_share_attempted_at" < ?');
+    expect(sql).toContain('order by "sent_at" asc');
+    expect(sql).toContain('limit ?');
+    expect(bindings).toEqual([
+      'sent',            // status — only completed sends
+      false,             // shared_to_social — the stranded condition
+      true,              // auto_share_social — respect the per-send opt-in
+      expect.any(Date),  // 7-day lookback cutoff
+      'pending', 'failed',
+      'processing',
+      expect.any(Date),  // stale-processing cutoff
+      25,                // default limit
+    ]);
+  });
 
   test('queries newsletter_sends and drives every stranded candidate', async () => {
     mockStrandedRows = [

@@ -15,6 +15,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/content/opportunity-queue', () => ({
   getById: jest.fn(),
   peek: jest.fn(),
+  // intercept-brief-seeder destructures _internals.maxClaimAttempts at load —
+  // omitting it makes the whole suite fail to require (TypeError), not skip.
+  _internals: { maxClaimAttempts: jest.fn(() => 5) },
 }));
 
 const db = require('../models/db');

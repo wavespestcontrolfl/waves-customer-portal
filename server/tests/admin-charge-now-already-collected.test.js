@@ -115,20 +115,35 @@ describe('charge-now already-collected guard', () => {
     });
   });
 
-  test('guard queries the cron dedupe shape (billed_month metadata-first)', async () => {
-    paymentsQB.first.mockResolvedValue({ id: 'pay-cron' });
-    await withServer(async (baseUrl) => {
-      await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-      });
-      expect(paymentsQB.whereIn).toHaveBeenCalledWith('status', ['paid', 'processing']);
-      const monthKey = new Date().toISOString().slice(0, 7);
-      // The grouped where-callback runs against the same recorded builder,
-      // so the metadata-first clause lands in whereRaw's call list.
-      const rawCalls = paymentsQB.whereRaw.mock.calls.map((c) => c[0]);
-      expect(rawCalls).toContain("metadata->>'billed_month' = ?");
-      void monthKey;
+  test('guard dedupes on the ET month key — not UTC — at the ET/UTC month boundary', async () => {
+    // 2026-08-01T02:30Z is still 2026-07-31 22:30 in ET: the month of
+    // obligation is July. A UTC-keyed regression would check/stamp August,
+    // miss the cron's July billed_month stamp, and double-charge the month.
+    jest.useFakeTimers({
+      now: new Date('2026-08-01T02:30:00Z'),
+      doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask',
+        'setImmediate', 'setInterval', 'setTimeout',
+        'clearImmediate', 'clearInterval', 'clearTimeout'],
     });
+    try {
+      paymentsQB.first.mockResolvedValue({ id: 'pay-cron' });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(res.status).toBe(409);
+        expect(paymentsQB.whereIn).toHaveBeenCalledWith('status', ['paid', 'processing']);
+        // The grouped where-callback runs against the same recorded builder,
+        // so the metadata-first clause lands in whereRaw's call list — assert
+        // the BOUND month value, not just the SQL text.
+        expect(paymentsQB.whereRaw).toHaveBeenCalledWith("metadata->>'billed_month' = ?", ['2026-07']);
+        // The legacy unstamped fallback window must span the same ET month.
+        expect(paymentsQB.andWhere).toHaveBeenCalledWith('payment_date', '>=', '2026-07-01');
+        expect(paymentsQB.andWhere).toHaveBeenCalledWith('payment_date', '<=', '2026-07-31');
+      });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('charges normally when the month is not collected yet, stamping billed_month', async () => {
