@@ -477,6 +477,7 @@ const BillingCron = {
               dedupe: 14,
               recipient: 'billing',
               checkSuppression: true,
+              retryFailedUnsent: false,
               source: 'autopay_failure',
             });
             emailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
@@ -1185,6 +1186,7 @@ const BillingCron = {
               dedupe: 14,
               recipient: 'billing',
               checkSuppression: true,
+              retryFailedUnsent: false,
               source: 'autopay_retry_failure',
             });
             retryEmailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);

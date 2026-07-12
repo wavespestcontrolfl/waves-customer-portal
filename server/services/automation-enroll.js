@@ -61,6 +61,13 @@ async function enrollSequenceFromEvent({
   // REPLACE a transactional email and must fall back to it rather than let the
   // runner cancel the enrollment silently (dunning must always deliver).
   checkSuppression = false,
+  // When false, a prior failed-never-sent enrollment returns
+  // { reason: 'failed_prior' } instead of re-enrolling — for callers with a
+  // transactional fallback: the sequence already proved undeliverable for
+  // this customer, so reactivating it and counting 'enrolled' as coverage
+  // would suppress the fallback while delivery stays broken. Callers WITHOUT
+  // a fallback (review thank-you) keep the default retry-by-reactivation.
+  retryFailedUnsent = true,
   source = 'event',
 } = {}) {
   try {
@@ -87,6 +94,17 @@ async function enrollSequenceFromEvent({
       priorQuery.where('enrolled_at', '>', new Date(Date.now() - Number(dedupe) * 24 * 3600 * 1000));
     }
     if (await priorQuery.first('id')) return { enrolled: false, reason: 'deduped' };
+
+    if (!retryFailedUnsent) {
+      const failedQuery = db('automation_enrollments')
+        .whereIn('template_key', dedupeKeys)
+        .where({ customer_id: customerId, status: 'failed' })
+        .whereNull('last_sent_at');
+      if (dedupe !== 'ever') {
+        failedQuery.where('enrolled_at', '>', new Date(Date.now() - Number(dedupe) * 24 * 3600 * 1000));
+      }
+      if (await failedQuery.first('id')) return { enrolled: false, reason: 'failed_prior' };
+    }
 
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return { enrolled: false, reason: 'no_customer' };

@@ -22,6 +22,7 @@ let prefsRow;
 let enrollmentWhereArgs;
 let enrollmentWhereInArgs;
 let enrollmentQueries;
+let failedUnsentRow;
 
 function templatesQuery() {
   const q = { where: jest.fn(() => q), first: jest.fn(async () => templateRow) };
@@ -43,7 +44,11 @@ function enrollmentsQuery() {
     whereIn: jest.fn((...args) => { enrollmentWhereInArgs.push(args); return q; }),
     whereNot: jest.fn(() => q),
     orWhereNotNull: jest.fn(() => q),
-    first: jest.fn(async () => priorRow),
+    // whereNull marks this as the failed-unsent probe (it's the only
+    // enrollments query that uses it) — first() then answers from
+    // failedUnsentRow instead of priorRow.
+    whereNull: jest.fn(() => { q.__failedProbe = true; return q; }),
+    first: jest.fn(async () => (q.__failedProbe ? failedUnsentRow : priorRow)),
   };
   enrollmentQueries.push(q);
   return q;
@@ -69,6 +74,7 @@ beforeEach(() => {
   enrollmentWhereArgs = [];
   enrollmentWhereInArgs = [];
   enrollmentQueries = [];
+  failedUnsentRow = null;
   customerRow = { id: 'cust-1', first_name: 'Megan', last_name: 'Example', email: 'megan@example.com', deleted_at: null };
   db.mockImplementation((table) => {
     if (table === 'automation_templates') return templatesQuery();
@@ -231,6 +237,32 @@ describe('enrollSequenceFromEvent', () => {
     expect(await enrollSequenceFromEvent({ templateKey: null, customerId: 'x' })).toEqual({ enrolled: false, reason: 'bad_args' });
     expect(await enrollSequenceFromEvent({ templateKey: 'x', customerId: null })).toEqual({ enrolled: false, reason: 'bad_args' });
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('retryFailedUnsent: false — a prior failed-never-sent row returns failed_prior instead of reactivating', async () => {
+    // The sequence already proved undeliverable for this customer; callers
+    // with a transactional fallback (dunning) must not count a reactivation
+    // as coverage. Callers without one keep the default retry.
+    failedUnsentRow = { id: 'enr-dead' };
+
+    const result = await enrollSequenceFromEvent({
+      templateKey: 'payment_failed',
+      customerId: 'cust-1',
+      dedupe: 14,
+      retryFailedUnsent: false,
+    });
+
+    expect(result).toEqual({ enrolled: false, reason: 'failed_prior' });
+    expect(enrollCustomer).not.toHaveBeenCalled();
+  });
+
+  test('default retryFailedUnsent — the failed-unsent probe never runs and reactivation proceeds', async () => {
+    failedUnsentRow = { id: 'enr-dead' }; // would block if probed
+
+    const result = await enrollSequenceFromEvent({ templateKey: 'referral_nudge', customerId: 'cust-1', dedupe: 'ever' });
+
+    expect(result).toEqual({ enrolled: true, reason: 'enrolled' });
+    expect(enrollCustomer).toHaveBeenCalledTimes(1);
   });
 
   test('checkSuppression: an active stream suppression blocks enrollment so the caller can fall back', async () => {

@@ -713,13 +713,20 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // office matching an unlinked review must fire the same thank-you sequence
   // the automatic match would have (gate, 4-5-star bar, cross-location
   // once-ever dedupe all live in the shared helper; it never throws).
-  const { enrollReviewThankYou } = require('./automation-enroll');
-  await enrollReviewThankYou({
-    customerId,
-    locationId: review.location_id,
-    starRating: review.star_rating,
-    source: 'google_review_manual_match',
-  });
+  // ONLY when the customer link actually changed: this same path also
+  // services the missing_technician repair queue, where the review is
+  // already attributed to this customer and only the technician/service
+  // record is being attached — a months-later "thanks for your review"
+  // from that repair would read as noise.
+  if (review.customer_id !== customerId) {
+    const { enrollReviewThankYou } = require('./automation-enroll');
+    await enrollReviewThankYou({
+      customerId,
+      locationId: review.location_id,
+      starRating: review.star_rating,
+      source: 'google_review_manual_match',
+    });
+  }
 
   const attributionSnapshot = {
     method: 'manual_admin_match',
