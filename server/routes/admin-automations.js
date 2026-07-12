@@ -348,20 +348,33 @@ router.post('/templates/:key/trigger', async (req, res) => {
 // refuses if the segment drifted from the previewed count, so the operator
 // always confirms the number that actually sends.
 
+const { whereLiveCustomer } = require('../services/customer-stages');
+
 const SEGMENT_SCOPES = new Set(['customers', 'program']);
 const SEGMENT_LOCATIONS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
 const SEGMENT_SEND_CAP = 2000;
+// waveguard_tier values that are NOT program membership (prod carries
+// 'One-Time' placeholder rows) — a bare NOT NULL over-counts.
+const NON_PROGRAM_TIERS = ['One-Time'];
 
 // Live customers with an email, per the canonical real-customer predicate
 // (customer-stages.js — pipeline_stage, NOT the always-true `active` flag
-// alone). scope 'program' = WaveGuard program (recurring) customers only.
+// alone). scope 'program' = recurring membership: a real WaveGuard tier OR a
+// positive monthly rate (prod-verified 2026-07-12: a handful of monthly
+// payers carry no tier — they're program customers for announcements like a
+// price increase, while 'One-Time' tier rows are not).
 function segmentQuery({ scope, locationId }) {
-  const { whereLiveCustomer } = require('../services/customer-stages');
   let q = db('customers')
     .modify(whereLiveCustomer)
     .whereNotNull('email')
     .whereRaw("TRIM(email) <> ''");
-  if (scope === 'program') q = q.whereNotNull('waveguard_tier');
+  if (scope === 'program') {
+    q = q.where(function programMembership() {
+      this.where(function realTier() {
+        this.whereNotNull('waveguard_tier').whereNotIn('waveguard_tier', NON_PROGRAM_TIERS);
+      }).orWhere('monthly_rate', '>', 0);
+    });
+  }
   if (locationId) q = q.where('nearest_location_id', locationId);
   return q;
 }
