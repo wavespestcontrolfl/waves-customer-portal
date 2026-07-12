@@ -29,7 +29,7 @@
 //   from a JSON payload. Watch for any unescaped HTML rendering on
 //   the preview side that could XSS the operator from a malformed
 //   template body.
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Badge, Button, Card, Switch, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -224,16 +224,107 @@ export default function EmailAutomationsPanelV2() {
   );
 }
 
-// ── Manual send modal — search a customer by name, enroll them in this
-//    automation's sequence. The server responds with exactly what happened
-//    (enrolled / no email / already enrolled / disabled / no steps).
+const SEGMENT_SCOPE_OPTIONS = [
+  { value: "customers", label: "All active customers" },
+  { value: "program", label: "Program (WaveGuard) customers" },
+];
+const SEGMENT_LOCATION_OPTIONS = [
+  { value: "", label: "All locations" },
+  { value: "bradenton", label: "Bradenton / Lakewood Ranch" },
+  { value: "parrish", label: "Parrish" },
+  { value: "sarasota", label: "Sarasota" },
+  { value: "venice", label: "Venice" },
+];
+
+// ── Manual send modal — one customer (search by name) or a whole segment
+//    (preview count → explicit confirm; built for announcement automations
+//    like Pricing Update). The server responds with exactly what happened.
 function SendAutomationModal({ template, onClose, onSent }) {
+  const [mode, setMode] = useState("single");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState(null);
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState(null);
+  // Segment mode
+  const [scope, setScope] = useState("customers");
+  const [locationId, setLocationId] = useState("");
+  const [preview, setPreview] = useState(null); // { count, overCap }
+  const [previewing, setPreviewing] = useState(false);
+  // Monotonic preview-request id: a segment change bumps it, so a preview
+  // response that resolves AFTER the operator switched scope/location is
+  // dropped instead of arming the confirm button against the wrong segment
+  // (the server's count check can't catch two segments with the same count).
+  const previewSeq = useRef(0);
+
+  // Any segment change invalidates the previewed count — the confirm button
+  // only arms against the number the operator just saw.
+  useEffect(() => {
+    previewSeq.current += 1;
+    setPreview(null);
+    setResult(null);
+    setPreviewing(false);
+  }, [scope, locationId, mode]);
+
+  const runPreview = async () => {
+    if (previewing) return;
+    const requestId = ++previewSeq.current;
+    setPreviewing(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/segment-preview`,
+        {
+          method: "POST",
+          body: JSON.stringify({ segment: { scope, locationId: locationId || undefined } }),
+        },
+      );
+      // Snapshot the SEGMENT with the count: the confirm must send exactly
+      // what was previewed. Reading the live scope/locationId at send time
+      // leaves a one-render window (before the clearing useEffect commits)
+      // where a click could pair the new segment with the old count — and
+      // the server's drift check can't catch two segments sharing a count.
+      if (previewSeq.current === requestId) {
+        setPreview({ ...data, scope, locationId });
+      }
+    } catch (e) {
+      if (previewSeq.current === requestId) {
+        setResult({ ok: false, text: "Preview failed: " + e.message });
+      }
+    } finally {
+      if (previewSeq.current === requestId) setPreviewing(false);
+    }
+  };
+
+  const sendSegment = async () => {
+    if (!preview || preview.overCap || !preview.count || sending) return;
+    setSending(true);
+    setResult(null);
+    try {
+      const data = await adminFetch(
+        `/admin/automations/templates/${template.key}/segment-send`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            segment: { scope: preview.scope, locationId: preview.locationId || undefined },
+            expectedCount: preview.count,
+          }),
+        },
+      );
+      // success:false = some enrollments THREW (server keeps 200 with the
+      // summary) — render the message in the alert tone so the retry note
+      // is impossible to miss.
+      setResult({ ok: data.success !== false, text: data.message || "Segment enrolled." });
+      setPreview(null);
+      onSent?.();
+    } catch (e) {
+      setResult({ ok: false, text: e.message });
+      setPreview(null); // 409 drift or failure — force a fresh preview
+    } finally {
+      setSending(false);
+    }
+  };
 
   useEffect(() => {
     if (selected) return undefined;
@@ -333,7 +424,80 @@ function SendAutomationModal({ template, onClose, onSent }) {
           </button>{" "}
         </div>{" "}
         <div className="p-5 space-y-3">
-          {selected ? (
+          <div className="flex gap-2">
+            {[
+              { key: "single", label: "One customer" },
+              { key: "segment", label: "Segment" },
+            ].map((m) => {
+              const active = mode === m.key;
+              return (
+                <button
+                  key={m.key}
+                  type="button"
+                  onClick={() => setMode(m.key)}
+                  aria-current={active ? "page" : undefined}
+                  className={
+                    "h-8 px-3 rounded-sm border-hairline text-11 font-medium uppercase tracking-label u-focus-ring " +
+                    (active
+                      ? "bg-zinc-900 text-white border-zinc-900"
+                      : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50")
+                  }
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+          {mode === "segment" && (
+            <>
+              <div>
+                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                  Who
+                </label>
+                <select
+                  value={scope}
+                  onChange={(e) => setScope(e.target.value)}
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                >
+                  {SEGMENT_SCOPE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
+                  Location
+                </label>
+                <select
+                  value={locationId}
+                  onChange={(e) => setLocationId(e.target.value)}
+                  className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-13 text-zinc-900"
+                >
+                  {SEGMENT_LOCATION_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+              {preview && !preview.overCap && preview.count > 0 && (
+                <div className="text-13 text-zinc-900 border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
+                  <span className="u-nums font-medium">{preview.count}</span>{" "}
+                  customers will be enrolled. Emails drain at ~50/minute.
+                </div>
+              )}
+              {preview && !preview.overCap && preview.count === 0 && (
+                <div className="text-12 text-ink-secondary">
+                  No customers match this segment — nothing to send.
+                </div>
+              )}
+              {preview && preview.overCap && (
+                <div className="text-12 text-alert-fg">
+                  {preview.count} customers exceeds the {preview.cap}-customer
+                  cap for one send — narrow the segment.
+                </div>
+              )}
+            </>
+          )}
+          {mode === "single" && (selected ? (
             <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
               <div className="min-w-0">
                 <div className="text-14 font-medium text-zinc-900 truncate">
@@ -396,7 +560,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
                 </div>
               )}
             </>
-          )}
+          ))}
           {result && (
             <div
               className={cn(
@@ -411,17 +575,29 @@ function SendAutomationModal({ template, onClose, onSent }) {
             <Button variant="secondary" onClick={onClose}>
               Close
             </Button>
-            <Button
-              onClick={send}
-              disabled={!selected || !selected.email || sending}
-              title={
-                selected && !selected.email
-                  ? "This customer has no email on file"
-                  : undefined
-              }
-            >
-              {sending ? "Sending…" : "Send"}
-            </Button>
+            {mode === "single" ? (
+              <Button
+                onClick={send}
+                disabled={!selected || !selected.email || sending}
+                title={
+                  selected && !selected.email
+                    ? "This customer has no email on file"
+                    : undefined
+                }
+              >
+                {sending ? "Sending…" : "Send"}
+              </Button>
+            ) : preview && !preview.overCap && preview.count > 0 ? (
+              <Button onClick={sendSegment} disabled={sending}>
+                {sending
+                  ? "Enrolling…"
+                  : `Send to ${preview.count} customers`}
+              </Button>
+            ) : (
+              <Button onClick={runPreview} disabled={previewing}>
+                {previewing ? "Counting…" : "Preview count"}
+              </Button>
+            )}
           </div>
         </div>{" "}
       </div>{" "}
