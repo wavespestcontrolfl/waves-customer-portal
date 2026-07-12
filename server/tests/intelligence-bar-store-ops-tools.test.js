@@ -114,7 +114,10 @@ describe('intelligence bar store ops tools', () => {
     expect(result.production_status).toBe('completed');
     expect(result.production_release).toBe('1.2 (12)');
     expect(result.total_tracks).toBe(2);
-    expect(mockEdits.delete).toHaveBeenCalledWith({ packageName: 'com.wavespestcontrol.portal', editId: 'edit-1' });
+    expect(mockEdits.delete).toHaveBeenCalledWith(
+      { packageName: 'com.wavespestcontrol.portal', editId: 'edit-1' },
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
   });
 
   test('the draft edit is deleted even when the track read fails', async () => {
@@ -125,7 +128,10 @@ describe('intelligence bar store ops tools', () => {
 
     const result = await executeStoreOpsTool('get_play_store_status', {});
     expect(result.error).toMatch(/boom/);
-    expect(mockEdits.delete).toHaveBeenCalledWith(expect.objectContaining({ editId: 'edit-2' }));
+    expect(mockEdits.delete).toHaveBeenCalledWith(
+      expect.objectContaining({ editId: 'edit-2' }),
+      expect.anything(),
+    );
   });
 
   test('invalid PLAY_SERVICE_ACCOUNT_JSON surfaces as { error }, never a throw', async () => {
@@ -133,6 +139,30 @@ describe('intelligence bar store ops tools', () => {
     const result = await executeStoreOpsTool('get_play_store_status', {});
     expect(result.error).toMatch(/not valid JSON/);
     expect(mockEdits.insert).not.toHaveBeenCalled();
+  });
+
+  test('escaped \\n in ASC_PRIVATE_KEY is normalized before signing (Railway stores .p8 that way)', async () => {
+    process.env.ASC_KEY_ID = 'KEY1';
+    process.env.ASC_ISSUER_ID = 'ISSUER1';
+    process.env.ASC_PRIVATE_KEY = '-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ data: [] }));
+
+    await executeStoreOpsTool('get_app_store_status', {});
+    const jwt = require('jsonwebtoken');
+    const signedKey = jwt.sign.mock.calls[0][1];
+    expect(signedKey).toBe('-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----');
+  });
+
+  test('every Play call carries the module timeout (gaxios has no default deadline)', async () => {
+    process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
+    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-3' } });
+    mockEdits.tracks.list.mockResolvedValueOnce({ data: { tracks: [] } });
+    mockEdits.delete.mockResolvedValueOnce({});
+
+    await executeStoreOpsTool('get_play_store_status', {});
+    expect(mockEdits.insert.mock.calls[0][1]).toEqual({ timeout: 15000 });
+    expect(mockEdits.tracks.list.mock.calls[0][1]).toEqual({ timeout: 15000 });
+    expect(mockEdits.delete.mock.calls[0][1]).toEqual({ timeout: 15000 });
   });
 
   test('ASC auth rejection surfaces a key hint as { error }', async () => {

@@ -19,6 +19,14 @@
  *   canonical read pattern; fastlane does the same). No edit is ever
  *   committed from this module.
  *
+ *   CONSTRAINT: Play invalidates a user's other active edits for the same
+ *   app when a new edit is created, so PLAY_SERVICE_ACCOUNT_JSON must be a
+ *   service account that is NOT shared with any Play publishing automation
+ *   — a status check during a release window must never be able to discard
+ *   an in-flight upload edit. (No Play publishing automation exists in this
+ *   repo; releases are pushed from local tooling under a different user.
+ *   If that ever changes, give this tool its own dedicated SA.)
+ *
  * There are NO store mutations here — no submissions, no rollouts, no
  * metadata changes. Anything that mutates store state must go through the
  * write-gate mechanism (issue #1568) and is intentionally not built.
@@ -62,8 +70,11 @@ function ascConfigured() {
 }
 
 function ascJwt() {
+  // Railway often stores the .p8 with escaped newlines — normalize them
+  // (same treatment as APNS_KEY in services/apns.js).
+  const key = process.env.ASC_PRIVATE_KEY.trim().replace(/\\n/g, '\n');
   // Apple caps validity at 20 minutes; mint fresh per call and keep it short.
-  return jwt.sign({}, process.env.ASC_PRIVATE_KEY, {
+  return jwt.sign({}, key, {
     algorithm: 'ES256',
     issuer: process.env.ASC_ISSUER_ID,
     audience: 'appstoreconnect-v1',
@@ -135,15 +146,18 @@ async function getPlayStoreStatus() {
     scopes: ['https://www.googleapis.com/auth/androidpublisher'],
   });
   const publisher = google.androidpublisher({ version: 'v3', auth: await auth.getClient() });
+  // googleapis/gaxios has NO default deadline — every call gets the module
+  // timeout so a stalled Play call can't hang the Intelligence Bar loop.
+  const callOpts = { timeout: REQUEST_TIMEOUT_MS };
 
   // Track state is only readable inside an edit context. The edit is a
   // DRAFT: inserted, read, then deleted — never committed, so nothing in
   // Play changes. Deletion failures are swallowed (uncommitted edits also
   // expire server-side on their own).
-  const edit = await publisher.edits.insert({ packageName });
+  const edit = await publisher.edits.insert({ packageName }, callOpts);
   const editId = edit.data.id;
   try {
-    const tracks = await publisher.edits.tracks.list({ packageName, editId });
+    const tracks = await publisher.edits.tracks.list({ packageName, editId }, callOpts);
     const mapped = (tracks.data.tracks || []).map(t => ({
       track: t.track,
       releases: (t.releases || []).map(r => ({
@@ -163,7 +177,7 @@ async function getPlayStoreStatus() {
     };
   } finally {
     try {
-      await publisher.edits.delete({ packageName, editId });
+      await publisher.edits.delete({ packageName, editId }, callOpts);
     } catch (cleanupErr) {
       logger.warn(`[intelligence-bar:store-ops] Play draft-edit cleanup failed (edit expires on its own): ${cleanupErr.message}`);
     }
