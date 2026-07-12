@@ -1114,6 +1114,37 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-12 findings (#2633) ──
+
+  test('Codex r12: own-brand separator #1 blocks; negated separator claims stay clean', () => {
+    for (const prose of ['Waves — the #1 choice for mosquito control.', 'Waves: the #1 choice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    for (const prose of ['Waves: no hidden fees, ever.', 'Waves — not a ripoff, just flat quoted pricing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+      expect(r.pass).toBe(true);
+    }
+  });
+
+  test('Codex r12: extra-name separator #1 and separator insults block', () => {
+    for (const prose of ['Bug Busters, the #1 choice.', 'Bug Busters — the #1 choice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    for (const prose of ['A+ Pest Control: overpriced.', 'acme pest solutions: dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r12: negated object reports stay clean', () => {
+    const r = gate.evaluate({ body: `Customers do not report hidden fees after choosing Bug Busters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
   // ── Codex round-11 findings (#2633) ──
 
   test('Codex r11: a benign earlier own-brand mention does not shadow a later accusation', () => {

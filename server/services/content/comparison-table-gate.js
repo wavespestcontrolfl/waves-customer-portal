@@ -115,6 +115,11 @@ const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|of
 // has/use recreates the literal-shade false positive ("companies use shady
 // foliage to locate mosquitoes" is field advice, not an accusation).
 const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
+// Disparagement tokens with NO literal/benign sense in pest content — safe
+// for separator headings on lower-confidence name captures ("acme pest
+// solutions: dishonest"), unlike shady/sloppy/lousy which read literally
+// ("… — shady corners of the lanai"). (Codex r12 on #2633.)
+const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|overpriced|second[\\s-]?rate|crooks?|frauds?|fraudulent|clueless|goug\\w+|rip[\\s-]?offs?|ripoffs?|scams?|bait[\\s-]and[\\s-]switch)';
 // A word gap that tolerates comma/parenthetical adverbs within the sentence
 // ("companies, frankly, are dishonest") — whitespace-only gaps let ordinary
 // punctuation defeat the directed arms (Codex r3 on #2633). Gap words must
@@ -205,10 +210,13 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // "Waves — Shady Foliage Treatment Guide" (literal shade).
 const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:'s)?";
 const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}\\s*[:—–-]\\s*`);
+// Prefix words are negator-excluded: "Waves: no hidden fees" is a denial,
+// not an accusation (Codex r12 on #2633).
 const OWN_BRAND_SEP_TAIL_RE = new RegExp(
-  `^(?:[\\w'’]+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i',
+  `^(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i',
 );
-const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}[,\\s]+`);
+// Separator anchors count for #1 too — "Waves — the #1 choice" (Codex r12).
+const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}(?:\\s*[,:—–-]\\s*|\\s+)`);
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
 
 // Linking/behavioral verbs that tie a subject name to a following negative
@@ -923,14 +931,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // they read as names on their face, while noisy CI captures ("and
       // termite prevention") would turn "… — shady corners" back into the
       // original false positive.
-      // Non-personified names get an OBJECT-ANCHORED separator instead
-      // ("acme pest solutions: shady billing", "bob bugs llc: hidden
-      // fees") — full-vocabulary separators on noisy CI captures would
-      // turn "… and termite prevention — shady corners" back into the
-      // original false positive (Codex r6 on #2633).
+      // Non-personified names get an OBJECT/UNAMBIGUOUS-anchored separator
+      // instead ("acme pest solutions: dishonest", "bob bugs llc: hidden
+      // fees") — the full vocabulary on noisy CI captures would turn "…
+      // and termite prevention — shady corners" back into the original
+      // false positive (Codex r6/r12 on #2633). Prefix words are
+      // negator-excluded on both arms ("X: not overpriced" is a denial).
       const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
-        ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:\\w+\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
-        : new RegExp(`${escaped}(?:'s)?\\s*[:—–-]\\s*(?:\\w+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i');
+        ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
+        : new RegExp(`${escaped}(?:'s)?\\s*[:—–-]\\s*(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|${UNAMBIGUOUS_DISPARAGEMENT_SRC})`, 'i');
       // Possession/usage accusations with the required object ("Bug Busters
       // uses shady billing", "Acme Rodent Removal comes with hidden fees")
       // — Codex r4 on #2633.
@@ -948,12 +957,27 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i')
         : null;
-      const dm = proseNameText.match(directedP0)
+      let dm = proseNameText.match(directedP0)
         || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
-        || (sepP0 && proseNameText.match(sepP0))
-        || (objAssocP0 && proseNameText.match(objAssocP0));
+        || (sepP0 && proseNameText.match(sepP0));
+      if (!dm && objAssocP0) {
+        // Sentence-level negation check: "Customers do NOT report hidden
+        // fees after choosing Bug Busters" is a denial even though the
+        // negator sits before the object (Codex r12 on #2633).
+        const am = proseNameText.match(objAssocP0);
+        if (am) {
+          const sentStart = Math.max(
+            proseNameText.lastIndexOf('.', am.index),
+            proseNameText.lastIndexOf('!', am.index),
+            proseNameText.lastIndexOf('?', am.index),
+            proseNameText.lastIndexOf('\n', am.index),
+          ) + 1;
+          const sentence = proseNameText.slice(sentStart, am.index + am[0].length);
+          if (!/\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i.test(sentence)) dm = am;
+        }
+      }
       if (dm) { disp = dm; break; }
     }
   }
@@ -1030,7 +1054,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const calledRank = new RegExp(
           `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
-        const rm = proseNameText.match(selfRank) || proseNameText.match(calledRank);
+        // Separator/appositive #1 for PERSONIFIED names only ("Bug Busters,
+        // the #1 choice" — Codex r12); CI captures excluded ("… and termite
+        // prevention, the #1 defense is …" is educational).
+        const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
+          ? new RegExp(`${escaped}(?:'s)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
+          : null;
+        const rm = proseNameText.match(selfRank)
+          || proseNameText.match(calledRank)
+          || (sepRank && proseNameText.match(sepRank));
         if (rm) { rank = rm; break; }
       }
     }
