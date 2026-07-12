@@ -96,10 +96,11 @@ const ACTIVE_DISPARAGEMENT_SRC = [
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
 // Common intervening adverbs for active-predicate shapes ("<subject> routinely
-// rips off homeowners"). "never" is deliberately absent: it NEGATES the
-// accusation — "Waves never overcharges" is marketing copy, not disparagement
-// (Codex r6 on #2633 surfaced the collision).
-const ACTIVE_ADVERBS = '(?:(?:also|often|always|routinely|repeatedly|regularly|frequently|just|really|constantly)\\s+){0,2}';
+// rips off homeowners"), with an optional leading modal ("may charge hidden
+// fees" is a hedged accusation, Codex r10 on #2633). "never" is deliberately
+// absent: it NEGATES the accusation — "Waves never overcharges" is marketing
+// copy, not disparagement (Codex r6 surfaced the collision).
+const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|often|always|routinely|repeatedly|regularly|frequently|just|really|constantly|sometimes|occasionally|reportedly|allegedly|apparently)\\s+){0,2}';
 
 // The full disparagement vocabulary DIRECTED at a provider noun — the
 // PROVIDER_DISPARAGEMENT_RE shapes (adjacent / linking-verb) but with every
@@ -123,9 +124,10 @@ const NON_NEGATED_WORD = "(?!(?:never|not|no|don'?t|doesn'?t|didn'?t|won'?t|woul
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  // Linking verbs: "companies are (frankly) dishonest". Post-verb gap words
-  // are negator-excluded too ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // Linking verbs incl. modal/hedged forms ("companies may be dishonest",
+  // Codex r10 on #2633). Post-verb gap words are negator-excluded too
+  // ("are never dishonest" is a denial).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got|(?:may|might|could)\\s+be|appears?\\s+to\\s+be|seems?\\s+to\\s+be)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
@@ -189,18 +191,21 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   `\\bwaves\\b(?:'s)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
-// Own-brand SEPARATOR and appositive-#1 forms are case-SENSITIVE ("Waves:
-// hidden fees", "Choose Waves, the #1 choice") — lowercase would collide
-// with the common noun ("in summer heat waves — shady, damp corners", "in
-// summer heat waves, the #1 hidden breeding site"). Objects/numbers are
-// anchored, so capitalized sentence-start "Waves of mosquitoes …" cannot
-// match either. (Codex r7 on #2633.)
-const OWN_BRAND_SEP_DISPARAGEMENT_RE = new RegExp(
-  `\\bWaves\\b\\s*[:—–-]\\s*(?:[\\w'’]+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`,
+// Own-brand SEPARATOR and appositive-#1 forms keep a case-SENSITIVE brand
+// ANCHOR ("Waves"/"WAVES", never lowercase) — lowercase would collide with
+// the common noun ("in summer heat waves — shady, damp corners", "in summer
+// heat waves, the #1 hidden breeding site"). The accusation/number TAIL is
+// case-insensitive ("Waves: Hidden fees", "Choose WAVES, The #1 choice" are
+// heading-cased, Codex r9/r10 on #2633) and stays OBJECT/number-anchored:
+// full disparagement vocabulary here would re-block heading shapes like
+// "Waves — Shady Foliage Treatment Guide" (literal shade).
+const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:'s)?";
+const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}\\s*[:—–-]\\s*`);
+const OWN_BRAND_SEP_TAIL_RE = new RegExp(
+  `^(?:[\\w'’]+\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i',
 );
-const OWN_BRAND_NUMERIC_RANKING_RE = new RegExp(
-  `\\bWaves\\b(?:'s)?[,\\s]+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
-);
+const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}[,\\s]+`);
+const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
 
 // Linking/behavioral verbs that tie a subject name to a following negative
 // term (shared by the table-less directed scans).
@@ -872,8 +877,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // category-table strictness is asserted by existing tests.
   let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE)
     || scanText.match(DIRECTED_DISPARAGEMENT_RE)
-    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE)
-    || scanText.match(OWN_BRAND_SEP_DISPARAGEMENT_RE);
+    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
+  if (!disp) {
+    // Case-sensitive brand anchor + case-insensitive object-anchored tail
+    // ("Waves: Hidden fees") — see the OWN_BRAND_ANCHOR comment block.
+    const sepAnchor = scanText.match(OWN_BRAND_SEP_ANCHOR_RE);
+    if (sepAnchor && OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sepAnchor.index + sepAnchor[0].length))) {
+      disp = [scanText.slice(sepAnchor.index, sepAnchor.index + sepAnchor[0].length + 40)];
+    }
+  }
   if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
@@ -935,9 +947,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // (PROD 2026-07-11 false positives).
   let rank = scanText.match(SELF_RANKING_RE)
     || scanText.match(NUMERIC_SELF_RANKING_RE)
-    || scanText.match(OWN_BRAND_NUMERIC_RANKING_RE)
     || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
+  if (!rank) {
+    // Case-sensitive brand anchor + case-insensitive number tail ("Choose
+    // WAVES, The #1 choice") — see the OWN_BRAND_ANCHOR comment block.
+    const numAnchor = scanText.match(OWN_BRAND_NUMERIC_ANCHOR_RE);
+    if (numAnchor && OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(numAnchor.index + numAnchor[0].length))) {
+      rank = [scanText.slice(numAnchor.index, numAnchor.index + numAnchor[0].length + 20)];
+    }
+  }
   if (!rank) {
     // "#1" needs SYNTAX tying it to a provider — "#1 (rated) pest control
     // company" — or a detected brand/business name in the window. A bare
@@ -953,7 +972,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // geographic tail, so "the #1 option for standing water is a Bti dunk"
     // stays educational.
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)\\s+(?:control|care|removal)\\s+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick)\\s+(?:in|around|near))\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest\\s+control|lawn\\s+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)\\s+(?:control|care|removal)\\s+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
     );
     let nm1;
     while ((nm1 = numRe.exec(proseText)) !== null) {
@@ -972,8 +991,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // prevention" into a rigged ranking (Codex r4 on #2633).
     if (!rank) {
       for (const name of extraProseNames) {
+        // Appositive-tolerant, like the disparagement path ("Bug Busters,
+        // frankly, is #1" — Codex r10 on #2633).
         const selfRank = new RegExp(
-          `${escapeForNameRe(name)}(?:'s)?\\s+(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+          `${escapeForNameRe(name)}(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
         );
         const rm = proseNameText.match(selfRank);
         if (rm) { rank = rm; break; }

@@ -1114,6 +1114,46 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-9 tail + round-10 findings (#2633) ──
+
+  test('Codex r10: heading-cased own-brand separator accusations block; literal-shade headings stay clean', () => {
+    for (const prose of ['Waves: Hidden fees on renewals.', 'Waves — Shady billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const ok = gate.evaluate({ body: `Waves — shady foliage on the north side stays damp the longest.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
+  test('Codex r10: heading-cased own-brand appositive #1 blocks', () => {
+    for (const prose of ['Choose WAVES, the #1 choice for mosquito control.', 'Choose Waves, The #1 Choice for Mosquito Control.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r10: appositive and modal forms for extra names block', () => {
+    for (const prose of ['Bug Busters, frankly, is #1.', 'Acme Rodent Removal, frankly, is #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    for (const prose of ['Bug Busters sometimes scams customers.', 'Acme Rodent Removal may charge hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r10: modal provider-noun disparagement blocks', () => {
+    const r = gate.evaluate({ body: `Pest control companies may be dishonest about what a quote covers.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r10: geo-scoped "#1 option" blocks; method "#1 option for" stays clean', () => {
+    const r = gate.evaluate({ body: `The #1 option in Venice for pest control.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
   // ── Codex round-9 finding (#2633) ──
 
   test('Codex r9: service-line "#1 … choice" winner claims block; method rankings stay clean', () => {
