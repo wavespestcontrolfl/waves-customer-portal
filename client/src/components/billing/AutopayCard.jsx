@@ -423,7 +423,7 @@ export default function AutopayCard({ onStateChange }) {
           <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
             {state === 'active'
               ? (perApplicationBilling
-                ? 'Auto Pay is on — your saved payment method is charged after each visit.'
+                ? 'Auto Pay is on — your saved payment method is charged after each application.'
                 : annualPrepayBilling
                   ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
                   : monthlyUnpriced

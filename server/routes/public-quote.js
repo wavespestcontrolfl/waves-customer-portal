@@ -1311,7 +1311,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         : emailPerApp
           ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
           : emailMultiRecurring
-            ? 'Priced per visit — full breakdown inside'
+            ? 'Priced per application — full breakdown inside'
             : `$${monthly.toFixed(2)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'

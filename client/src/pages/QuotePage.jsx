@@ -1440,7 +1440,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                           <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
                           {multiRecurring ? (
                             <div style={{ fontSize: 34, fontWeight: 800, color: COLORS.blueDeeper, marginTop: 8, lineHeight: 1.15 }}>
-                              Priced per visit
+                              Priced per application
                             </div>
                           ) : (
                             <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
@@ -1449,7 +1449,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                             </div>
                           )}
                           {multiRecurring ? (
-                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Each service bills per visit — your estimate breaks down every price.</div>
+                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Each service bills per application — your estimate breaks down every price.</div>
                           ) : (
                             <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${money(rangeLow)} – ${money(rangeHigh)}</strong> {perApp > 0 ? 'per application' : 'per month'}</div>
                           )}

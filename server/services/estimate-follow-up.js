@@ -160,7 +160,7 @@ function moneySummary(est = {}) {
         ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
         : `$${monthlyTotal.toFixed(2)}/mo`;
     }
-    return "Priced per visit — full breakdown inside";
+    return "Priced per application — full breakdown inside";
   }
   if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return "";
