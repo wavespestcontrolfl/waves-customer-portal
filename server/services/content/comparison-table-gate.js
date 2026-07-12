@@ -99,7 +99,7 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   '(?:charges?|charged|adds?(?:\\s+on)?|added(?:\\s+on)?|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?',
   // Phrasal order with the fees BEFORE the particle — "sneaks hidden fees
   // into contracts" (Codex r21).
-  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|bur(?:y|ies|ied|ying))\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?\\s+into\\b',
+  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|bur(?:y|ies|ied|ying))\\s+(?:(?:a|an|the|its|their)\\s+)?hidden\\s+fees?\\s+in(?:to)?\\b',
   `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
   `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
   `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
@@ -107,6 +107,10 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   'pulls?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
   'uses?\\s+bait[\\s-]and[\\s-]switch',
   'runs?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
+  // Unambiguous predicate accusations — "run scams", "commit fraud"
+  // (Codex r40).
+  'run(?:s|ning)?\\s+(?:a\\s+)?scams?\\b',
+  'commit(?:s|ted|ting)?\\s+fraud\\b',
   // Verb form with a victim object — "companies bait-and-switch homeowners
   // with teaser prices" (Codex r17 on #2633) — or with an instrumental
   // tail and no victim: "bait-and-switch with teaser prices" (Codex r21).
@@ -193,6 +197,9 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // hidden fees" (Codex r34). The object requirement keeps "they have no
   // hidden fees" a denial.
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:(?:they|it)\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added|(?:are|is)\\s+(?:known|notorious)\\s+for)|(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:ha(?:s|ve|s)|includes?|comes?\\s+with))\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
+  // pest control companies look cheap; they are dishonest." (Codex r40).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Pronoun-possessive LINKING insults with a provider antecedent — "Some
   // pest control companies look cheap; their billing is dishonest."
   // (Codex r39). NEG_ADJ is hyphen-guarded like the first-person arms.
@@ -334,7 +341,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1" statistical statements ("Florida is ranked #1 for termite pressure"
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
-  `(?<!\\b(?:is|are|was|were|been|remains?|remained|stays?|stayed)\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `(?<![\\w'’]\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // (The own-brand-subject ranking arm — "Waves, after years of serving …,
   // is #1", Codex r5 — lives outside this joined regex behind the
   // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
@@ -394,7 +401,7 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
 // lowercase common-noun "waves" a subject ("summer heat waves can be lousy
 // for turf" hard-blocked; Codex r18 on #2633).
 const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
-  `^${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+  `^(?!\\s+service\\s+areas?\\b)${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
 );
 // Reverse form ("…dishonest Waves"): the vocabulary needs 'i' but the brand
 // token must be case-VERIFIED in code (capture group checked against
@@ -533,7 +540,7 @@ const OWN_BRAND_RE = /\bwaves\b/i;
 // path's target-scoped tone scans use the SAME name inventory as the
 // table-less directed scans (Codex on #2633: lowercase "acme pest solutions
 // is dishonest" must stay a detectable target on both paths).
-const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero|Not|All|Few|Both|Winner|Winners|Is|Was|Are|Were`;
+const CI_PROSE_EXCLUSIONS = `${GENERIC_LEAD_EXCLUSIONS}|How|What|When|Where|Why|Who|Which|To|With|For|From|About|Against|Compare|Compared|Comparing|Versus|Vs|Choose|Choosing|Avoid|Avoiding|Hire|Hiring|Find|Finding|Get|Getting|Use|Using|Than|Like|Say|Says|Said|Call|Calling|Called|Calls|Need|Needs|Want|Wants|Consider|Considering|Considers|Considered|Between|Before|After|Most|Many|Some|Any|Every|Other|Another|Good|Great|Better|Describe|Describes|Described|Label|Labels|Labeled|Labelled|Rate|Rates|Rated|Rank|Ranks|Ranked|Vote|Votes|Voted|Name|Names|Named|Make|Makes|Made|Making|Chose|Chooses|Select|Selects|Selecting|Selected|Pick|Picks|Picking|Picked|Prefer|Prefers|Preferring|Preferred|In|Into|No|None|Zero|Not|All|Few|Both|Winner|Winners|Is|Was|Are|Were|And|Or`;
 // Leads may be digit-led or carry a plus ("360 Pest Control", "A+ Pest
 // Control") — an alphabetic-only lead let those names escape the
 // target-scoped tone scans entirely (Codex r6 on #2633). The exclusion
@@ -867,7 +874,7 @@ function scanNameRankingArms(text, names) {
         );
         const rm = text.match(selfRank)
           || text.match(supRank)
-          || text.match(calledRank)
+          || firstUnnegatedMatch(text, calledRank)
           || text.match(marketingRank)
           || firstUnnegatedMatch(text, rankBeforeName)
           || firstUnnegatedMatch(text, supBeforeName)
@@ -898,7 +905,12 @@ function scopedSelfRankingMatch(text) {
     // gel bait is the best option" embeds it under a reporting verb
     // (Codex r38).
     subjLead = subjLead.replace(/^[\s\S]*\b(?:says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|wonders?|recommends?|recommended|suggests?|suggested|advises?|advised|teach(?:es)?|taught|shows?|showed|whether|if|that|when)\b/i, '');
-    if (/\b(?:we|our|us|itself|ourselves)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
+    // Bare editorial "our" is not a provider subject — "Our guide to
+    // German roaches: gel bait is the best option" (Codex r40); "our"
+    // counts only with a business/people noun.
+    if (/\b(?:we|us|itself|ourselves)\b/i.test(subjLead)
+      || /\bour\s+(?:billing|pricing|team|teams|company|technicians?|techs?|staff|crews?|services?|business)\b/i.test(subjLead)
+      || /\bW(?:aves|AVES)\b/.test(subjLead)
       || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
       return sm;
     }
@@ -1313,12 +1325,10 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       // the table path (Codex r18). Name-confident names also get the
       // object-association arm — "Customers report hidden fees after
       // choosing Bug Busters" in plain prose (Codex r23).
-      const objAssocP0 = (PERSONIFIED_SUFFIX_RE.test(name) || confidentGenericNames.has(name))
-        ? new RegExp([
+      const objAssocP0 = new RegExp([
           `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})`,
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
-        ].join('|'), 'i')
-        : null;
+        ].join('|'), 'i');
       const am = firstUnnegatedMatch(nameScanText, negBeforeName)
         || firstUnnegatedMatch(nameScanText, fromP0)
         || (objAssocP0 && firstUnnegatedMatch(nameScanText, objAssocP0));
@@ -1593,12 +1603,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // hidden fees" stays clean. Header-shaped non-personified captures
       // are excluded — object proximity on them re-creates the educational
       // false positives.
-      const objAssocP0 = (PERSONIFIED_SUFFIX_RE.test(name) || confidentProseNames.has(name))
-        ? new RegExp([
+      // All captures qualify: the collector guarantees non-generic leads
+      // or personified suffixes, and And/Or joined the CI exclusions so
+      // fragment captures can't form (Codex r39/r40).
+      const objAssocP0 = new RegExp([
           `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})`,
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
-        ].join('|'), 'i')
-        : null;
+        ].join('|'), 'i');
       // Object-position insult idiom, verb-anchored ("homeowners call Bug
       // Busters a scam", "customers describe X as dishonest") — Codex r13.
       const objInsultP0 = new RegExp(
@@ -1644,7 +1655,6 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // exactly like the table-less path (Codex r29 on #2633).
   if (!disp) {
     for (const name of extraProseNames) {
-      if (!PERSONIFIED_SUFFIX_RE.test(name) && !confidentProseNames.has(name)) continue;
       const escaped = escapeForNameRe(name);
       const directedReliability = new RegExp(
         `${escaped}\\b(?:['’]s?)?(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?)(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',

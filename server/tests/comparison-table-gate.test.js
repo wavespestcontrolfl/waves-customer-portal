@@ -1114,6 +1114,31 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-40 findings (#2633) ──
+
+  test('Codex r40: header-shaped reliability and association parity beside tables', () => {
+    const rel = gate.evaluate({ body: `Acme Rodent Removal never answers the phone.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rel.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    for (const body of [`Customers report hidden fees after choosing Acme Rodent Removal.\n\n${CATEGORY_TABLE}`, 'Customers report hidden fees after choosing Acme Rodent Removal.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r40: pronoun-subject insults and scam predicates block', () => {
+    for (const prose of ['Some pest control companies look cheap; they are dishonest.', 'Some chains run scams.', 'Some providers commit fraud.', 'Some companies bury hidden fees in contracts.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r40: editorial our, statistics, negated object rankings, and Waves geography stay clean', () => {
+    for (const body of ['Our guide to German roaches: gel bait is the best option.', 'Florida ranked #1 for termite pressure in a 2026 risk report.', `Customers did not rate Bug Busters #1.\n\n${CATEGORY_TABLE}`, `Reviews do not call Bug Busters the #1 choice.\n\n${CATEGORY_TABLE}`, 'Waves service area is shady and humid.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-39 findings (#2633) ──
 
   test('Codex r39: pronoun-linked practice insults and table-less winner claims block', () => {
