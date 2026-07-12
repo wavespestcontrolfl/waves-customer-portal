@@ -220,14 +220,19 @@ strict 1:1 visual-refresh rule (no behavior changes riding restyles) and
 ui-verify before review.
 
 ### Phase A — Graduate the shadow (biggest report win, near-zero code)
-1. Owner reviews stored `internal_only` rodent reports (staff report view).
-   Gate from the owner spec: exclusion/sanitation conditional modules must
-   tell their own story — never flatten to "rodent service completed."
-2. Graduation migration: flip `delivery_mode → auto_send` for the rodent
+1. **A0 — review surface first:** enumerate the shadow-period stored rodent
+   reports (an ops/agents script per its README, or a small admin list) —
+   date, service key, customer, staff report link — so the owner review is a
+   20-minute skim, not archaeology. The reports exist; finding them today
+   means hand-querying.
+2. Owner reviews the stored `internal_only` rodent reports (staff report
+   view). Gate from the owner spec: exclusion/sanitation conditional modules
+   must tell their own story — never flatten to "rodent service completed."
+3. Graduation migration: flip `delivery_mode → auto_send` for the rodent
    family + rodent_trapping + rodent_bait keys, AND the `pest_rodent_quarterly`
    companion entry (recipe in `combined-service-completions.md`; pattern
    `20260612000023`). Stored shadow reports keep their frozen posture.
-3. Progress-SMS template (`service_report_v1_progress`) goes live with real
+4. Progress-SMS template (`service_report_v1_progress`) goes live with real
    traffic — verify on the first graduated trap-check.
 
 ### Phase B — Cut over the stragglers (flow universality)
@@ -383,8 +388,10 @@ rodent family — one more reason A is the lever.
    resolves its own billing disposition (the 409 `completion_billing_required`
    pre-gate must run per component), the sibling's `service_records` row must
    point at the shared report, and invoice merge vs. two invoices is an owner
-   decision. E1 removes most of the need (recurring pairs book combined);
-   E3 covers the irregular remainder.
+   decision — and where a visit is third-party-payer (Bill-To) routed, a
+   merged invoice must never mix payer-responsible and customer-responsible
+   components (payer-statements rules win). E1 removes most of the need
+   (recurring pairs book combined); E3 covers the irregular remainder.
 
 Sequencing: E1 first (mechanism fully exists; converter + re-type only),
 then E3, then E2 — or fold E2 into E3 as the "unscheduled extra work"
@@ -444,6 +451,12 @@ service-scoped:
    draft endpoints (the Codex P1 pattern at admin-dispatch.js:6366) extends
    to any new draft endpoint.
 
+**Implementation warning (applies to every F/G/H window):** these "since
+last visit" / "since job origin" bounds are timestamp WHERE clauses — the
+ET-vs-timestamptz window leak is this repo's documented incident class.
+Implement with the waves-db safe patterns and add boundary tests at the
+window edges; never raw date arithmetic.
+
 ### Phase G — Program memory: string multi-visit services together (owner ask 2026-07-12)
 
 Owner: "we may have multiple services for one individual service — like
@@ -480,6 +493,17 @@ machinery. G1 is therefore partly a FIX, not just new capability.
    derivation in the implementation PR), the D2 timeline (episode-scoped),
    and G2 context. Old episodes stay visible in history UIs where shown,
    but never generate trend claims across the boundary.
+
+   **Property scoping is now mandatory, not optional:** PR 1's revisit
+   condition — "a per-customer property/location entity is added (extend
+   activity history key)" — has triggered: `customer_properties`
+   (`20260629000001`) and `scheduled_services.property_id`
+   (`20260709000001`) are live, but `service_activity_scores` history is
+   still keyed customer+indicator only (`activity-scores-store.js:33-36`).
+   A multi-property customer's rodent job at the rental would chain and
+   trend against the one at their home. G1 keys episodes AND the existing
+   gauge history on property linkage where present (null-property rows
+   fall back to customer scope for continuity with pre-linkage history).
 2. **G2 — prior-report digest into completion AI drafts:** extend the
    Phase-F context service with an in-episode digest of the last K visits
    (proposal K=3): date, Today's Result headline, activity word, key
@@ -560,13 +584,46 @@ assembler, sectioned, each section independently scoped and toggleable):**
    "Optionally" per the owner: sections independently toggleable; strips
    stay collapsed/compact so the 60-second completion budget holds.
 
+### Metrics & rollout discipline
+
+Every phase ships with the house kill-switch doctrine (delivery modes +
+`SPECIALTY_REPORT_DELIVERY_DISABLED` already cover reports; each new
+context lane in F/G/H lands behind its own flag/env for instant disable)
+and a success measure, reusing the contract-§10 instrumentation:
+
+| Phase | Measure |
+|---|---|
+| A | rodent `report_opened` / `sms_link_clicked` rates; office callbacks within 48h of report (contract support metrics) — the before/after IS the shadow period |
+| B | straggler types' report-open rates vs their project-flow baseline |
+| C | none required (strict 1:1 restyles) beyond ui-verify |
+| D2/D3 | report engagement delta (`repeat_open`, time-on-report) on timeline/video families |
+| F/G | `ai_draft_used` and `recommendation_text_edited` rates (already instrumented) — context should RAISE used and LOWER edited; token cost sanity check |
+| H | % of prep-question services with a prep send on record before the visit |
+
 ### Explicitly out of scope
-- Any pricing value change (WDO fee reconciliation is flagged, not changed).
+- Any pricing value change (the WDO fee mess is flagged for decision, not
+  changed here — see Q8: THREE disagreeing sources).
 - The typed-report content system (snapshots, copy maps, banned words) — it
   is the standard; nothing here edits customer copy machinery.
-- Multi-visit "Programs" admin card (open trapping/German chains with trend +
-  next follow-up in Customer 360) — genuinely useful, but new capability;
-  listed as a candidate follow-up, not part of this scope.
+
+### Candidate follow-ups (roadmap, not this scope)
+- **One-time → recurring conversion lane:** the rodent/pest inspection forms
+  are explicitly "diagnostic and sales-supportive" (Recommended service +
+  Urgency fields), but the report renders no conversion CTA — a
+  "recommended plan" block linking to an estimate, with attribution, is the
+  natural revenue follow-up once D lands. Measure conversion per family.
+- **Customer 360 "Programs" card** (open trapping/German chains, trend, next
+  follow-up): nearly free after G1 — the episode resolver + D2 timeline are
+  its data source.
+- **Intelligence Bar `projects` context:** there is no projects-tools module
+  (`server/services/intelligence-bar/` has none), so ⌘K can't answer "find
+  the Smith WDO / what's unsigned / what's unsent." A small read-first
+  module per the IB README pattern; any write tools go through the
+  write-gates registry.
+- **Language preference for customer artifacts:** `voice_preferred_language`
+  exists for calls; prep guides + reports are English-only. If Spanish
+  matters for the customer base, it slots into the same snapshot/template
+  system — owner call on priority.
 
 ## 6. Open questions for the owner
 
@@ -586,8 +643,14 @@ assembler, sectioned, each section independently scoped and toggleable):**
    (full pipeline merge). Also: same treatment for pre-treat certs?
 7. **Naming:** keep "Projects" in the nav, or rename the surface (label-only)
    to "One-Time Services" / "Jobs"?
-8. **WDO fee mismatch:** tech estimator $125 vs $150/$200/$250 invoice tiers —
-   which is right?
+8. **WDO fee — three disagreeing sources:** tech quick-estimator flat $125
+   (`TechEstimatorPage.jsx:57`); auto-invoice tiers $150/$200/$250 on
+   `structure_sqft` (`admin-projects.js:2079`); and the stale
+   `SPECIALTY.wdo.brackets` $175/$200/$225 keyed to lawn-area
+   `property_sqft` — owner-confirmed stale in DECISIONS (2026-05-29
+   addendum 3) but still read by the customer-facing estimate engine.
+   Which number is right? Then all three converge to one source via the
+   pricing-config checklist.
 9. **Tech entry (C4):** open the completion sheet directly on /tech, or is
    the dispatch-tab habit fine as-is?
 10. **D2/D3 rollout:** timeline — trend types only, or all typed families?
