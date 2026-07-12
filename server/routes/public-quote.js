@@ -1093,6 +1093,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             price: item.priceAfterDiscount ?? item.price ?? null,
             total: item.totalAfterDiscount ?? item.total ?? null,
             perApp: item.perApp ?? null,
+            // Mosquito lines carry perVisit/visits instead of
+            // perApp/visitsPerYear (codex 2642 r4) — preserve both shapes so
+            // the mirrored estimate can render per-application pricing.
+            perVisit: item.perVisit ?? null,
+            visits: item.visits ?? null,
             frequency: item.frequency ?? item.visitsPerYear ?? null,
             // Recurring foam carries an operator-chosen cadence + tier labor
             // duration; keep them so the accept/render/booking paths present the

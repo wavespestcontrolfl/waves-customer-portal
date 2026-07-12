@@ -4327,7 +4327,13 @@ function BillingTab({ customer }) {
           {[
             { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per visit' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
-            { label: 'Monthly plan', value: money(monthlyRate), sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan') },
+            // Billing-mode aware (codex 2642 r4): per-application / prepaid
+            // customers never see a combined monthly total here either.
+            {
+              label: perApplicationBilling ? 'Plan billing' : annualPrepayBilling ? 'Plan billing' : 'Monthly plan',
+              value: perApplicationBilling ? 'Per visit' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
+              sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
+            },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
