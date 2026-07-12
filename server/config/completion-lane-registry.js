@@ -50,22 +50,28 @@ const PENDING_COMPLIANCE_REVIEW_KEYS = [
 ];
 
 // Owner-approved cutovers/repoints not yet shipped — classification accepts
-// BOTH the before and after state. Remove each entry when its migration
-// lands (a stale entry is flagged by the audit once the key reads as typed).
+// the declared BEFORE state and the typed AFTER state, nothing else (a
+// missing profile or an undeclared shape is still a defect — in-flight is
+// not a suppression blanket). Remove each entry when its migration lands
+// (a stale entry is flagged once the key reads as typed).
+// `before`: 'project' (project_required/special_project), 'generic'
+// (service_report with no pointer), or 'consultation' (internal_only mode).
 const CUTOVER_IN_FLIGHT_KEYS = {
-  wildlife_trapping: 'Phase B — typed sectioned form built, cutover migration pending',
-  bed_bug_treatment: 'Phase B — Q2: customer copy approved 2026-07-12, visibility later',
-  cockroach_control: 'Phase B — Q3: flip to the typed cockroach flow',
-  one_time_pest_control: 'Phase B — straggler found by the B0 scan 2026-07-12',
-  rodent_monitoring: 'PR #2673 — repoint to the typed rodent_bait_station flow',
-  palm_treatment: 'owner 2026-07-12 — repoint to the typed palm form',
-  lawn_inspection: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report',
+  wildlife_trapping: { before: 'project', note: 'Phase B — typed sectioned form built, cutover migration pending' },
+  bed_bug_treatment: { before: 'project', note: 'Phase B — Q2: customer copy approved 2026-07-12, visibility later' },
+  cockroach_control: { before: 'project', note: 'Phase B — Q3: flip to the typed cockroach flow' },
+  one_time_pest_control: { before: 'project', note: 'Phase B — straggler found by the B0 scan 2026-07-12' },
+  rodent_monitoring: { before: 'generic', note: 'PR #2673 — repoint to the typed rodent_bait_station flow' },
+  palm_treatment: { before: 'generic', note: 'owner 2026-07-12 — repoint to the typed palm form' },
+  lawn_inspection: { before: 'consultation', note: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report' },
 };
 
 // Owner 2026-07-12: scheduled as services, but billing riders — invoice line
 // + post-service report REFERENCE only. No standalone completion report, and
-// NEVER included in reminder SMS. (Reminder-SMS exclusion + report/invoice
-// reference lines are follow-up work items recorded in the plan.)
+// NEVER included in reminder SMS. Enforced end state: generic service_report
+// profile with delivery 'disabled' (or 'internal_only'); an auto_send rider
+// is a defect (20260712400000 flips the four keys). Reminder-SMS exclusion +
+// report/invoice reference lines are follow-up work items in the plan.
 const BILLING_RIDER_KEYS = [
   'termite_renewal',
   'termite_bond_1yr',
@@ -106,7 +112,8 @@ const ALL_LISTS = {
  * Classify one catalog row (services LEFT JOIN service_completion_profiles).
  *
  * @param {object} row - { service_key, billing_type, completion_mode,
- *   project_type, profile_active } — profile fields null when no row.
+ *   project_type, delivery_mode, profile_active } — profile fields null
+ *   when no row.
  * @returns {{ lane: string, flags: string[] }} lane is the resolved
  *   completion lane; flags are defects/inconsistencies (empty = healthy).
  */
@@ -138,12 +145,32 @@ function classifyCatalogRow(row) {
     return { lane, flags };
   }
   if (lane === 'cutover_in_flight') {
-    // Accepts before AND after states while the migration is in flight;
-    // nothing to flag either way — the audit prints these for visibility.
+    // In-flight accepts exactly the declared BEFORE state or the typed
+    // AFTER state — a missing profile or any other shape is still the
+    // fall-through defect this registry exists to catch (Codex P2).
+    const declared = CUTOVER_IN_FLIGHT_KEYS[key];
+    const beforeOk = (declared.before === 'project' && isProjectMode)
+      || (declared.before === 'generic' && isGenericReport)
+      || (declared.before === 'consultation' && isConsultation);
+    if (!hasProfile) {
+      flags.push('cutover_key_missing_profile:no_decision_recorded_in_db');
+    } else if (!beforeOk && !isTyped) {
+      flags.push(`cutover_key_unexpected_state:${row.completion_mode || 'none'}/${row.project_type || '-'}`);
+    }
     return { lane, flags };
   }
   if (lane === 'billing_rider') {
-    if (row.project_type) flags.push('billing_rider_has_typed_pointer');
+    // Riders must not run their own customer report lane: generic
+    // service_report with delivery disabled/internal_only is the decided
+    // end state; auto_send or a typed pointer is a live report lane the
+    // owner ruled out (Codex P2).
+    if (!hasProfile) {
+      flags.push('billing_rider_missing_profile');
+    } else if (row.project_type) {
+      flags.push('billing_rider_has_typed_pointer');
+    } else if (row.completion_mode === 'service_report' && row.delivery_mode === 'auto_send') {
+      flags.push('billing_rider_report_lane_active:expected_delivery_disabled');
+    }
     return { lane, flags };
   }
   if (lane === 'recurring_generic_by_design') {

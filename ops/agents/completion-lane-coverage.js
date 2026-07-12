@@ -52,7 +52,7 @@ async function main() {
     for (const [lane, keys] of [...byLane.entries()].sort()) {
       console.log(`${lane} (${keys.length}):`);
       for (const key of keys) {
-        const note = CUTOVER_IN_FLIGHT_KEYS[key] ? `  ← ${CUTOVER_IN_FLIGHT_KEYS[key]}` : '';
+        const note = CUTOVER_IN_FLIGHT_KEYS[key] ? `  ← ${CUTOVER_IN_FLIGHT_KEYS[key].note}` : '';
         console.log(`  ${key}${note}`);
       }
     }
@@ -105,6 +105,24 @@ async function main() {
       console.log('\nINACTIVE/ARCHIVED services with upcoming scheduled visits (live lanes despite catalog flags):');
       for (const g of ghostVisits) {
         console.log(`  ${g.service_key} (${g.is_archived ? 'archived' : 'inactive'}): ${g.upcoming} upcoming`);
+        // A live lane is a live lane — classify it like any active service
+        // and surface its flags as real defects (Codex P2: printing without
+        // failing lets a profile-less inactive key ride the generic
+        // fall-through while the audit reports clean).
+        const { rows: [ghostRow] } = await client.query(`
+          SELECT s.service_key, s.billing_type,
+                 p.completion_mode, p.project_type, p.delivery_mode,
+                 p.active AS profile_active
+          FROM services s
+          LEFT JOIN service_completion_profiles p ON p.service_key = s.service_key
+          WHERE s.service_key = $1
+        `, [g.service_key]);
+        const { lane, flags } = classifyCatalogRow(ghostRow);
+        defects.push({
+          key: g.service_key,
+          lane,
+          flags: [`inactive_service_with_upcoming_visits:${g.upcoming}`, ...flags],
+        });
       }
     }
 

@@ -54,6 +54,68 @@ describe('completion-lane registry (static)', () => {
     expect(lane).toBe('undecided');
     expect(flags).toContain('no_completion_decision:no_profile_and_no_registry_entry');
   });
+
+  test('cutover-in-flight is not a suppression blanket', () => {
+    // Missing profile on an in-flight key is still a defect.
+    const missing = classifyCatalogRow({
+      service_key: 'wildlife_trapping',
+      billing_type: 'one_time',
+      completion_mode: null,
+      project_type: null,
+      profile_active: null,
+    });
+    expect(missing.flags).toContain('cutover_key_missing_profile:no_decision_recorded_in_db');
+    // A shape that is neither the declared before state nor typed is a defect.
+    const weird = classifyCatalogRow({
+      service_key: 'wildlife_trapping',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(weird.flags.some((f) => f.startsWith('cutover_key_unexpected_state'))).toBe(true);
+    // The declared before state (project) and the typed after state are clean.
+    const before = classifyCatalogRow({
+      service_key: 'wildlife_trapping',
+      billing_type: 'one_time',
+      completion_mode: 'project_required',
+      project_type: 'wildlife_trapping',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(before.flags).toEqual([]);
+    const after = classifyCatalogRow({
+      service_key: 'wildlife_trapping',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: 'wildlife_trapping',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(after.flags).toEqual([]);
+  });
+
+  test('billing rider with a live auto_send report lane is a defect', () => {
+    const active = classifyCatalogRow({
+      service_key: 'termite_renewal',
+      billing_type: 'recurring',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(active.flags).toContain('billing_rider_report_lane_active:expected_delivery_disabled');
+    const suppressed = classifyCatalogRow({
+      service_key: 'termite_renewal',
+      billing_type: 'recurring',
+      completion_mode: 'service_report',
+      project_type: null,
+      delivery_mode: 'disabled',
+      profile_active: true,
+    });
+    expect(suppressed.flags).toEqual([]);
+  });
 });
 
 describeOrSkip('completion-lane coverage (migrated catalog)', () => {
@@ -69,7 +131,8 @@ describeOrSkip('completion-lane coverage (migrated catalog)', () => {
       .andWhere('s.is_archived', false)
       .select(
         's.service_key', 's.billing_type',
-        'p.completion_mode', 'p.project_type', 'p.active as profile_active',
+        'p.completion_mode', 'p.project_type', 'p.delivery_mode',
+        'p.active as profile_active',
       );
   });
 
