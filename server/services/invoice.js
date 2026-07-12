@@ -630,7 +630,11 @@ async function calculateUpdateFinancials({
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
-        return String(item.description || row?.name || "").trim();
+        // Catalog rows keep their CANONICAL name (codex 2652 r3: the editor
+        // sends verbose descriptions like "WaveGuard Silver (Pest Control)",
+        // which would drift the label on a no-op save and eat the 100-char
+        // cap); only plain negative lines label from their own description.
+        return String((row && row.name) || item.description || "").trim();
       })
       .filter(Boolean),
   )];

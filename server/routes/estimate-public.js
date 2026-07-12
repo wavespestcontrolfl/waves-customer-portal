@@ -978,14 +978,25 @@ function buildEstimateInvoiceModeDraft({
     .replace(/^Charged after each\s+/i, '')
     || `${cadenceLabel} visit`;
 
-  // Labeled manual-discount itemization (owner 2026-07-11), identical to the
-  // standard accept leg: gross the first-visit line by the resolved
-  // per-application slice + a _kind:'discount' negative line, so create()
-  // rolls it into discount_amount/label and the TOTAL stays `amount` by
-  // construction. `amount` (used for messaging) stays net.
-  const invoiceModeSlice = Number(manualDiscountItemization?.perApplication) > 0
-    ? Math.round(Number(manualDiscountItemization.perApplication) * 100) / 100
-    : 0;
+  // Labeled manual-discount itemization (owner 2026-07-11), same mechanism
+  // as the standard accept leg: gross the first-visit line by the resolved
+  // slice + a _kind:'discount' negative line, so create() rolls it into
+  // discount_amount/label and the TOTAL stays `amount` by construction.
+  // The slice is sized to the INVOICE BILLING INTERVAL, not blindly
+  // per-application (codex 2652 r3): a monthly-billed 4-visit tier bills a
+  // monthly amount, so its credit slice is annual/12 — for visit-billed
+  // plans the interval slice equals the per-application slice anyway.
+  const invoiceModeSlice = (() => {
+    const recurringAnnual = Number(manualDiscountItemization?.recurringAnnual) || 0;
+    const perApplication = Number(manualDiscountItemization?.perApplication) || 0;
+    if (!(recurringAnnual > 0) && !(perApplication > 0)) return 0;
+    const billingKey = String(selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || '').toLowerCase();
+    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : billingKey === 'monthly' ? 1 : null;
+    if (intervalMonths != null && recurringAnnual > 0) {
+      return Math.round(((recurringAnnual * intervalMonths) / 12) * 100) / 100;
+    }
+    return perApplication > 0 ? Math.round(perApplication * 100) / 100 : 0;
+  })();
   const recurringLineItems = invoiceModeSlice > 0
     ? [
       {
