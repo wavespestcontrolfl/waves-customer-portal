@@ -27,9 +27,12 @@ recurring-pest report's parts (timeline, recap-video slot, designed cards)
 over the typed fields, (5) a decision on how far WDO joins, (6) finishing
 multi-service appointments — one visit, one completion, one embedded report
 (the companion mechanism exists; booking routing and ad-hoc add-ons don't),
-and (7) the comms-context AI toggle ("Include recent customer
+(7) the comms-context AI toggle ("Include recent customer
 calls/texts/emails in AI draft") on every completion surface, with
-service-scoped time windows so it never drags in year-old irrelevant threads.
+service-scoped time windows so it never drags in year-old irrelevant threads,
+and (8) program memory — multi-visit services (cockroach, flea, rodent…)
+string their visits together so each completion and report knows what the
+previous ones found, bounded by an episode window.
 
 ---
 
@@ -439,6 +442,62 @@ service-scoped:
    draft endpoints (the Codex P1 pattern at admin-dispatch.js:6366) extends
    to any new draft endpoint.
 
+### Phase G — Program memory: string multi-visit services together (owner ask 2026-07-12)
+
+Owner: "we may have multiple services for one individual service — like
+cockroach, flea. We should be able to string these services together,
+basically pull in data from previous reports to add more relevance. Could be
+good regardless — we'd just have to limit it, we don't want to be pulling
+data from a year ago."
+
+**What already chains today:** `service_activity_scores` carries per-visit
+0–5 activity per `indicator_key` (customer-scoped), which powers the gauge
+history, trend words ("decreased since the last visit"), progress-visit
+framing, and `visitSequence`; CTA-booked follow-ups link explicitly via
+`scheduled_services.followup_source_service_id`. What does NOT carry
+forward: the substance of prior visits — findings values, harborage
+locations, prep status, recommendations — none of it reaches the next
+visit's completion form or AI draft.
+
+**Verified gap in the existing chain:** the history query has **no lower
+time bound** (`activity-scores-store.js:33-42` — customer + indicator,
+`service_date <= visit`, newest-first, limit). A new cockroach job today
+chains against a visit from any time in the past, so trend words and
+"Progress Visit" framing can compare across an arbitrary gap — the exact
+year-old-data problem the owner is naming, already live in the trend
+machinery. G1 is therefore partly a FIX, not just new capability.
+
+**Scope:**
+
+1. **G1 — program-episode resolver** (shared, one place): a visit chain =
+   explicit `followup_source_service_id` links, plus same customer + same
+   findings family/`indicator_key` within an owner-ratified gap (proposal:
+   90–120 days; a longer gap starts a NEW episode → baseline framing again,
+   "Baseline recorded today," no trend claim). Consumers: gauge
+   history/trend words + `visitSequence` (fix — verify the sequence
+   derivation in the implementation PR), the D2 timeline (episode-scoped),
+   and G2 context. Old episodes stay visible in history UIs where shown,
+   but never generate trend claims across the boundary.
+2. **G2 — prior-report digest into completion AI drafts:** extend the
+   Phase-F context service with an in-episode digest of the last K visits
+   (proposal K=3): date, Today's Result headline, activity word, key
+   findings values (harborage, prep status, treatment), next-step chips,
+   recommendations — sourced from the immutable `typedReportSnapshot`s.
+   Feeds the findings-recap draft and the recurring drafts ("good
+   regardless" — recurring pest/lawn get the same, same caps). Secondary,
+   clearly-labeled one-liners for the customer's OTHER in-window typed
+   reports (e.g. a flea job during a rodent program) — model instructed to
+   use only if relevant.
+3. **G3 — "Last visit" strip in the CompletionPanel** for in-episode
+   visits: display-only (headline, activity word, chips of the previous
+   visit) so the tech starts oriented. Deliberately NOT value-prefill from
+   the prior visit — carrying "8 traps checked" into a 6-trap day is how
+   stale data reaches a customer report; the contract's derive-then-pin
+   stays the only prefill mechanism.
+
+Report side needs no new work beyond D2: trend + timeline already present
+the chain; G1 just bounds them to the episode.
+
 ### Explicitly out of scope
 - Any pricing value change (WDO fee reconciliation is flagged, not changed).
 - The typed-report content system (snapshots, copy maps, banned words) — it
@@ -484,3 +543,8 @@ service-scoped:
     since last completed visit of the service line, capped at 120 days;
     one-time = since job origin, capped at 180 days), and should the
     checkbox default to checked or unchecked?
+14. **Program episodes (G1/G2):** ratify the episode gap (90 vs 120 days —
+    German roach follow-ups run 10–14 days, flea/rodent checks weeks, so
+    either bound is generous) and K=3 prior visits in the AI digest. Also:
+    prior-report digest always-on (it's our own service data), or behind
+    the same toggle as comms?
