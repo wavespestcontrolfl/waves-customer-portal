@@ -42,9 +42,9 @@ const TRACK_PRIMARY_CTA = {
   justifyContent: 'center',
   minHeight: 48,
   padding: '0 20px',
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
-  border: `1px solid ${COLORS.blueDeeper}`,
+  border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
   fontWeight: 800,
@@ -290,7 +290,7 @@ function TrackerMap({ tech, property }) {
           position={property}
           icon={{
             path: 'M -10,4 L -10,-4 L 0,-12 L 10,-4 L 10,4 Z',
-            scale: 1, fillColor: COLORS.blueDeeper, fillOpacity: 1,
+            scale: 1, fillColor: COLORS.glassNavy, fillOpacity: 1,
             strokeColor: COLORS.white, strokeWeight: 2,
           }}
           title="Your property"
@@ -344,7 +344,7 @@ function TechBlock({ tech, size = 'md' }) {
       ) : (
         <div style={{
           width: px, height: px, borderRadius: '50%',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: px * 0.4, fontWeight: 600,
         }}>
@@ -528,7 +528,7 @@ function CompleteCard({ data }) {
             href={`/report/${summary.serviceReportToken}`}
             data-glass-accent=""
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              display: 'block', padding: '16px 20px', background: COLORS.glassNavy, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -539,7 +539,7 @@ function CompleteCard({ data }) {
             href={summary.reviewUrl}
             data-glass-accent=""
             style={{
-              display: 'block', padding: '16px 20px', background: COLORS.blueDeeper, color: COLORS.white,
+              display: 'block', padding: '16px 20px', background: COLORS.glassNavy, color: COLORS.white,
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
@@ -582,7 +582,7 @@ function CancelledCard({ data }) {
         data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}
@@ -610,7 +610,7 @@ function NoShowCard({ data }) {
         data-glass-accent=""
         style={{
           display: 'block', marginTop: 20, padding: '14px 20px',
-          background: COLORS.blueDeeper, color: COLORS.white,
+          background: COLORS.glassNavy, color: COLORS.white,
           textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 15,
           textDecoration: 'none',
         }}

@@ -15,7 +15,7 @@ const BOOK_URL = 'https://wavespestcontrol.com/book?source=pest-report';
 // Warm-brand tokens — mirror LawnReportViewPage (customer surface, not admin).
 const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
-const TEXT = '#1B2C5B';
+const TEXT = '#04395E';
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
@@ -100,7 +100,7 @@ function NotFoundCard() {
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at what you&apos;re seeing.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -118,7 +118,7 @@ function PricingCard({ pricing }) {
       <SectionTitle>{pricing.service_label || 'Your plan'}</SectionTitle>
       <div style={{ display: 'grid', gap: 10 }}>
         {tiers.map((tier, i) => (
-          <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+          <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
             <div>
               <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>{tier.label}</div>
               {/* One-time packages count TOTAL visits (flea = 2-visit package),
@@ -279,7 +279,7 @@ export default function PestReportViewPage() {
             <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 16, textDecoration: 'none' }}>
               Book now
             </a>
-            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
+            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
               Call {WAVES_PHONE_DISPLAY}
             </a>
           </div>
@@ -290,7 +290,7 @@ export default function PestReportViewPage() {
           <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
             If different bugs show up — or this one keeps coming back in numbers — we&apos;re happy to take a look.
           </p>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
             Call {WAVES_PHONE_DISPLAY}
           </a>
         </SectionCard>

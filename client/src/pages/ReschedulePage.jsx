@@ -37,7 +37,7 @@ const S = {
   border: '#E7E2D7',
   soft: '#F8FCFE',
   softBorder: '#CFE7F5',
-  text: '#1B2C5B',
+  text: '#04395E',
   body: '#3F4A65',
   muted: CUSTOMER_SURFACE.muted,
 };
@@ -49,9 +49,9 @@ const PRIMARY_CTA = {
   width: '100%',
   minHeight: 48,
   padding: '0 20px',
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
-  border: `1px solid ${COLORS.blueDeeper}`,
+  border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
   fontWeight: 800,
@@ -187,9 +187,9 @@ function SlotButton({ slot, selected, onSelect }) {
       onClick={() => onSelect(slot)}
       style={{
         textAlign: 'left',
-        background: selected ? COLORS.blueDeeper : S.surface,
+        background: selected ? COLORS.glassNavy : S.surface,
         color: selected ? COLORS.white : S.text,
-        border: `2px solid ${selected ? COLORS.blueDeeper : S.border}`,
+        border: `2px solid ${selected ? COLORS.glassNavy : S.border}`,
         borderRadius: 10,
         padding: '10px 14px',
         cursor: 'pointer',
@@ -421,7 +421,7 @@ export default function ReschedulePage() {
         <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
           <WavesAIScheduleSearch
             key={aiSession}
-            theme={{ accent: COLORS.blueDeeper, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
+            theme={{ accent: COLORS.glassNavy, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
             onSearch={runAiSearch}
           />
           {aiFiltered ? (
@@ -430,7 +430,7 @@ export default function ReschedulePage() {
               onClick={showAllTimes}
               style={{
                 justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
-                color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                color: COLORS.glassNavy, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                 textDecoration: 'underline',
               }}
             >

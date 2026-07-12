@@ -82,7 +82,7 @@ const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_CHROME = CUSTOMER_SURFACE.chrome;
-const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
+const ESTIMATE_BUTTON_BG = COLORS.glassNavy;
 
 // THE estimate primary CTA (modal pay/confirm buttons + success links) —
 // hoisted so the repeated inline copies can't drift (doc-style unify).
@@ -2182,7 +2182,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
@@ -2294,7 +2294,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
@@ -3030,7 +3030,7 @@ export function ServiceSection({
             (termite monitoring) get a headline too (owner 2026-07-10). */}
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
-          color: '#1B2C5B', margin: '0 0 4px',
+          color: '#04395E', margin: '0 0 4px',
           // Same corner-badge clearance as the h3 above; only needed when
           // this headline is the first line in the card (single-service).
           paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
@@ -3052,7 +3052,7 @@ export function ServiceSection({
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
             <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#1B2C5B', margin: '14px 0 0' }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
           </>

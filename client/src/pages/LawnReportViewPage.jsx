@@ -16,7 +16,7 @@ const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
 // Canonical glass ink (owner ruling 2026-07-05) — this page is glass-only
 // (useGlassSurface mounts unconditionally), so the old marketing navy
-// #1B2C5B has no remaining render path here.
+// the old marketing navy has no remaining render path here.
 const TEXT = '#04395E';
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
@@ -100,7 +100,7 @@ function NotFoundCard() {
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -292,7 +292,7 @@ export default function LawnReportViewPage() {
           <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
           <div style={{ display: 'grid', gap: 10 }}>
             {report.pricing.tiers.map((tier, i) => (
-              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
                 <div>
                   <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
                     {tier.label}{tier.recommended ? ' · Most popular' : ''}

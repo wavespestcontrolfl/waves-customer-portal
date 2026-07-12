@@ -10,7 +10,7 @@
 //     to the canonical glass navy #04395E while a scene is mounted). Color
 //     roles here are CSS-var references ON PURPOSE: the same authored style
 //     renders warm-brand in print/PDF mode (no glass) and glass-navy live.
-//   - theme-brand.js FONTS/COLORS (the one Inter body stack; blueDeeper for
+//   - theme-brand.js FONTS/COLORS (the one Inter body stack; glassNavy for
 //     chrome that must NOT shift under glass, e.g. DocumentActionBar fills).
 //   - theme-customer.js CUSTOMER_SURFACE (warm literals for surfaces that
 //     glass deliberately leaves alone).
@@ -126,14 +126,15 @@ export const DOC_PAGE_MARGIN = '28px auto 56px';
 
 // ---------- color roles ----------
 
-// Roles resolve through the glass var layer: warm brand navy #1B2C5B from
-// brand-tokens.css when no scene is mounted, canonical glass navy #04395E
-// while one is. Literal escape hatches are named *Literal.
+// Roles resolve through the glass var layer. Since the 2026-07-12 owner
+// ruling both layers agree: brand-tokens.css :root and the mounted glass
+// scene resolve to the canonical glass navy #04395E. Literal escape
+// hatches are named *Literal.
 export const DOC = {
-  ink: 'var(--text, #1B2C5B)',
+  ink: 'var(--text, #04395E)',
   muted: 'var(--text-muted, #3F4A65)',
   supporting: CUSTOMER_SURFACE.muted, // #475569 — the one blessed gray
-  brand: 'var(--brand, #1B2C5B)',
+  brand: 'var(--brand, #04395E)',
   border: 'var(--border, #E7E2D7)',
   borderStrong: 'var(--border-strong, #D8D0C0)',
   surface: '#FFFFFF',
@@ -144,7 +145,7 @@ export const DOC = {
   success: 'var(--success, #047857)',
   successBg: CUSTOMER_SURFACE.successBg,
   successBorder: CUSTOMER_SURFACE.successBorder,
-  navyLiteral: B.blueDeeper, // #1B2C5B — chrome pinned across themes
+  navyLiteral: B.glassNavy, // #04395E — chrome pinned across themes (glass navy, owner 2026-07-12)
 };
 
 // ---------- radii / elevation / motion ----------
@@ -161,7 +162,7 @@ export const RADIUS = {
 export const SHADOW = {
   card: '0 1px 3px rgba(0,0,0,0.04)',
   modal: '0 18px 50px rgba(0,0,0,0.25)',
-  focusRing: '0 0 0 3px rgba(27,44,91,0.18)',
+  focusRing: '0 0 0 3px rgba(4,57,94,0.18)',
 };
 
 // One timing everywhere (150ms/160ms variants existed; 160 is dominant).
@@ -205,8 +206,8 @@ export function docButton(kind = 'primary') {
   }
   return {
     ...base,
-    border: `1px solid ${B.blueDeeper}`,
-    background: B.blueDeeper,
+    border: `1px solid ${B.glassNavy}`,
+    background: B.glassNavy,
     color: '#FFFFFF',
   };
 }

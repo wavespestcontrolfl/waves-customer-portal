@@ -71,7 +71,7 @@ function ReportMock() {
       </div>
       <div style={{
         position: 'relative', aspectRatio: '16 / 9', borderRadius: 12,
-        background: 'linear-gradient(135deg, #16294E 0%, #0B1B3A 55%, #1B2C5B 100%)',
+        background: 'linear-gradient(135deg, #16294E 0%, #0B1B3A 55%, #04395E 100%)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         boxShadow: 'inset 0 1px 0 rgba(255,255,255,.12), 0 6px 16px rgba(4,57,94,.22)',
       }}>
@@ -164,7 +164,7 @@ function LawnReportMock() {
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12,
         padding: '12px 12px', borderRadius: 12,
-        background: 'linear-gradient(135deg, #16294E 0%, #0B1B3A 55%, #1B2C5B 100%)',
+        background: 'linear-gradient(135deg, #16294E 0%, #0B1B3A 55%, #04395E 100%)',
         boxShadow: 'inset 0 1px 0 rgba(255,255,255,.12), 0 6px 16px rgba(4,57,94,.22)',
       }}>
         <span style={{

@@ -526,7 +526,7 @@ export default function PublicBookingPage() {
               style={{
                 width: '100%', padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
                 background: sel ? COLORS.wavesBlue : COLORS.white,
-                color: sel ? '#fff' : COLORS.blueDeeper,
+                color: sel ? '#fff' : COLORS.glassNavy,
                 border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
                 textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
               }}
@@ -565,7 +565,7 @@ export default function PublicBookingPage() {
         {/* STEP 1 — Address */}
         {step === 1 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               Find a date &amp; time that works for you
             </h2>
             <div style={{ display: 'grid', gap: 14, marginBottom: 24, marginTop: 18 }}>
@@ -631,7 +631,7 @@ export default function PublicBookingPage() {
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_SERVICE_SELECTED, { service: service.id }); setStep(2); }}
                 disabled={!address.line1}
                 data-glass-accent=""
-                style={{ width: '100%' }}
+                style={{ width: '100%', color: COLORS.glassNavy }}
               >
                 Find my best times →
               </Button>
@@ -644,7 +644,7 @@ export default function PublicBookingPage() {
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
             {!openDay ? (
               <>
-                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
                   Pick a day
                 </h2>
                 <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
@@ -681,7 +681,7 @@ export default function PublicBookingPage() {
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14,
                 background: COLORS.blueLight, border: `1px solid ${COLORS.wavesBlue}`,
-                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.blueDeeper,
+                borderRadius: 10, padding: '10px 12px', fontSize: 14, color: COLORS.glassNavy,
               }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
                   <Icon name="check" size={14} strokeWidth={3} /> Selected
@@ -710,7 +710,7 @@ export default function PublicBookingPage() {
                       }}
                     >
                       <div>
-                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>{day.fullDate}</div>
+                        <div style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>{day.fullDate}</div>
                         <div style={{ fontSize: 14, color: COLORS.slate600, marginTop: 2 }}>
                           {count} {count === 1 ? 'opening' : 'openings'}
                         </div>
@@ -744,7 +744,7 @@ export default function PublicBookingPage() {
               }
               return (
                 <div>
-                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+                  <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
                     {day.fullDate}
                   </h2>
                   <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 16, lineHeight: 1.5 }}>
@@ -761,7 +761,7 @@ export default function PublicBookingPage() {
                           style={{
                             width: '100%', padding: '14px 16px', borderRadius: 12, cursor: 'pointer',
                             background: sel ? COLORS.wavesBlue : COLORS.white,
-                            color: sel ? '#fff' : COLORS.blueDeeper,
+                            color: sel ? '#fff' : COLORS.glassNavy,
                             border: `1.5px solid ${sel ? COLORS.wavesBlue : COLORS.slate200}`,
                             textAlign: 'left', transition: 'background-color .15s, border-color .15s, color .15s',
                           }}
@@ -782,7 +782,7 @@ export default function PublicBookingPage() {
             {!loading && !openDay && (
               <>
                 <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
-                  <label style={{ ...labelStyle, color: COLORS.blueDeeper, fontWeight: 700 }}>
+                  <label style={{ ...labelStyle, color: COLORS.glassNavy, fontWeight: 700 }}>
                     Need a date further out? Pick any day that works.
                   </label>
                   <input
@@ -817,7 +817,7 @@ export default function PublicBookingPage() {
                 {/* Waves AI date/time search */}
                 <div style={{ marginTop: 20 }}>
                   <WavesAIScheduleSearch
-                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.blueDeeper, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
+                    theme={{ accent: COLORS.wavesBlue, accentText: '#fff', text: COLORS.glassNavy, muted: COLORS.slate600, border: '#CFE7F5', surface: COLORS.white, inputBg: '#F8FCFE' }}
                     onSearch={runAiSearch}
                   />
                 </div>
@@ -843,7 +843,7 @@ export default function PublicBookingPage() {
                 onClick={() => { track(FUNNEL_EVENTS.BOOKING_CONTACT_STARTED, { is_existing_customer: !!existingCustomerId }); setStep(3); }}
                 disabled={continueDisabled}
                 data-glass-accent=""
-                style={{ flex: 1 }}
+                style={{ flex: 1, color: COLORS.glassNavy }}
               >
                 Continue →
               </Button>
@@ -854,7 +854,7 @@ export default function PublicBookingPage() {
         {/* STEP 3 — Contact */}
         {step === 3 && (
           <div style={{ animation: 'slideUp 0.4s ease-out' }}>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               {existingCustomerId ? 'Confirm your booking' : 'Your info'}
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 20, lineHeight: 1.5 }}>
@@ -871,7 +871,7 @@ export default function PublicBookingPage() {
               <div style={{ fontSize: 12, fontWeight: 600, color: COLORS.blueDark, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 4 }}>
                 Your selected time
               </div>
-              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.blueDeeper }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.glassNavy }}>
                 {selectedSlot?.fullDate || selectedDayLabel} · {selectedSlot?.start_label}
               </div>
               <div style={{ fontSize: 12, color: COLORS.slate600, marginTop: 2 }}>
@@ -905,7 +905,7 @@ export default function PublicBookingPage() {
                 <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5 }}>
                   Customer found
                 </div>
-                <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.blueDeeper }}>
+                <div className="ph-mask" style={{ fontSize: 17, fontWeight: 700, color: COLORS.glassNavy }}>
                   {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || 'Customer on file'}
                 </div>
                 <div className="ph-mask" style={{ fontSize: 14, color: COLORS.slate600, marginTop: 4, lineHeight: 1.35 }}>
@@ -1002,7 +1002,7 @@ export default function PublicBookingPage() {
                 onClick={handleConfirm}
                 disabled={loading || (!existingCustomerId && (!contact.firstName || !contact.lastName || contact.phone.replace(/\D/g, '').length !== 10))}
                 data-glass-accent=""
-                style={{ flex: 1 }}
+                style={{ flex: 1, color: COLORS.glassNavy }}
               >
                 {loading ? 'Booking…' : 'Confirm booking'}
               </Button>
@@ -1022,7 +1022,7 @@ export default function PublicBookingPage() {
                 <polyline points="20 6 9 17 4 12" />
               </svg>
             </div>
-            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.blueDeeper, marginBottom: 8, letterSpacing: '-0.5px' }}>
+            <h2 style={{ fontSize: 22, fontWeight: 600, color: COLORS.glassNavy, marginBottom: 8, letterSpacing: '-0.5px' }}>
               You're booked!
             </h2>
             <p style={{ fontSize: 16, color: COLORS.slate600, marginBottom: 24, lineHeight: 1.5 }}>
@@ -1040,7 +1040,7 @@ export default function PublicBookingPage() {
                 {confCode}
               </div>
               <div style={{ fontSize: 16, color: COLORS.slate600, lineHeight: 1.6 }}>
-                <div><strong style={{ color: COLORS.blueDeeper }}>{service?.label}</strong></div>
+                <div><strong style={{ color: COLORS.glassNavy }}>{service?.label}</strong></div>
                 <div>{selectedSlot?.fullDate || selectedDayLabel}</div>
                 <div>{selectedSlot?.start_label} – {selectedSlot?.end_label}</div>
                 <div style={{ marginTop: 6 }}>{address.line1}{address.line2 ? ` · ${address.line2}` : ''}, {address.city} {address.zip}</div>
