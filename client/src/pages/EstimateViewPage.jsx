@@ -32,6 +32,7 @@ import PriceCard from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
+import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
 import DocumentActionBar from '../components/DocumentActionBar';
@@ -2326,6 +2327,130 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
+// Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE). Mirrors
+// CardHoldModal — a SetupIntent saves the card, NO money is taken here (the
+// deposit is its own modal) — but the authorization is Auto Pay: after each
+// completed application the saved card is charged automatically. The locked
+// card consent text is rendered verbatim behind a checkbox so the server's
+// consent snapshot records exactly what the customer agreed to.
+function RecurringCardModal({ intent, onSuccess, onCancel }) {
+  const dialogRef = useModalFocus();
+  const mountRef = useRef(null);
+  const stripeRef = useRef(null);
+  const elementsRef = useRef(null);
+  const [ready, setReady] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadStripeSdk().then((StripeCtor) => {
+      if (cancelled || !mountRef.current) return;
+      const stripe = StripeCtor(intent.publishableKey);
+      const elements = stripe.elements({
+        clientSecret: intent.clientSecret,
+        appearance: glassAppearanceActive()
+          ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
+          : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
+      });
+      const paymentElement = elements.create('payment');
+      paymentElement.mount(mountRef.current);
+      paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
+    }).catch(() => {
+      if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
+    });
+    return () => { cancelled = true; };
+  }, [intent]);
+
+  const handleSave = useCallback(async () => {
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      // Re-tap after a succeeded setup — honor the captured card instead of
+      // re-confirming.
+      const existing = await stripeRef.current.retrieveSetupIntent(intent.clientSecret);
+      if (existing?.setupIntent?.status === 'succeeded') {
+        onSuccess(existing.setupIntent.id);
+        return;
+      }
+      const result = await stripeRef.current.confirmSetup({
+        elements: elementsRef.current,
+        confirmParams: { return_url: window.location.href },
+        redirect: 'if_required',
+      });
+      if (result.error) {
+        setError(result.error.message || 'We could not save that card. Try another card.');
+        setSubmitting(false);
+        return;
+      }
+      const si = result.setupIntent;
+      if (si && si.status === 'succeeded') {
+        onSuccess(si.id);
+        return;
+      }
+      setError('That card could not be saved. Try again in a moment.');
+      setSubmitting(false);
+    } catch {
+      setError('We could not save that card. Try again.');
+      setSubmitting(false);
+    }
+  }, [intent, onSuccess]);
+
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Secure payment"
+      onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+    >
+      <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
+        <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Set up Auto Pay</div>
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
+          Save your card to confirm your recurring plan. After each completed
+          application, your card is charged that application&rsquo;s amount
+          automatically — no bills to chase. Saving your card doesn&rsquo;t
+          charge it now; your deposit is collected separately and credited to
+          your first invoice.
+        </div>
+        <div ref={mountRef} />
+        <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={agreed}
+            onChange={(e) => setAgreed(e.target.checked)}
+            disabled={submitting}
+            style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
+          />
+          <span style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5 }}>{CARD_CONSENT_TEXT}</span>
+        </label>
+        {error ? (
+          <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+        ) : null}
+        <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!ready || !agreed || submitting}
+            style={{ ...estimateCtaStyle, opacity: !ready || !agreed || submitting ? 0.6 : 1 }}
+          >{submitting ? 'Saving…' : 'Agree & save card'}</button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={submitting}
+            style={estimateSecondaryCtaStyle}
+          >Not now</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
@@ -3232,6 +3357,11 @@ export default function EstimateViewPage() {
   // deposit/card-hold exempt fall-through), so it carries its own synchronous
   // single-flight latch — a double-invoke must not double-PUT /accept.
   const acceptInFlightRef = useRef(false);
+  // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE).
+  // recurringCardIntent holds the live POST /recurring-card-intent response
+  // while the Auto Pay capture modal is open.
+  const [recurringCardIntent, setRecurringCardIntent] = useState(null);
+  const recurringCardSetupIntentIdRef = useRef(null);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -3264,7 +3394,12 @@ export default function EstimateViewPage() {
       // captured card isn't lost on the redirect and we don't re-mint a hold.
       const siFromRedirect = params.get('setup_intent');
       if (siFromRedirect && params.get('redirect_status') === 'succeeded') {
+        // Only one SetupIntent flow is ever live per accept (one-time → card
+        // hold; recurring → Auto Pay card), so restore the id into BOTH refs —
+        // accept sends each in its own field and the server pins trust to the
+        // intent's purpose metadata, so the wrong-lane echo is ignored.
         cardHoldSetupIntentIdRef.current = siFromRedirect;
+        recurringCardSetupIntentIdRef.current = siFromRedirect;
       }
       if (piFromRedirect || siFromRedirect) {
         ['payment_intent', 'payment_intent_client_secret', 'setup_intent', 'setup_intent_client_secret', 'redirect_status']
@@ -3694,6 +3829,7 @@ export default function EstimateViewPage() {
           serviceCadences: serviceCadences || undefined,
           depositPaymentIntentId: depositPaymentIntentIdRef.current || undefined,
           cardHoldSetupIntentId: cardHoldSetupIntentIdRef.current || undefined,
+          recurringCardSetupIntentId: recurringCardSetupIntentIdRef.current || undefined,
         }),
       });
       if (!r.ok) {
@@ -3709,6 +3845,12 @@ export default function EstimateViewPage() {
           // confirm re-opens the capture modal and mints a fresh SetupIntent.
           cardHoldSetupIntentIdRef.current = null;
           throw new Error(body.error || 'Add a card to hold your appointment to confirm this visit.');
+        }
+        if (r.status === 402 && body.code === 'RECURRING_CARD_REQUIRED') {
+          // The Auto Pay card couldn't be verified — drop it so the next
+          // confirm re-opens the capture modal.
+          recurringCardSetupIntentIdRef.current = null;
+          throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
           if (/estimate is no longer active/i.test(body.error || '')) {
@@ -3802,6 +3944,40 @@ export default function EstimateViewPage() {
         return;
       }
     }
+    // Recurring card-on-file (dark until RECURRING_CARD_ON_FILE). When this
+    // recurring accept owes an Auto Pay card and none is captured yet, mint
+    // the SetupIntent and open the capture modal; the modal's onSuccess
+    // re-enters handleConfirm so the deposit step (still owed alongside the
+    // card) runs next. Prepay-annual is exempt — the server re-resolves with
+    // the actual preference either way.
+    const recurringCardPolicy = data?.recurringCardPolicy;
+    if (serviceMode !== 'one_time' && recurringCardPolicy?.required
+        && paymentPreference !== 'prepay_annual'
+        && !recurringCardSetupIntentIdRef.current) {
+      setCtaPhase('submitting');
+      setError(null);
+      try {
+        const r = await fetch(`${API_BASE}/public/estimates/${token}/recurring-card-intent`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.exemptReason) {
+          // Policy says no card owed — fall through to the deposit/accept.
+        } else if (!r.ok) {
+          throw new Error(body.error || 'Could not start the card setup. Please try again.');
+        } else {
+          setRecurringCardIntent(body);
+          setCtaPhase('review');
+          return; // modal takes over; confirm continues from onSuccess
+        }
+      } catch (err) {
+        setError(err.message);
+        setCtaPhase('review');
+        return;
+      }
+    }
     const depositPolicy = data?.depositPolicy;
     // requiredForOneTime: a site-confirmation-held estimate zeroes `required`
     // (its recurring accept collects nothing) but a one-time switch still owes
@@ -3854,6 +4030,17 @@ export default function EstimateViewPage() {
   }, [performAccept]);
 
   const handleCardHoldCancel = useCallback(() => setCardHoldIntent(null), []);
+
+  // Unlike the card-hold success (which goes straight to accept — the hold
+  // supersedes the deposit), the Auto Pay card rides ALONGSIDE the deposit:
+  // re-enter handleConfirm so the deposit preflight runs next.
+  const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
+    recurringCardSetupIntentIdRef.current = setupIntentId;
+    setRecurringCardIntent(null);
+    await handleConfirm();
+  }, [handleConfirm]);
+
+  const handleRecurringCardCancel = useCallback(() => setRecurringCardIntent(null), []);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -4491,7 +4678,7 @@ export default function EstimateViewPage() {
                   ? `A ${fmtMoney(data.depositPolicy.oneTimeAmount)} deposit is due today — it is applied to your invoice.`
                   : paymentPreference === 'prepay_annual'
                     ? `A ${fmtMoney(data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your annual prepay invoice.`
-                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.`)
+                    : `A ${fmtMoney(serviceMode === 'one_time' ? data.depositPolicy.oneTimeAmount : data.depositPolicy.recurringAmount)} deposit is due today to hold your spot — it is applied to your first invoice.${serviceMode !== 'one_time' && data?.recurringCardPolicy?.required ? ' You’ll also save a card for Auto Pay — after each completed application, it’s charged automatically.' : ''}`)
                 : null)}
           />
           </div>
@@ -4508,6 +4695,13 @@ export default function EstimateViewPage() {
               intent={cardHoldIntent}
               onSuccess={handleCardHoldSuccess}
               onCancel={handleCardHoldCancel}
+            />
+          ) : null}
+          {recurringCardIntent ? (
+            <RecurringCardModal
+              intent={recurringCardIntent}
+              onSuccess={handleRecurringCardSuccess}
+              onCancel={handleRecurringCardCancel}
             />
           ) : null}
           {aiPanelBlock}
