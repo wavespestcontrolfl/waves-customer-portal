@@ -2339,12 +2339,21 @@ async function handleSetupIntentSucceeded(setupIntent) {
     const stripePmId = typeof setupIntent.payment_method === 'string'
       ? setupIntent.payment_method
       : setupIntent.payment_method.id;
-    await RecurringCards.completeRecurringCardEnrollment({
+    const enrollment = await RecurringCards.completeRecurringCardEnrollment({
       customerId: estimate.customer_id,
       stripePaymentMethodId: stripePmId,
       setupIntentId: setupIntent.id,
       estimateId: estimate.id,
     });
+    // This handler can be the ONLY durable recovery path (crash after the
+    // accept commit, browser never returned) — a TRANSIENT failure must
+    // rethrow so the dispatcher 500s and Stripe retries the idempotent
+    // enrollment (Codex #2680). Policy refusals (ownership mismatch,
+    // ach_blocked) stay acked: retries can't change them and the office
+    // alert already fired inside the enrollment routine.
+    if (!enrollment.enrolled && enrollment.transient) {
+      throw new Error(`recurring-cof webhook enrollment transient failure (${enrollment.reason}) — retry`);
+    }
     return;
   }
   // Covered-by-credit capture (Codex #2507 P1 round-3): the SetupIntent the

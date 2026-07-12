@@ -624,6 +624,24 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
     }
+    // Recurring card-on-file lane supersedes the deposit (mirrors the accept
+    // gate + /data): during the rollout window with both flags on, minting a
+    // deposit here would collect the retired $49 from a customer whose card
+    // lane promises "$0 today" (Codex #2680).
+    if (!oneTime) {
+      const cardPolicy = await resolveRecurringCardPolicyForEstimate({
+        estimate,
+        membership,
+        treatAsOneTime: false,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+        paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      });
+      const laneActive = cardPolicy.required
+        || ['saved_method_consented', 'autopay_already_active'].includes(cardPolicy.exemptReason || '');
+      if (laneActive) {
+        return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'recurring_card_supersedes' });
+      }
+    }
     // Mirror accept's appointment gate BEFORE collecting money: a one-time
     // uninvoiced accept with no booking is rejected (APPOINTMENT_REQUIRED at
     // accept), so minting the PI first would charge $99 for an acceptance

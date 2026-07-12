@@ -2419,8 +2419,7 @@ function RecurringCardModal({ intent, onSuccess, onCancel }) {
         <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, margin: '8px 0 16px' }}>
           Save your card to confirm your recurring plan — nothing is charged
           today. After each completed service, your card is charged that
-          service&rsquo;s amount automatically. Questions anytime:
-          billing@wavespestcontrol.com.
+          service&rsquo;s amount automatically.
         </div>
         <div ref={mountRef} />
         <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', marginTop: 16, cursor: 'pointer' }}>
@@ -2553,7 +2552,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
   );
 }
 
-export function SuccessCard({ acceptResult }) {
+export function SuccessCard({ acceptResult, appointmentLabel = null, recurring = false }) {
   const nextStep = acceptResult?.nextStep || (acceptResult?.invoiceMode ? 'pay_invoice' : 'confirmed');
   const bookingUrl = acceptResult?.bookingUrl || null;
   const invoicePayUrl = acceptResult?.invoicePayUrl || null;
@@ -2661,11 +2660,19 @@ export function SuccessCard({ acceptResult }) {
   }
 
   return (
-    <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+    // data-glass="card": the booked screen rides the estimate page's glass
+    // scene like the Auto Pay modal (owner ask 2026-07-12); inline styles
+    // stay as the non-glass fallback.
+    <div data-glass="card" style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
       <div style={{ fontSize: 40 }}></div>
       <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
         You're booked.
       </div>
+      {appointmentLabel ? (
+        <div style={{ fontSize: 17, fontWeight: 600, color: COLORS.navy, marginTop: 10 }}>
+          First visit: {appointmentLabel}
+        </div>
+      ) : null}
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
         {/* A retry of an already-accepted estimate returns the full success
             payload with alreadyAccepted: true — the original confirmation
@@ -2674,6 +2681,12 @@ export function SuccessCard({ acceptResult }) {
           ? 'This estimate was already accepted — you\'re all set. Our team will confirm the schedule.'
           : 'Check your phone for the confirmation text. Our team will confirm the schedule.'}
       </div>
+      {recurring ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 14, lineHeight: 1.5 }}>
+          Download the Waves app to track visits, reschedule, and manage your
+          plan anytime.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3995,8 +4008,15 @@ export default function EstimateViewPage() {
     // (its recurring accept collects nothing) but a one-time switch still owes
     // that mode's deposit — keep consulting /deposit-intent, which re-resolves
     // per mode and 409-exempts when nothing is owed.
-    const depositRequired = depositPolicy?.required
-      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime);
+    // Card lane supersedes the deposit ("$0 today"): /data already reports
+    // required:false when the lane is active, but a stale snapshot (flag
+    // flipped mid-session) or a just-captured card must not open the
+    // deposit modal — /deposit-intent and the accept gate both 409/exempt
+    // it server-side regardless.
+    const recurringCardLaneActive = serviceMode !== 'one_time'
+      && (data?.recurringCardPolicy?.required || !!recurringCardSetupIntentIdRef.current);
+    const depositRequired = !recurringCardLaneActive && (depositPolicy?.required
+      || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.
     if (depositRequired && !depositPaymentIntentIdRef.current) {
@@ -4564,7 +4584,18 @@ export default function EstimateViewPage() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
-        <SuccessCard acceptResult={acceptResult} />
+        <SuccessCard
+          acceptResult={acceptResult}
+          // First-visit line (owner ask 2026-07-12): the slot the customer
+          // just booked (kept in state through accept) or their validated
+          // existing appointment; null renders the classic card.
+          appointmentLabel={existingAppointment
+            ? formatAppointmentLabel(existingAppointment)
+            : (selectedSlotMeta?.date
+              ? `${new Date(`${selectedSlotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${selectedSlotMeta.time ? ` · ${selectedSlotMeta.time}` : ''}`
+              : null)}
+          recurring={serviceMode !== 'one_time'}
+        />
       </Page>
     );
   }

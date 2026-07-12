@@ -281,7 +281,10 @@ async function completeRecurringCardEnrollment({
   } catch (err) {
     logger.error(`[recurring-cof] enrollment failed post-accept for customer ${customerId}: ${err.message}`);
     await alertEnrollmentNeedsReview({ customerId, estimateId, reason: err.message });
-    return { enrolled: false, reason: err.message };
+    // transient: a thrown error (Stripe/DB hiccup) is retryable — the
+    // webhook backstop rethrows on it so Stripe's retry schedule re-runs
+    // the idempotent enrollment; policy refusals above are not.
+    return { enrolled: false, reason: err.message, transient: true };
   }
 }
 
