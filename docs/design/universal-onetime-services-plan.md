@@ -30,9 +30,11 @@ multi-service appointments — one visit, one completion, one embedded report
 (7) the comms-context AI toggle ("Include recent customer
 calls/texts/emails in AI draft") on every completion surface, with
 service-scoped time windows so it never drags in year-old irrelevant threads,
-and (8) program memory — multi-visit services (cockroach, flea, rodent…)
+(8) program memory — multi-visit services (cockroach, flea, rodent…)
 string their visits together so each completion and report knows what the
-previous ones found, bounded by an episode window.
+previous ones found, bounded by an episode window, and (9) pre-service prep
+docs + contracts joining the same completion context — the tech sees what
+prep was sent and what coverage applies before writing a word.
 
 ---
 
@@ -498,6 +500,55 @@ machinery. G1 is therefore partly a FIX, not just new capability.
 Report side needs no new work beyond D2: trend + timeline already present
 the chain; G1 just bounds them to the episode.
 
+### Phase H — Prep docs + contracts as completion context (owner ask 2026-07-12)
+
+Owner: "we're putting together pre-documents to send out prior to services —
+these should be tied in so the tech is aware the prep reports were sent out.
+Also look at integrating contracts — pulling in as much data, optionally, to
+make the tech's job easier and the reports that much more relevant."
+
+**Existing infrastructure (all live):**
+- Prep sends, two lanes: `prep.*` email automations (`prep.flea` seeded
+  `20260702000003`; pest-prep automations activated `20260702000002`; SMS
+  variant `20260711400000` — the in-flight work the owner references) and
+  manual per-project prep guides
+  (`POST /admin/projects/:id/send-prep-guide` → `ProjectEmail.sendPrepGuide`,
+  keyed by `prepTemplateForProjectType`).
+- Click signals for SMS links (`short_codes` click tracking,
+  `20260705000110`).
+- Agreements/contracts: `termite_bonds` (`20260705010060`),
+  `customer_contract_signature_snapshot` (`20260611000003`),
+  `document_templates` + versions (`20260601000009`), seeded agreement docs
+  (rodent exclusion guarantee `20260623000004`, termite bond agreements,
+  commercial service, lawn & ornamental `…03/05/06`).
+
+**Scope — these ride the same completion-context service as F/G (one
+assembler, sectioned, each section independently scoped and toggleable):**
+
+1. **H1 — prep-doc awareness.** A per-visit prep resolver: service family →
+   relevant `prep.*` automation sends + manual prep-guide sends for this
+   customer within the visit window → status line. Surfaces: (a) a
+   CompletionPanel context strip — "Prep guide sent Jul 9 · email + SMS ·
+   link clicked" or "No prep guide sent"; (b) a line in the AI-draft
+   context; (c) a copy guardrail that matters: forms with a prep question
+   (German roach "Prep completed Yes/Partial/No") get the send-status
+   pre-framed, and **if no prep was ever sent, the draft must not imply the
+   customer ignored instructions.** Registry-driven off the `prep.*`
+   convention so new prep docs appear without code changes.
+2. **H2 — agreements/coverage context.** Per-visit coverage resolver:
+   active termite bond (status, renewal due), rodent exclusion guarantee,
+   commercial / lawn & ornamental agreements, signature snapshots — scoped
+   to the service family. Surfaces: tech context strip ("Active termite
+   bond · renewal due Sep 2026") + structured facts in the AI-draft
+   context. **Customer-copy rule:** reports never assert or deny coverage
+   from AI inference — any coverage line comes from structured agreement
+   data only, tech-reviewed (extends the banned-claims posture).
+3. **H3 — one context service.** F (comms) + G (prior visits) + H (prep +
+   coverage) land as sections of a single server-side completion-context
+   assembler consumed by the CompletionPanel strips and every AI draft.
+   "Optionally" per the owner: sections independently toggleable; strips
+   stay collapsed/compact so the 60-second completion budget holds.
+
 ### Explicitly out of scope
 - Any pricing value change (WDO fee reconciliation is flagged, not changed).
 - The typed-report content system (snapshots, copy maps, banned words) — it
@@ -548,3 +599,8 @@ the chain; G1 just bounds them to the episode.
     either bound is generous) and K=3 prior visits in the AI digest. Also:
     prior-report digest always-on (it's our own service data), or behind
     the same toggle as comms?
+15. **Prep + coverage in customer copy (H):** tech-context only at v1
+    (recommended), or should reports also name the prep send date ("per the
+    prep instructions sent July 9") and structured coverage lines ("covered
+    under your termite bond")? Which prep docs are still being authored, so
+    the resolver registry starts complete?
