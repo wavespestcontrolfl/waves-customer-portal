@@ -27,6 +27,7 @@ invoked by a human or an agent session, on purpose, from the repo root.
 | `pull-page-tokens.js` | READ-ONLY | Pulls one recent live token per customer-facing token-gated page type (estimate, pay, receipt, report, track, …) so those pages can be opened for visual review. |
 | `retention-purge.js` | MUTATES (dry-run default) | Dismisses all `pending_approval` retention outreach drafts (`status` → `rejected`), audit-tagged and reversible. |
 | `railway-var-cleanup.sh` | MUTATES (dry-run default) | Deletes named Railway service variables one at a time, with confirmation of what exists first. |
+| `rodent-shadow-report-list.js` | READ-ONLY | Lists every stored shadow-period (`internal_only`) rodent-family report since the 2026-06-12 cutover — date, key, customer, staff report link — for the Phase-A graduation review, plus completed rodent visits that stored nothing. |
 
 ## Prod read-only access recipe
 
