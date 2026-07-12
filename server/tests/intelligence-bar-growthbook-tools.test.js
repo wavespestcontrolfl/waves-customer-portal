@@ -86,10 +86,36 @@ describe('intelligence bar GrowthBook tools', () => {
     const result = await executeGrowthbookTool('get_growthbook_features', { limit: 5 });
     expect(result.error).toBeUndefined();
     expect(result.features[0]).toEqual({
-      id: 'pricing-hub', value_type: 'boolean', default_value: 'false', tags: ['pricing'], archived: false,
+      id: 'pricing-hub', value_type: 'boolean', default_value: 'false', environments: {}, tags: ['pricing'], archived: false,
     });
     expect(result.has_more).toBe(true);
     expect(String(global.fetch.mock.calls[0][0])).toContain('limit=5');
+  });
+
+  test('get_growthbook_features surfaces per-environment enabled + default (production may differ from base)', async () => {
+    process.env.GROWTHBOOK_API_KEY = 'secret_read-only_x';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      hasMore: false,
+      features: [{
+        id: 'pricing-hub',
+        valueType: 'boolean',
+        defaultValue: 'false',
+        environments: {
+          production: { enabled: true, defaultValue: 'true' },
+          dev: { enabled: false },
+        },
+        tags: [],
+        archived: false,
+      }],
+    }));
+
+    const result = await executeGrowthbookTool('get_growthbook_features', {});
+    expect(result.error).toBeUndefined();
+    expect(result.features[0].default_value).toBe('false');
+    expect(result.features[0].environments).toEqual({
+      production: { enabled: true, default_value: 'true' },
+      dev: { enabled: false, default_value: null },
+    });
   });
 
   test('auth rejection surfaces a key hint as { error }, never a throw', async () => {

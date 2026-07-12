@@ -19,6 +19,13 @@
  *   canonical read pattern; fastlane does the same). No edit is ever
  *   committed from this module.
  *
+ *   PERMISSION: because the read goes through edits.insert, the service
+ *   account needs a Play Console role that can CREATE an edit (a release
+ *   role such as "Release apps to testing tracks" / "Manage production
+ *   releases", or Admin). The pure read-only "View app information and
+ *   download bulk reports" role CANNOT create the edit and this call would
+ *   403 — do not provision the SA with only that role.
+ *
  *   CONSTRAINT: Play invalidates a user's other active edits for the same
  *   app when a new edit is created, so PLAY_SERVICE_ACCOUNT_JSON must be a
  *   service account that is NOT shared with any Play publishing automation
@@ -40,6 +47,12 @@ const DEFAULT_ASC_APP_ID = '6782775654'; // Waves customer portal iOS app
 const DEFAULT_PLAY_PACKAGE = 'com.wavespestcontrol.portal';
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_VERSIONS = 10;
+
+// "Live on the App Store" has two spellings: the legacy appStoreState field
+// says READY_FOR_SALE; the newer appVersionState field says
+// READY_FOR_DISTRIBUTION. Treat both as live (and neither as in-flight).
+const LIVE_STATES = ['READY_FOR_SALE', 'READY_FOR_DISTRIBUTION'];
+const NOT_IN_FLIGHT_STATES = [...LIVE_STATES, 'REPLACED_WITH_NEW_VERSION', 'REMOVED_FROM_SALE'];
 
 const STORE_OPS_TOOLS = [
   {
@@ -63,7 +76,7 @@ Use for: "is the Android app live?", "what's on the Play production track?", "di
 ];
 
 const ASC_NOT_CONFIGURED = 'App Store Connect access is not configured. Add ASC_KEY_ID, ASC_ISSUER_ID, and ASC_PRIVATE_KEY (the .p8 key content) service variables in the Railway dashboard.';
-const PLAY_NOT_CONFIGURED = 'Google Play access is not configured. Add the PLAY_SERVICE_ACCOUNT_JSON service variable (a service-account key with "View app information" access in Play Console) in the Railway dashboard.';
+const PLAY_NOT_CONFIGURED = 'Google Play access is not configured. Add the PLAY_SERVICE_ACCOUNT_JSON service variable in the Railway dashboard. The service account needs a Play Console role that can create an edit (a release role, or Admin) — the read-only "View app information" role cannot read track state.';
 
 function ascConfigured() {
   return Boolean(process.env.ASC_KEY_ID && process.env.ASC_ISSUER_ID && process.env.ASC_PRIVATE_KEY);
@@ -114,8 +127,8 @@ async function getAppStoreStatus() {
     platform: v.attributes?.platform || null,
     created: v.attributes?.createdDate || null,
   }));
-  const live = versions.find(v => v.state === 'READY_FOR_SALE');
-  const inFlight = versions.filter(v => v.state && !['READY_FOR_SALE', 'REPLACED_WITH_NEW_VERSION', 'REMOVED_FROM_SALE'].includes(v.state));
+  const live = versions.find(v => LIVE_STATES.includes(v.state));
+  const inFlight = versions.filter(v => v.state && !NOT_IN_FLIGHT_STATES.includes(v.state));
   return {
     app_id: appId,
     live_version: live?.version || null,

@@ -84,6 +84,23 @@ async function getGrowthbookExperiments(input) {
   return { experiments, total: experiments.length, has_more: Boolean(json.hasMore) };
 }
 
+// The top-level defaultValue is the feature's base default, NOT what any
+// environment actually serves — an environment can be disabled or override
+// the value. Surface each environment's enabled flag + effective default so
+// "is X on in production?" is answerable and not confused with the base value.
+function mapEnvironments(environments) {
+  if (!environments || typeof environments !== 'object') return {};
+  const out = {};
+  for (const [env, cfg] of Object.entries(environments)) {
+    out[env] = {
+      enabled: Boolean(cfg?.enabled),
+      // env-specific override; falls back to the feature default when absent
+      default_value: cfg?.defaultValue ?? null,
+    };
+  }
+  return out;
+}
+
 async function getGrowthbookFeatures(input) {
   const limit = clampLimit(input.limit);
   const json = await gbGet(`/api/v1/features?limit=${limit}`);
@@ -91,6 +108,7 @@ async function getGrowthbookFeatures(input) {
     id: f.id,
     value_type: f.valueType,
     default_value: f.defaultValue,
+    environments: mapEnvironments(f.environments),
     tags: f.tags || [],
     archived: Boolean(f.archived),
   }));

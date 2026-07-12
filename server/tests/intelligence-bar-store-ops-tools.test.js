@@ -96,6 +96,25 @@ describe('intelligence bar store ops tools', () => {
     expect(result.total).toBe(3);
   });
 
+  test('appVersionState READY_FOR_DISTRIBUTION counts as live, not in-flight', async () => {
+    process.env.ASC_KEY_ID = 'KEY1';
+    process.env.ASC_ISSUER_ID = 'ISSUER1';
+    process.env.ASC_PRIVATE_KEY = 'pem';
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      data: [
+        { attributes: { versionString: '1.4', appVersionState: 'IN_REVIEW', platform: 'IOS', createdDate: '2026-07-12' } },
+        { attributes: { versionString: '1.3', appVersionState: 'READY_FOR_DISTRIBUTION', platform: 'IOS', createdDate: '2026-07-10' } },
+      ],
+    }));
+
+    const result = await executeStoreOpsTool('get_app_store_status', {});
+    expect(result.error).toBeUndefined();
+    expect(result.live_version).toBe('1.3');
+    expect(result.in_flight).toEqual([
+      { version: '1.4', state: 'IN_REVIEW', platform: 'IOS', created: '2026-07-12' },
+    ]);
+  });
+
   test('get_play_store_status reads tracks inside a draft edit and always deletes it', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
     mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-1' } });
