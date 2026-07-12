@@ -680,17 +680,25 @@ async function handleCardHoldCancellation({ scheduledServiceId, serviceStart = n
   return releaseCardHold({ scheduledServiceId, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' });
 }
 
-// Reminder policy clause (card-on-file spec Phase 1): the 72h/24h
+// Reminder policy disclosure (card-on-file spec Phase 1): the 72h/24h
 // appointment reminders for a HELD one-time booking state the fee policy —
-// dispute evidence as much as UX. Clause-style like reschedule-link's
-// smsLineFor: returns '' when the flag is off, no held row exists, or the
-// lookup fails, so the templates' {card_hold_policy_line} placeholder always
-// resolves and non-card-hold reminders stay byte-identical. Terms come from
-// the FROZEN hold row (what the customer consented to), never live config.
-// The cutoff is stated relative to the visit ("until N hours before") — the
-// booking-age grace in isWithinCancelWindow only ever makes the real rule
-// MORE lenient than this disclosure, never less.
-async function cardHoldReminderLine(scheduledServiceId) {
+// dispute evidence as much as UX. Returns '' when the flag is off, no held
+// row exists, or the lookup fails, so template placeholders always resolve
+// and non-card-hold reminders stay byte-identical. Terms come from the
+// FROZEN hold row (what the customer consented to), never live config.
+//
+// Copy accuracy (Codex #2677 round-1):
+//  - The fee attaches to LATE CANCELS and no-shows only — the self-serve
+//    reschedule path (SmartRebooker) charges nothing, so the disclosure
+//    says rescheduling is free rather than threatening a fee it never bills.
+//  - The stated cutoff is the EXACT free-cancel boundary under the
+//    booking-age rule. isWithinCancelWindow fees a cancel at time t iff
+//    start − t ≤ min(W, t − held_at); solving for t makes the free period
+//    end at t* = max(start − W, midpoint(held_at, start)) — a fixed
+//    instant, so the reminder can disclose it precisely instead of telling
+//    a same-day booker they are "already inside the window" when the
+//    booking-age grace still protects them.
+async function cardHoldReminderNote(scheduledServiceId) {
   try {
     if (!isCardHoldEnabled()) return '';
     const hold = await heldCardForScheduledService(scheduledServiceId);
@@ -698,11 +706,40 @@ async function cardHoldReminderLine(scheduledServiceId) {
     const fee = Number(hold.no_show_fee_amount) > 0 ? Number(hold.no_show_fee_amount) : cardHoldNoShowFee();
     const windowHours = Number(hold.cancel_window_hours) > 0 ? Number(hold.cancel_window_hours) : cardHoldCancelWindowHours();
     const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-    return `\n\nYour card on file holds this visit. Reschedule or cancel free until ${windowHours} hours before your appointment — inside that window, or if no one is home, a ${feeText} fee applies.`;
+    let cutoffClause = '';
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      const start = await scheduledServiceApptTime(scheduledServiceId);
+      const startMs = start ? new Date(start).getTime() : NaN;
+      if (Number.isFinite(startMs)) {
+        const heldMs = hold.held_at ? new Date(hold.held_at).getTime() : NaN;
+        const byWindow = startMs - windowHours * 3600000;
+        const tStar = Number.isFinite(heldMs) && heldMs <= startMs
+          ? Math.max(byWindow, (heldMs + startMs) / 2)
+          : byWindow;
+        if (tStar > Date.now()) {
+          const { formatETDate, formatETTime } = require('../utils/datetime-et');
+          const cutoff = new Date(tStar);
+          cutoffClause = ` — cancel free until ${formatETDate(cutoff)} at ${formatETTime(cutoff)}`;
+        }
+      }
+    } catch (err) {
+      logger.warn('[estimate-card-holds] reminder cutoff resolution failed — generic copy', { error: err.message });
+    }
+    return cutoffClause
+      ? `Your card on file holds this visit${cutoffClause}. After that, a ${feeText} fee applies only if you cancel or no one is home. Rescheduling is always free.`
+      : `Your card on file holds this visit. A ${feeText} fee applies only if you cancel or no one is home — rescheduling is always free.`;
   } catch (err) {
-    logger.warn('[estimate-card-holds] reminder policy line failed (non-fatal)', { error: err.message });
+    logger.warn('[estimate-card-holds] reminder policy note failed (non-fatal)', { error: err.message });
     return '';
   }
+}
+
+// SMS clause form — leading separator lives inside the clause so the
+// template placeholder resolves to nothing for non-card-hold bookings.
+async function cardHoldReminderLine(scheduledServiceId) {
+  const note = await cardHoldReminderNote(scheduledServiceId);
+  return note ? `\n\n${note}` : '';
 }
 
 // Read-only cancel preview for the admin cancel UIs: does this visit carry a
@@ -958,6 +995,7 @@ module.exports = {
   handleCardHoldCancellation,
   cardHoldCancelPreview,
   cardHoldReminderLine,
+  cardHoldReminderNote,
   isWithinCancelWindow,
   settleNoShowFee,
   _private: {

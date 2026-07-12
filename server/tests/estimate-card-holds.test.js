@@ -31,7 +31,12 @@ const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
+jest.mock('../utils/datetime-et', () => ({
+  etDateString: jest.fn(() => '2026-06-25'),
+  addETDays: jest.fn(),
+  formatETDate: jest.fn(() => 'July 13, 2026'),
+  formatETTime: jest.fn(() => '9:00 AM'),
+}));
 // cardHoldCancelPreview resolves the appointment start via the shared helper
 // when not supplied; the cancel-path tests pass serviceStart explicitly and
 // never hit this mock.
@@ -63,6 +68,7 @@ const {
   handleCardHoldCancellation,
   cardHoldCancelPreview,
   cardHoldReminderLine,
+  cardHoldReminderNote,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -222,7 +228,8 @@ describe('isWithinCancelWindow', () => {
   });
 });
 
-describe('cardHoldReminderLine — reminder fee-policy clause (spec Phase 1)', () => {
+describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Phase 1)', () => {
+  const HOUR = 3600000;
   it("'' while the flag is off (dark-safe)", async () => {
     delete process.env.ONE_TIME_CARD_HOLD;
     stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
@@ -232,16 +239,34 @@ describe('cardHoldReminderLine — reminder fee-policy clause (spec Phase 1)', (
     stubDb(null);
     expect(await cardHoldReminderLine('svc1')).toBe('');
   });
-  it('states the FROZEN fee + window from the hold row, not live config', async () => {
-    stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48 });
+  it('states the FROZEN fee and an exact free-cancel cutoff; rescheduling stays free', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48, held_at: new Date(Date.now() - 240 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // cutoff = start − 48h, in the future
     const line = await cardHoldReminderLine('svc1');
-    expect(line).toBe('\n\nYour card on file holds this visit. Reschedule or cancel free until 48 hours before your appointment — inside that window, or if no one is home, a $39 fee applies.');
+    expect(line.startsWith('\n\nYour card on file holds this visit — cancel free until ')).toBe(true);
+    expect(line).toContain('a $39 fee applies only if you cancel or no one is home');
+    expect(line).toContain('Rescheduling is always free.');
+    expect(line).not.toContain('reschedule or cancel free'); // fee never attributed to reschedules
   });
-  it('falls back to config defaults when frozen values are absent (legacy rows)', async () => {
-    stubDb({ id: 'h1' });
-    const line = await cardHoldReminderLine('svc1');
-    expect(line).toContain('until 24 hours before');
-    expect(line).toContain('$49 fee applies');
+  it('booking-age grace: a fresh same-day booking discloses the midpoint cutoff, not "already inside"', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 1 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 3 * HOUR)); // midpoint = +1h, still free NOW
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('cancel free until');
+  });
+  it('past-cutoff bookings get the generic in-window copy (no stale cutoff)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 10 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 1 * HOUR)); // midpoint 4.5h ago
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('A $49 fee applies only if you cancel or no one is home');
+    expect(note).not.toContain('cancel free until');
+  });
+  it('appointment-time resolution failure degrades to the generic copy, never throws', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    mockApptTime.mockRejectedValue(new Error('appt lookup down'));
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('$49 fee applies');
+    expect(note).not.toContain('cancel free until');
   });
   it("'' on a lookup error — a reminder must never fail on the policy clause", async () => {
     stubDb(new Error('db down'));
