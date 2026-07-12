@@ -1114,6 +1114,47 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-27 findings (#2633) ──
+
+  test('Codex r27: denial-lead provider copy stays clean beside a table; accusations still block', () => {
+    for (const prose of ['Not all pest control companies charge hidden fees.', 'No pest control companies are dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+    const accusation = gate.evaluate({ body: `Not only that, pest control companies scam customers.\n\n${CATEGORY_TABLE}` }, {});
+    expect(accusation.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r27: first-person evaluative negatives block; hyphen idiom stays clean', () => {
+    for (const prose of ['We are unreliable.', 'Our team is unreliable.', 'We seem sketchy.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const idiom = gate.evaluate({ body: `We are the worst-kept secret in Sarasota pest control.\n\n${CATEGORY_TABLE}` }, {});
+    expect(idiom.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r27: our-subject #1 claims block', () => {
+    for (const body of ['Our team is #1.', 'Our technicians are the #1 choice.', `Our team is #1.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r27: emphatic idiom leads keep the accusation', () => {
+    for (const prose of ['Without a doubt, hidden fees from Bug Busters are common.', 'No doubt, hidden fees after choosing Waves are common.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r27: tropical-wave weather copy stays educational', () => {
+    for (const prose of ['Tropical Waves Are the #1 Rain Trigger.', 'Tropical Waves are lousy for mosquito forecasts.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(false);
+    }
+  });
+
   // ── Codex round-26 findings (#2633) ──
 
   test('Codex r26: title-cased heat-wave copy stays educational; brand claims still block', () => {

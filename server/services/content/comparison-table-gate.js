@@ -220,11 +220,14 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // stays clean ("our lanais are shady and humid") (Codex r14 on #2633).
   // "service" is deliberately absent: "our service area is shady" is
   // educational geography, and NOUN_VERB_GAP would bridge "area".
-  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
-  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // NEG_ADJ counts for first-person subjects too — "We are unreliable",
+  // "We seem sketchy" (Codex r27); hyphen-guarded so "we are the
+  // worst-kept secret" marketing idiom stays clean.
+  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|seems?|seemed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // (The reverse "…dishonest Waves" arm lives outside this joined regex —
   // it needs a case-VERIFIED brand token so "Lousy heat waves stress St.
   // Augustinegrass" stays clean; see OWN_BRAND_REVERSE_RE / Codex r19.)
@@ -270,6 +273,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
   `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  // "our <team/company/...>" subjects are own-brand for #1 claims too —
+  // "Our technicians are the #1 choice" (Codex r27 on #2633).
+  `\\bour\\s+(?:teams?|company|technicians?|techs?|staff|crews?|services?|business)\\b${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Achievement verbs — "We earned the #1 spot in Venice", "we've won #1"
   // (Codex r21 on #2633).
   `\\bwe(?:['’]ve)?\\s+(?:have\\s+|just\\s+|finally\\s+)?(?:earns?|earned|wins?|won|claims?|claimed|secures?|secured|clinch(?:es)?|clinched|grabs?|grabbed|takes?|took|holds?|held)\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
@@ -319,7 +325,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // The lookbehind drops weather/physics compounds in ANY case — "Heat
 // Waves Are the #1 Stressor" is title-cased educational copy (Codex r26
 // on #2633).
-const OWN_BRAND_ANCHOR = "(?<!\\b[Hh][Ee][Aa][Tt]\\s)(?<!\\b[Cc][Oo][Ll][Dd]\\s)(?<!\\b[Tt][Ii][Dd][Aa][Ll]\\s)(?<!\\b[Oo][Cc][Ee][Aa][Nn]\\s)(?<!\\b[Ss][Oo][Uu][Nn][Dd]\\s)(?<!\\b[Ss][Hh][Oo][Cc][Kk]\\s)\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
+const OWN_BRAND_ANCHOR = "(?<!\\b[Hh][Ee][Aa][Tt]\\s)(?<!\\b[Cc][Oo][Ll][Dd]\\s)(?<!\\b[Tt][Ii][Dd][Aa][Ll]\\s)(?<!\\b[Oo][Cc][Ee][Aa][Nn]\\s)(?<!\\b[Ss][Oo][Uu][Nn][Dd]\\s)(?<!\\b[Ss][Hh][Oo][Cc][Kk]\\s)(?<!\\b[Tt][Rr][Oo][Pp][Ii][Cc][Aa][Ll]\\s)(?<!\\b[Ss][Tt][Oo][Rr][Mm]\\s)(?<!\\b[Rr][Oo][Gg][Uu][Ee]\\s)(?<!\\b[Rr][Aa][Dd][Ii][Oo]\\s)\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
 // Curated heading descriptors may sit between the brand and the separator —
 // "Waves Review: Hidden fees", "Waves billing: hidden fees" (Codex r21 on
 // #2633). Curated, not free words: arbitrary hops would re-create the
@@ -608,7 +614,9 @@ function finding(severity, code, message) {
 // the fee claim (Codex r23 on #2633).
 // Warning verbs join the recommendation exception — "No one should IGNORE
 // hidden fees after choosing X" asserts the fees (Codex r24 on #2633).
-const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+// Emphatic idioms are not denials — "Without a doubt, hidden fees from X
+// are common" asserts the claim (Codex r27 on #2633).
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -1233,9 +1241,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // block the bare vocabulary still blocks unconditionally (per-table scan
   // below) — table cells are provider/option context by construction, and
   // category-table strictness is asserted by existing tests.
-  let disp = scanText.match(PROVIDER_DISPARAGEMENT_RE)
-    || scanText.match(DIRECTED_DISPARAGEMENT_RE)
-    || scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
+  // Provider/directed whole-text matches take the sentence-level denial
+  // guard — "Not all pest control companies charge hidden fees" is consumer
+  // protection beside a table too (Codex r27); the contrastive/warning/
+  // recommendation exclusions in SENTENCE_NEGATOR_RE keep real accusations
+  // ("Not only that, companies scam customers" still blocks).
+  let disp = null;
+  const pd = scanText.match(PROVIDER_DISPARAGEMENT_RE) || scanText.match(DIRECTED_DISPARAGEMENT_RE);
+  if (pd && !sentenceHasNegator(scanText, pd.index, pd[0].length)) disp = pd;
+  if (!disp) disp = scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
   if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
