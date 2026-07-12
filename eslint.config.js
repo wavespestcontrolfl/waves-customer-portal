@@ -55,7 +55,10 @@ module.exports = [
   },
   // Client — ESM + JSX in the browser. eslint-plugin-react is loaded ONLY
   // for jsx-uses-vars/jsx-uses-react so components referenced from JSX
-  // don't false-positive as unused; no other react rules.
+  // don't false-positive as unused; no other react rules. `process` is
+  // readonly because legacy files use the guarded
+  // `typeof process !== 'undefined' && process.env...` pattern, which is
+  // browser-safe and must not trip no-undef.
   {
     files: ['client/src/**/*.{js,jsx}'],
     plugins: { react },
@@ -63,13 +66,35 @@ module.exports = [
       ecmaVersion: 'latest',
       sourceType: 'module',
       parserOptions: { ecmaFeatures: { jsx: true } },
-      globals: { ...globals.browser },
+      globals: { ...globals.browser, process: 'readonly' },
     },
     rules: {
       ...ERRORS_ONLY,
       'react/jsx-uses-vars': 'error',
       'react/jsx-uses-react': 'error',
     },
+  },
+  // Client runtime scripts outside src/ (service worker, push helper) —
+  // browser + worker globals; module sourceType (push-subscribe.js uses
+  // import/export, and module parsing accepts classic scripts like sw.js).
+  {
+    files: ['client/public/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.browser, ...globals.serviceworker },
+    },
+    rules: ERRORS_ONLY,
+  },
+  // Client build configs (vite/postcss/tailwind) — Node-run, ESM syntax.
+  {
+    files: ['client/*.{js,cjs,mjs}'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+    rules: ERRORS_ONLY,
   },
   // Client tests (vitest via explicit imports + jsdom).
   {
