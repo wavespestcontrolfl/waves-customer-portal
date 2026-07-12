@@ -7634,6 +7634,30 @@ router.put('/:token/accept', async (req, res, next) => {
     const firstApplicationInvoiceAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly && billingTerm !== 'prepay_annual'
       ? (sameDayVisitTotal || recurringFirstVisitAmount || null)
       : null;
+    // Manual-discount itemization for the accept-generated invoice (owner
+    // 2026-07-11: the labeled credit the estimate promised follows onto the
+    // invoice; totals unchanged — the parent line grosses UP by exactly the
+    // slice the pricing ladder netted OUT). Single-recurring-service accepts
+    // only: there the ladder nets the promo per application and PriceCard
+    // adds it back with this same recurringAmount/visits formula, so
+    // gross − discount reproduces the net to the cent. Multi-service plans
+    // apply the credit at PLAN level (the first-visit amount is pre-credit),
+    // and suppressed/absent row objects mean the selected cadence capped the
+    // credit away — both itemize nothing rather than invent arithmetic.
+    const acceptManualDiscountItemization = (() => {
+      if (treatAsOneTime) return null;
+      if (!Array.isArray(recurringSvcList) || recurringSvcList.length !== 1) return null;
+      const row = selectedFrequency?.manualDiscount;
+      if (!row || selectedFrequency?.manualDiscountSuppressed === true) return null;
+      const recurringAnnual = Math.round((Number(row.recurringAmount ?? row.amount) || 0) * 100) / 100;
+      if (!(recurringAnnual > 0)) return null;
+      const label = String(row.label || '').trim() || 'Discount';
+      const visits = Number(selectedFrequency?.visitsPerYear) > 0
+        ? Number(selectedFrequency.visitsPerYear)
+        : (Number(selectedFrequencyPestVisits) > 0 ? Number(selectedFrequencyPestVisits) : 0);
+      const perApplication = visits > 0 ? Math.round((recurringAnnual / visits) * 100) / 100 : 0;
+      return { label, recurringAnnual, perApplication };
+    })();
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
       : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
@@ -8096,6 +8120,17 @@ router.put('/:token/accept', async (req, res, next) => {
           billingTerm,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
+          // Labeled manual-discount itemization on the prepay invoice (owner
+          // 2026-07-11) — annual slice; the converter grosses the prepay line
+          // and adds the negative labeled line, total unchanged.
+          ...(acceptManualDiscountItemization && acceptManualDiscountItemization.recurringAnnual > 0
+            ? {
+              manualDiscountItemization: {
+                label: acceptManualDiscountItemization.label,
+                annualAmount: acceptManualDiscountItemization.recurringAnnual,
+              },
+            }
+            : {}),
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
@@ -8188,11 +8223,28 @@ router.put('/:token/accept', async (req, res, next) => {
               });
             }
             if (includesFirstApplicationLine) {
+              // With a resolvable manual discount, the line grosses up by the
+              // exact slice and a negative labeled line brings it back —
+              // create() rolls the negative line into discount_amount /
+              // discount_label, and the invoice TOTAL is unchanged by
+              // construction (gross := net + slice).
+              const manualSlice = acceptManualDiscountItemization?.perApplication > 0
+                ? acceptManualDiscountItemization.perApplication
+                : 0;
               lineItems.push({
                 description: 'First service application',
                 quantity: 1,
-                unit_price: standardFirstApplicationAmount,
+                unit_price: manualSlice > 0
+                  ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
+                  : standardFirstApplicationAmount,
               });
+              if (manualSlice > 0) {
+                lineItems.push({
+                  description: acceptManualDiscountItemization.label,
+                  quantity: 1,
+                  unit_price: -manualSlice,
+                });
+              }
             }
             const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
               ? 'WaveGuard Membership Setup + First Application'

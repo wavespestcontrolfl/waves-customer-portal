@@ -1204,9 +1204,18 @@ const InvoiceService = {
       discountAmount = subtotal;
     }
 
+    // Line-item discounts label with their RESOLVED names (owner 2026-07-11:
+    // the invoice shows the same discount label the estimate promised —
+    // "Referral Credit", not the generic "Line-item discounts"). The literal
+    // survives only as the fallback for a nameless line.
+    const lineItemDiscountNames = [...new Set(
+      lineItemDiscounts.map((m) => String(m.name || "").trim()).filter(Boolean),
+    )];
     const labelParts = [
       ...manualDiscounts.map((m) => m.row.name),
-      lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+      ...(lineItemDiscountAmount > 0
+        ? (lineItemDiscountNames.length ? lineItemDiscountNames : ["Line-item discounts"])
+        : []),
     ].filter(Boolean);
     const discountLabel = labelParts.length ? labelParts.join(" + ") : null;
 
