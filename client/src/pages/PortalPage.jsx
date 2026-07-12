@@ -1483,9 +1483,13 @@ function DashboardTab({ customer, onSwitchTab }) {
   const tier = TIER[customer.tier];
   // 0% is not a perk — the At-a-Glance sub shows the plan name instead of
   // advertising "0% discount" (eyeball 07-12). >0% keeps the discount line.
+  // Plan name comes from the membership resolver, not raw customer.tier —
+  // non-membership sentinels (Commercial, One-Time) must not render as
+  // "WaveGuard Commercial".
+  const atGlanceTierName = resolveActiveTierName(customer);
   const tierDiscountSub = tier?.discount && tier.discount !== '0%'
     ? `${tier.discount} discount`
-    : customer.tier ? `WaveGuard ${customer.tier}` : 'recurring plan';
+    : atGlanceTierName ? `WaveGuard ${atGlanceTierName}` : 'recurring plan';
   const annualPrepay = customer.annualPrepay || null;
   const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
