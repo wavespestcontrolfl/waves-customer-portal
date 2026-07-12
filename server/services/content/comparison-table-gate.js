@@ -193,6 +193,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // hidden fees" (Codex r34). The object requirement keeps "they have no
   // hidden fees" a denial.
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:(?:they|it)\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added|(?:are|is)\\s+(?:known|notorious)\\s+for)|(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?)\\s+(?:ha(?:s|ve|s)|includes?|comes?\\s+with))\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  // Pronoun-possessive LINKING insults with a provider antecedent — "Some
+  // pest control companies look cheap; their billing is dishonest."
+  // (Codex r39). NEG_ADJ is hyphen-guarded like the first-person arms.
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\b(?:their|its)\\s+(?:billing|pricing|quotes?|estimates?|contracts?|invoic[\\w'’]*|practices?|plans?|crews?|teams?|technicians?|work|service)\\s+(?:is|are|was|were|remains?|seems?|looks?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Separator/heading and possessive association at a provider noun —
   // "Pest control companies: hidden fees are common", "Providers' scams
   // are common" (Codex r24 on #2633). Separator prefix words are
@@ -416,10 +420,10 @@ const OWN_BRAND_ASSOC_TAIL_RE = new RegExp([
 ].join('|'), 'i');
 // Superlative-BEFORE-the-brand winner framing — "The winner is Waves",
 // "Best choice: Waves Pest Control" (Codex r38); brand token case-verified.
-const OWN_BRAND_SUP_BEFORE_SRC = `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
+const OWN_BRAND_SUP_BEFORE_SRC = `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b(?:\\s+(?:for|in|around|near)\\s+(?:[\\w'’-]+\\s+){0,3}?)?\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
 // #1-BEFORE-the-brand winner framing — "The #1 overall is Waves" (Codex
 // r21); brand token case-verified in code.
-const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
+const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?(?:\\s+(?:for|in|around|near)\\s+(?:[\\w'’-]+\\s+){0,3}?)?\\s*(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
 // Waves-subject #1 arms, case-sensitive anchor + 'i' tails, same split as
 // the linking/separator arms (Codex r5/r17/r19 on #2633). The verb must be
 // adjacent to the number so "in heat waves, the #1 breeding site is …"
@@ -672,7 +676,7 @@ function finding(severity, code, message) {
 // Emphatic idioms are not denials — "Without a doubt, hidden fees from X
 // are common" asserts the claim (Codex r27 on #2633). "no(?!\.)": the
 // "No. 1" ordinal abbreviation is never a negator.
-const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t|hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|couldn['’]?t|shouldn['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 // Accusation vocabulary used by the conjunction-reset scope check.
 const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b`, 'i');
 function sentenceHasNegator(text, index, length) {
@@ -808,6 +812,71 @@ function scanOwnBrandDisparagementArms(scanText) {
   return null;
 }
 
+// Name-anchored winner/ranking arms, shared by the table and table-less
+// paths (Codex r39): 'The winner is Bug Busters.' must block without a
+// <ComparisonTable> too.
+function scanNameRankingArms(text, names) {
+  for (const name of names) {
+
+        const escaped = escapeForNameRe(name);
+        // Appositive-tolerant, like the disparagement path ("Bug Busters,
+        // frankly, is #1" — Codex r10 on #2633). Negator-free adverb slot
+        // ("Bug Busters is currently #1" — Codex r16 parity).
+        const selfRank = new RegExp(
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+        );
+        // Object-position idiom: "reviews call Bug Busters the #1 choice",
+        // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
+        // proximity. Customer-choice verbs and "their", same as the
+        // us-object arm ("customers make Bug Busters their #1 choice" —
+        // Codex r16 parity).
+        const calledRank = new RegExp(
+          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted|makes?|made|chooses?|chose|selects?|selected|picks?|picked|prefers?|preferred)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an|their)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+        );
+        // Separator/appositive #1: PERSONIFIED names take any following #1
+        // ("Bug Busters, the #1 choice" — Codex r12). Non-personified names
+        // ("A+ Pest Control — the #1 choice.") need a WINNER-NOUN tail after
+        // the #1 (Codex r15): the tail is what separates a declared winner
+        // from educational idiom on a noisy capture ("… and termite
+        // prevention, the #1 defense is …" has no winner noun and stays
+        // clean).
+        const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
+          ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
+          : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?)\\b`, 'i');
+        // Marketing verbs with a reflexive object, same as the own-brand
+        // arm — "Bug Busters advertises itself as #1" (Codex r17 parity).
+        const marketingRank = new RegExp(
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+        );
+        // #1-before-the-name framing — "The #1 spot belongs to Bug Busters"
+        // (Codex r21). Winner-noun hop is curated so "the #1 threat is …"
+        // educational framing needs the name to be the declared winner.
+        const rankBeforeName = new RegExp(
+          `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?(?:\\s+(?:for|in|around|near)\\s+(?:[\\w'’-]+\\s+){0,3}?)?\\s*(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
+        );
+        // Superlative-before-name too — "The winner is Bug Busters"
+        // (Codex r38 parity).
+        const supBeforeName = new RegExp(
+          `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b(?:\\s+(?:for|in|around|near)\\s+(?:[\\w'’-]+\\s+){0,3}?)?\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
+        );
+        // Name-as-subject superlatives — "Acme Pest Solutions is the best
+        // choice." (Codex r39); the negator-excluded gap keeps "is not the
+        // best choice" a denial.
+        const supRank = new RegExp(
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?)\\s+(?:the\\s+)?(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b`, 'i',
+        );
+        const rm = text.match(selfRank)
+          || text.match(supRank)
+          || text.match(calledRank)
+          || text.match(marketingRank)
+          || firstUnnegatedMatch(text, rankBeforeName)
+          || firstUnnegatedMatch(text, supBeforeName)
+          || (sepRank && text.match(sepRank));
+        if (rm) return rm;
+  }
+  return null;
+}
+
 // Subject-scoped, negation-checked superlative scan shared by both paths
 // (Codex r35/r37): "We are the best choice in Venice" blocks; "Gel bait is
 // the best option for German roaches" is treatment advice; "We are not the
@@ -828,8 +897,8 @@ function scopedSelfRankingMatch(text) {
     // The pronoun/brand must GOVERN the ranking phrase — "Our guide says
     // gel bait is the best option" embeds it under a reporting verb
     // (Codex r38).
-    subjLead = subjLead.replace(/^[\s\S]*\b(?:says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|wonders?|whether|if|that)\b/i, '');
-    if (/\b(?:we|our|us)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
+    subjLead = subjLead.replace(/^[\s\S]*\b(?:says?|said|asks?|asked|explains?|explained|notes?|noted|reports?|reported|wonders?|recommends?|recommended|suggests?|suggested|advises?|advised|teach(?:es)?|taught|shows?|showed|whether|if|that|when)\b/i, '');
+    if (/\b(?:we|our|us|itself|ourselves)\b/i.test(subjLead) || /\bW(?:aves|AVES)\b/.test(subjLead)
       || new RegExp(`\\b(?:${PROVIDER_NOUN})\\b`, 'i').test(subjLead)) {
       return sm;
     }
@@ -1153,8 +1222,10 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // table supplies comparison context — "gel bait is the best option" is
   // treatment advice (Codex r35).
   // Subject-scoped superlative scan — shared helper with the table path
-  // (Codex r35/r38).
-  let ownRank = scopedSelfRankingMatch(scanText);
+  // (Codex r35/r38); generic names get the shared winner arms too
+  // ("The winner is Bug Busters." — Codex r39).
+  let ownRank = scopedSelfRankingMatch(scanText)
+    || scanNameRankingArms(nameScanText, genericNames);
   if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
     const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
@@ -1673,56 +1744,8 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // termite prevention") would turn "the #1 mistake in termite
     // prevention" into a rigged ranking (Codex r4 on #2633).
     if (!rank) {
-      for (const name of extraProseNames) {
-        const escaped = escapeForNameRe(name);
-        // Appositive-tolerant, like the disparagement path ("Bug Busters,
-        // frankly, is #1" — Codex r10 on #2633). Negator-free adverb slot
-        // ("Bug Busters is currently #1" — Codex r16 parity).
-        const selfRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
-        );
-        // Object-position idiom: "reviews call Bug Busters the #1 choice",
-        // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
-        // proximity. Customer-choice verbs and "their", same as the
-        // us-object arm ("customers make Bug Busters their #1 choice" —
-        // Codex r16 parity).
-        const calledRank = new RegExp(
-          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted|makes?|made|chooses?|chose|selects?|selected|picks?|picked|prefers?|preferred)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:the|your|a|an|their)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
-        );
-        // Separator/appositive #1: PERSONIFIED names take any following #1
-        // ("Bug Busters, the #1 choice" — Codex r12). Non-personified names
-        // ("A+ Pest Control — the #1 choice.") need a WINNER-NOUN tail after
-        // the #1 (Codex r15): the tail is what separates a declared winner
-        // from educational idiom on a noisy capture ("… and termite
-        // prevention, the #1 defense is …" has no winner noun and stays
-        // clean).
-        const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
-          ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
-          : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?)\\b`, 'i');
-        // Marketing verbs with a reflexive object, same as the own-brand
-        // arm — "Bug Busters advertises itself as #1" (Codex r17 parity).
-        const marketingRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
-        );
-        // #1-before-the-name framing — "The #1 spot belongs to Bug Busters"
-        // (Codex r21). Winner-noun hop is curated so "the #1 threat is …"
-        // educational framing needs the name to be the declared winner.
-        const rankBeforeName = new RegExp(
-          `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
-        );
-        // Superlative-before-name too — "The winner is Bug Busters"
-        // (Codex r38 parity).
-        const supBeforeName = new RegExp(
-          `\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b\\s*(?:(?:is|was|remains?)\\s+|[:—–-]\\s*)(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
-        );
-        const rm = proseNameText.match(selfRank)
-          || proseNameText.match(calledRank)
-          || proseNameText.match(marketingRank)
-          || firstUnnegatedMatch(proseNameText, rankBeforeName)
-          || firstUnnegatedMatch(proseNameText, supBeforeName)
-          || (sepRank && proseNameText.match(sepRank));
-        if (rm) { rank = rm; break; }
-      }
+      // Shared name-anchored winner arms (Codex r39).
+      rank = scanNameRankingArms(proseNameText, extraProseNames);
     }
   }
   if (rank) {

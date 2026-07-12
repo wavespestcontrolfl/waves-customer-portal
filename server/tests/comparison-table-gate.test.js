@@ -1114,6 +1114,29 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-39 findings (#2633) ──
+
+  test('Codex r39: pronoun-linked practice insults and table-less winner claims block', () => {
+    for (const body of [`Some pest control companies look cheap; their billing is dishonest.\n\n${CATEGORY_TABLE}`, 'The winner is Bug Busters.', 'Acme Pest Solutions is the best choice.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r39: scoped winner-before-brand claims block', () => {
+    for (const prose of ['The best choice for pest control is Waves.', 'The #1 spot for pest control belongs to Waves.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r39: contracted-auxiliary denials and brand treatment advice stay clean', () => {
+    for (const body of [`Waves hasn’t charged hidden fees.\n\n${CATEGORY_TABLE}`, `Acme Pest Solutions won’t charge hidden fees.\n\n${CATEGORY_TABLE}`, 'Waves recommends gel bait as the best option for German roaches.', `Waves teaches homeowners to use gel bait when it is the best option.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-38 findings (#2633) ──
 
   test('Codex r38: winner-before-brand and in-cell superlatives block', () => {
