@@ -12,7 +12,7 @@ const PAGE_BG = '#FAF8F3';
 const CARD_BORDER = '#E7E2D7';
 const INPUT_BORDER = '#CFE7F5';
 const INPUT_BG = '#F8FCFE';
-const TEXT = COLORS.blueDeeper;
+const TEXT = COLORS.glassNavy;
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 
@@ -20,7 +20,7 @@ const primaryActionStyle = {
   minHeight: 46,
   border: 'none',
   borderRadius: 10,
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
   fontSize: 15,
   fontWeight: 800,
@@ -341,7 +341,7 @@ export default function RatePage() {
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
         <style>{`@media (prefers-reduced-motion: reduce) { [data-rate-spinner] { animation: none !important; } }`}</style>
-        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.blueDeeper, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.glassNavy, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
         <span style={{ fontSize: 14, color: MUTED }}>Loading...</span>
       </div>
     </Page>
@@ -351,7 +351,7 @@ export default function RatePage() {
     <Page>
       <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.blueDeeper, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.glassNavy, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -370,7 +370,7 @@ export default function RatePage() {
                 style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', display: 'block', boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}
               />
             ) : (
-              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.body, boxShadow: 'none' }}>
+              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.glassNavy, fontFamily: FONTS.body, boxShadow: 'none' }}>
                 {(techName || 'W')[0].toUpperCase()}
               </div>
             )}
@@ -459,8 +459,8 @@ export default function RatePage() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '10px 16px', minHeight: 44, border: `1px solid ${highlights.includes(h) ? COLORS.blueDeeper : CARD_BORDER}`,
-                borderRadius: 8, background: highlights.includes(h) ? COLORS.blueDeeper : COLORS.white,
+                padding: '10px 16px', minHeight: 44, border: `1px solid ${highlights.includes(h) ? COLORS.glassNavy : CARD_BORDER}`,
+                borderRadius: 8, background: highlights.includes(h) ? COLORS.glassNavy : COLORS.white,
                 color: highlights.includes(h) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}>{h}</button>
             ))}
@@ -501,8 +501,8 @@ export default function RatePage() {
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                     {SERVICE_OPTIONS.map(s => (
                       <button key={s} onClick={() => toggleService(s)} style={{
-                        padding: '9px 16px', border: `1px solid ${selectedServices.includes(s) ? COLORS.blueDeeper : CARD_BORDER}`,
-                        borderRadius: 8, background: selectedServices.includes(s) ? COLORS.blueDeeper : COLORS.white,
+                        padding: '9px 16px', border: `1px solid ${selectedServices.includes(s) ? COLORS.glassNavy : CARD_BORDER}`,
+                        borderRadius: 8, background: selectedServices.includes(s) ? COLORS.glassNavy : COLORS.white,
                         color: selectedServices.includes(s) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                       }}>{s}</button>
                     ))}
@@ -611,7 +611,7 @@ export default function RatePage() {
 
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
                 <button onClick={handleGenerateReview} disabled={generating} style={{
-                  fontSize: 14, color: COLORS.blueDeeper, background: 'none', border: 'none',
+                  fontSize: 14, color: COLORS.glassNavy, background: 'none', border: 'none',
                   cursor: 'pointer', fontWeight: 600,
                 }}>
                   {generating ? 'Rewriting…' : 'Regenerate'}

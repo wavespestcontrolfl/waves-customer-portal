@@ -99,7 +99,7 @@ export default function LoginPage() {
     <main
       className="portal-login-page"
       style={{
-        '--login-blue': B.blueDeeper,
+        '--login-blue': B.glassNavy,
         '--login-brand': B.wavesBlue,
         '--login-text': '#3F4A65',
         '--login-muted': CUSTOMER_SURFACE.muted,
@@ -669,7 +669,7 @@ export default function LoginPage() {
               <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
                 The Waves App
               </div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
                 Your home team, one tap away.
               </div>
               <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>

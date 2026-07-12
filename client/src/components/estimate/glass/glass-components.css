@@ -40,7 +40,7 @@
   background: linear-gradient(135deg, rgba(255, 222, 120, 0.62), rgba(244, 176, 20, 0.46)),
     rgba(240, 165, 0, 0.38);
   border-color: rgba(255, 238, 180, 0.92);
-  color: #1b2c5b;
+  color: #04395e;
   box-shadow: 0 8px 22px rgba(180, 110, 0, 0.18), 0 0 14px rgba(240, 165, 0, 0.18),
     inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
@@ -310,7 +310,7 @@
   font-weight: 600;
   font-size: 15px;
   font-family: inherit;
-  color: #1b2c5b;
+  color: #04395e;
   background: linear-gradient(135deg, rgba(255, 222, 120, 0.9), rgba(244, 176, 20, 0.78));
   box-shadow: 0 6px 18px rgba(180, 110, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.6);
   cursor: pointer;
@@ -330,7 +330,7 @@
   font-size: 15px;
   font-weight: 600;
   font-family: inherit;
-  color: #1b2c5b;
+  color: #04395e;
   cursor: pointer;
   border: 1px solid rgba(255, 238, 180, 0.92);
   background: linear-gradient(135deg, rgba(255, 222, 120, 0.6), rgba(244, 176, 20, 0.45)),

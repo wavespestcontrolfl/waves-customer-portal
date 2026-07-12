@@ -46,14 +46,14 @@ class PageErrorBoundary extends Component {
             }}>
               <Icon name="warning" size={22} strokeWidth={2} />
             </div>
-            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
+            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
             <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
             {this.state.error.message}
             </div>
             <button onClick={() => { this.setState({ error: null }); window.location.reload(); }} style={{
               minHeight: 42,
               padding: '0 18px',
-              background: COLORS.blueDeeper,
+              background: COLORS.glassNavy,
               color: '#fff',
               border: 'none',
               borderRadius: 8,
@@ -162,7 +162,7 @@ function ChunkLoadFallback() {
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.blueDeeper, marginBottom: 8, fontFamily: FONTS.heading }}>
+        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
@@ -171,7 +171,7 @@ function ChunkLoadFallback() {
         <button
           onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
           style={{
-            minHeight: 42, padding: '0 18px', background: COLORS.blueDeeper, color: '#fff',
+            minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
             border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 850,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
@@ -332,7 +332,7 @@ function ProtectedRoute({ children }) {
           borderRadius: 16,
           padding: 28,
           textAlign: 'center',
-          color: COLORS.blueDeeper,
+          color: COLORS.glassNavy,
           boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
           position: 'relative',
         }}>

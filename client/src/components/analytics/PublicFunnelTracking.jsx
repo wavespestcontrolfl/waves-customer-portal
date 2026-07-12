@@ -61,7 +61,7 @@ export default function PublicFunnelTracking() {
         right: 0,
         bottom: 0,
         zIndex: 1000,
-        // Glass navy — the old marketing #1B2C5B panel read as the old
+        // Glass navy — the old marketing navy panel read as the old
         // theme over the glassed funnel pages (/book, /pay).
         background: 'rgba(4, 57, 94, 0.96)',
         backdropFilter: 'blur(4px)',
@@ -97,7 +97,7 @@ export default function PublicFunnelTracking() {
           style={{
             flex: '0 0 auto',
             background: 'linear-gradient(135deg, #FFDE78, #F4B014)',
-            color: '#1B2C5B',
+            color: '#04395E',
             border: '1px solid rgba(255, 238, 180, 0.92)',
             borderRadius: 8,
             padding: '9px 18px',

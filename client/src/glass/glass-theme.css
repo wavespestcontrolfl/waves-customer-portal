@@ -23,7 +23,7 @@ html[data-glass-theme] {
   /* The remaining warm/marketing brand tokens remap to the glass system
      while the theme is mounted — otherwise WavesShell chrome and every
      var(--text)/var(--border) consumer keeps rendering the old navy
-     #1B2C5B ink and warm #E7E2D7 hairlines over the scene. --surface
+     old marketing navy ink and warm #E7E2D7 hairlines over the scene. --surface
      stays white (cards carry data-glass) and status colors stay reserved. */
   --text: #04395e;
   --border: rgba(4, 57, 94, 0.16);
@@ -289,8 +289,8 @@ html[data-glass-theme] [data-glass-accent] {
 }
 html[data-glass-theme] [data-glass-accent],
 html[data-glass-theme] [data-glass-accent] * {
-  color: #1b2c5b !important;
-  fill: #1b2c5b;
+  color: #04395e !important;
+  fill: #04395e;
 }
 html[data-glass-theme] [data-glass-accent]::before {
   content: "";

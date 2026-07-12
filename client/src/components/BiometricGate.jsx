@@ -263,7 +263,7 @@ export default function BiometricGate({ children }) {
                   borderRadius: 999, border: 'none', cursor: 'pointer',
                   fontFamily: FONTS.ui, fontSize: 17, fontWeight: 600,
                   // fallbacks only — the data-glass-accent rules repaint these
-                  background: COLORS.yellow, color: COLORS.blueDeeper,
+                  background: COLORS.yellow, color: COLORS.glassNavy,
                   opacity: checking ? 0.65 : 1,
                 }}
               >

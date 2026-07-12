@@ -20,7 +20,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
-const TEXT = '#1B2C5B';
+const TEXT = '#04395E';
 const BODY = '#3F4A65';
 
 function ArchiveBody({ html }) {
@@ -132,8 +132,8 @@ export default function NewsletterArchivePage() {
             fontWeight: 800,
             letterSpacing: 0,
             color: '#fff',
-            background: B.blueDeeper,
-            border: `1px solid ${B.blueDeeper}`,
+            background: B.glassNavy,
+            border: `1px solid ${B.glassNavy}`,
             borderRadius: 8,
             padding: '12px 22px',
             textDecoration: 'none',
@@ -155,7 +155,7 @@ export default function NewsletterArchivePage() {
     <WavesShell variant="customer" topBar="solid">
     <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }}>
       {/* Header strip */}
-      <div style={{ background: B.blueDeeper, color: '#fff', padding: '16px 24px' }}>
+      <div style={{ background: B.glassNavy, color: '#fff', padding: '16px 24px' }}>
         <div style={{ maxWidth: 760, margin: '0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           {/* Portal /newsletter landing retired 2026-07-09 — the astro site
               is the single newsletter landing. */}

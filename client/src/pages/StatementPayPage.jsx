@@ -90,7 +90,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
           appearance: {
             theme: "stripe",
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
@@ -120,8 +120,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
                 borderRadius: `${RADIUS.input}px`,
               },
               ".Tab--selected": {
-                borderColor: COLORS.blueDeeper,
-                backgroundColor: "rgba(27,44,91,0.08)",
+                borderColor: COLORS.glassNavy,
+                backgroundColor: "rgba(4,57,94,0.08)",
               },
             },
           },

@@ -20,7 +20,7 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (mirror LawnReportViewPage / public estimate surface) ──────
-const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (#1B2C5B old navy)
+const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (old marketing navy)
 const BODY = 'var(--text)'; // prose uses the same ink as the rest of the report body
 // muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
 const MUTED = 'var(--muted)'; // single supporting gray, matches the page
@@ -268,7 +268,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
         {customerAction
           ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
           : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we’ve got it covered." dot={COLORS.green} /> : null)}
-        {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.blueDeeper} /> : null}
+        {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
       {seasonalNote ? (
         <div style={{ marginTop: 14, fontSize: 13, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
@@ -320,7 +320,7 @@ function SliderArrow({ dir, onClick, disabled }) {
       className="lawn-photo-arrow"
       style={{
         position: 'absolute', top: '42%', [dir === 'prev' ? 'left' : 'right']: 8, transform: 'translateY(-50%)',
-        width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(27,44,91,0.82)', color: '#fff',
+        width: 36, height: 36, borderRadius: 999, border: 'none', background: 'rgba(4,57,94,0.82)', color: '#fff',
         fontSize: 20, fontWeight: 800, lineHeight: 1, cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.3 : 1,
         display: 'grid', placeItems: 'center',
       }}
@@ -610,7 +610,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
             href={irrigationHref}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 7,
-              background: COLORS.blueDeeper, color: '#fff', textDecoration: 'none',
+              background: COLORS.glassNavy, color: '#fff', textDecoration: 'none',
               fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14,
               padding: '11px 18px', borderRadius: 999,
             }}
@@ -660,7 +660,7 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
               <div style={{ fontSize: 10.5, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{(on || v) ? inchLabel(v) || '0"' : ''}</div>
               <div style={{
                 width: '100%', maxWidth: 26, height: Math.max(2, mounted ? h : 0),
-                background: v ? (on ? COLORS.blueDeeper : '#0A7EC2') : BORDER, borderRadius: 4,
+                background: v ? (on ? COLORS.glassNavy : '#0A7EC2') : BORDER, borderRadius: 4,
                 transition: `height 0.7s cubic-bezier(0.4,0,0.2,1) ${i * 45}ms, background 0.15s ease`,
               }} />
               <div style={{ fontSize: 11, color: on ? TEXT : MUTED, fontWeight: on ? 700 : 400 }}>{d.d}</div>
@@ -855,7 +855,7 @@ function ScoreBadge({ score, side }) {
   return (
     <div className="lawn-photo-score" style={{
       position: 'absolute', bottom: 10, [side]: 10, zIndex: 3,
-      background: 'rgba(27,44,91,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
+      background: 'rgba(4,57,94,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
       fontFamily: FONTS.heading, fontWeight: 800, fontSize: 13, lineHeight: 1,
     }}>{Math.round(toScore(score))}</div>
   );
