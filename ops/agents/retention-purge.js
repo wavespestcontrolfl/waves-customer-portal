@@ -1,13 +1,14 @@
 // MUTATES (dry-run default): dismisses every pending_approval retention
 // outreach draft (status -> rejected). No deletes. Reversible: written rows
-// are tagged in approved_by, so they can be flipped back with
+// are tagged in approved_by with a per-run ET timestamp tag, so ONE batch
+// can be flipped back with
 //   UPDATE retention_outreach SET status='pending_approval'
-//   WHERE approved_by='<tag>';
+//   WHERE approved_by='<tag printed by the run>';
 //
 // Usage (repo root):
 //   railway run --service Postgres node ops/agents/retention-purge.js            # dry run
 //   railway run --service Postgres node ops/agents/retention-purge.js --execute
-//   ... --execute --tag audit-purge-2026-07-11                                   # explicit tag
+//   ... --execute --tag audit-purge-2026-07-11-adhoc                             # pin a tag
 
 // Fail closed: without this, pg falls back to libpq env defaults and the
 // UPDATE could land in whatever local/dev database is reachable.
@@ -19,9 +20,16 @@ const { Client } = require('pg');
 
 const execute = process.argv.includes('--execute');
 const tagIdx = process.argv.indexOf('--tag');
+// ET wall-clock, second precision: unique per run (a date-only or UTC tag
+// would be shared across same-day runs and one day ahead on ET evenings,
+// making the tag-based rollback unable to isolate one batch).
+const etStamp = new Date()
+  .toLocaleString('sv-SE', { timeZone: 'America/New_York' })
+  .replace(' ', 'T')
+  .replace(/:/g, '');
 const tag = tagIdx > -1 && process.argv[tagIdx + 1]
   ? process.argv[tagIdx + 1]
-  : `audit-purge-${new Date().toISOString().slice(0, 10)}`;
+  : `audit-purge-${etStamp}`;
 
 (async () => {
   const c = new Client({ connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } });
@@ -30,17 +38,19 @@ const tag = tagIdx > -1 && process.argv[tagIdx + 1]
   console.log(`pending_approval drafts: ${before.rows[0].n}`);
 
   if (!execute) {
-    const byAge = await c.query(`SELECT date_trunc('day', created_at)::date AS day, count(*)::int AS n
-                                 FROM retention_outreach WHERE status='pending_approval'
-                                 GROUP BY 1 ORDER BY 1`);
-    byAge.rows.forEach(r => console.log(`  ${r.day.toISOString().slice(0, 10)}: ${r.n}`));
-    console.log(`DRY RUN — would set status='rejected', approved_by='${tag}'. Re-run with --execute.`);
+    // Print exactly the rows that would change (ids only — no PII).
+    const rows = await c.query(`SELECT id, created_at::date AS day FROM retention_outreach
+                                WHERE status='pending_approval' ORDER BY created_at, id`);
+    rows.rows.forEach(r => console.log(`  id=${r.id} created=${r.day.toISOString().slice(0, 10)}  pending_approval -> rejected`));
+    console.log(`DRY RUN — ${rows.rows.length} rows above would get status='rejected' and a per-run tag like '${tag}'. Re-run with --execute (the execute run prints ITS tag — that tag is the rollback key).`);
   } else {
     const r = await c.query(
       `UPDATE retention_outreach SET status='rejected', approved_by=$1, updated_at=now() WHERE status='pending_approval'`,
       [tag]
     );
-    console.log(`updated: ${r.rowCount} (tag ${tag})`);
+    console.log(`updated: ${r.rowCount}`);
+    console.log(`batch tag: ${tag}`);
+    console.log(`rollback:  UPDATE retention_outreach SET status='pending_approval' WHERE approved_by='${tag}';`);
     const after = await c.query(`SELECT status, count(*)::int AS n FROM retention_outreach GROUP BY status ORDER BY status`);
     after.rows.forEach(row => console.log(`  ${row.status}: ${row.n}`));
   }
