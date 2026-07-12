@@ -215,7 +215,8 @@ async function loadProductSafety(products, knex) {
         else this.whereRaw('1 = 0');
       })
       .select('id', 'name', 'category', 'product_type', 'active_ingredient', 'epa_reg_number',
-        'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'approved_for_service_report');
+        'rei_hours', 'rainfast_minutes', 'reentry_text', 'reentry_summary', 'irrigation_required',
+        'approved_for_service_report');
     return rows
       .filter(catalogApprovedForReport)
       .map((r) => ({
@@ -226,6 +227,9 @@ async function loadProductSafety(products, knex) {
         reiHours: r.rei_hours == null ? null : finiteOrNull(r.rei_hours),
         rainfastMinutes: finiteOrNull(r.rainfast_minutes),
         reentryText: truncate(r.reentry_summary || r.reentry_text, 200) || null,
+        // Tri-state: true = label requires watering-in, false = label says no
+        // irrigation needed, null = unknown (omitted from the prompt).
+        irrigationRequired: r.irrigation_required == null ? null : Boolean(r.irrigation_required),
       }));
   } catch (err) {
     logger.warn(`[report-copy-context] product-safety load failed: ${err.message}`);
@@ -398,6 +402,8 @@ async function buildReportCopyContext({
         formatReiForPrompt(p.reiHours),
         p.rainfastMinutes != null ? `rainfast ${p.rainfastMinutes >= 60 ? `${(p.rainfastMinutes / 60).toFixed(p.rainfastMinutes % 60 ? 1 : 0)} hr` : `${p.rainfastMinutes} min`}` : null,
         p.reentryText ? `label: ${p.reentryText}` : null,
+        p.irrigationRequired === true ? 'label requires watering-in after application' : null,
+        p.irrigationRequired === false ? 'no watering-in required' : null,
       ].filter(Boolean).join('; ');
       return `- ${p.name}${bits ? ` (${bits})` : ''}`;
     });
