@@ -1,0 +1,193 @@
+/**
+ * Intelligence Bar — App-Store Status Ops Tools
+ * server/services/intelligence-bar/store-ops-tools.js
+ *
+ * Read-only visibility into app-store release state: App Store Connect
+ * version states (READY_FOR_SALE, IN_REVIEW, REJECTED...) and Google Play
+ * track releases, so "are the apps approved yet?" is answerable during
+ * release windows without dashboard spelunking.
+ *
+ * Auth:
+ * - Apple: ASC_KEY_ID + ASC_ISSUER_ID + ASC_PRIVATE_KEY (the .p8 content) —
+ *   a short-lived ES256 JWT is minted per call. ASC_APP_ID defaults to the
+ *   portal app.
+ * - Google: PLAY_SERVICE_ACCOUNT_JSON (service-account key JSON, string) via
+ *   googleapis; PLAY_PACKAGE_NAME defaults to the portal package. Reading
+ *   track state requires the Play API's edit context: a DRAFT edit is
+ *   inserted, tracks are read, and the edit is deleted without ever being
+ *   committed — nothing observable changes in Play (this is the API's
+ *   canonical read pattern; fastlane does the same). No edit is ever
+ *   committed from this module.
+ *
+ * There are NO store mutations here — no submissions, no rollouts, no
+ * metadata changes. Anything that mutates store state must go through the
+ * write-gate mechanism (issue #1568) and is intentionally not built.
+ */
+
+const jwt = require('jsonwebtoken');
+const logger = require('../logger');
+
+const ASC_API_BASE = process.env.ASC_API_BASE || 'https://api.appstoreconnect.apple.com';
+const DEFAULT_ASC_APP_ID = '6782775654'; // Waves customer portal iOS app
+const DEFAULT_PLAY_PACKAGE = 'com.wavespestcontrol.portal';
+const REQUEST_TIMEOUT_MS = 15000;
+const MAX_VERSIONS = 10;
+
+const STORE_OPS_TOOLS = [
+  {
+    name: 'get_app_store_status',
+    description: `Get the App Store (iOS) release state: recent app versions with their App Store states — READY_FOR_SALE (live), WAITING_FOR_REVIEW, IN_REVIEW, REJECTED, etc.
+Use for: "is the iOS app approved yet?", "what version is live on the App Store?", "did Apple reject the build?"`,
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'get_play_store_status',
+    description: `Get the Google Play release state: each track (production, beta, internal) with its releases, version names, and status (completed = fully live, inProgress = staged rollout, draft...).
+Use for: "is the Android app live?", "what's on the Play production track?", "did the Play review finish?"`,
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+];
+
+const ASC_NOT_CONFIGURED = 'App Store Connect access is not configured. Add ASC_KEY_ID, ASC_ISSUER_ID, and ASC_PRIVATE_KEY (the .p8 key content) service variables in the Railway dashboard.';
+const PLAY_NOT_CONFIGURED = 'Google Play access is not configured. Add the PLAY_SERVICE_ACCOUNT_JSON service variable (a service-account key with "View app information" access in Play Console) in the Railway dashboard.';
+
+function ascConfigured() {
+  return Boolean(process.env.ASC_KEY_ID && process.env.ASC_ISSUER_ID && process.env.ASC_PRIVATE_KEY);
+}
+
+function ascJwt() {
+  // Apple caps validity at 20 minutes; mint fresh per call and keep it short.
+  return jwt.sign({}, process.env.ASC_PRIVATE_KEY, {
+    algorithm: 'ES256',
+    issuer: process.env.ASC_ISSUER_ID,
+    audience: 'appstoreconnect-v1',
+    expiresIn: '10m',
+    keyid: process.env.ASC_KEY_ID,
+  });
+}
+
+async function ascGet(path) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${ASC_API_BASE}${path}`, {
+      headers: { Authorization: `Bearer ${ascJwt()}` },
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('App Store Connect rejected the key — check ASC_KEY_ID / ASC_ISSUER_ID / ASC_PRIVATE_KEY.');
+    }
+    if (!res.ok) throw new Error(`App Store Connect API returned HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`App Store Connect API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getAppStoreStatus() {
+  const appId = process.env.ASC_APP_ID || DEFAULT_ASC_APP_ID;
+  const json = await ascGet(`/v1/apps/${appId}/appStoreVersions?limit=${MAX_VERSIONS}`);
+  const versions = (json.data || []).map(v => ({
+    version: v.attributes?.versionString,
+    // Newer ASC responses use appVersionState; older use appStoreState.
+    state: v.attributes?.appStoreState || v.attributes?.appVersionState || null,
+    platform: v.attributes?.platform || null,
+    created: v.attributes?.createdDate || null,
+  }));
+  const live = versions.find(v => v.state === 'READY_FOR_SALE');
+  const inFlight = versions.filter(v => v.state && !['READY_FOR_SALE', 'REPLACED_WITH_NEW_VERSION', 'REMOVED_FROM_SALE'].includes(v.state));
+  return {
+    app_id: appId,
+    live_version: live?.version || null,
+    in_flight: inFlight,
+    versions,
+    total: versions.length,
+  };
+}
+
+// googleapis is required lazily so unit tests can mock it and the module
+// stays cheap to load for the (default) unconfigured case.
+function getGoogleapis() {
+  // eslint-disable-next-line global-require
+  return require('googleapis').google;
+}
+
+async function getPlayStoreStatus() {
+  let credentials;
+  try {
+    credentials = JSON.parse(process.env.PLAY_SERVICE_ACCOUNT_JSON);
+  } catch {
+    throw new Error('PLAY_SERVICE_ACCOUNT_JSON is not valid JSON.');
+  }
+  const packageName = process.env.PLAY_PACKAGE_NAME || DEFAULT_PLAY_PACKAGE;
+  const google = getGoogleapis();
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/androidpublisher'],
+  });
+  const publisher = google.androidpublisher({ version: 'v3', auth: await auth.getClient() });
+
+  // Track state is only readable inside an edit context. The edit is a
+  // DRAFT: inserted, read, then deleted — never committed, so nothing in
+  // Play changes. Deletion failures are swallowed (uncommitted edits also
+  // expire server-side on their own).
+  const edit = await publisher.edits.insert({ packageName });
+  const editId = edit.data.id;
+  try {
+    const tracks = await publisher.edits.tracks.list({ packageName, editId });
+    const mapped = (tracks.data.tracks || []).map(t => ({
+      track: t.track,
+      releases: (t.releases || []).map(r => ({
+        name: r.name,
+        status: r.status,
+        version_codes: r.versionCodes || [],
+        user_fraction: r.userFraction ?? null,
+      })),
+    }));
+    const production = mapped.find(t => t.track === 'production');
+    return {
+      package: packageName,
+      production_status: production?.releases?.[0]?.status || null,
+      production_release: production?.releases?.[0]?.name || null,
+      tracks: mapped,
+      total_tracks: mapped.length,
+    };
+  } finally {
+    try {
+      await publisher.edits.delete({ packageName, editId });
+    } catch (cleanupErr) {
+      logger.warn(`[intelligence-bar:store-ops] Play draft-edit cleanup failed (edit expires on its own): ${cleanupErr.message}`);
+    }
+  }
+}
+
+async function executeStoreOpsTool(toolName, input = {}) {
+  // "Not configured" is the expected DARK state, not a failure — an
+  // { error } result would count against the shared admin circuit breaker
+  // (see ops-tools.js for the full rationale).
+  try {
+    switch (toolName) {
+      case 'get_app_store_status':
+        if (!ascConfigured()) return { configured: false, message: ASC_NOT_CONFIGURED };
+        return await getAppStoreStatus();
+      case 'get_play_store_status':
+        if (!process.env.PLAY_SERVICE_ACCOUNT_JSON) return { configured: false, message: PLAY_NOT_CONFIGURED };
+        return await getPlayStoreStatus();
+      default: return { error: `Unknown tool: ${toolName}` };
+    }
+  } catch (err) {
+    logger.error(`[intelligence-bar:store-ops] Tool ${toolName} failed:`, err);
+    return { error: err.message };
+  }
+}
+
+module.exports = { STORE_OPS_TOOLS, executeStoreOpsTool };

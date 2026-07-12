@@ -36,6 +36,8 @@ const { CLOUDFLARE_OPS_TOOLS, executeCloudflareOpsTool } = require('../services/
 const { TWILIO_OPS_TOOLS, executeTwilioOpsTool } = require('../services/intelligence-bar/twilio-ops-tools');
 const { STRIPE_OPS_TOOLS, executeStripeOpsTool } = require('../services/intelligence-bar/stripe-ops-tools');
 const { GITHUB_OPS_TOOLS, executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
+const { STORE_OPS_TOOLS, executeStoreOpsTool } = require('../services/intelligence-bar/store-ops-tools');
+const { GROWTHBOOK_TOOLS, executeGrowthbookTool } = require('../services/intelligence-bar/growthbook-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -86,11 +88,14 @@ const CLOUDFLARE_OPS_TOOL_NAMES = new Set(CLOUDFLARE_OPS_TOOLS.map(t => t.name))
 const TWILIO_OPS_TOOL_NAMES = new Set(TWILIO_OPS_TOOLS.map(t => t.name));
 const STRIPE_OPS_TOOL_NAMES = new Set(STRIPE_OPS_TOOLS.map(t => t.name));
 const GITHUB_OPS_TOOL_NAMES = new Set(GITHUB_OPS_TOOLS.map(t => t.name));
+const STORE_OPS_TOOL_NAMES = new Set(STORE_OPS_TOOLS.map(t => t.name));
+const GROWTHBOOK_TOOL_NAMES = new Set(GROWTHBOOK_TOOLS.map(t => t.name));
 // Every infra module loads with the dashboard context and shares the
 // admin-only guard that OPS_TOOLS established.
 const INFRA_TOOLS = [
   ...OPS_TOOLS, ...SENTRY_OPS_TOOLS, ...CLOUDFLARE_OPS_TOOLS,
   ...TWILIO_OPS_TOOLS, ...STRIPE_OPS_TOOLS, ...GITHUB_OPS_TOOLS,
+  ...STORE_OPS_TOOLS, ...GROWTHBOOK_TOOLS,
 ];
 const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
@@ -395,6 +400,8 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
 - Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed). Business revenue questions use the revenue tools, not these.
 - GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
 - Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
@@ -876,6 +883,12 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (GITHUB_OPS_TOOL_NAMES.has(toolName)) {
     return executeGithubOpsTool(toolName, input);
+  }
+  if (STORE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeStoreOpsTool(toolName, input);
+  }
+  if (GROWTHBOOK_TOOL_NAMES.has(toolName)) {
+    return executeGrowthbookTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);

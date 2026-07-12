@@ -215,6 +215,8 @@ const READ_ONLY = [
   'get_twilio_alerts', 'get_twilio_failed_messages',
   'get_stripe_webhook_endpoints', 'get_stripe_webhook_failures',
   'get_recent_merged_prs', 'get_commit_info',
+  'get_app_store_status', 'get_play_store_status',
+  'get_growthbook_experiments', 'get_growthbook_features',
 ];
 
 describe('intelligence bar write-gate contract (issue #1568)', () => {
