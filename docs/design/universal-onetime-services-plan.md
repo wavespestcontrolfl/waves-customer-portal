@@ -24,9 +24,12 @@ Service Report V1. What's left is (1) graduating the rodent shadow, (2) cutting
 over four straggler types, (3) replacing the legacy Projects admin UI — the
 "not pretty" lookup, (4) building the one-time report UIs up from the
 recurring-pest report's parts (timeline, recap-video slot, designed cards)
-over the typed fields, (5) a decision on how far WDO joins, and (6) finishing
+over the typed fields, (5) a decision on how far WDO joins, (6) finishing
 multi-service appointments — one visit, one completion, one embedded report
-(the companion mechanism exists; booking routing and ad-hoc add-ons don't).
+(the companion mechanism exists; booking routing and ad-hoc add-ons don't),
+and (7) the comms-context AI toggle ("Include recent customer
+calls/texts/emails in AI draft") on every completion surface, with
+service-scoped time windows so it never drags in year-old irrelevant threads.
 
 ---
 
@@ -385,6 +388,57 @@ deliberately keeps photos/AI summary/follow-up CTA primary-only
 (disclosed-for-ratification in the combined doc) — ratify or revise when D1
 ships.
 
+### Phase F — Comms context on every completion (owner ask 2026-07-12)
+
+Owner: the "Include recent customer calls/texts/emails in AI draft" feature
+(screenshot: the project form's RECOMMENDATIONS / NOTES → AI draft) "should
+be in all complete service sections… but limited to the specific service,
+and limited [in time] for recurring — we don't want to be pulling in data
+that's not relevant from a year ago."
+
+**Current state:** two near-duplicate builders, neither windowed nor
+service-scoped:
+
+- `getCustomerCommunicationContext(customerId)`
+  (`server/routes/admin-projects.js:726`) — feeds the project ai-write. Last
+  **3 calls (`call_log` synopsis/notes/transcription) + 4 texts (`sms_log`)
+  + 3 emails (`emails`)** for the customer, merged newest-first, top 6
+  lines. No date floor: a sparse-comms customer's "most recent 3 calls" can
+  reach back a year — exactly the owner's complaint.
+- `loadFindingsRecapCommsContext(customerId)`
+  (`server/routes/admin-dispatch.js:6066`) — the typed completion's
+  recommendations AI draft (`POST /:serviceId/findings-recap/draft`,
+  opt-in via `includeCustomerComms === true` at :6381, modeled on the
+  projects one). Same shape, same limitations.
+- Missing entirely from the recurring surfaces: the CompletionPanel
+  "Generate AI report" draft and the ServiceRecapModal draft have no comms
+  toggle at all.
+
+**Scope:**
+
+1. **F1 — one shared builder** (`server/services/completion-comms-context.js`
+   or similar): same three channels, but window-first —
+   - recurring service: since the customer's **last completed visit of the
+     same service line** (the inter-visit window), with a hard cap;
+   - one-time/project: since the **job's origin** (estimate accepted /
+     booking created), with a hard cap;
+   - never uncapped most-recent-N. Cap values are owner-ratified numbers,
+     not guesses.
+   Service relevance v1 = window + a service-line hint in the prompt with an
+   explicit "ignore unrelated topics" instruction — NOT a hard keyword
+   prefilter (which would drop "ants in the kitchen" texts that never name
+   the service). Drafts stay tech-reviewed, so model-side relevance is
+   acceptable at v1; revisit a purpose/link prefilter if noise shows up.
+2. **F2 — wire everywhere:** replace both existing builders with F1
+   (projects ai-write + findings-recap draft), and ADD the opt-in checkbox +
+   context to the recurring CompletionPanel AI report draft and the
+   ServiceRecapModal draft. One consistent label everywhere.
+3. **F3 — guardrails unchanged:** opt-in per draft; context feeds AI drafts
+   only (tech reviews before anything customer-facing); banned-claims
+   validation stays; the profile-authoritative ownership gating on the
+   draft endpoints (the Codex P1 pattern at admin-dispatch.js:6366) extends
+   to any new draft endpoint.
+
 ### Explicitly out of scope
 - Any pricing value change (WDO fee reconciliation is flagged, not changed).
 - The typed-report content system (snapshots, copy maps, banned words) — it
@@ -426,3 +480,7 @@ ships.
     completion (ad hoc or same-day fold), is it always $0-included, or does
     it bill its own service price (pre-gate per component)? One merged
     invoice or one per service?
+13. **Comms context (F1):** ratify the window caps (proposal: recurring =
+    since last completed visit of the service line, capped at 120 days;
+    one-time = since job origin, capped at 180 days), and should the
+    checkbox default to checked or unchecked?
