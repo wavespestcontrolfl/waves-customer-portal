@@ -135,6 +135,11 @@ const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|of
 // scam/ripoff qualify as practice modifiers too — "scam pricing", "ripoff
 // billing" (Codex r17 on #2633).
 const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
+// Association-object vocabulary: the possession objects plus UNAMBIGUOUS
+// standalone tokens — "Customers report scams after choosing Bug Busters"
+// (Codex r22 on #2633). Ambiguous tokens (shady/lousy) stay out: their
+// literal senses are the original false-positive class.
+const ASSOC_ACCUSATION_SRC = `(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b|frauds?\\b)`;
 // Disparagement tokens with NO literal/benign sense in pest content — safe
 // for separator headings on lower-confidence name captures ("acme pest
 // solutions: dishonest"), unlike shady/sloppy/lousy which read literally
@@ -220,7 +225,9 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // DISPARAGEMENT_RE vocabulary only: NEG_ADJ here would collide with the
   // common noun ("experts call heat waves a serious lawn stressor")
   // (Codex r14 on #2633).
-  `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:waves|us)\\b\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source})`,
+  // Negator immediately before the verb is a denial — "Customers do not
+  // call Waves a scam" (Codex r22 on #2633).
+  `(?<!\\b(?:not|never|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|rarely|hardly|seldom)\\s)\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:waves|us)\\b\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source})`,
   // Appositive-tolerant gaps ("Waves, frankly, charges hidden fees") —
   // Codex r7 on #2633.
   `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -240,7 +247,10 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
 // rigged ranking (Codex r8 on #2633).
 const NUMERIC_ONE_ALT = '(?:#\\s?1\\b|no\\.?\\s?1\\b|number one\\b)';
 const NUMERIC_SELF_RANKING_RE = new RegExp([
-  `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
+  // Place-winner form ("#1 in Venice"). A following copula marks LIST
+  // framing instead — "The #1 in every mosquito checklist IS standing
+  // water" names the list's top item, not a winner (Codex r22 on #2633).
+  `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)(?![^.!?\\n]{0,40}?\\b(?:is|are|was|were)\\b)`,
   // Typographic apostrophe accepted; optional determiner after the verb and
   // after ranked/rated/voted (Codex r3 on #2633). The adverb slot takes any
   // negator-free words, not a curated list — "We're currently #1" (Codex
@@ -329,7 +339,7 @@ const OWN_BRAND_CASE_RE = /^W(?:aves|AVES)$/;
 // Accusation-object ASSOCIATION with Waves in object position — "Customers
 // report hidden fees after choosing Waves" (Codex r21 on #2633). Brand token
 // case-verified in code; sentence-level denial-guarded at the call site.
-const OWN_BRAND_OBJ_ASSOC_SRC = `(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?\\b(?<brandTok>waves)\\b`;
+const OWN_BRAND_OBJ_ASSOC_SRC = `(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?\\b(?<brandTok>waves)\\b`;
 // Anchor-tail association forms: possessive accusation ("Waves' hidden fees
 // are common") and complaint attribution ("Waves gets complaints about
 // hidden fees") — Codex r21.
@@ -568,11 +578,13 @@ function finding(severity, code, message) {
 // (Codex r12/r17/r18 on #2633): a negator anywhere earlier in the same
 // sentence makes the match a denial ("There are no reports of hidden fees
 // from Acme"), not an accusation.
-// Contrastive "not only" is emphasis, not negation — "Not only that, hidden
-// fees from Acme are common" stays an accusation (Codex r19 on #2633). A
-// negated RECOMMENDATION isn't a denial either: "Do not choose Bug Busters
-// because of hidden fees" denies the choice, not the fees (Codex r20).
-const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+only\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
+// Contrastive "not only/just/to mention" is emphasis, not negation — "Not
+// only that, hidden fees from Acme are common" / "Not just a rumor, hidden
+// fees after choosing Waves are common" stay accusations (Codex r19/r22 on
+// #2633). A negated RECOMMENDATION isn't a denial either: "Do not choose
+// Bug Busters because of hidden fees" denies the choice, not the fees
+// (Codex r20).
+const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -912,7 +924,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     const possessionP0 = new RegExp(
       `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
     );
-    const fromP0 = new RegExp(`(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
+    const fromP0 = new RegExp(`(?:${ASSOC_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
     // Span-guarded like the table path: "Acme Pest Solutions isn't
     // dishonest" is a denial (Codex r19).
     let disparaged = Boolean(spanUnnegated(nameScanText.match(directedP0)))
@@ -1130,7 +1142,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     let la;
     while ((la = linkAnchorRe.exec(scanText)) !== null) {
       const tailText = scanText.slice(la.index + la[0].length);
-      const tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText) || OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
+      // The linking tail's gap is negator-excluded; the assoc tail's free
+      // window is not, so its match takes the span negation guard —
+      // "Waves does not get complaints about hidden fees" is a denial
+      // (Codex r22 on #2633).
+      let tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText);
+      if (!tm) {
+        const am2 = OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
+        if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])) tm = am2;
+      }
       if (tm) {
         disp = [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
         break;
@@ -1211,7 +1231,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // guard at the match site: "There are no reports of hidden fees from
       // Acme" is marketing-clean (Codex r18).
       const fromP0 = new RegExp(
-        `(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
+        `(?:${ASSOC_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
       );
       // Name-confident names — PERSONIFIED suffixes and CI/legal-entity
       // captures ("acme pest solutions") — get a same-sentence
@@ -1222,14 +1242,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // false positives.
       const objAssocP0 = (PERSONIFIED_SUFFIX_RE.test(name) || confidentProseNames.has(name))
         ? new RegExp([
-          `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})`,
-          `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
+          `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})`,
+          `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i')
         : null;
       // Object-position insult idiom, verb-anchored ("homeowners call Bug
       // Busters a scam", "customers describe X as dishonest") — Codex r13.
       const objInsultP0 = new RegExp(
-        `\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+        `(?<!\\b(?:not|never|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|rarely|hardly|seldom)\\s)\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+${escaped}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
       // directedP0's SUBJECT_VERBS include negative auxiliaries (isn't/
       // never), so its match SPAN is negation-checked — "Bug Busters isn't

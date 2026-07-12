@@ -1114,6 +1114,34 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-22 findings (#2633) ──
+
+  test('Codex r22: negated Waves complaint/insult claims are denials', () => {
+    for (const prose of ['Waves does not get complaints about hidden fees.', 'Waves never gets complaints about hidden fees.', 'Customers do not call Waves a scam.', 'Customers never describe Waves as dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    }
+  });
+
+  test('Codex r22: list-framed "#1 in" stays educational; place-winner "#1 in" blocks', () => {
+    const list = gate.evaluate({ body: `The #1 in every mosquito checklist is standing water.\n\n${CATEGORY_TABLE}` }, {});
+    expect(list.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    const winner = gate.evaluate({ body: `We are #1 in Venice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(winner.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r22: contrastive "not just" lead-ins keep the Waves association accusation', () => {
+    const r = gate.evaluate({ body: `Not just a rumor, hidden fees after choosing Waves are common.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r22: unambiguous scam-class association objects block', () => {
+    for (const prose of ['Customers report scams after choosing Bug Busters.', 'Homeowners describe ripoffs from Acme Pest Solutions.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-21 findings (#2633) ──
 
   test('Codex r21: reputation accusations block; negated reputation stays a denial', () => {
