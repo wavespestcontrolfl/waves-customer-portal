@@ -57,7 +57,9 @@ const TABLE_DISPARAGEMENT_RE = /\b(worst|terrible|awful|horrible|useless|inferio
 // companies", "national chains are unreliable". Targeted (adj adjacent to a
 // provider noun, either order) so "worst infestation" / "the best time" don't trip.
 const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\\s-]?par|pathetic|mediocre|lousy|sloppy|incompetent|shady|dishonest|untrustworthy';
-const PROVIDER_NOUN = 'pest control|exterminators?|lawn (?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
+// Hyphenated service phrases count everywhere — "pest-control companies"
+// (Codex r21 on #2633).
+const PROVIDER_NOUN = 'pest[\\s-]+control|exterminators?|lawn[\\s-]+(?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
 // "service area(s)" is literal geography, not a provider — "our service
 // area is shady and humid" is educational copy (Codex r17 guard on #2633).
 // The optional "service" hop covers compound forms — "pest control service
@@ -90,18 +92,24 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   `rips?\\s+off\\s+${DISPARAGEMENT_VICTIM}`,
   `gouges?\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
   `overcharges?(?:\\s+(?:${DISPARAGEMENT_VICTIM}|for\\b))?`,
-  // Fee-adding verb variants — "adds hidden fees", "tacks on hidden fees"
-  // are the same accusation as "charges hidden fees" (Codex r17 on #2633).
-  '(?:charges?|charged|adds?|added|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+hidden\\s+fees?',
+  // Fee-adding verb variants — "adds (on) hidden fees", "tacks on hidden
+  // fees" are the same accusation as "charges hidden fees" (Codex r17/r21
+  // on #2633).
+  '(?:charges?|charged|adds?(?:\\s+on)?|added(?:\\s+on)?|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+hidden\\s+fees?',
+  // Phrasal order with the fees BEFORE the particle — "sneaks hidden fees
+  // into contracts" (Codex r21).
+  '(?:sneaks?|snuck|slips?|slipped|builds?|built|bakes?|baked|rolls?|rolled|buries|buried)\\s+hidden\\s+fees?\\s+into\\b',
   `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
   `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
   `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
   `defrauds?\\s+${DISPARAGEMENT_VICTIM}`,
   'pulls?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
   'uses?\\s+bait[\\s-]and[\\s-]switch',
+  'runs?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
   // Verb form with a victim object — "companies bait-and-switch homeowners
-  // with teaser prices" (Codex r17 on #2633).
-  `bait[\\s-]and[\\s-]switch(?:es|ed|ing)?\\s+${DISPARAGEMENT_VICTIM}`,
+  // with teaser prices" (Codex r17 on #2633) — or with an instrumental
+  // tail and no victim: "bait-and-switch with teaser prices" (Codex r21).
+  `bait[\\s-]and[\\s-]switch(?:es|ed|ing)?\\s+(?:${DISPARAGEMENT_VICTIM}|(?:with|on|via|through)\\b)`,
 ].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
@@ -155,10 +163,14 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
+  // Reputation forms count — "providers known for hidden fees", "accused
+  // of hidden fees"; NOUN_VERB_GAP absorbs the copula ("are known for")
+  // and stays negator-excluded ("not known for hidden fees" is a denial)
+  // (Codex r21).
   // Prepositional form takes the noun directly — "companies with hidden
   // fees should be avoided" (Codex r16); the negator-free article gap keeps
   // "providers with no hidden fees" a denial.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gap here too — "companies, frankly, charge hidden
   // fees" (Codex r7 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -215,7 +227,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // Possession/usage with a required accusation object ("Waves has hidden
   // fees", "Waves uses shady billing") — object required so "Waves has
   // shady spots covered" stays clean (Codex r3/r6 on #2633).
-  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -238,6 +250,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
   `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Achievement verbs — "We earned the #1 spot in Venice", "we've won #1"
+  // (Codex r21 on #2633).
+  `\\bwe(?:['’]ve)?\\s+(?:have\\s+|just\\s+|finally\\s+)?(?:earned|won|claimed|secured|clinched|grabbed|took|hold|held)\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Marketing verbs with a reflexive object — "we market ourselves as the
   // #1 choice" (Codex r17 on #2633). The reflexive is REQUIRED: "we
   // advertise the #1-rated mosquito trap" is a product mention, not
@@ -280,14 +295,20 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // case, and only the leading W disambiguates the brand from the common
 // noun (Codex r14 on #2633). Bare/typographic possessives accepted.
 const OWN_BRAND_ANCHOR = "\\bW(?:aves|AVES)\\b(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
-const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}\\s*[:—–-]\\s*`);
+// Curated heading descriptors may sit between the brand and the separator —
+// "Waves Review: Hidden fees", "Waves billing: hidden fees" (Codex r21 on
+// #2633). Curated, not free words: arbitrary hops would re-create the
+// common-noun collision ("heat Waves crash — shady…" is impossible, but
+// keep the surface tight anyway).
+const OWN_BRAND_DESCRIPTOR_HOP = "(?:\\s+(?:[Rr]eviews?|[Bb]illing|[Pp]ricing|[Rr]atings?|[Cc]omplaints?|[Cc]ontracts?|[Qq]uotes?|[Ii]nvoic(?:es?|ing)|[Ff]ees?|[Ee]xperience)){0,2}";
+const OWN_BRAND_SEP_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_DESCRIPTOR_HOP}\\s*[:—–-]\\s*`);
 // Prefix words are negator-excluded: "Waves: no hidden fees" is a denial,
 // not an accusation (Codex r12 on #2633).
 const OWN_BRAND_SEP_TAIL_RE = new RegExp(
   `^(?:${NON_NEGATED_WORD}\\s+){0,2}(?:${POSSESSION_ACCUSATION_SRC}|scams?\\b|rip[\\s-]?offs?\\b)`, 'i',
 );
 // Separator anchors count for #1 too — "Waves — the #1 choice" (Codex r12).
-const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}(?:\\s*[,:—–-]\\s*|\\s+)`);
+const OWN_BRAND_NUMERIC_ANCHOR_RE = new RegExp(`${OWN_BRAND_ANCHOR}${OWN_BRAND_DESCRIPTOR_HOP}(?:\\s*[,:—–-]\\s*|\\s+)`);
 const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(`^(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i');
 // Waves-subject linking-verb disparagement, case-sensitive anchor + case-
 // insensitive tail ("Waves is dishonest", "Waves may be dishonest") — pulled
@@ -305,12 +326,27 @@ const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
 // positional index would grab the vocabulary token instead of the brand.
 const OWN_BRAND_REVERSE_SRC = `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\b(?<brandTok>waves)\\b`;
 const OWN_BRAND_CASE_RE = /^W(?:aves|AVES)$/;
+// Accusation-object ASSOCIATION with Waves in object position — "Customers
+// report hidden fees after choosing Waves" (Codex r21 on #2633). Brand token
+// case-verified in code; sentence-level denial-guarded at the call site.
+const OWN_BRAND_OBJ_ASSOC_SRC = `(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?\\b(?<brandTok>waves)\\b`;
+// Anchor-tail association forms: possessive accusation ("Waves' hidden fees
+// are common") and complaint attribution ("Waves gets complaints about
+// hidden fees") — Codex r21.
+const OWN_BRAND_ASSOC_TAIL_RE = new RegExp([
+  `^\\s*(?:${POSSESSION_ACCUSATION_SRC})`,
+  `^[^.!?\\n]{0,60}?\\b(?:gets?|got|receives?|received|draws?|drew|faces?|faced|racks?\\s+up|racked\\s+up)\\s+complaints?\\s+(?:about|over|regarding)\\s+(?:(?:its|their|the|a|an)\\s+)?(?:${POSSESSION_ACCUSATION_SRC})`,
+].join('|'), 'i');
+// #1-BEFORE-the-brand winner framing — "The #1 overall is Waves" (Codex
+// r21); brand token case-verified in code.
+const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?\\b(?<brandTok>waves)\\b`;
 // Waves-subject #1 arms, case-sensitive anchor + 'i' tails, same split as
 // the linking/separator arms (Codex r5/r17/r19 on #2633). The verb must be
 // adjacent to the number so "in heat waves, the #1 breeding site is …"
 // stays clean; the marketing form requires the reflexive.
+// Achievement verbs included — "Waves earned the #1 spot" (Codex r21).
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
-  `^[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -874,7 +910,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // path ("<Name> uses scam pricing", "dishonest pricing from <Name>" —
     // Codex r18); the sourced form is sentence-level denial-guarded.
     const possessionP0 = new RegExp(
-      `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
     );
     const fromP0 = new RegExp(`(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
     // Span-guarded like the table path: "Acme Pest Solutions isn't
@@ -1093,7 +1129,8 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const linkAnchorRe = new RegExp(OWN_BRAND_ANCHOR, 'g');
     let la;
     while ((la = linkAnchorRe.exec(scanText)) !== null) {
-      const tm = OWN_BRAND_LINKING_TAIL_RE.exec(scanText.slice(la.index + la[0].length));
+      const tailText = scanText.slice(la.index + la[0].length);
+      const tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText) || OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
       if (tm) {
         disp = [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
         break;
@@ -1106,6 +1143,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     let rv;
     while ((rv = revRe.exec(scanText)) !== null) {
       if (OWN_BRAND_CASE_RE.test(rv.groups.brandTok)) { disp = [rv[0]]; break; }
+    }
+  }
+  if (!disp) {
+    // Own-brand object association ("Customers report hidden fees after
+    // choosing Waves") — case-verified + sentence-level denial guard
+    // (Codex r21).
+    const assocRe = new RegExp(OWN_BRAND_OBJ_ASSOC_SRC, 'gi');
+    let av;
+    while ((av = assocRe.exec(scanText)) !== null) {
+      if (!OWN_BRAND_CASE_RE.test(av.groups.brandTok)) continue;
+      if (sentenceHasNegator(scanText, av.index, av[0].length)) continue;
+      disp = [av[0]];
+      break;
     }
   }
   if (!disp) {
@@ -1154,7 +1204,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // comes with hidden fees" / "… with hidden fees should be avoided" —
       // Codex r16).
       const possessionP0 = new RegExp(
-        `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
       // Accusation-phrase SOURCED at the name — "dishonest pricing from
       // acme pest solutions" (Codex r17 on #2633). Sentence-level denial
@@ -1254,6 +1304,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     }
   }
   if (!rank) {
+    // #1-before-the-brand framing ("The #1 overall is Waves") —
+    // case-verified brand token (Codex r21).
+    const nbRe = new RegExp(OWN_BRAND_NUM_BEFORE_SRC, 'gi');
+    let nb;
+    while ((nb = nbRe.exec(scanText)) !== null) {
+      if (OWN_BRAND_CASE_RE.test(nb.groups.brandTok)) { rank = [nb[0]]; break; }
+    }
+  }
+  if (!rank) {
     // "#1" needs SYNTAX tying it to a provider — "#1 (rated) pest control
     // company" — or a detected brand/business name in the window. A bare
     // provider noun within 90 chars is NOT context: PROVIDER_NOUN includes
@@ -1294,7 +1353,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         // frankly, is #1" — Codex r10 on #2633). Negator-free adverb slot
         // ("Bug Busters is currently #1" — Codex r16 parity).
         const selfRank = new RegExp(
-          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
         );
         // Object-position idiom: "reviews call Bug Busters the #1 choice",
         // "rated Bug Busters as #1" (Codex r11/r14) — verb-anchored, not
@@ -1319,9 +1378,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const marketingRank = new RegExp(
           `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
         );
+        // #1-before-the-name framing — "The #1 spot belongs to Bug Busters"
+        // (Codex r21). Winner-noun hop is curated so "the #1 threat is …"
+        // educational framing needs the name to be the declared winner.
+        const rankBeforeName = new RegExp(
+          `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choice|pick|compan(?:y|ies)|providers?|options?|rank(?:ing)?|position|team|services?))?\\s+(?:belongs\\s+to|goes\\s+to|is|was|remains)\\s+(?:(?:the|your|a|an)\\s+)?${escaped}\\b`, 'i',
+        );
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
           || proseNameText.match(marketingRank)
+          || proseNameText.match(rankBeforeName)
           || (sepRank && proseNameText.match(sepRank));
         if (rm) { rank = rm; break; }
       }

@@ -1114,6 +1114,72 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-21 findings (#2633) ──
+
+  test('Codex r21: reputation accusations block; negated reputation stays a denial', () => {
+    for (const prose of ['Avoid pest control providers known for hidden fees.', 'Companies accused of hidden fees keep showing up here.', 'Waves is known for hidden fees.', 'Bug Busters is notorious for shady billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: `Bug Busters is not known for hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r21: achievement-verb #1 claims block across subjects', () => {
+    for (const prose of ['We earned the #1 spot in Venice.', "We've won the #1 spot.", 'Waves earned the #1 spot.', 'Bug Busters claimed the #1 spot.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r21: hyphenated provider nouns are disparagement targets', () => {
+    for (const prose of ['Some shady pest-control companies cut corners.', 'Overpriced pest-control services are everywhere.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r21: phrasal fee verbs block', () => {
+    for (const prose of ['Pest control companies add on hidden fees.', 'Some providers sneak hidden fees into contracts.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r21: own-brand headings with descriptors block', () => {
+    for (const prose of ['Waves Review: Hidden fees.', 'Waves billing: hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const rank = gate.evaluate({ body: `Waves review - the #1 choice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r21: victimless bait-and-switch predicates block', () => {
+    for (const prose of ['Pest control companies bait-and-switch with teaser prices.', 'Some providers run bait-and-switch pricing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r21: own-brand association accusations block; lowercase noun stays clean', () => {
+    for (const prose of ['Customers report hidden fees after choosing Waves.', 'Waves gets complaints about hidden fees.', "Waves' hidden fees are common."]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const literal = gate.evaluate({ body: `Hidden fees are rare, and summer heat waves are the bigger story.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r21: #1-before-name winner framing blocks; educational threat framing stays clean', () => {
+    for (const prose of ['The #1 spot belongs to Bug Busters.', 'The #1 overall is Waves.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const educational = gate.evaluate({ body: `The #1 threat in summer is the German roach, not your provider.\n\n${CATEGORY_TABLE}` }, {});
+    expect(educational.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
   // ── Codex round-20 findings (#2633) ──
 
   test('Codex r20: negators inside business names are not denials', () => {
