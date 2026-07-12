@@ -337,11 +337,16 @@ function emptyText(v) { return v == null || String(v).trim() === '' || String(v)
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
+  // Track which corrections actually fired: a row that already carries the
+  // corrected registration (dev/preview DB, prior admin fix) must NOT have
+  // its note/stamps force-replaced — admin edits win when we changed nothing.
+  const epaApplied = new Set();
   for (const [name, wrong, right] of EPA_CORRECTIONS) {
-    await knex('products_catalog')
+    const n = await knex('products_catalog')
       .whereRaw('LOWER(name) = LOWER(?)', [name])
       .where('epa_reg_number', wrong)
       .update({ epa_reg_number: right, updated_at: new Date() });
+    if (n) epaApplied.add(name.toLowerCase());
   }
 
   // Track which legacy corrections actually fired so the DATA loop below can
@@ -362,7 +367,7 @@ exports.up = async function up(knex) {
       .whereRaw('LOWER(name) = LOWER(?)', [d.name])
       .first();
     if (!row) continue;
-    const isEpaCorrection = EPA_CORRECTION_NAMES.has(d.name.toLowerCase());
+    const isEpaCorrection = epaApplied.has(d.name.toLowerCase());
     const updates = {};
     if (d.basis === 'per_1000_sqft') {
       const rate = d.rate != null ? d.rate : d.min;
@@ -393,7 +398,10 @@ exports.up = async function up(knex) {
       // fields written above need provenance too — append, never replace.
       updates.label_source_note = `${row.label_source_note} | ${d.note}`;
     }
-    if (row.label_verified_at == null || isEpaCorrection) {
+    // Stamp only rows this migration actually wrote to: stamping an untouched
+    // row would claim its (possibly admin-entered) values as label-verified
+    // AND hand down() ownership to null fields we explicitly skipped.
+    if ((Object.keys(updates).length && row.label_verified_at == null) || isEpaCorrection) {
       updates.label_verified_at = new Date();
       updates.label_verified_by = VERIFIED_BY;
     }
@@ -444,8 +452,10 @@ exports.down = async function down(knex) {
       if (d.unit && row.default_unit === `${d.unit}/gal`) reverts.default_unit = null;
     }
     // Corrected registrations stay corrected (see note at the top of down()).
+    // Revert to the 'N/A' sentinel, not null: epa_reg_number is NOT NULL
+    // since 20260517000004, and 'N/A' is the exact pre-fill state up() saw.
     if (d.epa && row.epa_reg_number === d.epa && !EPA_CORRECTION_NAMES.has(d.name.toLowerCase())) {
-      reverts.epa_reg_number = null;
+      reverts.epa_reg_number = 'N/A';
     }
     if (d.note && row.label_source_note === d.note) {
       reverts.label_source_note = null;
