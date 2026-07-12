@@ -1,24 +1,24 @@
 /**
- * Store ops tools — unit tests with mocked ASC fetch + mocked googleapis.
- * Verifies the read-only contract: benign shape when unconfigured (must not
- * trip the shared admin breaker), version/track mapping, that the Play
- * draft edit is ALWAYS deleted (never committed), and { error } on failure.
+ * Store ops tools — unit tests with mocked ASC + Play fetch and a mocked
+ * GoogleAuth token source. Verifies the read-only contract: benign shape when
+ * unconfigured (must not trip the shared admin breaker), version/release
+ * mapping, live-vs-pending split, that Play is read via the NON-edit
+ * releases endpoint (no edit created), and { error } on failure.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('jsonwebtoken', () => ({ sign: jest.fn(() => 'mock-asc-jwt') }));
 
-const mockEdits = {
-  insert: jest.fn(),
-  delete: jest.fn(),
-  tracks: { list: jest.fn() },
-};
+// Play now reads via raw REST with a GoogleAuth access token — no edit client.
 jest.mock('googleapis', () => ({
   google: {
     auth: {
-      GoogleAuth: jest.fn().mockImplementation(() => ({ getClient: jest.fn(async () => ({})) })),
+      GoogleAuth: jest.fn().mockImplementation(() => ({
+        getClient: jest.fn(async () => ({
+          getAccessToken: jest.fn(async () => ({ token: 'play-token' })),
+        })),
+      })),
     },
-    androidpublisher: jest.fn(() => ({ edits: mockEdits })),
   },
 }));
 
@@ -67,7 +67,7 @@ describe('intelligence bar store ops tools', () => {
     expect(result.error).toBeUndefined();
     expect(result.configured).toBe(false);
     expect(result.message).toMatch(/PLAY_SERVICE_ACCOUNT_JSON/);
-    expect(mockEdits.insert).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('unknown tool name returns an error result', async () => {
@@ -132,71 +132,73 @@ describe('intelligence bar store ops tools', () => {
     expect(result.live_version).toBe('1.2');
   });
 
-  test('get_play_store_status reads tracks inside a draft edit and always deletes it', async () => {
+  test('get_play_store_status reads release summaries from the non-edit endpoint and splits live vs pending', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
-    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-1' } });
-    mockEdits.tracks.list.mockResolvedValueOnce({
-      data: {
-        tracks: [
-          { track: 'production', releases: [{ name: '1.2 (12)', status: 'completed', versionCodes: ['12'] }] },
-          { track: 'internal', releases: [{ name: '1.3 (13)', status: 'draft', versionCodes: ['13'] }] },
-        ],
-      },
-    });
-    mockEdits.delete.mockResolvedValueOnce({});
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ releases: [
+        { releaseName: '1.2 (12)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_PUBLISHED', activeArtifacts: [{ versionCode: 12 }] },
+        { releaseName: '1.3 (13)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_IN_REVIEW', activeArtifacts: [{ versionCode: 13 }] },
+      ] }))
+      .mockResolvedValue(jsonResponse({}, 404)); // beta / alpha / internal not configured
 
     const result = await executeStoreOpsTool('get_play_store_status', {});
     expect(result.error).toBeUndefined();
-    expect(result.production_status).toBe('completed');
+    expect(result.production_status).toBe('RELEASE_LIFECYCLE_STATE_PUBLISHED');
     expect(result.production_release).toBe('1.2 (12)');
-    expect(result.total_tracks).toBe(2);
-    expect(mockEdits.delete).toHaveBeenCalledWith(
-      { packageName: 'com.wavespestcontrol.portal', editId: 'edit-1' },
-      expect.objectContaining({ timeout: expect.any(Number) }),
-    );
+    expect(result.pending_release).toEqual({
+      name: '1.3 (13)', lifecycle_state: 'RELEASE_LIFECYCLE_STATE_IN_REVIEW', version_codes: [13],
+    });
+    expect(result.total_tracks).toBe(1);
+    // first call hits the production releases endpoint with a Bearer token; no edit is created
+    const [url, opts] = global.fetch.mock.calls[0];
+    expect(url).toContain('/applications/com.wavespestcontrol.portal/tracks/production/releases');
+    expect(opts.headers.Authorization).toBe('Bearer play-token');
   });
 
-  test('a pending (non-completed) production release is surfaced over the live one', async () => {
+  test('a rejected pending build is surfaced separately from the live release', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
-    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-p' } });
-    mockEdits.tracks.list.mockResolvedValueOnce({
-      data: {
-        tracks: [
-          { track: 'production', releases: [
-            { name: '1.2 (12)', status: 'completed', versionCodes: ['12'] },
-            { name: '1.3 (13)', status: 'inProgress', versionCodes: ['13'] },
-          ] },
-        ],
-      },
-    });
-    mockEdits.delete.mockResolvedValueOnce({});
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ releases: [
+        { releaseName: '1.2 (12)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_PUBLISHED', activeArtifacts: [{ versionCode: 12 }] },
+        { releaseName: '1.3 (13)', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_NOT_APPROVED', activeArtifacts: [{ versionCode: 13 }] },
+      ] }))
+      .mockResolvedValue(jsonResponse({}, 404));
 
     const result = await executeStoreOpsTool('get_play_store_status', {});
-    expect(result.error).toBeUndefined();
-    expect(result.production_status).toBe('inProgress');
-    expect(result.production_release).toBe('1.3 (13)');
+    expect(result.production_status).toBe('RELEASE_LIFECYCLE_STATE_PUBLISHED');
+    expect(result.pending_release.lifecycle_state).toBe('RELEASE_LIFECYCLE_STATE_NOT_APPROVED');
     expect(result.production_releases).toHaveLength(2);
   });
 
-  test('the draft edit is deleted even when the track read fails', async () => {
+  test('a track that 404s is skipped; other tracks still read', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
-    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-2' } });
-    mockEdits.tracks.list.mockRejectedValueOnce(new Error('boom'));
-    mockEdits.delete.mockResolvedValueOnce({});
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({}, 404)) // production not configured
+      .mockResolvedValueOnce(jsonResponse({ releases: [
+        { releaseName: '1.0-beta', releaseLifecycleState: 'RELEASE_LIFECYCLE_STATE_PUBLISHED', activeArtifacts: [{ versionCode: 5 }] },
+      ] })) // beta
+      .mockResolvedValue(jsonResponse({}, 404)); // alpha / internal
 
     const result = await executeStoreOpsTool('get_play_store_status', {});
-    expect(result.error).toMatch(/boom/);
-    expect(mockEdits.delete).toHaveBeenCalledWith(
-      expect.objectContaining({ editId: 'edit-2' }),
-      expect.anything(),
-    );
+    expect(result.error).toBeUndefined();
+    expect(result.production_status).toBeNull();
+    expect(result.production_release).toBeNull();
+    expect(result.total_tracks).toBe(1);
+    expect(result.tracks[0].track).toBe('beta');
+  });
+
+  test('a Play permission error surfaces as { error }, never a throw', async () => {
+    process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
+    global.fetch.mockResolvedValue(jsonResponse({}, 403));
+    const result = await executeStoreOpsTool('get_play_store_status', {});
+    expect(result.error).toMatch(/app access|rejected/i);
   });
 
   test('invalid PLAY_SERVICE_ACCOUNT_JSON surfaces as { error }, never a throw', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = 'not-json';
     const result = await executeStoreOpsTool('get_play_store_status', {});
     expect(result.error).toMatch(/not valid JSON/);
-    expect(mockEdits.insert).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   test('escaped \\n in ASC_PRIVATE_KEY is normalized before signing (Railway stores .p8 that way)', async () => {
@@ -211,16 +213,16 @@ describe('intelligence bar store ops tools', () => {
     expect(signedKey).toBe('-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----');
   });
 
-  test('every Play call carries the module timeout (gaxios has no default deadline)', async () => {
+  test('no Play edit is ever created — status is a pure read (no invalidation risk)', async () => {
     process.env.PLAY_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: 'sa@x.iam' });
-    mockEdits.insert.mockResolvedValueOnce({ data: { id: 'edit-3' } });
-    mockEdits.tracks.list.mockResolvedValueOnce({ data: { tracks: [] } });
-    mockEdits.delete.mockResolvedValueOnce({});
+    global.fetch.mockResolvedValue(jsonResponse({ releases: [] })); // every track empty
 
     await executeStoreOpsTool('get_play_store_status', {});
-    expect(mockEdits.insert.mock.calls[0][1]).toEqual({ timeout: 15000 });
-    expect(mockEdits.tracks.list.mock.calls[0][1]).toEqual({ timeout: 15000 });
-    expect(mockEdits.delete.mock.calls[0][1]).toEqual({ timeout: 15000 });
+    // All calls are GETs to .../releases; none create or mutate an edit.
+    for (const [url, opts] of global.fetch.mock.calls) {
+      expect(url).toMatch(/\/tracks\/[^/]+\/releases$/);
+      expect(opts.method === undefined || opts.method === 'GET').toBe(true);
+    }
   });
 
   test('ASC auth rejection surfaces a key hint as { error }', async () => {

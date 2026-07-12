@@ -11,28 +11,23 @@
  * - Apple: ASC_KEY_ID + ASC_ISSUER_ID + ASC_PRIVATE_KEY (the .p8 content) —
  *   a short-lived ES256 JWT is minted per call. ASC_APP_ID defaults to the
  *   portal app.
- * - Google: PLAY_SERVICE_ACCOUNT_JSON (service-account key JSON, string) via
- *   googleapis; PLAY_PACKAGE_NAME defaults to the portal package. Reading
- *   track state requires the Play API's edit context: a DRAFT edit is
- *   inserted, tracks are read, and the edit is deleted without ever being
- *   committed — nothing observable changes in Play (this is the API's
- *   canonical read pattern; fastlane does the same). No edit is ever
- *   committed from this module.
+ * - Google: PLAY_SERVICE_ACCOUNT_JSON (service-account key JSON, string).
+ *   PLAY_PACKAGE_NAME defaults to the portal package. Track state is read
+ *   through the NON-edit release-summary endpoint
+ *   applications.tracks.releases.list
+ *   (GET .../v3/applications/{package}/tracks/{track}/releases), which
+ *   returns each release's releaseLifecycleState — including the review
+ *   states (DRAFT / NOT_SENT_FOR_REVIEW / IN_REVIEW / APPROVED_NOT_PUBLISHED
+ *   / NOT_APPROVED / PUBLISHED). This is a pure read: NO edit is created, so
+ *   it (a) cannot invalidate an in-flight publishing edit, and (b) needs only
+ *   read access ("View app information") on the service account — no release
+ *   or edit permission. The installed googleapis client (v171) does not yet
+ *   surface this method, so it is called via raw REST with a GoogleAuth
+ *   access token.
  *
- *   PERMISSION: because the read goes through edits.insert, the service
- *   account needs a Play Console role that can CREATE an edit (a release
- *   role such as "Release apps to testing tracks" / "Manage production
- *   releases", or Admin). The pure read-only "View app information and
- *   download bulk reports" role CANNOT create the edit and this call would
- *   403 — do not provision the SA with only that role.
- *
- *   CONSTRAINT: Play invalidates a user's other active edits for the same
- *   app when a new edit is created, so PLAY_SERVICE_ACCOUNT_JSON must be a
- *   service account that is NOT shared with any Play publishing automation
- *   — a status check during a release window must never be able to discard
- *   an in-flight upload edit. (No Play publishing automation exists in this
- *   repo; releases are pushed from local tooling under a different user.
- *   If that ever changes, give this tool its own dedicated SA.)
+ *   NOTE: the Play half is pending first live validation — Play Console access
+ *   for the service account is still being granted; the endpoint/URL/field
+ *   mapping follow the androidpublisher v3 discovery contract.
  *
  * There are NO store mutations here — no submissions, no rollouts, no
  * metadata changes. Anything that mutates store state must go through the
@@ -43,9 +38,16 @@ const jwt = require('jsonwebtoken');
 const logger = require('../logger');
 
 const ASC_API_BASE = process.env.ASC_API_BASE || 'https://api.appstoreconnect.apple.com';
+const PLAY_API_BASE = process.env.PLAY_API_BASE || 'https://androidpublisher.googleapis.com';
 const DEFAULT_ASC_APP_ID = '6782775654'; // Waves customer portal iOS app
 const DEFAULT_PLAY_PACKAGE = 'com.wavespestcontrol.portal';
 const REQUEST_TIMEOUT_MS = 15000;
+// Standard Play tracks to poll (there is no non-edit "list tracks" endpoint,
+// so we query known track names and skip any that 404 for this app).
+const PLAY_TRACKS = ['production', 'beta', 'alpha', 'internal'];
+// releaseLifecycleState value meaning "available to users" (incl. partial
+// rollout and resumable halted). Everything else is pending / in-review.
+const PLAY_LIVE_STATE = 'RELEASE_LIFECYCLE_STATE_PUBLISHED';
 // ASC's appStoreVersions relationship does NOT support a `sort` param (it
 // returns HTTP 400 "The parameter 'sort' can not be used with this request",
 // verified live), and it returns rows newest-first by default. Request a
@@ -71,8 +73,8 @@ Use for: "is the iOS app approved yet?", "what version is live on the App Store?
   },
   {
     name: 'get_play_store_status',
-    description: `Get the Google Play release state: each track (production, beta, internal) with its releases, version names, and status (completed = fully live, inProgress = staged rollout, draft...).
-Use for: "is the Android app live?", "what's on the Play production track?", "did the Play review finish?"`,
+    description: `Get the Google Play release state: each track (production, beta, alpha, internal) with its releases, names, and lifecycle state — PUBLISHED (live/serving users), IN_REVIEW, APPROVED_NOT_PUBLISHED, NOT_APPROVED (rejected), NOT_SENT_FOR_REVIEW, DRAFT. Returns the live production release and any pending release separately.
+Use for: "is the Android app live?", "what's on the Play production track?", "did the Play review finish?", "was the Android build rejected?"`,
     input_schema: {
       type: 'object',
       properties: {},
@@ -81,7 +83,7 @@ Use for: "is the Android app live?", "what's on the Play production track?", "di
 ];
 
 const ASC_NOT_CONFIGURED = 'App Store Connect access is not configured. Add ASC_KEY_ID, ASC_ISSUER_ID, and ASC_PRIVATE_KEY (the .p8 key content) service variables in the Railway dashboard.';
-const PLAY_NOT_CONFIGURED = 'Google Play access is not configured. Add the PLAY_SERVICE_ACCOUNT_JSON service variable in the Railway dashboard. The service account needs a Play Console role that can create an edit (a release role, or Admin) — the read-only "View app information" role cannot read track state.';
+const PLAY_NOT_CONFIGURED = 'Google Play access is not configured. Add the PLAY_SERVICE_ACCOUNT_JSON service variable (a service-account key with "View app information" read access in Play Console) in the Railway dashboard.';
 
 function ascConfigured() {
   return Boolean(process.env.ASC_KEY_ID && process.env.ASC_ISSUER_ID && process.env.ASC_PRIVATE_KEY);
@@ -155,6 +157,19 @@ function getGoogleapis() {
   return require('googleapis').google;
 }
 
+async function playGet(url, token) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Google Play API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getPlayStoreStatus() {
   let credentials;
   try {
@@ -168,52 +183,48 @@ async function getPlayStoreStatus() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/androidpublisher'],
   });
-  const publisher = google.androidpublisher({ version: 'v3', auth: await auth.getClient() });
-  // googleapis/gaxios has NO default deadline — every call gets the module
-  // timeout so a stalled Play call can't hang the Intelligence Bar loop.
-  const callOpts = { timeout: REQUEST_TIMEOUT_MS };
+  const client = await auth.getClient();
+  const tokenResp = await client.getAccessToken();
+  const token = typeof tokenResp === 'string' ? tokenResp : tokenResp?.token;
+  if (!token) throw new Error('Could not obtain a Google Play access token from PLAY_SERVICE_ACCOUNT_JSON.');
 
-  // Track state is only readable inside an edit context. The edit is a
-  // DRAFT: inserted, read, then deleted — never committed, so nothing in
-  // Play changes. Deletion failures are swallowed (uncommitted edits also
-  // expire server-side on their own).
-  const edit = await publisher.edits.insert({ packageName }, callOpts);
-  const editId = edit.data.id;
-  try {
-    const tracks = await publisher.edits.tracks.list({ packageName, editId }, callOpts);
-    const mapped = (tracks.data.tracks || []).map(t => ({
-      track: t.track,
-      releases: (t.releases || []).map(r => ({
-        name: r.name,
-        status: r.status,
-        version_codes: r.versionCodes || [],
-        user_fraction: r.userFraction ?? null,
-      })),
-    }));
-    const production = mapped.find(t => t.track === 'production');
-    const prodReleases = production?.releases || [];
-    // A track can carry several releases at once (a completed live release PLUS
-    // a draft / inProgress / halted one). For "did Play review finish?" the
-    // pending release is the newsworthy one, so surface the first non-completed
-    // release when present and fall back to the current live release otherwise.
-    // (edits.tracks.list already returns releases across all statuses — draft,
-    // inProgress, halted, completed — so pending builds are not dropped.)
-    const prodActive = prodReleases.find(r => r.status && r.status !== 'completed') || prodReleases[0] || null;
-    return {
-      package: packageName,
-      production_status: prodActive?.status || null,
-      production_release: prodActive?.name || null,
-      production_releases: prodReleases,
-      tracks: mapped,
-      total_tracks: mapped.length,
-    };
-  } finally {
-    try {
-      await publisher.edits.delete({ packageName, editId }, callOpts);
-    } catch (cleanupErr) {
-      logger.warn(`[intelligence-bar:store-ops] Play draft-edit cleanup failed (edit expires on its own): ${cleanupErr.message}`);
+  // No edit context: read each known track's release summaries directly. A
+  // track not configured for this app 404s and is simply skipped.
+  const tracks = [];
+  for (const track of PLAY_TRACKS) {
+    const url = `${PLAY_API_BASE}/androidpublisher/v3/applications/${encodeURIComponent(packageName)}/tracks/${track}/releases`;
+    const res = await playGet(url, token);
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Google Play rejected the service account — check PLAY_SERVICE_ACCOUNT_JSON has app access.');
     }
+    if (res.status === 404) continue;
+    if (!res.ok) throw new Error(`Google Play API returned HTTP ${res.status} for track ${track}`);
+    const data = await res.json();
+    const releases = (data.releases || []).map(r => ({
+      name: r.releaseName || null,
+      lifecycle_state: r.releaseLifecycleState || null,
+      version_codes: (r.activeArtifacts || []).map(a => a.versionCode).filter(v => v != null),
+    }));
+    if (releases.length) tracks.push({ track, releases });
   }
+
+  const production = tracks.find(t => t.track === 'production');
+  const prodReleases = production?.releases || [];
+  // Keep "is it live?" separate from "is a release pending?": the live release
+  // is the PUBLISHED one currently serving users; the pending release is the
+  // first non-published one (in review / approved-not-published / rejected /
+  // draft). Both can coexist on the production track during a release window.
+  const liveRelease = prodReleases.find(r => r.lifecycle_state === PLAY_LIVE_STATE) || null;
+  const pendingRelease = prodReleases.find(r => r.lifecycle_state && r.lifecycle_state !== PLAY_LIVE_STATE) || null;
+  return {
+    package: packageName,
+    production_status: liveRelease?.lifecycle_state || null,
+    production_release: liveRelease?.name || null,
+    pending_release: pendingRelease,
+    production_releases: prodReleases,
+    tracks,
+    total_tracks: tracks.length,
+  };
 }
 
 async function executeStoreOpsTool(toolName, input = {}) {
