@@ -6,7 +6,71 @@ const tracker = require('../services/seo/impact-tracker');
 const GitHubClient = require('../services/content-astro/github-client');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { computeVerdict } = tracker;
-const { median, clicksPct, positionDelta, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict } = tracker._internals;
+const { median, clicksPct, positionDelta, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl } = tracker._internals;
+
+describe('normalizeQueryCohort — frozen target-query cohort', () => {
+  test('trims, dedupes case-insensitively, drops empties, caps at 3', () => {
+    expect(normalizeQueryCohort([
+      ' bed bug treatment bradenton ',
+      'Bed Bug Treatment Bradenton',
+      '',
+      null,
+      'pest control parrish',
+      'lawn care venice',
+      'termite inspection sarasota',
+    ])).toEqual(['bed bug treatment bradenton', 'pest control parrish', 'lawn care venice']);
+  });
+  test('accepts {query} objects and non-array input', () => {
+    expect(normalizeQueryCohort([{ query: 'flea treatment' }, { query: null }])).toEqual(['flea treatment']);
+    expect(normalizeQueryCohort(null)).toEqual([]);
+    expect(normalizeQueryCohort('not-an-array')).toEqual([]);
+  });
+});
+
+describe('queryLift — blogr-style before/after per target query', () => {
+  test('prefers page position over site position on both sides', () => {
+    const r = queryLift({
+      baseline: { page: { position: 18 }, site: { position: 12 } },
+      window: { page: { position: 8, clicks: 40, impressions: 900 }, site: { position: 9 } },
+    });
+    expect(r.before_position).toBe(18);
+    expect(r.after_position).toBe(8);
+    expect(r.position_delta).toBe(10); // positive = moved up
+    expect(r.clicks).toBe(40);
+    expect(r.impressions).toBe(900);
+  });
+  test('new article: before falls back to sitewide position (another page ranked)', () => {
+    const r = queryLift({
+      baseline: { page: { position: null }, site: { position: 22 } },
+      window: { page: { position: 6, clicks: 12, impressions: 300 } },
+    });
+    expect(r.before_position).toBe(22);
+    expect(r.position_delta).toBe(16);
+  });
+  test('site was not ranking at all → before null, delta null', () => {
+    const r = queryLift({
+      baseline: { page: { position: null }, site: { position: null } },
+      window: { page: { position: 7, clicks: 5, impressions: 100 } },
+    });
+    expect(r.before_position).toBeNull();
+    expect(r.after_position).toBe(7);
+    expect(r.position_delta).toBeNull();
+  });
+  test('no data at all → all nulls / zeros', () => {
+    const r = queryLift({});
+    expect(r.before_position).toBeNull();
+    expect(r.after_position).toBeNull();
+    expect(r.position_delta).toBeNull();
+    expect(r.clicks).toBe(0);
+  });
+});
+
+describe('domainFromUrl', () => {
+  test('strips www and handles bad input', () => {
+    expect(domainFromUrl('https://www.wavespestcontrol.com/blog/x/')).toBe('wavespestcontrol.com');
+    expect(domainFromUrl('/blog/relative/')).toBeNull();
+  });
+});
 
 describe('aeoVerdict — answer-engine visibility feedback', () => {
   test('too few observation days → insufficient_data', () => {
@@ -184,7 +248,9 @@ describe('sweepNewlyLive', () => {
             astro_pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/124',
             completed_at: new Date('2026-05-28T09:00:00Z'),
             brief_target_url: '/blog/pr-test/',
+            brief_target_keyword: 'Bed Bug Treatment Bradenton',
             opportunity_page_url: null,
+            opportunity_query: 'bed bug treatment bradenton',
             draft_payload: JSON.stringify({ url: '/blog/pr-test/' }),
           }],
           firstResult: { bucket: 'decay_refresh' },
@@ -215,6 +281,13 @@ describe('sweepNewlyLive', () => {
       page_url: '/blog/pr-test/',
       bucket: 'decay_refresh',
     }));
+    // Target-keyword + mined query collapse into one frozen cohort entry
+    // (case-insensitive dedupe), each carrying page + site baselines.
+    const cohort = JSON.parse(insertedImpacts[0].query_cohort);
+    expect(cohort).toHaveLength(1);
+    expect(cohort[0].query).toBe('Bed Bug Treatment Bradenton');
+    expect(cohort[0].baseline).toHaveProperty('page');
+    expect(cohort[0].baseline).toHaveProperty('site');
     expect(result).toEqual({ created: 1, scanned: 1 });
   });
 });

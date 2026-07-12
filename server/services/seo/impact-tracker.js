@@ -121,6 +121,51 @@ function computeVerdict({ baseline, window, controlDeltas = [] }) {
 
 // ── GSC aggregation ─────────────────────────────────────────────────
 
+// Cap the frozen cohort: the target keyword + mined query is the signal;
+// anything past a few queries is noise that bloats every measurement sweep.
+const QUERY_COHORT_MAX = 3;
+
+// Normalize raw cohort input (strings or {query} objects, any casing) into a
+// deduped, trimmed list of query strings.
+function normalizeQueryCohort(input) {
+  const seen = new Set();
+  const out = [];
+  for (const entry of Array.isArray(input) ? input : []) {
+    const raw = typeof entry === 'string' ? entry : entry?.query;
+    const query = String(raw || '').trim();
+    if (!query) continue;
+    const key = query.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(query);
+    if (out.length >= QUERY_COHORT_MAX) break;
+  }
+  return out;
+}
+
+function domainFromUrl(pageUrl) {
+  try { return new URL(pageUrl).hostname.replace(/^www\./, ''); } catch { return null; }
+}
+
+/**
+ * Pure: blogr-style before/after view for one cohort query.
+ * "Before" prefers the page's own position for the query; a brand-new page has
+ * none, so fall back to the sitewide position (another page ranked) or null
+ * (site wasn't ranking at all). "After" prefers the page's position so credit
+ * goes to the article, not a sibling page. Positive delta = moved up.
+ */
+function queryLift({ baseline, window: win } = {}) {
+  const before = baseline?.page?.position ?? baseline?.site?.position ?? null;
+  const after = win?.page?.position ?? win?.site?.position ?? null;
+  return {
+    before_position: before == null ? null : Number(before),
+    after_position: after == null ? null : Number(after),
+    position_delta: before == null || after == null ? null : Math.round((Number(before) - Number(after)) * 100) / 100,
+    clicks: Number(win?.page?.clicks) || 0,
+    impressions: Number(win?.page?.impressions) || 0,
+  };
+}
+
 async function aggregatePageMetrics(database, pageUrl, startDate, endDate) {
   const row = await database('gsc_pages')
     .where('page_url', pageUrl)
@@ -136,6 +181,56 @@ async function aggregatePageMetrics(database, pageUrl, startDate, endDate) {
   const position = row?.position == null ? null : Number(row.position);
   const ctr = impressions > 0 ? clicks / impressions : 0;
   return { clicks, impressions, position, ctr };
+}
+
+// Query×page metrics from the daily gsc_query_page_map sync (date_from ==
+// date_to == the day for daily rows).
+async function aggregateQueryPageMetrics(database, pageUrl, query, startDate, endDate) {
+  const row = await database('gsc_query_page_map')
+    .where('page_url', pageUrl)
+    .andWhereRaw('lower(query) = ?', [String(query).toLowerCase()])
+    .andWhere('date_from', '>=', startDate)
+    .andWhere('date_from', '<=', endDate)
+    .first(
+      database.raw('COALESCE(SUM(clicks),0)::int as clicks'),
+      database.raw('COALESCE(SUM(impressions),0)::int as impressions'),
+      database.raw('CASE WHEN SUM(impressions) > 0 THEN SUM(position*impressions)/SUM(impressions) ELSE NULL END as position'),
+    );
+  const clicks = Number(row?.clicks) || 0;
+  const impressions = Number(row?.impressions) || 0;
+  return { clicks, impressions, position: row?.position == null ? null : Number(row.position) };
+}
+
+// Sitewide metrics for a query (any page), scoped to the article's domain so
+// spoke-site rows don't pollute hub numbers.
+async function aggregateSiteQueryMetrics(database, query, domain, startDate, endDate) {
+  let q = database('gsc_queries')
+    .whereRaw('lower(query) = ?', [String(query).toLowerCase()])
+    .andWhere('date', '>=', startDate)
+    .andWhere('date', '<=', endDate);
+  if (domain) q = q.andWhere('domain', domain);
+  const row = await q.first(
+    database.raw('COALESCE(SUM(clicks),0)::int as clicks'),
+    database.raw('COALESCE(SUM(impressions),0)::int as impressions'),
+    database.raw('CASE WHEN SUM(impressions) > 0 THEN SUM(position*impressions)/SUM(impressions) ELSE NULL END as position'),
+  );
+  const clicks = Number(row?.clicks) || 0;
+  const impressions = Number(row?.impressions) || 0;
+  return { clicks, impressions, position: row?.position == null ? null : Number(row.position) };
+}
+
+// Baseline-enriched cohort entries: [{ query, baseline: { page, site } }].
+async function buildQueryCohortBaselines(database, pageUrl, queries, startDate, endDate) {
+  const domain = domainFromUrl(pageUrl);
+  const cohort = [];
+  for (const query of queries) {
+    let page = null;
+    let site = null;
+    try { page = await aggregateQueryPageMetrics(database, pageUrl, query, startDate, endDate); } catch (err) { logger.warn(`[impact-tracker] query-page baseline failed for "${query}": ${err.message}`); }
+    try { site = await aggregateSiteQueryMetrics(database, query, domain, startDate, endDate); } catch (err) { logger.warn(`[impact-tracker] site-query baseline failed for "${query}": ${err.message}`); }
+    cohort.push({ query, baseline: { page, site } });
+  }
+  return cohort;
 }
 
 // ── control-page selection ──────────────────────────────────────────
@@ -195,6 +290,13 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
 
   const measurementStart = etDateString(addETDays(deployedAt, DEPLOY_LAG_DAYS));
 
+  // Freeze the target-query cohort with its own baseline (page-scoped and
+  // sitewide) so the sweep can report blogr-style before/after per query.
+  const cohortQueries = normalizeQueryCohort(queryCohort);
+  const cohort = cohortQueries.length
+    ? await buildQueryCohortBaselines(database, pageUrl, cohortQueries, startDate, endDate)
+    : [];
+
   const ctx = runId ? await aeoContextForRun(database, runId) : { bucket: null, city: null, service: null };
   const bucket = ctx.bucket;
   // For aeo_gap rows, capture which managed mention queries to watch after the
@@ -217,7 +319,7 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
       baseline_clicks: baseline.clicks,
       baseline_position: baseline.position,
       baseline_ctr: baseline.ctr,
-      query_cohort: JSON.stringify(queryCohort || []),
+      query_cohort: JSON.stringify(cohort),
       control_page_urls: controlUrls,
       control_selection_reason: JSON.stringify({ service_category: classRow?.service_category || null, count: controlUrls.length }),
       updated_at: now,
@@ -270,7 +372,9 @@ async function sweepNewlyLive({ db: database = db, now = new Date() } = {}) {
         'r.astro_pr_url',
         'r.completed_at',
         'b.target_url as brief_target_url',
+        'b.target_keyword as brief_target_keyword',
         'q.page_url as opportunity_page_url',
+        'q.query as opportunity_query',
         'r.draft_payload',
       );
   } catch (err) {
@@ -297,6 +401,7 @@ async function sweepNewlyLive({ db: database = db, now = new Date() } = {}) {
         runId: r.run_id,
         pageUrl,
         deployedAt: prInfo?.merged_at || r.completed_at || now,
+        queryCohort: [r.brief_target_keyword, r.opportunity_query],
         now,
       });
       created += 1;
@@ -374,7 +479,36 @@ async function measureWindow(database, impactRow, days) {
     impressions: impactRow.baseline_impressions,
   };
   const verdict = computeVerdict({ baseline, window: page, controlDeltas });
-  return { page, controlDeltas, verdict };
+
+  // Target-query view (display only — the diff-in-diff verdict above stays
+  // the authoritative call). One entry per frozen cohort query.
+  const targetQueries = await measureQueryCohort(database, impactRow, start, end);
+
+  return { page, controlDeltas, verdict, targetQueries };
+}
+
+async function measureQueryCohort(database, impactRow, start, end) {
+  let cohort = [];
+  try {
+    cohort = Array.isArray(impactRow.query_cohort)
+      ? impactRow.query_cohort
+      : JSON.parse(impactRow.query_cohort || '[]');
+  } catch { cohort = []; }
+  if (!cohort.length) return [];
+
+  const domain = domainFromUrl(impactRow.page_url);
+  const out = [];
+  for (const entry of cohort) {
+    const query = typeof entry === 'string' ? entry : entry?.query;
+    if (!query) continue;
+    const baseline = (entry && typeof entry === 'object' && entry.baseline) || null;
+    let page = null;
+    let site = null;
+    try { page = await aggregateQueryPageMetrics(database, impactRow.page_url, query, start, end); } catch (err) { logger.warn(`[impact-tracker] query-page window failed for "${query}": ${err.message}`); }
+    try { site = await aggregateSiteQueryMetrics(database, query, domain, start, end); } catch (err) { logger.warn(`[impact-tracker] site-query window failed for "${query}": ${err.message}`); }
+    out.push({ query, ...queryLift({ baseline, window: { page, site } }) });
+  }
+  return out;
 }
 
 /**
@@ -403,7 +537,7 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
 
     if (!row.checked_14d_at && today >= day14) {
       const r = await measureWindow(database, row, 14);
-      patch.metrics_14d = JSON.stringify(r.page);
+      patch.metrics_14d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_14d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_14d_at = now;
       // 14d sets a provisional verdict.
@@ -414,7 +548,7 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
     }
     if (!row.checked_21d_at && today >= day21) {
       const r = await measureWindow(database, row, 21);
-      patch.metrics_21d = JSON.stringify(r.page);
+      patch.metrics_21d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_21d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_21d_at = now;
       // 21d is the confirmed verdict.
@@ -527,7 +661,7 @@ module.exports = {
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
-  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict },
+  _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,

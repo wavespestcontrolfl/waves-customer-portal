@@ -240,6 +240,89 @@ router.post('/autonomous/review/:id/decision', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/content/autonomous/impact?limit=100
+// Closed-loop "proof of ranking" view over content_optimization_impact: one
+// row per published optimization with its frozen target-query cohort, the
+// 14d/21d before/after query positions, clicks earned, and the diff-in-diff
+// verdict. Read-only reporting — verdict math lives in the impact tracker.
+router.get('/autonomous/impact', async (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 250);
+    const rows = await db('content_optimization_impact as i')
+      .leftJoin('autonomous_runs as r', 'i.run_id', 'r.id')
+      .leftJoin('content_briefs as b', 'r.brief_id', 'b.id')
+      .orderBy(db.raw('COALESCE(i.deployed_at, i.created_at)'), 'desc')
+      .limit(limit)
+      .select(
+        'i.*',
+        'r.action_type',
+        'r.draft_payload',
+        'b.target_keyword as brief_target_keyword',
+      );
+
+    const items = rows.map(shapeImpactItem);
+    const measured = items.filter((it) => it.latest_window);
+    const verdictCounts = { improved: 0, neutral: 0, regressed: 0, insufficient_data: 0 };
+    for (const it of measured) {
+      if (it.verdict && verdictCounts[it.verdict] != null) verdictCounts[it.verdict] += 1;
+    }
+    const totals = {
+      tracked: items.length,
+      measured: measured.length,
+      awaiting_measurement: items.length - measured.length,
+      verdicts: verdictCounts,
+      window_clicks: measured.reduce((sum, it) => sum + (Number(it.latest_window?.clicks) || 0), 0),
+      window_impressions: measured.reduce((sum, it) => sum + (Number(it.latest_window?.impressions) || 0), 0),
+    };
+    res.json({ items, totals });
+  } catch (err) { next(err); }
+});
+
+function parseMaybeJson(value, fallback) {
+  if (value == null) return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function shapeImpactItem(row) {
+  const draft = parseMaybeJson(row.draft_payload, {});
+  const cohort = parseMaybeJson(row.query_cohort, []);
+  const metrics21 = row.checked_21d_at ? parseMaybeJson(row.metrics_21d, null) : null;
+  const metrics14 = row.checked_14d_at ? parseMaybeJson(row.metrics_14d, null) : null;
+  const latest = metrics21 || metrics14;
+  const primaryQuery = (Array.isArray(cohort) && cohort[0]?.query) || row.brief_target_keyword || null;
+
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    page_url: row.page_url,
+    title: draft?.title || draft?.frontmatter?.title || null,
+    action_type: row.action_type || null,
+    bucket: row.bucket || null,
+    deployed_at: row.deployed_at,
+    measurement_start: row.measurement_start,
+    target_query: primaryQuery,
+    target_queries: latest?.target_queries || [],
+    baseline: {
+      position: row.baseline_position == null ? null : Number(row.baseline_position),
+      clicks: Number(row.baseline_clicks) || 0,
+      impressions: Number(row.baseline_impressions) || 0,
+    },
+    latest_window: latest
+      ? {
+        days: metrics21 ? 21 : 14,
+        position: latest.position == null ? null : Number(latest.position),
+        clicks: Number(latest.clicks) || 0,
+        impressions: Number(latest.impressions) || 0,
+      }
+      : null,
+    verdict: row.verdict || null,
+    verdict_confidence: row.verdict_confidence == null ? null : Number(row.verdict_confidence),
+    estimated_lift_position: row.estimated_lift_position == null ? null : Number(row.estimated_lift_position),
+    estimated_lift_clicks_pct: row.estimated_lift_clicks_pct == null ? null : Number(row.estimated_lift_clicks_pct),
+  };
+}
+
 // POST /api/admin/content/autonomous/run-now
 // Owner-triggered single cycle of the autonomous content engine on the
 // deployed server (which has DB + GitHub + Anthropic creds) — the same work
