@@ -809,3 +809,12 @@ review.
   extra work defaults to $0-documentation unless the owner flags it
   billable at completion. Payer-routed components never merge with
   customer-responsible ones.
+- **Q13 (comms windows, F1):** caps accepted — recurring = since last
+  completed visit of the service line, capped 120 days; one-time = since
+  job origin, capped 180 days. Checkbox defaults CHECKED.
+- **Q14 (program episodes, G1/G2):** episode gap 120 days; K=3 prior
+  visits in the AI digest; digest ALWAYS-ON (not behind the comms toggle).
+- **Q15 (prep + coverage in customer copy, H):** tech-context only at v1 —
+  customer reports never name prep-send dates or coverage lines; revisit
+  after Phase H ships. No in-flight prep docs named for the H1 registry at
+  ratification time.
