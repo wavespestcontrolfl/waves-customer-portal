@@ -152,7 +152,9 @@ const UNAMBIGUOUS_DISPARAGEMENT_SRC = '(?:dishonest|untrustworthy|incompetent|ov
 // are the accusation's denial, not the accusation.
 // without/zero are negators here too — "Waves: zero hidden fees" is a denial
 // (Codex r18 on #2633).
-const NON_NEGATED_WORD = "(?!(?:never|not|no|without|zero|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
+// Emphatic idioms pass through the gap — "Waves not only charges hidden
+// fees" / "no doubt charges" assert the accusation (Codex r28 on #2633).
+const NON_NEGATED_WORD = "(?!(?:never|not(?!\\s+(?:only|just)\\b)|no(?!\\s+doubt\\b)|without(?!\\s+(?:a\\s+)?(?:doubt|question)\\b)|zero|don'?t|doesn'?t|didn'?t|won'?t|wouldn'?t|can'?t|cannot|hardly|rarely|seldom)\\b)[\\w'’]+";
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Gap words exclude category-scoping prepositions: "hidden fees IN pest
@@ -325,7 +327,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
 // The lookbehind drops weather/physics compounds in ANY case — "Heat
 // Waves Are the #1 Stressor" is title-cased educational copy (Codex r26
 // on #2633).
-const OWN_BRAND_ANCHOR = "(?<!\\b[Hh][Ee][Aa][Tt]\\s)(?<!\\b[Cc][Oo][Ll][Dd]\\s)(?<!\\b[Tt][Ii][Dd][Aa][Ll]\\s)(?<!\\b[Oo][Cc][Ee][Aa][Nn]\\s)(?<!\\b[Ss][Oo][Uu][Nn][Dd]\\s)(?<!\\b[Ss][Hh][Oo][Cc][Kk]\\s)(?<!\\b[Tt][Rr][Oo][Pp][Ii][Cc][Aa][Ll]\\s)(?<!\\b[Ss][Tt][Oo][Rr][Mm]\\s)(?<!\\b[Rr][Oo][Gg][Uu][Ee]\\s)(?<!\\b[Rr][Aa][Dd][Ii][Oo]\\s)\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
+const OWN_BRAND_ANCHOR = "(?<!\\b(?:[Hh][Ee][Aa][Tt]|[Cc][Oo][Ll][Dd]|[Tt][Ii][Dd][Aa][Ll]|[Oo][Cc][Ee][Aa][Nn]|[Ss][Oo][Uu][Nn][Dd]|[Ss][Hh][Oo][Cc][Kk]|[Tt][Rr][Oo][Pp][Ii][Cc][Aa][Ll]|[Ss][Tt][Oo][Rr][Mm]|[Rr][Oo][Gg][Uu][Ee]|[Rr][Aa][Dd][Ii][Oo]|[Ee][Aa][Ss][Tt][Ee][Rr][Ll][Yy]|[Ww][Ee][Ss][Tt][Ee][Rr][Ll][Yy]|[Rr][Oo][Ss][Ss][Bb][Yy]|[Kk][Ee][Ll][Vv][Ii][Nn]|[Gg][Rr][Aa][Vv][Ii][Tt][Yy]|[Pp][Ll][Aa][Nn][Ee][Tt][Aa][Rr][Yy]|[Mm][Oo][Nn][Ss][Oo][Oo][Nn]|[Ss][Ee][Ii][Ss][Mm][Ii][Cc]|[Pp][Rr][Ee][Ss][Ss][Uu][Rr][Ee]|[Rr][Aa][Ii][Nn]|[Ww][Ii][Nn][Dd])\\s)\\bW(?:aves|AVES)\\b(?!\\s+of\\b)(?:\\s+[Pp][Ee][Ss][Tt]\\s+[Cc][Oo][Nn][Tt][Rr][Oo][Ll])?(?:['’]s?)?";
 // Curated heading descriptors may sit between the brand and the separator —
 // "Waves Review: Hidden fees", "Waves billing: hidden fees" (Codex r21 on
 // #2633). Curated, not free words: arbitrary hops would re-create the
@@ -615,8 +617,9 @@ function finding(severity, code, message) {
 // Warning verbs join the recommendation exception — "No one should IGNORE
 // hidden fees after choosing X" asserts the fees (Codex r24 on #2633).
 // Emphatic idioms are not denials — "Without a doubt, hidden fees from X
-// are common" asserts the claim (Codex r27 on #2633).
-const SENTENCE_NEGATOR_RE = /\b(?:no(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+// are common" asserts the claim (Codex r27 on #2633). "no(?!\.)": the
+// "No. 1" ordinal abbreviation is never a negator.
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -641,8 +644,14 @@ function spanUnnegated(m) {
 // "Waves Pest Control charges hidden fees" must block in a plain no-table
 // draft exactly as it does beside a comparison table (Codex r25 on #2633).
 function scanOwnBrandDisparagementArms(scanText) {
-  const joined = scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
-  if (joined) return joined;
+  // Sentence-guarded and iterated — "No one calls Waves a scam" is a
+  // denial, and a denied early match must not shadow a later live one
+  // (Codex r28 on #2633).
+  const joinedRe = new RegExp(OWN_BRAND_DISPARAGEMENT_RE.source, 'gi');
+  let joined;
+  while ((joined = joinedRe.exec(scanText)) !== null) {
+    if (!sentenceHasNegator(scanText, joined.index, joined[0].length)) return joined;
+  }
   // Case-sensitive brand anchor + case-insensitive object-anchored tail
   // ("Waves: Hidden fees"). EVERY anchor is checked: a benign earlier
   // heading must not shadow a later accusation (Codex r11).
@@ -982,7 +991,16 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
       `Draft contains disparaging language about Waves itself ("${ownDisp[0].trim()}"). State attributes, never insults — in prose, the title, and the meta.`));
   }
-  const ownRank = scanText.match(NUMERIC_SELF_RANKING_RE) || scanOwnBrandRankingArms(scanText);
+  let ownRank = null;
+  {
+    // Sentence-guarded and iterated, same as the table path (Codex r28).
+    const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
+    let nsm;
+    while ((nsm = numSelfRe.exec(scanText)) !== null) {
+      if (!sentenceHasNegator(scanText, nsm.index, nsm[0].length)) { ownRank = nsm; break; }
+    }
+  }
+  if (!ownRank) ownRank = scanOwnBrandRankingArms(scanText);
   if (ownRank) {
     findings.push(finding('P1', 'COMPARISON_RIGGED_RANKING',
       `Draft uses self-ranking framing ("${ownRank[0].trim()}"). Present neutral trade-offs — do not declare a winner, in prose, the title, or the meta.`));
@@ -1246,10 +1264,18 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // protection beside a table too (Codex r27); the contrastive/warning/
   // recommendation exclusions in SENTENCE_NEGATOR_RE keep real accusations
   // ("Not only that, companies scam customers" still blocks).
+  // A denied early match must not shadow a later live accusation — "No
+  // chains are shady. Providers are incompetent." (Codex r28): iterate
+  // every match, skipping negated sentences.
   let disp = null;
-  const pd = scanText.match(PROVIDER_DISPARAGEMENT_RE) || scanText.match(DIRECTED_DISPARAGEMENT_RE);
-  if (pd && !sentenceHasNegator(scanText, pd.index, pd[0].length)) disp = pd;
-  if (!disp) disp = scanText.match(OWN_BRAND_DISPARAGEMENT_RE);
+  for (const re of [PROVIDER_DISPARAGEMENT_RE, DIRECTED_DISPARAGEMENT_RE, OWN_BRAND_DISPARAGEMENT_RE]) {
+    const g = new RegExp(re.source, 'gi');
+    let m;
+    while ((m = g.exec(scanText)) !== null) {
+      if (!sentenceHasNegator(scanText, m.index, m[0].length)) { disp = m; break; }
+    }
+    if (disp) break;
+  }
   if (!disp) {
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
@@ -1381,9 +1407,17 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // "#1 hidden breeding site" is educational idiom, not a declared winner
   // (PROD 2026-07-11 false positives).
   let rank = scanText.match(SELF_RANKING_RE)
-    || scanText.match(NUMERIC_SELF_RANKING_RE)
     || (metaText ? metaText.match(NUMERIC_ONE_RE) : null)
     || blocks.map((b) => b.match(NUMERIC_ONE_RE)).find(Boolean);
+  if (!rank) {
+    // Sentence-guarded and iterated — "No one rated us #1" is a denial
+    // (Codex r28 on #2633).
+    const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
+    let nsm;
+    while ((nsm = numSelfRe.exec(scanText)) !== null) {
+      if (!sentenceHasNegator(scanText, nsm.index, nsm[0].length)) { rank = nsm; break; }
+    }
+  }
   if (!rank) {
     // Case-sensitive brand anchor + case-insensitive number tail ("Choose
     // WAVES, The #1 choice") — see the OWN_BRAND_ANCHOR comment block.

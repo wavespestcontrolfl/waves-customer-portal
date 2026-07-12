@@ -1114,6 +1114,34 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-28 findings (#2633) ──
+
+  test('Codex r28: denied early matches do not shadow later accusations', () => {
+    const r = gate.evaluate({ body: `No chains are shady. Providers are incompetent.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r28: subject-negated insult and ranking denials stay clean', () => {
+    for (const body of ['No one calls Waves a scam.', `No one calls Waves a scam.\n\n${CATEGORY_TABLE}`, 'No one rated us #1.', 'No reviewers call us #1.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
+  test('Codex r28: meteorology wave compounds stay educational', () => {
+    for (const prose of ['Easterly Waves Are the #1 Rain Trigger.', 'Rossby Waves are lousy for forecasts.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING' || (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0'))).toBe(false);
+    }
+  });
+
+  test('Codex r28: emphatic gaps before accusation verbs keep the P0', () => {
+    for (const prose of ['Waves not only charges hidden fees, it hides them.', 'Waves no doubt charges hidden fees.', 'Providers without question charge hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-27 findings (#2633) ──
 
   test('Codex r27: denial-lead provider copy stays clean beside a table; accusations still block', () => {
