@@ -2756,7 +2756,7 @@ const RECURRING_CADENCE_RE = /\b(?:bi[- ]?)?monthly\b|\bquarterly\b|\bsemi[- ]?a
 // "we get/see/have fire ants every month" describes pressure, not a plan
 // ask. "have" is pressure ONLY as possession — request idioms ("can I
 // have…", "want to have…") are excluded by lookbehind.
-const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:want|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in)|(?:was|were|used to be) (?:on|with|getting|doing)|(?:i'?m|we'?re|am|are|currently|already|still) (?:on|with|using))\b[^.?!]{0,40}$/i;
+const PEST_PRESSURE_BEFORE_RE = /\b(?:get(?:ting)?|got|has|(?<!\b(?:can|could|may) (?:i|we) )(?<!\b(?:do|does|did) (?:you|they) )(?<!\byou guys )(?<!\b(?:want|need|like|love|prefer)(?:ed)? to )have|had|having|been|see(?:ing|n)?|notice(?:d|ing)?|noticing|find(?:ing)?|found|spot(?:ted|ting)?|deal(?:ing)? with|show(?:s|ing)? up|come(?:s|ing)? (?:back|out of|in)|(?:was|were|used to be) (?:on|with|getting|doing)|(?:i'?m|we'?re|am|are|currently|already|still) (?:on|with|using))\b[^.?!]{0,40}$/i;
 // ...but a request verb AFTER the pressure verb re-frames the clause as an
 // ask: "I HAVE ants and WANT monthly service".
 const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me| us)? up|set(?:ting)? up|start|get started|schedule|book|interested in|looking for|put (?:me|us) on)\b/i;
@@ -2769,7 +2769,7 @@ const REQUEST_VERB_RE = /\b(?:want(?:s|ed)?|need(?:s)?|prefer|sign(?:ing)?(?: me
 // The negated-want gap is clause-bounded (no ;) and must not cross another
 // "want/need" — "I don't want just a one-time; I want a package" pivots to a
 // request and is NOT a decline.
-const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plans?|packages?|memberships?|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:(?:service|maintenance|pest|treatment) )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
+const RECURRING_DECLINED_RE = /\b(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|won'?t|not) (?:want|need|interested in|looking for)\b(?:(?!\b(?:want|need)\b)[^.?!;]){0,50}\b(?:recurring|plans?|packages?|memberships?|ongoing|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)|\b(?:no|without|skip(?:ping)?) (?:a |the |any )?(?:(?:service|maintenance|pest|treatment) )?(?:recurring|plans?|packages?|memberships?|quarterly|(?:bi[- ]?)?monthly|semi[- ]?annual(?:ly)?)\b|(?<!\b(?:not|than)\s)(?<!\b(?:don'?t|do not|doesn'?t|won'?t|didn'?t) (?:want|need) )\bjust (?:a |the )?one[- ]?time\b/i;
 // A decline whose object is ONLY a cadence ("no monthly", "don't want
 // quarterly") excludes that cadence, it does not decline recurring service —
 // the negated-cadence filter already keeps it from being chosen. Only a
@@ -2779,7 +2779,7 @@ const PROGRAM_DECLINE_RE = /\b(?:recurring|plans?|packages?|memberships?|ongoing
 
 // A cadence word the caller is EXCLUDING ("but not monthly", "instead of
 // monthly") must not count as their chosen cadence.
-const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|instead of|(?:don'?t|do not|can'?t|cannot|won'?t) (?:want|need|do|offer|provide|carry)|(?:not|never) (?:interested in|looking for|into)|no longer (?:want|need|on|interested in))\s+(?:the |a |any )?|\b(?:not|no|never|(?:don'?t|do not) want)\s+(?:the |a |any )?(?:(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?),? (?:or|nor|and) )$/i;
+const NEGATED_CADENCE_BEFORE_RE = /(?:\b(?:not|no|never|without|rather than|instead of|(?:don'?t|do not|doesn'?t|does not|isn'?t|is not|can'?t|cannot|won'?t) (?:want|need|do|offer|provide|carry|interested in)|(?:not|never) (?:interested in|looking for|into)|no longer (?:want|need|on|interested in))\s+(?:the |a |any )?|\b(?:not|no|never|(?:don'?t|do not) want)\s+(?:the |a |any )?(?:(?:bi[- ]?)?monthly|quarterly|semi[- ]?annual(?:ly)?),? (?:or|nor|and) )$/i;
 // Billing cadence is not service cadence: "can I PAY MONTHLY for the one-time
 // treatment?" is a payment-terms question.
 const PAYMENT_CONTEXT_BEFORE_RE = /\b(?:pay(?:ing)?|billed?|billing|charged?|payments?|installments?|invoiced?)\b[^.?!]{0,15}$/i;
@@ -2792,7 +2792,9 @@ function serviceCadenceMatch(re, text) {
   let m;
   while ((m = scan.exec(text))) {
     const before = text.slice(Math.max(0, m.index - 60), m.index);
-    if (!NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
+    const after = text.slice(m.index + m[0].length, m.index + m[0].length + 20);
+    const billingNounAfter = /^\s{0,2}(?:payments?|installments?|billing|invoices?|price|pricing|cost)\b/i.test(after);
+    if (!billingNounAfter && !NEGATED_CADENCE_BEFORE_RE.test(before) && !PAYMENT_CONTEXT_BEFORE_RE.test(before)) {
       const pressure = before.match(PEST_PRESSURE_BEFORE_RE);
       if (!pressure || REQUEST_VERB_RE.test(before.slice(pressure.index))) return true;
     }
@@ -2946,7 +2948,14 @@ function applyRecurringIntentDefault(extracted, transcription, bookableServiceNa
   // not let the (negated) bi-monthly mention erase the monthly choice.
   const hits = families.filter((f) => serviceCadenceMatch(f.re, cadenceText)
     && !(f.veto && nonNegatedMatch(f.veto, cadenceText)));
-  const chosen = hits.length === 1 ? hits[0] : families.find((f) => f.key === 'quarterly');
+  // The default must never be a cadence the caller explicitly EXCLUDED ("a
+  // plan, but no quarterly"): walk the ladder to the first family whose
+  // tokens aren't negated in the text (mentioned somewhere but never
+  // positively — a positive hit already cleared it).
+  const negatedInText = (f) => new RegExp(f.re.source, 'i').test(cadenceText) && !serviceCadenceMatch(f.re, cadenceText);
+  const ladder = ['quarterly', 'bimonthly', 'semiannual', 'monthly']
+    .map((k) => families.find((f) => f.key === k));
+  const chosen = hits.length === 1 ? hits[0] : (ladder.find((f) => !negatedInText(f)) || ladder[0]);
   const programName = (family) => resolveProgramName(family.key, family.fallback, bookableServiceNames);
 
   const retarget = (isSingular, isRecurring, current) => {

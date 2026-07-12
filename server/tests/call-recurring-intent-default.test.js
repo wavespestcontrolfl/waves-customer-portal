@@ -435,6 +435,34 @@ describe('applyRecurringIntentDefault', () => {
     expect(out.matched_service).toBe('Quarterly Pest Control Service');
   });
 
+  test('the default is never a cadence the caller excluded', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I want a plan, but no quarterly.').matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), "Caller: I want a package, but not monthly or quarterly.").matched_service)
+      .toBe('Bi-Monthly Pest Control Service');
+  });
+
+  test('"do you have <cadence> service?" is an inquiry, not possession', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: do you have quarterly service?').matched_service)
+      .toBe('Quarterly Pest Control Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: I need to have monthly service.').matched_service)
+      .toBe('Monthly Pest Control Service');
+  });
+
+  test('third-person opt-outs decline', () => {
+    expect(applyRecurringIntentDefault(lead(), "Caller: my wife doesn't want a plan, just the nest.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), "Caller: she isn't interested in recurring, one visit only.").matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('post-cadence billing nouns stay billing', () => {
+    expect(applyRecurringIntentDefault(lead(), 'Caller: do you offer monthly payments for the wasp treatment?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+    expect(applyRecurringIntentDefault(lead(), 'Caller: what is the quarterly price if I just do the one-time?').matched_service)
+      .toBe('Bee / Wasp Nest Removal Service');
+  });
+
   test('unlabelled transcripts fail open (whole text scanned) and already-recurring stays put', () => {
     expect(applyRecurringIntentDefault(lead(), 'I want a quarterly package for the ants').matched_service)
       .toBe('Quarterly Pest Control Service');
