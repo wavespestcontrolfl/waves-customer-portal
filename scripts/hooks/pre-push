@@ -20,11 +20,13 @@
 #   CODEX_REVIEW_TIMEOUT=300           — per-ref codex budget in seconds (default 180)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
 #
-# Failure policy: if Codex itself errors, hangs past CODEX_REVIEW_TIMEOUT,
-# the network is down, or jq is missing, the hook prints a warning and exits
-# 0. We do NOT want infra flakiness to block pushes — this auditor is
-# advisory backup, not a gate. A hung `codex exec` (auth prompt in a non-TTY
-# hook, dead network) is killed by a watchdog and the push proceeds.
+# Failure policy: this auditor is advisory backup, not a gate — infra
+# flakiness must never block a push. Preflight failures (no codex CLI, no
+# jq, missing schema, unknown base) warn and pass the whole push. Per-ref
+# failures (codex errors, hangs past CODEX_REVIEW_TIMEOUT, bad output) skip
+# just that ref so a multi-ref push keeps its aggregate P0 verdict; a hung
+# `codex exec` (auth prompt in a non-TTY hook, dead network) is killed by a
+# watchdog. If no ref could be audited, the push proceeds.
 
 set -u
 
@@ -185,6 +187,10 @@ for i in "${!REF_SHAS[@]}"; do
 
   # Run codex under a watchdog: a hook has no TTY, so a codex that stalls
   # (auth prompt, dead network) would otherwise hang the push forever.
+  # `set -m` gives each background job its own process group, so the kills
+  # below take out codex's descendants and the watchdog's sleep too — not
+  # just the leader PID (orphans under pid 1 otherwise outlive the hook).
+  set -m
   codex exec \
         --sandbox read-only \
         --skip-git-repo-check \
@@ -193,38 +199,44 @@ for i in "${!REF_SHAS[@]}"; do
         - \
         < "$PROMPT_FILE" >"$TMPDIR_RUN/codex-$i.stdout" 2>"$TMPDIR_RUN/codex-$i.stderr" &
   CODEX_PID=$!
-  # stdio detached: the killed subshell leaves its sleep behind as an orphan,
-  # which must not hold the hook's stdout/stderr pipes open.
+  # stdio detached: on timeout the subshell must not hold the hook's stdout/
+  # stderr pipes open past the hook's own exit.
   (
     sleep "$CODEX_TIMEOUT"
     touch "$TMPDIR_RUN/timed-out-$i"
-    kill -TERM "$CODEX_PID" 2>/dev/null
+    kill -TERM -"$CODEX_PID" 2>/dev/null
     sleep 5
-    kill -KILL "$CODEX_PID" 2>/dev/null
+    kill -KILL -"$CODEX_PID" 2>/dev/null
   ) >/dev/null 2>&1 &
   WATCHDOG_PID=$!
+  set +m
   CODEX_STATUS=0
   wait "$CODEX_PID" || CODEX_STATUS=$?
-  kill "$WATCHDOG_PID" 2>/dev/null
+  kill -TERM -"$WATCHDOG_PID" 2>/dev/null
   wait "$WATCHDOG_PID" 2>/dev/null
 
+  # Timeouts and codex failures skip only THIS ref: a multi-ref push keeps
+  # its aggregate verdict, so a P0 already found on an earlier ref still
+  # blocks even if a later ref's audit dies.
   if [ "$CODEX_STATUS" -ne 0 ]; then
     if [ -f "$TMPDIR_RUN/timed-out-$i" ]; then
-      warn_and_pass "codex timed out after ${CODEX_TIMEOUT}s on $AUDIT_LABEL — push allowed (set CODEX_REVIEW_TIMEOUT to adjust)."
+      echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): codex timed out after ${CODEX_TIMEOUT}s — skipping this ref (set CODEX_REVIEW_TIMEOUT to adjust)." >&2
+      continue
     fi
-    echo "[codex-review] codex exec failed for $AUDIT_LABEL:" >&2
+    echo "[codex-review] codex exec failed for $AUDIT_LABEL — skipping this ref:" >&2
     sed -n '1,40p' "$TMPDIR_RUN/codex-$i.stderr" >&2
-    warn_and_pass "codex infra failure — push allowed."
+    continue
   fi
 
   if [ ! -s "$OUT_FILE" ]; then
-    warn_and_pass "codex produced no output for $AUDIT_LABEL — push allowed."
+    echo "[codex-review] codex produced no output for $AUDIT_LABEL — skipping this ref." >&2
+    continue
   fi
 
   if ! jq empty "$OUT_FILE" >/dev/null 2>&1; then
-    echo "[codex-review] codex output for $AUDIT_LABEL is not valid JSON:" >&2
+    echo "[codex-review] codex output for $AUDIT_LABEL is not valid JSON — skipping this ref:" >&2
     sed -n '1,20p' "$OUT_FILE" >&2
-    warn_and_pass "unparseable output — push allowed."
+    continue
   fi
 
   AUDITED=$((AUDITED + 1))
