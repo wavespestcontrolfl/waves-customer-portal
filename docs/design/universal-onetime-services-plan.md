@@ -535,6 +535,17 @@ assembler, sectioned, each section independently scoped and toggleable):**
    pre-framed, and **if no prep was ever sent, the draft must not imply the
    customer ignored instructions.** Registry-driven off the `prep.*`
    convention so new prep docs appear without code changes.
+
+   *Owner direction (2026-07-12 follow-up): prep guides are being expanded,
+   pulled OUT of the contracts/documents lane and INTO the automations flow,
+   delivered as React UIs.* Consequences for H1: the `prep.*` automations
+   registry is the system of record for the resolver — do not build new
+   dependencies on the manual project `send-prep-guide` or the
+   document-templates lane (transition-only); and once prep guides are
+   token-linked React pages, the strip gains a first-class **viewed** signal
+   (report-style page-open tracking), not just SMS link clicks. Sequence H1
+   with (or after) the prep-guide automations/React build so the resolver
+   targets the end-state registry.
 2. **H2 — agreements/coverage context.** Per-visit coverage resolver:
    active termite bond (status, renewal due), rodent exclusion guarantee,
    commercial / lawn & ornamental agreements, signature snapshots — scoped
