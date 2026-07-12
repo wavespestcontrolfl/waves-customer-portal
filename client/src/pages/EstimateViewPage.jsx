@@ -4240,7 +4240,14 @@ export default function EstimateViewPage() {
   // never the bearer token).
   useEffect(() => {
     if (ctaPhase !== 'review' || !reservation) {
-      if (ctaPhase === 'configure') reviewViewedRef.current = false;
+      // Any phase that lands the customer back in the booking flow is a
+      // fresh funnel entry — slot conflicts and expired reservations
+      // re-enter review via a NEW reservation and must count again
+      // (Codex #2681 r1 P3). 'submitting' stays excluded: a failed accept
+      // returning to review is the same review visit, not a new one.
+      if (ctaPhase === 'configure' || ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired') {
+        reviewViewedRef.current = false;
+      }
       return;
     }
     if (reviewViewedRef.current) return;
@@ -4901,7 +4908,15 @@ export default function EstimateViewPage() {
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
                 glassActive={!!glassContent}
-                onStateChange={setInlineCardState}
+                onStateChange={(st) => {
+                  setInlineCardState(st);
+                  // Stripe.js load failure: drop the inline capture so the
+                  // CTA reverts to the plain confirm — handleConfirm's modal
+                  // branch then mints fresh and opens RecurringCardModal,
+                  // which has its own retry UX (Codex #2681 r1 P2). The mint
+                  // guard ref stays set, so the inline form never thrashes.
+                  if (st.loadFailed) setInlineCardIntent(null);
+                }}
               />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent ? 'Confirm booking & save card' : null}

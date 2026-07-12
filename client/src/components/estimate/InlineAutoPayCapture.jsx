@@ -33,10 +33,15 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   const [agreed, setAgreed] = useState(false);
   const [termsOpen, setTermsOpen] = useState(false);
   const [error, setError] = useState(null);
+  // Stripe.js failed to load/mount: reported upward so the parent can drop
+  // the inline capture and fall back to the modal path — otherwise the
+  // combined CTA stays disabled forever with no reachable retry
+  // (Codex #2681 r1 P2).
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
-    onStateChange?.({ ready, agreed });
-  }, [ready, agreed, onStateChange]);
+    onStateChange?.({ ready, agreed, loadFailed });
+  }, [ready, agreed, loadFailed, onStateChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,7 +61,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       stripeRef.current = stripe;
       elementsRef.current = elements;
     }).catch(() => {
-      if (!cancelled) setError('Could not load the secure card form. Check your connection and try again.');
+      if (!cancelled) {
+        setError('Could not load the secure card form. Check your connection and try again.');
+        setLoadFailed(true);
+      }
     });
     return () => { cancelled = true; };
   }, [intent, loadStripeSdk, glassActive]);
