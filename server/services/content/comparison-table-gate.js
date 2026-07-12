@@ -124,10 +124,11 @@ const NON_NEGATED_WORD = "(?!(?:never|not|no|don'?t|doesn'?t|didn'?t|won'?t|woul
 const NOUN_VERB_GAP = `(?:\\s*,?\\s+${NON_NEGATED_WORD}){0,3}\\s*,?\\s+`;
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  // Linking verbs incl. modal/hedged forms ("companies may be dishonest",
-  // Codex r10 on #2633). Post-verb gap words are negator-excluded too
+  // Linking verbs incl. modal/hedged and sensory forms ("companies may be
+  // dishonest", "providers sound shady" — Codex r10/r11 on #2633; same set
+  // as the own-brand arm). Post-verb gap words are negator-excluded too
   // ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seem|seems|tend to be|can be|get|got|(?:may|might|could)\\s+be|appears?\\s+to\\s+be|seems?\\s+to\\s+be)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appears?\\s+to\\s+be)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
@@ -189,6 +190,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // window (Codex r5 on #2633). The verb must still be adjacent to the
   // number, so "in heat waves, the #1 breeding site is …" stays clean.
   `\\bwaves\\b(?:'s)?[^.!?\\n]{0,120}?\\b(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  // Provider-noun subject: "pest control companies are #1", "providers
+  // rank #1" (Codex r11 on #2633).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|was|were|ranks?|ranked|remains?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
 // Own-brand SEPARATOR and appositive-#1 forms keep a case-SENSITIVE brand
@@ -881,9 +885,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   if (!disp) {
     // Case-sensitive brand anchor + case-insensitive object-anchored tail
     // ("Waves: Hidden fees") — see the OWN_BRAND_ANCHOR comment block.
-    const sepAnchor = scanText.match(OWN_BRAND_SEP_ANCHOR_RE);
-    if (sepAnchor && OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sepAnchor.index + sepAnchor[0].length))) {
-      disp = [scanText.slice(sepAnchor.index, sepAnchor.index + sepAnchor[0].length + 40)];
+    // EVERY anchor is checked: a benign earlier heading ("Waves — shady
+    // foliage guide") must not shadow a later accusation (Codex r11).
+    const sepAnchorRe = new RegExp(OWN_BRAND_SEP_ANCHOR_RE.source, 'g');
+    let sa;
+    while ((sa = sepAnchorRe.exec(scanText)) !== null) {
+      if (OWN_BRAND_SEP_TAIL_RE.test(scanText.slice(sa.index + sa[0].length))) {
+        disp = [scanText.slice(sa.index, sa.index + sa[0].length + 40)];
+        break;
+      }
     }
   }
   if (!disp) {
@@ -927,11 +937,23 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const possessionP0 = new RegExp(
         `${escaped}(?:'s)?\\s+(?:has|have|had|uses?|used|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
+      // Name-confident PERSONIFIED names also get a same-sentence
+      // accusation-object association ("Customers report hidden fees after
+      // choosing Bug Busters" — Codex r11), denial-guarded so "with no
+      // hidden fees" stays clean. Noisy CI captures are excluded — object
+      // proximity on them re-creates the educational false positives.
+      const objAssocP0 = PERSONIFIED_SUFFIX_RE.test(name)
+        ? new RegExp([
+          `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})`,
+          `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
+        ].join('|'), 'i')
+        : null;
       const dm = proseNameText.match(directedP0)
         || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
-        || (sepP0 && proseNameText.match(sepP0));
+        || (sepP0 && proseNameText.match(sepP0))
+        || (objAssocP0 && proseNameText.match(objAssocP0));
       if (dm) { disp = dm; break; }
     }
   }
@@ -952,9 +974,15 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   if (!rank) {
     // Case-sensitive brand anchor + case-insensitive number tail ("Choose
     // WAVES, The #1 choice") — see the OWN_BRAND_ANCHOR comment block.
-    const numAnchor = scanText.match(OWN_BRAND_NUMERIC_ANCHOR_RE);
-    if (numAnchor && OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(numAnchor.index + numAnchor[0].length))) {
-      rank = [scanText.slice(numAnchor.index, numAnchor.index + numAnchor[0].length + 20)];
+    // EVERY anchor is checked (Codex r11): an earlier benign "Waves —
+    // seasonal guide" must not shadow a later self-ranking.
+    const numAnchorRe = new RegExp(OWN_BRAND_NUMERIC_ANCHOR_RE.source, 'g');
+    let na;
+    while ((na = numAnchorRe.exec(scanText)) !== null) {
+      if (OWN_BRAND_NUMERIC_TAIL_RE.test(scanText.slice(na.index + na[0].length))) {
+        rank = [scanText.slice(na.index, na.index + na[0].length + 20)];
+        break;
+      }
     }
   }
   if (!rank) {
@@ -991,12 +1019,18 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // prevention" into a rigged ranking (Codex r4 on #2633).
     if (!rank) {
       for (const name of extraProseNames) {
+        const escaped = escapeForNameRe(name);
         // Appositive-tolerant, like the disparagement path ("Bug Busters,
         // frankly, is #1" — Codex r10 on #2633).
         const selfRank = new RegExp(
-          `${escapeForNameRe(name)}(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+          `${escaped}(?:'s)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?)\\s+(?:(?:still|now|proudly|the)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
         );
-        const rm = proseNameText.match(selfRank);
+        // Object-position idiom: "reviews call Bug Busters the #1 choice"
+        // (Codex r11) — verb-anchored, not proximity.
+        const calledRank = new RegExp(
+          `\\b(?:calls?|called|names?|named|rates?|rated|ranks?|ranked|votes?|voted)\\s+${escaped}\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+        );
+        const rm = proseNameText.match(selfRank) || proseNameText.match(calledRank);
         if (rm) { rank = rm; break; }
       }
     }

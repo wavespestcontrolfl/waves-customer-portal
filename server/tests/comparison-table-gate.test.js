@@ -1114,6 +1114,39 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-11 findings (#2633) ──
+
+  test('Codex r11: a benign earlier own-brand mention does not shadow a later accusation', () => {
+    const disp = gate.evaluate({ body: `Waves — shady foliage guide for damp yards.\n\nWaves: hidden fees on renewals.\n\n${CATEGORY_TABLE}` }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const rank = gate.evaluate({ body: `Waves — seasonal mosquito guide.\n\nChoose Waves, the #1 choice for mosquito control.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+  });
+
+  test('Codex r11: sensory linking verbs at provider nouns block', () => {
+    for (const prose of ['Pest control companies look dishonest to most homeowners.', 'Some providers sound shady on the phone.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r11: provider-noun subjects ranked #1 block', () => {
+    for (const prose of ['Pest control companies are #1.', 'Pest control providers rank #1 in our book.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r11: object-position extra-name shapes block; denials stay clean', () => {
+    const rank = gate.evaluate({ body: `Local reviews call Bug Busters the #1 choice.\n\n${CATEGORY_TABLE}` }, {});
+    expect(rank.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    const disp = gate.evaluate({ body: `Customers report hidden fees after choosing Bug Busters.\n\n${CATEGORY_TABLE}` }, {});
+    expect(disp.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const ok = gate.evaluate({ body: `Bug Busters quotes flat pricing with no hidden fees.\n\n${CATEGORY_TABLE}` }, {});
+    expect(ok.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(ok.pass).toBe(true);
+  });
+
   // ── Codex round-9 tail + round-10 findings (#2633) ──
 
   test('Codex r10: heading-cased own-brand separator accusations block; literal-shade headings stay clean', () => {
