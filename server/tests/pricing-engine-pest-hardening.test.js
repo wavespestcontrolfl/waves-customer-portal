@@ -334,12 +334,11 @@ describe('pest-control pricing hardening', () => {
       visits: 4,
     }));
 
-    expect(priceWDO({ footprint: 2500 }).price).toBe(175);
-    expect(priceWDO({ footprint: 2501 }).price).toBe(200);
-    expect(priceWDO({ footprint: 3500 }).price).toBe(200);
-    expect(priceWDO({ footprint: 3501 }).price).toBe(225);
+    // $250 flat regardless of footprint (owner decision 2026-07-12, Q8).
+    expect(priceWDO({ footprint: 2500 }).price).toBe(250);
+    expect(priceWDO({ footprint: 3501 }).price).toBe(250);
     const fallback = priceWDO({});
-    expect(fallback.price).toBe(175);
+    expect(fallback.price).toBe(250);
     expect(fallback.requiresManualReview).toBe(true);
   });
 

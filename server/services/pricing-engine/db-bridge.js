@@ -1306,6 +1306,25 @@ async function syncConstantsFromDB(dbInstance) {
       if (ot.pest_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.pest = Number(ot.pest_mult);
       if (ot.fungicide_mult != null) constants.ONE_TIME.lawn.treatmentMultipliers.fungicide = Number(ot.fungicide_mult);
     }
+    // onetime_wdo was seeded 20260414000026 but never read — the estimate
+    // engine kept pricing off stale constants while the admin row sat inert
+    // (the Q8 three-way fee disagreement). DB shape {brackets: [{max_sqft,
+    // price}]} maps onto SPECIALTY.wdo.brackets; a terminal max_sqft >=
+    // 999999 becomes Infinity so the sorted-brackets validation (which
+    // requires terminal Infinity) holds. Malformed rows are ignored — the
+    // post-sync validation snapshot-restores on errors anyway.
+    if (Array.isArray(config.onetime_wdo?.brackets) && config.onetime_wdo.brackets.length) {
+      const mapped = config.onetime_wdo.brackets
+        .map((b) => ({
+          maxSqFt: Number(b.max_sqft ?? b.maxSqFt) >= 999999 ? Infinity : Number(b.max_sqft ?? b.maxSqFt),
+          price: r(Number(b.price)),
+        }))
+        .filter((b) => (b.maxSqFt === Infinity || b.maxSqFt > 0) && Number.isFinite(b.price) && b.price > 0)
+        .sort((a, b) => (a.maxSqFt === Infinity ? 1 : b.maxSqFt === Infinity ? -1 : a.maxSqFt - b.maxSqFt));
+      if (mapped.length && mapped[mapped.length - 1].maxSqFt === Infinity) {
+        constants.SPECIALTY.wdo.brackets = mapped;
+      }
+    }
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
