@@ -3938,6 +3938,13 @@ export default function EstimateViewPage() {
     // a double-tap on Confirm must not double-enter the flow — the second
     // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
     if (ctaPhaseRef.current === 'submitting') return;
+    // A fresh 409 exemption from a card/hold intent endpoint that does NOT
+    // itself supersede the deposit (feature_disabled after a kill-switch
+    // flip, payer_check_uncertain during a lookup outage, …) means the
+    // stale /data flags must not suppress the deposit step — consult
+    // /deposit-intent and let the server's live resolution decide (it
+    // 409-exempts when the lane/hold genuinely supersedes) (Codex #2680 r4).
+    let depositConsultForced = false;
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). When a card
     // is required to book this one-time visit and none is captured yet, mint
     // the SetupIntent and open the capture modal; accept continues from the
@@ -3955,7 +3962,10 @@ export default function EstimateViewPage() {
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
-          // Policy says no hold owed — fall through to accept.
+          // Policy says no hold owed — fall through to accept. 'saved_method'
+          // means the hold still stands (a saved card backs it); any other
+          // exemption removes the hold, so the deposit may be owed again.
+          if (body.exemptReason !== 'saved_method') depositConsultForced = true;
         } else if (!r.ok) {
           throw new Error(body.error || 'Could not start the card hold. Please try again.');
         } else {
@@ -3990,6 +4000,12 @@ export default function EstimateViewPage() {
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
+          // Only saved_method_consented / autopay_already_active keep the
+          // lane active at the accept gate (deposit stays superseded); any
+          // other exemption deactivates the lane server-side.
+          if (!['saved_method_consented', 'autopay_already_active'].includes(body.exemptReason)) {
+            depositConsultForced = true;
+          }
         } else if (!r.ok) {
           throw new Error(body.error || 'Could not start the card setup. Please try again.');
         } else {
@@ -4034,7 +4050,7 @@ export default function EstimateViewPage() {
       || (paymentPreference === 'prepay_annual' && depositPolicy?.requiredForPrepay));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.
-    if (depositRequired && !depositPaymentIntentIdRef.current) {
+    if ((depositRequired || depositConsultForced) && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {

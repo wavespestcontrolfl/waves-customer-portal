@@ -2280,9 +2280,14 @@ async function handleSetupIntentSucceeded(setupIntent) {
   // idempotent — an already-enrolled inline run skips as already_enrolled.
   if (setupIntent.metadata?.purpose === 'estimate_recurring_card' && setupIntent.payment_method) {
     const RecurringCards = require('../services/recurring-card-on-file');
-    if (!RecurringCards.isRecurringCardOnFileEnabled()) return;
     const estimate = await db('estimates').where({ id: setupIntent.metadata.estimate_id }).first();
     if (!estimate) return;
+    // Kill switch stops NEW captures — it must not strand committed ones
+    // (r4 P2): an accepted estimate already suppressed its pay link
+    // expecting Auto Pay, so this durable recovery still enrolls even when
+    // the flag is off. Flag-off + not-yet-accepted acks and drops (no
+    // retry loop for a killed feature).
+    if (!RecurringCards.isRecurringCardOnFileEnabled() && estimate.status !== 'accepted') return;
     // This event normally arrives BEFORE the accept commits (the customer
     // confirms the card, then clicks through the deposit + accept). Acking it
     // then would burn the only durable retry this capture has — a deploy/crash

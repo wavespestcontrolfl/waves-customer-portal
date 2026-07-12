@@ -7517,7 +7517,7 @@ router.put('/:token/accept', async (req, res, next) => {
         });
       }
       cardHoldVerification = await CardHolds.verifyCardHoldIntent({ estimate, setupIntentId: cardHoldSetupIntentId });
-      if (!cardHoldVerification.ok && estimate.customer_id) {
+      if (!cardHoldVerification.ok) {
         // Auto-satisfy (spec §3.2: existing customers with a saved card are
         // never re-asked — the runbook flagged members being re-prompted).
         // A saved CARD with an enrollment-qualifying consent backs the hold
@@ -7525,10 +7525,20 @@ router.put('/:token/accept', async (req, res, next) => {
         // completion/no-show charges resolve it exactly like a captured
         // card. Lookup failure falls through to the 402 (capture remains
         // the path of last resort — fail toward asking, never toward an
-        // unprotected booking).
+        // unprotected booking). Phone-only estimates resolve the SAME
+        // unambiguous match the accept transaction lands on (r4 P2) —
+        // the match runs inside this very request, so gate-vs-trx
+        // divergence would need a concurrent customer edit mid-request.
         try {
+          let holdCustomerId = estimate.customer_id || null;
+          if (!holdCustomerId && estimate.customer_phone) {
+            const { match } = await matchAcceptCustomerByPhone(estimate);
+            holdCustomerId = match?.id || null;
+          }
           const ConsentService = require('../services/payment-method-consents');
-          const savedCard = await ConsentService.findConsentedChargeableCard(estimate.customer_id);
+          const savedCard = holdCustomerId
+            ? await ConsentService.findConsentedChargeableCard(holdCustomerId)
+            : null;
           if (savedCard?.stripe_payment_method_id) {
             cardHoldVerification = {
               ok: true,

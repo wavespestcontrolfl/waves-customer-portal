@@ -48,6 +48,7 @@ const {
   findLinkedUpcomingAppointment,
   handleEstimateAsk,
   isEstimateAcceptActive,
+  matchAcceptCustomerByPhone,
   isEstimateCustomerViewable,
   isRodentGuaranteeOnlyEstimate,
   isStructuralOneTimeOnlyEstimate,
@@ -766,8 +767,17 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     // to accept, where the gate resolves the same saved method. Lookup
     // failure mints normally (fail toward asking).
     try {
-      const savedCard = await require('../services/payment-method-consents')
-        .findConsentedChargeableCard(estimate.customer_id);
+      // Phone-only estimates: resolve the same unambiguous customer match
+      // the accept gate + transaction use, or an existing customer's saved
+      // card is invisible here and they get re-asked (r4 P2).
+      let holdCustomerId = estimate.customer_id || null;
+      if (!holdCustomerId && estimate.customer_phone) {
+        const { match } = await matchAcceptCustomerByPhone(estimate);
+        holdCustomerId = match?.id || null;
+      }
+      const savedCard = holdCustomerId
+        ? await require('../services/payment-method-consents').findConsentedChargeableCard(holdCustomerId)
+        : null;
       if (savedCard?.stripe_payment_method_id) {
         return res.status(409).json({ error: 'A saved card already covers this booking', exemptReason: 'saved_method' });
       }
