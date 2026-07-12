@@ -106,12 +106,38 @@ describe('intelligence bar Stripe ops tools', () => {
     expect(result.recent_pending_events.map(e => e.id)).toEqual(['evt_fresh']);
     expect(result.total_undelivered).toBe(1);
     expect(result.total_recent_pending).toBe(1);
+    expect(result.scan_exhaustive).toBe(true);
     expect(JSON.stringify(result)).not.toContain('private@example.com');
     expect(JSON.stringify(result)).not.toContain('private2@example.com');
 
     const calledUrl = String(global.fetch.mock.calls[0][0]);
     expect(calledUrl).toContain('delivery_success=false');
     expect(calledUrl).toContain('created%5Bgte%5D=');
+  });
+
+  test('get_stripe_webhook_failures pages past fresh pending events to find older failures', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const freshCreated = Math.floor(Date.now() / 1000) - 60;
+    const oldCreated = Math.floor(Date.now() / 1000) - 7200;
+    // Page 1: 50 fresh pending events (newest first) with more behind them.
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      id: `evt_fresh_${i}`, type: 'charge.succeeded', created: freshCreated, pending_webhooks: 1,
+    }));
+    const page2 = [
+      { id: 'evt_failed_old', type: 'invoice.payment_failed', created: oldCreated, pending_webhooks: 3 },
+    ];
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: true, data: page1 }))
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: page2 }));
+
+    const result = await executeStripeOpsTool('get_stripe_webhook_failures', { hours: 24 });
+    expect(result.error).toBeUndefined();
+    // The older real failure behind a page of pending noise is found.
+    expect(result.undelivered_events.map(e => e.id)).toEqual(['evt_failed_old']);
+    expect(result.total_recent_pending).toBe(50);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('starting_after=evt_fresh_49');
   });
 
   test('auth rejection surfaces as { error }, never a throw', async () => {

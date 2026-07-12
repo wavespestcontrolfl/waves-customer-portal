@@ -29,6 +29,8 @@ const MAX_ENABLED_EVENTS_SHOWN = 25;
 // events whose first attempts are simply still in flight. Younger than this
 // is normal retry churn, not a failure signal.
 const RECENT_PENDING_MINUTES = 10;
+const EVENTS_PAGE_SIZE = 50;
+const MAX_EVENT_PAGES = 5;
 
 const STRIPE_OPS_TOOLS = [
   {
@@ -101,36 +103,56 @@ async function getStripeWebhookFailures(input) {
   const hours = Math.min(Math.max(Number(input.hours) || DEFAULT_HOURS, 1), MAX_HOURS);
   const limit = Math.min(Math.max(Number(input.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
   const createdGte = Math.floor((Date.now() - hours * 60 * 60 * 1000) / 1000);
-  const json = await stripeGet('/v1/events', {
-    delivery_success: 'false',
-    'created[gte]': createdGte,
-    limit,
-  });
   // Event payloads carry customer data — only type/timing/delivery state
   // leave this function.
   const pendingCutoff = Date.now() - RECENT_PENDING_MINUTES * 60 * 1000;
   const failing = [];
   const recentPending = [];
-  for (const e of json.data || []) {
-    const createdMs = e.created * 1000;
-    const mapped = {
-      id: e.id,
-      type: e.type,
-      created: new Date(createdMs).toISOString(),
-      pending_webhooks: e.pending_webhooks,
-    };
-    // Young events are usually mid-delivery, not failures — splitting them
-    // out keeps a routine health check from raising false alarms.
-    if (createdMs >= pendingCutoff) recentPending.push(mapped);
-    else failing.push(mapped);
+  let recentPendingSeen = 0;
+  let failingSeen = 0;
+  // Events come newest-first, so a burst of fresh pending deliveries can
+  // fill the first page and hide older, genuinely failed events — page
+  // (via starting_after) until enough real failures are collected or the
+  // window is exhausted.
+  let startingAfter = null;
+  let pagesFetched = 0;
+  let morePages = true;
+  while (morePages && pagesFetched < MAX_EVENT_PAGES && failing.length < limit) {
+    const params = { delivery_success: 'false', 'created[gte]': createdGte, limit: EVENTS_PAGE_SIZE };
+    if (startingAfter) params.starting_after = startingAfter;
+    const json = await stripeGet('/v1/events', params);
+    pagesFetched += 1;
+    const data = json.data || [];
+    for (const e of data) {
+      const createdMs = e.created * 1000;
+      const mapped = {
+        id: e.id,
+        type: e.type,
+        created: new Date(createdMs).toISOString(),
+        pending_webhooks: e.pending_webhooks,
+      };
+      // Young events are usually mid-delivery, not failures — splitting them
+      // out keeps a routine health check from raising false alarms.
+      if (createdMs >= pendingCutoff) {
+        recentPendingSeen += 1;
+        if (recentPending.length < limit) recentPending.push(mapped);
+      } else {
+        failingSeen += 1;
+        if (failing.length < limit) failing.push(mapped);
+      }
+    }
+    morePages = Boolean(json.has_more) && data.length > 0;
+    startingAfter = data.length ? data[data.length - 1].id : null;
   }
   return {
     window_hours: hours,
     undelivered_events: failing,
     recent_pending_events: recentPending,
-    total_undelivered: failing.length,
-    total_recent_pending: recentPending.length,
-    has_more: Boolean(json.has_more),
+    total_undelivered: failingSeen,
+    total_recent_pending: recentPendingSeen,
+    // Pending pages, or failures seen beyond the reported cap, both mean the
+    // window may hold more failures than shown.
+    scan_exhaustive: !morePages && failingSeen === failing.length,
     note: `Events younger than ${RECENT_PENDING_MINUTES} min are listed as recent_pending (likely still delivering, not failures). Event payloads are never exposed through the Intelligence Bar.`,
   };
 }
