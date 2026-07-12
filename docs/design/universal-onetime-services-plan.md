@@ -877,3 +877,18 @@ trapping/exclusion/inspection jobs, which correctly stay standalone
 typed flows). E1 is closed with no code change; the archived-yet-bookable
 `pest_rodent_quarterly` catalog flag remains a note for whoever
 un-archives it.
+
+**Build-session addenda (2026-07-12, post-ratification):**
+- **palm_treatment repoint DEFERRED** (Codex P1 on #2675): typed
+  palm_injection completions skip the legacy palm/T&S closeout gates
+  (product actuals, N/P blackout, pollinator, photo minimums) and
+  validateTreeShrubTypedCompliance covers tree_shrub only. The archived
+  key has zero upcoming visits; the repoint ships after typed-palm gate
+  parity. NOTE the pre-existing question this surfaced: the LIVE
+  palm_injection service has ridden the typed path since Phase 1 with
+  that same gate posture — owner/compliance review candidate.
+- **Two-treatment package semantics hardened** (#2675): cockroach_control
+  + bed_bug_treatment stop at visit 2 (an included follow-up never mints
+  another); "No action needed" chip rejected on package visit 1.
+- **WDO fee convergence shipped as PR #2678** ($250 flat; also wires the
+  previously-dead onetime_wdo pricing_config row into db-bridge).
