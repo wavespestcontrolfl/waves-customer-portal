@@ -181,10 +181,15 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Prepositional form takes the noun directly — "companies with hidden
   // fees should be avoided" (Codex r16); the negator-free article gap keeps
   // "providers with no hidden fees" a denial.
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Appositive-tolerant gap here too — "companies, frankly, charge hidden
   // fees" (Codex r7 on #2633).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
+  // Pronoun-subject possession with a provider-noun antecedent in the same
+  // sentence — "pest control companies are not cheap because THEY have
+  // hidden fees" (Codex r34). The object requirement keeps "they have no
+  // hidden fees" a denial.
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?\\bthey\\s+(?:also\\s+)?(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with|charges?|charged|adds?|added)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
   // Separator/heading and possessive association at a provider noun —
   // "Pest control companies: hidden fees are common", "Providers' scams
   // are common" (Codex r24 on #2633). Separator prefix words are
@@ -251,7 +256,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // Possession/usage with a required accusation object ("Waves has hidden
   // fees", "Waves uses shady billing") — object required so "Waves has
   // shady spots covered" stays clean (Codex r3/r6 on #2633).
-  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
+  `${OWN_BRAND_SUBJECT}${NOUN_VERB_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`,
 ].join('|'), 'i');
 
 // Numeric-one that is self-ranking ON ITS FACE, needing no nearby target: a
@@ -396,7 +401,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted))?)\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -648,7 +653,17 @@ function sentenceHasNegator(text, index, length) {
     text.lastIndexOf(':', index),
     text.lastIndexOf('\n', index),
   ) + 1;
-  return SENTENCE_NEGATOR_RE.test(text.slice(sentStart, index + length));
+  let clause = text.slice(sentStart, index + length);
+  // Coordinating conjunctions reset the negation scope — "X is not cheap
+  // because it has hidden fees" asserts the fees (Codex r34). The reset
+  // uses the LAST conjunction before the accusation match, so a negator in
+  // an earlier coordinate clause cannot deny a later one.
+  const conjRe = /\b(?:and|but|because|yet|so)\b/gi;
+  let lastConj = -1;
+  let cm;
+  while ((cm = conjRe.exec(clause)) !== null) lastConj = cm.index + cm[0].length;
+  if (lastConj !== -1) clause = clause.slice(lastConj);
+  return SENTENCE_NEGATOR_RE.test(clause);
 }
 
 // Tail-scoped denial check for subject-verb arms whose verb list includes
@@ -1127,7 +1142,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // path ("<Name> uses scam pricing", "dishonest pricing from <Name>" —
     // Codex r18); the sourced form is sentence-level denial-guarded.
     const possessionP0 = new RegExp(
-      `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
     );
     const fromP0 = new RegExp(`(?:${ASSOC_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i');
     // Span-guarded like the table path: "Acme Pest Solutions isn't
@@ -1403,7 +1418,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // comes with hidden fees" / "… with hidden fees should be avoided" —
       // Codex r16).
       const possessionP0 = new RegExp(
-        `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|includes?|included|comes?\\s+with|(?:known|notorious|infamous)\\s+for|accused\\s+of|blamed\\s+for|cited\\s+for)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
       // Accusation-phrase SOURCED at the name — "dishonest pricing from
       // acme pest solutions" (Codex r17 on #2633). Sentence-level denial

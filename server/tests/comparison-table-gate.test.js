@@ -1114,6 +1114,31 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-34 findings (#2633) ──
+
+  test('Codex r34: conjunction-separated accusations keep the P0; denials stay denials', () => {
+    for (const prose of ['Pest control companies are not cheap because they have hidden fees.', 'Waves is not cheap, and Waves has hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: `There are no reports of hidden fees from Acme Pest Solutions.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r34: auxiliary brand rankings block', () => {
+    for (const prose of ['Waves has been ranked #1.', 'Waves has been the #1 choice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r34: inclusion-verb fee accusations block', () => {
+    for (const prose of ['Waves includes hidden fees.', 'Waves billing includes hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-33 findings (#2633) ──
 
   test('Codex r33: table-less trailing separator denials stay clean', () => {
