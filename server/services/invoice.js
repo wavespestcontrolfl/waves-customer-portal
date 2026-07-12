@@ -619,15 +619,35 @@ async function calculateUpdateFinancials({
     rate = taxRate !== undefined ? Number(taxRate) : defaultRate;
     taxAmount = Math.round(afterDiscount * rate * 100) / 100;
   }
+  // Mirror create()'s resolved-name labeling (codex 2652 r2: an admin edit
+  // recomputed the label back to the generic literal, wiping the promised
+  // "Referral Credit" from the pay page/PDF). Names come from each negative
+  // line's catalog row or its own description; same varchar(100) bound.
+  const editDiscountNames = [...new Set(
+    items
+      .filter((item) => Number(item.amount) < 0 && item.category !== "deposit_credit")
+      .map((item) => {
+        const row = item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null;
+        return String(item.description || row?.name || "").trim();
+      })
+      .filter(Boolean),
+  )];
   const labelParts = [
-    lineItemDiscountAmount > 0 ? "Line-item discounts" : null,
+    ...(lineItemDiscountAmount > 0
+      ? (editDiscountNames.length ? editDiscountNames : ["Line-item discounts"])
+      : []),
   ].filter(Boolean);
 
+  const editJoinedLabel = labelParts.join(" + ");
   return {
     line_items: JSON.stringify(items),
     subtotal,
     discount_amount: discountAmount,
-    discount_label: labelParts.length ? labelParts.join(" + ") : null,
+    discount_label: labelParts.length
+      ? (editJoinedLabel.length > 100 ? `${editJoinedLabel.slice(0, 97)}...` : editJoinedLabel)
+      : null,
     tax_rate: rate,
     tax_amount: taxAmount,
     total: Math.max(

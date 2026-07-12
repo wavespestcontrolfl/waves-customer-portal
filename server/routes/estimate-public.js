@@ -918,6 +918,10 @@ function buildEstimateInvoiceModeDraft({
   recurringFirstVisitAmount = null,
   effectiveBillingCadence = null,
   selectedFrequency = null,
+  // { label, perApplication } resolved by the accept handler — same
+  // labeled-discount itemization as the standard accept leg (codex 2652 r2:
+  // invoice-mode accepts previously dropped the promised label).
+  manualDiscountItemization = null,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -974,16 +978,40 @@ function buildEstimateInvoiceModeDraft({
     .replace(/^Charged after each\s+/i, '')
     || `${cadenceLabel} visit`;
 
+  // Labeled manual-discount itemization (owner 2026-07-11), identical to the
+  // standard accept leg: gross the first-visit line by the resolved
+  // per-application slice + a _kind:'discount' negative line, so create()
+  // rolls it into discount_amount/label and the TOTAL stays `amount` by
+  // construction. `amount` (used for messaging) stays net.
+  const invoiceModeSlice = Number(manualDiscountItemization?.perApplication) > 0
+    ? Math.round(Number(manualDiscountItemization.perApplication) * 100) / 100
+    : 0;
+  const recurringLineItems = invoiceModeSlice > 0
+    ? [
+      {
+        description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
+        quantity: 1,
+        unit_price: Math.round((amount + invoiceModeSlice) * 100) / 100,
+      },
+      {
+        _kind: 'discount',
+        description: String(manualDiscountItemization.label || 'Discount').trim() || 'Discount',
+        quantity: 1,
+        unit_price: -invoiceModeSlice,
+      },
+    ]
+    : [{
+      description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
+      quantity: 1,
+      unit_price: amount,
+    }];
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
     amount,
     title: `${svcType} — first ${visitNoun}`,
-    lineItems: [{
-      description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
-      quantity: 1,
-      unit_price: amount,
-    }],
+    lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
 }
@@ -8011,6 +8039,7 @@ router.put('/:token/accept', async (req, res, next) => {
           recurringFirstVisitAmount,
           effectiveBillingCadence,
           selectedFrequency,
+          manualDiscountItemization: acceptManualDiscountItemization,
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
