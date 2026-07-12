@@ -797,3 +797,15 @@ review.
   bait, lawn+tree&shrub) into ONE combined scheduled service; the Harris
   re-type onto `pest_rodent_quarterly` ships as a marker-reversible
   one-off.
+- **Q1 gate CLEARED (owner, 2026-07-12):** fixture renders for all four
+  rodent form families (trapping ×3, bait station ×2, exclusion,
+  sanitation, inspection — exclusion/sanitation/inspection composed
+  through the real `buildTypedReportSnapshot` since no fixtures existed)
+  reviewed on local renders; owner: "yes, this all works." Whole-family
+  graduation migration is GO.
+- **Q12 (add-on / auto-fold billing, E2/E3):** recommendation adopted —
+  same-day fold bills each service its own price (per-component billing
+  pre-gate), ONE invoice per service (no money-behavior change); ad-hoc
+  extra work defaults to $0-documentation unless the owner flags it
+  billable at completion. Payer-routed components never merge with
+  customer-responsible ones.
