@@ -22,9 +22,13 @@ const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
 // matching Automations-tab sequence (automation_templates — the SendGrid
 // runner sends steps per their delays). Separate stack from the transactional
 // prep guide above. Wire a pest by adding its template key here; the
-// treatmentAutomationEnroll gate stays the single kill switch.
+// treatmentAutomationEnroll gate stays the single kill switch. german_roach
+// bookings route through pestType 'cockroach' (onServiceScheduled), so they
+// enroll the cockroach sequence too.
 const TREATMENT_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   bed_bug: 'bed_bug',
+  cockroach: 'cockroach',
+  flea: 'flea',
 });
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an

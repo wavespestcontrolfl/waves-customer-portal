@@ -407,8 +407,12 @@ describe('appointment tagger prep email automation', () => {
 
     // gate off, terminal, past, and dedupe all skip the email for reasons
     // other than a missing address — none should trigger the standalone SMS.
-    isEnabled.mockReturnValueOnce(false);
+    // (Both gates off: cockroach is sequence-wired now, so the first isEnabled
+    // call is the treatmentAutomationEnroll check — a bare mockReturnValueOnce
+    // would land there instead of the email-automations gate.)
+    isEnabled.mockReturnValue(false);
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+    isEnabled.mockImplementation((key) => key !== 'treatmentAutomationEnroll');
 
     await AppointmentTagger.triggerPestPrep(service({ status: 'cancelled' }), 'cockroach');
     await AppointmentTagger.triggerPestPrep(service({ scheduled_date: PAST_DATE }), 'cockroach');
@@ -535,10 +539,25 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     expect(enrollCustomer).not.toHaveBeenCalled();
   });
 
-  test('unwired pests keep the transactional lane even with the gate on', async () => {
+  test('cockroach and flea bookings route to their sequences too (all three pests wired)', async () => {
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+    await AppointmentTagger.triggerPestPrep(
+      service({ service_type: 'Flea Treatment - Interior & Exterior' }),
+      'flea',
+    );
 
-    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    // ONE email each: sequences enroll, the transactional prep automation is
+    // never triggered for wired pests.
+    expect(executor.processTrigger).not.toHaveBeenCalled();
+    expect(enrollCustomer).toHaveBeenCalledTimes(2);
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'cockroach' }));
+    expect(enrollCustomer).toHaveBeenCalledWith(expect.objectContaining({ templateKey: 'flea' }));
+  });
+
+  test('an unmapped pest type reports no_automation and never enrolls', async () => {
+    const result = await AppointmentTagger.enrollTreatmentSequence(service(), 'mosquito');
+
+    expect(result).toEqual({ queued: false, reason: 'no_automation' });
     expect(enrollCustomer).not.toHaveBeenCalled();
   });
 
