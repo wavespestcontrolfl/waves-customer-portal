@@ -864,3 +864,16 @@ All 16 questions answered — plan header flipped to RATIFIED.
   report experience (customer-visible).
 - **one_time_pest_control (B0 scan finding):** still `project_required` —
   a straggler the plan's §1 list missed; joins the Phase-B cutover batch.
+
+**E1 status correction (build session, 2026-07-12):** the converter
+combining described as "missing" in §5 Phase E is ALREADY LIVE in main —
+`combineRecurringServicesForScheduling` (estimate-converter.js) maps all
+three pairs onto the combined keys with cadence/visits guards and
+reserved-row rewrites. And the Harris re-type is MOOT: prod has no
+customer with a rodent bait-station chain alongside quarterly pest as
+separate rows (the doc's Harris has zero scheduled services; the five
+customers with separate pest+rodent rows all have one-time
+trapping/exclusion/inspection jobs, which correctly stay standalone
+typed flows). E1 is closed with no code change; the archived-yet-bookable
+`pest_rodent_quarterly` catalog flag remains a note for whoever
+un-archives it.
