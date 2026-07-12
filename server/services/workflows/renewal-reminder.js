@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
+const { isEnabled } = require('../../config/feature-gates');
 
 class RenewalReminder {
   /**
@@ -77,6 +78,23 @@ class RenewalReminder {
               && await annualPrepay.hasAnnualPrepayRenewal(customer.id, dateStr)
             ) {
               continue;
+            }
+
+            // Email leg (service_renewal sequence, Automations tab) at the
+            // 30-day bucket only — this lane was historically SMS-only, so
+            // the sequence ADDS the email rather than replacing anything.
+            // 90-day dedupe = once per renewal cycle (the 15/7-day buckets
+            // revisit the same customer; next year re-enrolls via
+            // reactivation). Runs BEFORE the SMS cooldown check so a recent
+            // unrelated renewal text can't starve the email.
+            if (daysOut === 30 && isEnabled('serviceRenewalEnroll')) {
+              const { enrollSequenceFromEvent } = require('../automation-enroll');
+              await enrollSequenceFromEvent({
+                templateKey: 'service_renewal',
+                customerId: customer.id,
+                dedupe: 90,
+                source: `renewal_${field.column}`,
+              });
             }
 
             // Check cooldown — skip if renewal SMS sent in last 35 days

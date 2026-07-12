@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+const { isEnabled } = require('../config/feature-gates');
 
 /**
  * Billing Cron Service
@@ -452,13 +453,35 @@ const BillingCron = {
         }
 
         if (failedPayment) {
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: failedPayment.id,
-            retryDate: retryAt,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
-          });
+          // One email per failure (owner rule 2026-07-11): with the gate on,
+          // the Automations-tab payment_failed sequence (editable; its copy
+          // matches the Day-3 retry + portal card-update CTA) REPLACES the
+          // transactional retry-notice email. The failure SMS above, with the
+          // card-update link, is unchanged either way. 14-day dedupe = one
+          // enrollment per failure episode across the retry ladder; a repeat
+          // failure months later re-enrolls via reactivation. Falls back to
+          // the retry notice if the enrollment errors so a failure never
+          // goes email-silent by accident.
+          let emailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              source: 'autopay_failure',
+            });
+            emailed = enrollResult.reason !== 'error';
+          }
+          if (!emailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: failedPayment.id,
+              retryDate: retryAt,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
+            });
+          }
         }
       }
     }

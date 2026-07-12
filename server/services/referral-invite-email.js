@@ -29,6 +29,28 @@ function dollars(cents) {
 async function sendReferralInviteEmail({ customerId, trigger = 'positive_review' } = {}) {
   try {
     if (!customerId) return null;
+
+    // One referral email per customer (owner rule 2026-07-11): with the gate
+    // on, the Automations-tab referral_nudge sequence (editable in the tab)
+    // IS the invite — it replaces the transactional referral.invite template.
+    // Once-ever dedupe mirrors this function's own customer-scoped
+    // idempotency; both call sites (review-gate + review-request promoter
+    // hooks) flow through here unchanged. The referral SMS nudge is a
+    // separate channel and is unaffected. Known one-time overlap: a customer
+    // already invited via referral.invite pre-flip who submits another
+    // promoter rating post-flip has no enrollment row yet and gets the
+    // sequence once — accepted, noted on the PR.
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('referralNudgeEnroll')) {
+      const { enrollSequenceFromEvent } = require('./automation-enroll');
+      return enrollSequenceFromEvent({
+        templateKey: 'referral_nudge',
+        customerId,
+        dedupe: 'ever',
+        source: `referral_${trigger}`,
+      });
+    }
+
     const customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'first_name', 'email');
