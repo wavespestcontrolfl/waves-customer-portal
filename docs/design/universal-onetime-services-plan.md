@@ -818,3 +818,26 @@ review.
   customer reports never name prep-send dates or coverage lines; revisit
   after Phase H ships. No in-flight prep docs named for the H1 registry at
   ratification time.
+- **Q6 (WDO):** W1 confirmed, both for WDO and pre-treat certs — universal
+  experience (appointment-entry completion, V2 surfaces, report-shell
+  polish); FDACS signature/archive/send machinery and
+  `V1_EXCLUDED_PROJECT_TYPES` untouched. Owner framing from the interview:
+  ALL services flow within the complete-service flow — the residual
+  surface is compliance detail + history, never a parallel completion
+  system.
+- **Q7 (naming):** "Jobs" — nav label flips when PR C1 ships. Label-only.
+- **Q9 (tech entry, C4):** open the completion sheet directly on /tech —
+  the alert bounce goes away.
+- **Q10 (D2/D3):** timeline trend-types-first; video recap rodent-first
+  after graduation; during-visit capture affordance deferred until the
+  first typed composition exists.
+- **Q5 (termite Phase 3):** owner performs the review; terminal session
+  preps a REVIEW PACKET (statute text FS 482.226 / FS 482.2265 /
+  FAC 5E-14 + the typed termite_treatment form fields + what the
+  2026-06-12 bait-lane signoff covered) so the review is a sit-down, not
+  research. Termite keys stay on the project flow until signoff.
+- **Q8 (WDO fee):** owner decision 2026-07-12 — **$250 FLAT**, replacing
+  all three disagreeing sources (tech estimator $125 flat; invoice tiers
+  $150/$200/$250 by structure sq ft; stale SPECIALTY.wdo.brackets
+  $175/$200/$225 by lawn sq ft). Convergence ships via the pricing-config
+  checklist as its own PR.
