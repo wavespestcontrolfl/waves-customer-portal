@@ -229,6 +229,21 @@ button, input, select, textarea, optgroup {
   border-radius: 4px;
 }
 
+/* Keyboard focus ring for customer-surface form controls whose inline
+   styles used to set outline:'none' (which killed every stylesheet ring —
+   inline styles win). The inline outline is removed at those sites and
+   this class supplies the replacement: no ring on plain :focus (pointer
+   aesthetics unchanged), a visible ring on :focus-visible only. Values
+   match the glass ring (glass-theme.css :focus-visible — 2px solid
+   rgba(--accent 10,126,194, .9), 3px offset). */
+.waves-focus-ring:focus {
+  outline: none;
+}
+.waves-focus-ring:focus-visible {
+  outline: 2px solid rgba(10, 126, 194, 0.9);
+  outline-offset: 3px;
+}
+
 /* Customer-facing portal cleanup. These classes intentionally sit outside
    admin shells and pair with inline React styles on the public pages. */
 .waves-customer-page {

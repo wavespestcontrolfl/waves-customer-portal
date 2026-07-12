@@ -65,7 +65,7 @@ function Field({ label, value }) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
+      <div role="alert" className="waves-contract-page waves-contract-single" style={{ width: DOC_COLUMN }}>
         <BrandCard padding={28}>
           <StatusPill>Contract unavailable</StatusPill>
           <SerifHeading style={{ marginTop: SP.md, marginBottom: SP.sm }}>{title}</SerifHeading>
@@ -362,7 +362,7 @@ export default function ContractSignPage() {
                 </AgreementRow>
 
                 {error && (
-                  <div style={{ margin: '16px 0', color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: RADIUS.input, padding: SP.sm, fontSize: FS.body }}>
+                  <div role="alert" style={{ margin: '16px 0', color: '#991B1B', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: RADIUS.input, padding: SP.sm, fontSize: FS.body }}>
                     {error}
                   </div>
                 )}

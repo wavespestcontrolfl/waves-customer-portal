@@ -63,9 +63,9 @@ function Page({ children }) {
   );
 }
 
-function SectionCard({ children, style }) {
+function SectionCard({ children, style, ...rest }) {
   return (
-    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" {...rest} style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -95,7 +95,7 @@ function UrgencyPill({ urgency, notAPest }) {
 
 function NotFoundCard() {
   return (
-    <SectionCard style={{ textAlign: 'center', marginTop: 40 }}>
+    <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This pest report isn&apos;t available</SectionTitle>
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at what you&apos;re seeing.
