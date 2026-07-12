@@ -8826,13 +8826,17 @@ export function CompletionPanel({
         // A hand-entered Total is the tech's actual and is never recomputed;
         // otherwise rate/area edits keep the derived Total (rate × sq ft /
         // 1,000) in sync on area-based applications — including back to blank
-        // when the rate/area is cleared, so a stale total can't be submitted.
-        // The derived total is in the rate's unit, so a rate-unit change
-        // moves the total unit with it.
+        // when the rate/area is cleared or the method stops being area-based,
+        // so a stale full-lawn total can't be submitted. The derived total is
+        // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
-        } else if (!next.totalAmountManual && next.areaUnit === "sqft") {
-          if (field === "rate" || field === "areaValue") {
+        } else if (!next.totalAmountManual) {
+          if (next.areaUnit !== "sqft") {
+            if (field === "applicationMethod" && p.areaUnit === "sqft") {
+              next.totalAmount = "";
+            }
+          } else if (field === "rate" || field === "areaValue") {
             next.totalAmount = derivedTotalAmount(next.rate, next.areaValue);
           } else if (field === "rateUnit") {
             next.amountUnit = value;

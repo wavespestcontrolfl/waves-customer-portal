@@ -19,13 +19,19 @@
 // products that are in the active rotation (used in service_products or
 // referenced by protocols). irrigation values are the label-standard
 // watering-in facts; ambiguous/method-dependent products are left NULL.
+//
+// down() restores duplicates/repoints and value-matched scalar fields, but
+// intentionally leaves the two booleans standing (see the note in down()).
 
 const CLUSTERS = [
   { keeper: 'Demand CS', losers: ['Demand CS Insecticide'] },
   {
     keeper: 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer',
     losers: ['LESCO High Manganese Combo Chelated Micronutrients AM 1% Mg 5.75% S 3% Fe 4% Mn Micronutrient Liquid Soil Amendment'],
-    keeperUpdates: { display_name: 'LESCO High Mn Combo' },
+    // The 000050 approval landed on the soil-amendment duplicate; carry it to
+    // the keeper so High Mn label facts keep flowing (no-op where the keeper
+    // is already approved, as in prod).
+    keeperUpdates: { display_name: 'LESCO High Mn Combo', approved_for_service_report: true },
   },
   {
     // Protocols reference the long row (10 lawn_protocol_products rows).
@@ -172,11 +178,15 @@ exports.up = async function up(knex) {
     if (cluster.keeperUpdates) {
       // Apply each field only when the keeper doesn't already carry a value,
       // so an admin edit made after this migration was written survives.
+      // `false` is a real value for irrigation_required ("no watering-in
+      // required") — only the approval boolean treats false as fillable.
       const row = await knex('products_catalog').where({ id: keeper.id }).first();
       const updates = {};
       for (const [field, value] of Object.entries(cluster.keeperUpdates)) {
         const current = row[field];
-        const empty = current == null || current === '' || current === 'N/A' || current === false;
+        const empty =
+          current == null || current === '' || current === 'N/A' ||
+          (field === 'approved_for_service_report' && current === false);
         if (empty) updates[field] = value;
       }
       if (Object.keys(updates).length) {
@@ -231,18 +241,13 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
-  for (const name of APPROVE_FOR_REPORT) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .where('approved_for_service_report', true)
-      .update({ approved_for_service_report: false, updated_at: new Date() });
-  }
-
-  for (const name of [...IRRIGATION_TRUE, ...IRRIGATION_FALSE]) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .update({ irrigation_required: null, updated_at: new Date() });
-  }
+  // approved_for_service_report and irrigation_required are intentionally NOT
+  // reverted: a boolean can't be value-matched back to "what up() wrote"
+  // (a pre-existing seed/admin true is indistinguishable from ours — e.g.
+  // 20260530000022 approves CarbonPro-L on some databases), and stripping a
+  // pre-existing approval on rollback would remove report grounding this
+  // migration never granted. Rollback restores duplicates/repoints and the
+  // exact scalar values written below; the booleans are left standing.
 
   for (const name of UNTIL_DRY_FIX) {
     await knex('products_catalog')
@@ -269,8 +274,10 @@ exports.down = async function down(knex) {
       const row = await knex('products_catalog').where({ id: keeper.id }).first();
       const reverts = {};
       for (const [field, value] of Object.entries(cluster.keeperUpdates)) {
+        // Booleans stay (see note at the top of down()).
+        if (field === 'approved_for_service_report' || field === 'irrigation_required') continue;
         // eslint-disable-next-line eqeqeq
-        if (row[field] == value) reverts[field] = field === 'approved_for_service_report' ? false : null;
+        if (row[field] == value) reverts[field] = null;
       }
       if (Object.keys(reverts).length) {
         await knex('products_catalog')
