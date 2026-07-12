@@ -1114,6 +1114,31 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-23 findings (#2633) ──
+
+  test('Codex r23: table-less association accusations block; denials stay clean', () => {
+    for (const prose of ['Customers report hidden fees after choosing Bug Busters.', "Acme Pest Solutions' hidden fees are common.", 'Customers report scams after choosing Acme Pest Solutions.']) {
+      const r = gate.evaluate({ body: prose }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const denial = gate.evaluate({ body: 'Customers do not report hidden fees after choosing Bug Busters.' }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+  });
+
+  test('Codex r23: negated recommendations with intervening words keep the accusation', () => {
+    for (const prose of ['No one should choose Bug Busters because of hidden fees.', 'We advise homeowners not to choose Bug Busters because of hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r23: scam-class own-brand association objects block', () => {
+    for (const prose of ['Waves gets complaints about scams.', "Waves' ripoffs are common."]) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
   // ── Codex round-22 findings (#2633) ──
 
   test('Codex r22: negated Waves complaint/insult claims are denials', () => {

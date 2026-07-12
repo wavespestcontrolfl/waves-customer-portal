@@ -344,8 +344,8 @@ const OWN_BRAND_OBJ_ASSOC_SRC = `(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?\\b(
 // are common") and complaint attribution ("Waves gets complaints about
 // hidden fees") — Codex r21.
 const OWN_BRAND_ASSOC_TAIL_RE = new RegExp([
-  `^\\s*(?:${POSSESSION_ACCUSATION_SRC})`,
-  `^[^.!?\\n]{0,60}?\\b(?:gets?|got|receives?|received|draws?|drew|faces?|faced|racks?\\s+up|racked\\s+up)\\s+complaints?\\s+(?:about|over|regarding)\\s+(?:(?:its|their|the|a|an)\\s+)?(?:${POSSESSION_ACCUSATION_SRC})`,
+  `^\\s*(?:${ASSOC_ACCUSATION_SRC})`,
+  `^[^.!?\\n]{0,60}?\\b(?:gets?|got|receives?|received|draws?|drew|faces?|faced|racks?\\s+up|racked\\s+up)\\s+complaints?\\s+(?:about|over|regarding)\\s+(?:(?:its|their|the|a|an)\\s+)?(?:${ASSOC_ACCUSATION_SRC})`,
 ].join('|'), 'i');
 // #1-BEFORE-the-brand winner framing — "The #1 overall is Waves" (Codex
 // r21); brand token case-verified in code.
@@ -584,7 +584,10 @@ function finding(severity, code, message) {
 // #2633). A negated RECOMMENDATION isn't a denial either: "Do not choose
 // Bug Busters because of hidden fees" denies the choice, not the fees
 // (Codex r20).
-const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
+// Up to two words may sit between the negator and the recommendation verb —
+// "No one should choose X because of hidden fees" negates the choice, not
+// the fee claim (Codex r23 on #2633).
+const SENTENCE_NEGATOR_RE = /\b(?:no|not(?!\s+(?:only|just|to\s+mention)\b)|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|use|using|go(?:ing)?\s+with)\b)/i;
 function sentenceHasNegator(text, index, length) {
   const sentStart = Math.max(
     text.lastIndexOf('.', index),
@@ -844,13 +847,16 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // ("dishonest acme pest solutions") — captures are SPLIT at their last
   // interior negativity token so the adjective sits back OUTSIDE the name
   // where the neg-before-name directed check sees it.
+  // CI/legal captures are NAME-CONFIDENT and qualify for the association
+  // arm, mirroring the table path (Codex r20/r23 on #2633).
+  const confidentGenericNames = new Set();
   for (const m of nameScanText.matchAll(CI_PROVIDER_NAME_RE)) {
     const nm = splitAtNegativity(m[1]);
-    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+    if (nm && !OWN_BRAND_RE.test(nm)) { genericNames.add(nm); confidentGenericNames.add(nm); }
   }
   for (const m of nameScanText.matchAll(legalEntityRe('gi'))) {
     const nm = splitAtNegativity(m[1]);
-    if (nm && !OWN_BRAND_RE.test(nm)) genericNames.add(nm);
+    if (nm && !OWN_BRAND_RE.test(nm)) { genericNames.add(nm); confidentGenericNames.add(nm); }
   }
   // Header-shaped names too ("Bug Busters", "Acme Rodent Removal") — the
   // table path treats them as business-shaped targets, so the table-less
@@ -931,8 +937,17 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
       || activeP0.test(nameScanText) || possessionP0.test(nameScanText);
     if (!disparaged) {
       // Association shapes take the sentence-level denial guard, same as
-      // the table path (Codex r18).
-      const fm = nameScanText.match(negBeforeName) || nameScanText.match(fromP0);
+      // the table path (Codex r18). Name-confident names also get the
+      // object-association arm — "Customers report hidden fees after
+      // choosing Bug Busters" in plain prose (Codex r23).
+      const objAssocP0 = (PERSONIFIED_SUFFIX_RE.test(name) || confidentGenericNames.has(name))
+        ? new RegExp([
+          `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})`,
+          `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
+        ].join('|'), 'i')
+        : null;
+      const fm = nameScanText.match(negBeforeName) || nameScanText.match(fromP0)
+        || (objAssocP0 && nameScanText.match(objAssocP0));
       disparaged = Boolean(fm && !sentenceHasNegator(nameScanText, fm.index, fm[0].length));
     }
     if (disparaged) {
