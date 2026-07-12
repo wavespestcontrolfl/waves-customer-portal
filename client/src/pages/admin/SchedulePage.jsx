@@ -8659,20 +8659,40 @@ export function CompletionPanel({
       product.rateUnit ||
       product.rate_unit ||
       "oz";
+    const catalogRate =
+      product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "";
+    // Generic "insecticide" categories cover dry/bait/packet forms too (e.g.
+    // Advion WDG Granular, Delta Dust, Alpine WSG), whose inferred method
+    // still falls through to perimeter_spray — a 4 oz liquid default would be
+    // a wrong compliance record for those, so screen the name/category for
+    // dry-form and dry-formulation markers (WSG/WDG/WG/WP/DF).
+    const dryFormProduct =
+      /\b(granul\w*|dust|bait|gel|station|trap|briquet|tablet|blox|dunk|packet|wsg|wdg|wg|wp|df)\b/i.test(
+        `${product.name || ""} ${product.category || product.product_category || ""}`,
+      );
+    // General-pest perimeter sprays: when the catalog carries no rate, start
+    // at the house default of 4 oz (rate/total units move together with it so
+    // a catalog unit like "oz/1000sf" can't pair with the fallback value).
+    // Editable as before; catalog rates still win when present.
+    const usePestSprayDefault =
+      catalogRate === "" &&
+      !dryFormProduct &&
+      applicationMethod === "perimeter_spray" &&
+      serviceLineFromType(serviceTypeForArea) === "pest";
     setSelectedProducts((prev) => [
       ...prev,
       {
         productId: product.id,
         name: product.name,
-        rate: product.defaultRatePer1000 ?? product.default_rate_per_1000 ?? product.ratePer1000 ?? "",
-        rateUnit: defaultUnit,
+        rate: usePestSprayDefault ? 4 : catalogRate,
+        rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           null,
         totalAmount: "",
-        amountUnit: defaultUnit,
+        amountUnit: usePestSprayDefault ? "oz" : defaultUnit,
         applicationMethod,
         applicationArea: "",
         areaValue: "",
