@@ -214,23 +214,38 @@ const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
 // Query shapes that map naturally to an enumerable list: a leading count
 // ("10 natural mosquito repellents") or an enumerable-noun keyword. Kept
 // narrow on purpose — a miss just produces a normal supporting-blog, and a
-// borderline match still yields a valid post, just list-formatted.
-const LISTICLE_QUERY_RE = /(^\s*\d{1,2}\s+\w)|\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
+// borderline match still yields a valid post, just list-formatted. A leading
+// digit followed by a time/cadence unit ("24 hour pest control", "7 day
+// treatment plan") is service phrasing, not an item count — excluded.
+const LISTICLE_TIME_UNIT_RE = /^(hour|hr|day|week|month|year|minute|min|am|pm)s?\b/i;
+const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}\s+(\S+)/;
+const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
 
 function isListicleQuery(query) {
-  return LISTICLE_QUERY_RE.test(String(query || '').trim());
+  const q = String(query || '').trim();
+  if (!q) return false;
+  const count = q.match(LISTICLE_LEADING_COUNT_RE);
+  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1])) return true;
+  return LISTICLE_NOUN_RE.test(q);
 }
 
-function applyListicleTreatment({ enabled, pageType, query, requiredSections, schemaTypes, voiceConstraints }) {
-  if (!enabled || !LISTICLE_ELIGIBLE_PAGE_TYPES.has(pageType) || !isListicleQuery(query)) {
+function applyListicleTreatment({ enabled, actionType, pageType, query, requiredSections, schemaTypes, voiceConstraints }) {
+  // New drafts only: a refresh whose SERP type normalizes to supporting-blog
+  // must never receive restructure-the-title/H2 mandates — the refresh lane's
+  // contract is preserve slug + structural identity.
+  if (!enabled || actionType !== 'new_supporting_blog' || !LISTICLE_ELIGIBLE_PAGE_TYPES.has(pageType) || !isListicleQuery(query)) {
     return { requiredSections, schemaTypes, voiceConstraints, listicle: false };
   }
+  // required_sections is an ORDERED plan for the writer — the above-the-fold
+  // constraints (title structure, 60-word quick answer, dated line) go FIRST
+  // so they can't be buried under the body/FAQ/CTA sections; the sourced
+  // methodology note reads naturally after the list body, so it appends.
   const sections = [
-    ...requiredSections,
     'listicle structure: exact item count in the title (e.g. "7 Signs of Termite Damage in Bradenton Homes"), one numbered H2 per item, and the same internal shape for every item (what it is → why it matters in SWFL → what to do)',
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
-    '"how we put this list together" note (2–3 sentences citing the facts-pack / UF-IFAS / FDACS sources actually used — never an invented methodology)',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
+    ...requiredSections,
+    '"how we put this list together" note (2–3 sentences citing the facts-pack / UF-IFAS / FDACS sources actually used — never an invented methodology)',
   ];
   const voice = {
     ...voiceConstraints,
@@ -515,6 +530,7 @@ class ContentBriefBuilder {
     // queries (gated; applied on top of the AEO overlay so both can coexist).
     const layered = applyListicleTreatment({
       enabled: isEnabled('listicleBriefs'),
+      actionType: decision.action_type,
       pageType,
       query: opportunity.query,
       requiredSections: aeo.requiredSections,

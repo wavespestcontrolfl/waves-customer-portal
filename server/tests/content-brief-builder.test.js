@@ -34,11 +34,19 @@ describe('isListicleQuery — list-shaped query detection', () => {
     expect(isListicleQuery('')).toBe(false);
     expect(isListicleQuery(null)).toBe(false);
   });
+  test('a leading digit with a time/cadence unit is service phrasing, not an item count', () => {
+    expect(isListicleQuery('24 hour pest control')).toBe(false);
+    expect(isListicleQuery('7 day lawn treatment plan')).toBe(false);
+    expect(isListicleQuery('30 minute mosquito treatment')).toBe(false);
+    // …but a real count followed by a content noun still matches.
+    expect(isListicleQuery('7 plants that repel mosquitoes')).toBe(true);
+  });
 });
 
 describe('applyListicleTreatment', () => {
   const base = (over = {}) => ({
     enabled: true,
+    actionType: 'new_supporting_blog',
     pageType: 'supporting-blog',
     query: 'signs of chinch bugs in st augustine grass',
     requiredSections: [...REQUIRED_SECTIONS['supporting-blog']],
@@ -50,7 +58,7 @@ describe('applyListicleTreatment', () => {
   test('list-shaped supporting-blog query gets the citable-listicle sections + voice notes', () => {
     const r = applyListicleTreatment(base());
     expect(r.listicle).toBe(true);
-    // The full supporting-blog contract is preserved, listicle sections appended.
+    // The full supporting-blog contract is preserved.
     for (const s of REQUIRED_SECTIONS['supporting-blog']) expect(r.requiredSections).toContain(s);
     expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true);
     expect(r.requiredSections.some((s) => /first 60 words/i.test(s))).toBe(true);
@@ -61,6 +69,18 @@ describe('applyListicleTreatment', () => {
     expect(r.schemaTypes).toEqual(SCHEMA_TYPES['supporting-blog']);
   });
 
+  test('above-the-fold constraints lead the ORDERED section plan; methodology note trails', () => {
+    const r = applyListicleTreatment(base());
+    expect(r.requiredSections[0]).toMatch(/listicle structure/i);
+    expect(r.requiredSections[1]).toMatch(/first 60 words/i);
+    expect(r.requiredSections[2]).toMatch(/Last updated/i);
+    // Every original section comes after the above-the-fold constraints…
+    const firstOriginalIdx = r.requiredSections.indexOf(REQUIRED_SECTIONS['supporting-blog'][0]);
+    expect(firstOriginalIdx).toBe(3);
+    // …and the methodology note is the trailing entry.
+    expect(r.requiredSections[r.requiredSections.length - 1]).toMatch(/how we put this list together/i);
+  });
+
   test('gate off → passthrough', () => {
     const r = applyListicleTreatment(base({ enabled: false }));
     expect(r.listicle).toBe(false);
@@ -68,9 +88,12 @@ describe('applyListicleTreatment', () => {
     expect(r.voiceConstraints.listicle_notes).toBeUndefined();
   });
 
-  test('non-list query or non-blog page type → passthrough', () => {
+  test('non-list query, non-blog page type, or non-new-draft action → passthrough', () => {
     expect(applyListicleTreatment(base({ query: 'how to get rid of ants' })).listicle).toBe(false);
     expect(applyListicleTreatment(base({ pageType: 'city-service' })).listicle).toBe(false);
+    // refresh_existing_page whose SERP type normalized to supporting-blog must
+    // NOT get restructure mandates (preserve-slug/structure contract).
+    expect(applyListicleTreatment(base({ actionType: 'refresh_existing_page' })).listicle).toBe(false);
   });
 
   test('stacks on top of the AEO overlay without losing its additions', () => {
@@ -83,6 +106,7 @@ describe('applyListicleTreatment', () => {
     });
     const r = applyListicleTreatment({
       enabled: true,
+      actionType: 'new_supporting_blog',
       pageType: 'supporting-blog',
       query: '7 ways to keep mosquitoes off your lanai',
       requiredSections: aeo.requiredSections,
