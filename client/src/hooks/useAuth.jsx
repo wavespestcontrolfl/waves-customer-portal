@@ -96,6 +96,39 @@ export function AuthProvider({ children }) {
     setLoading(false);
   }, []);
 
+  // Cross-tab session sync. Logout in tab A only clears tab B's localStorage —
+  // tab B's in-memory api.token kept working until its next 401. React to the
+  // token key changing in ANOTHER tab (`storage` never fires in the tab that
+  // wrote): removal ends this tab's session too; a new/changed token (login or
+  // property switch elsewhere) is adopted so the tabs can't act as two
+  // different customers.
+  useEffect(() => {
+    const onStorage = (event) => {
+      // key === null means localStorage.clear(); otherwise only react to ours.
+      if (event.key !== null && event.key !== 'waves_token') return;
+      const token = localStorage.getItem('waves_token');
+      if (token === (api.token || null)) return; // echo of our own state
+      if (retryTimer.current) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = null;
+      }
+      if (!token) {
+        api.clearTokens();
+        customerRef.current = null;
+        setCustomer(null);
+        setProperties([]);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+      api.token = token;
+      api.refreshToken = localStorage.getItem('waves_refresh_token');
+      loadCustomer();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [loadCustomer]);
+
   const sendCode = async (phone) => {
     setError(null);
     try {

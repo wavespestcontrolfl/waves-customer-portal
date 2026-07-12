@@ -1451,12 +1451,15 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
+  const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
   const [lastService, setLastService] = useState(null);
   const [lastServiceStatus, setLastServiceStatus] = useState('loading');
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
+  const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
+  const [referralStatsStatus, setReferralStatsStatus] = useState('loading');
   const [satRating, setSatRating] = useState(0);
   const [satHover, setSatHover] = useState(0);
   const [satPhase, setSatPhase] = useState('rate');
@@ -1464,6 +1467,7 @@ function DashboardTab({ customer, onSwitchTab }) {
   const [satReviewLink, setSatReviewLink] = useState('');
   const [satOfficeName, setSatOfficeName] = useState('');
   const [satSubmitting, setSatSubmitting] = useState(false);
+  const [satError, setSatError] = useState('');
   const [satDismissed, setSatDismissed] = useState(false);
   // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
   // (same public feed the wavespestcontrol.com Social Hub renders), the
@@ -1489,7 +1493,15 @@ function DashboardTab({ customer, onSwitchTab }) {
         console.error(err);
         setNextServiceStatus('error');
       });
-    api.getServiceStats().then(setStats).catch(console.error);
+    api.getServiceStats()
+      .then(d => {
+        setStats(d);
+        setStatsStatus('ready');
+      })
+      .catch(err => {
+        console.error(err);
+        setStatsStatus('error');
+      });
     api.getBalance()
       .then(d => {
         setBalance(d);
@@ -1510,7 +1522,13 @@ function DashboardTab({ customer, onSwitchTab }) {
       });
     api.getPendingSatisfaction().then(d => {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
-    }).catch(console.error);
+      setPendingSatisfactionStatus('ready');
+    }).catch(err => {
+      // No error UI: the feedback card only exists when a pending item is
+      // known, so a failed load safely renders nothing.
+      console.error(err);
+      setPendingSatisfactionStatus('error');
+    });
     api.getReferrals().then(d => {
       if (d?.stats) setReferralStats({
         ...d.stats,
@@ -1518,7 +1536,13 @@ function DashboardTab({ customer, onSwitchTab }) {
         totalEarned: d.totalEarned != null ? Number(d.totalEarned) / 100 : 0, // dollars
         rewardPerReferral: Number(d.rewardPerReferral) || 25,
       });
-    }).catch(console.error);
+      setReferralStatsStatus('ready');
+    }).catch(err => {
+      // Decorative here (the $ figure on the Refer quick action) — fall back
+      // to the standard $25 below rather than hiding the action.
+      console.error(err);
+      setReferralStatsStatus('error');
+    });
     fetch(`${API_BASE}/public/social-feed`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -1546,6 +1570,7 @@ function DashboardTab({ customer, onSwitchTab }) {
 
   const handleSatRating = async (rating) => {
     setSatRating(rating);
+    setSatError('');
     setSatSubmitting(true);
     try {
       const result = await api.submitSatisfaction({
@@ -1560,7 +1585,11 @@ function DashboardTab({ customer, onSwitchTab }) {
         setSatPhase('feedback');
       }
     } catch (err) {
+      // The write failed — an optimistically lit rating with no phase change
+      // read as "recorded" while nothing was saved. Clear it and say so.
       console.error(err);
+      setSatRating(0);
+      setSatError('We could not record your rating. Please try again.');
     }
     setSatSubmitting(false);
   };
@@ -1658,7 +1687,9 @@ function DashboardTab({ customer, onSwitchTab }) {
     customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
     customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
   ].filter(Boolean).join(' · ');
-  const referralReward = Number(referralStats?.rewardPerReferral) || 25;
+  const referralReward = referralStatsStatus === 'ready'
+    ? (Number(referralStats?.rewardPerReferral) || 25)
+    : 25; // loading/error: standard reward until the server figure lands
   const quickActions = [
     { icon: 'wrench', label: 'Request', sub: 'New service', action: () => onSwitchTab?.('request') },
     { icon: 'chat', label: 'Message', sub: 'Text the team', action: () => { window.location.href = 'sms:+19412975749'; } },
@@ -1758,7 +1789,7 @@ function DashboardTab({ customer, onSwitchTab }) {
         </div>
       </section>
 
-      {pendingSatisfaction && !satDismissed && (
+      {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
           {satPhase === 'rate' && (
             <>
@@ -1790,6 +1821,11 @@ function DashboardTab({ customer, onSwitchTab }) {
                   );
                 })}
               </div>
+              {satError && (
+                <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 12 }}>
+                  {satError}
+                </div>
+              )}
             </>
           )}
           {satPhase === 'review' && (
@@ -1926,7 +1962,13 @@ function DashboardTab({ customer, onSwitchTab }) {
                     sub: annualPrepayLine || `${tier?.discount || '0%'} discount`,
                   }
                 : { label: 'Monthly rate', value: customer.monthlyRate ? `$${customer.monthlyRate}` : '—', sub: `${tier?.discount || '0%'} discount` },
-              { label: 'Services YTD', value: stats?.servicesYTD ?? '—', sub: stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits' },
+              {
+                label: 'Services YTD',
+                value: statsStatus === 'loading' ? '...' : stats?.servicesYTD ?? '—',
+                sub: statsStatus === 'error'
+                  ? 'Unavailable right now'
+                  : stats?.celsiusApplicationsThisYear != null ? `${stats.celsiusApplicationsThisYear} weed treatments` : 'completed visits',
+              },
               { label: 'Member since', value: customer.memberSince ? fmtDate(customer.memberSince, { month: 'short', year: 'numeric' }) : '—', sub: 'active customer' },
             ].map(item => (
               <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E7E2D7', paddingBottom: 10 }}>
@@ -3778,7 +3820,7 @@ function BillingTab({ customer }) {
   const cardMountRef = useRef(null);
   const processedSetupReturnRef = useRef(false);
 
-  const refreshCards = () => api.getCards().then(d => setCards(d.cards)).catch(console.error);
+  const refreshCards = () => api.getCards().then(d => setCards(d.cards || [])).catch(console.error);
 
   const loadBilling = useCallback(() => {
     setLoading(true);
@@ -3791,7 +3833,10 @@ function BillingTab({ customer }) {
       api.getAutopay().catch(() => ({ state: 'unknown', loadError: true })),
     ])
       .then(([payData, balData, cardData, prefsData, autopayData]) => {
-        setPayments(payData.payments); setBalance(balData); setCards(cardData.cards);
+        // `|| []` (same as loadSchedule): a shape-drifted 200 must not put
+        // undefined where payments.filter/cards.map render — the Billing tab
+        // has no error boundary and would white-screen.
+        setPayments(payData.payments || []); setBalance(balData); setCards(cardData.cards || []);
         setAutopay(autopayData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
@@ -8437,12 +8482,17 @@ function EnRouteLiveMap({ techPosition, customerLocation, techName }) {
 
   // Load Google Maps JS once the key is in hand.
   useEffect(() => {
-    if (!mapsKey) return;
-    if (window.google?.maps) { setMapReady(true); return; }
+    if (!mapsKey) return undefined;
+    if (window.google?.maps) { setMapReady(true); return undefined; }
     const existing = document.querySelector('script[data-waves-maps-loader]');
     if (existing) {
-      existing.addEventListener('load', () => setMapReady(true));
-      return;
+      // Another mount already owns the script tag. A finished load would have
+      // window.google.maps (caught above), so wait for its 'load' — with a
+      // cleanup: the tag outlives this component, and a leaked anonymous
+      // handler would setState against an unmounted map on every remount.
+      const onLoad = () => setMapReady(true);
+      existing.addEventListener('load', onLoad);
+      return () => existing.removeEventListener('load', onLoad);
     }
     const script = document.createElement('script');
     script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}`;
@@ -8574,17 +8624,23 @@ function ServiceTracker() {
   const [loading, setLoading] = useState(true);
   const [propertyPrefs, setPropertyPrefs] = useState(null);
   const [weather, setWeather] = useState(null);
+  // Monotonic sequence for tracker fetches: the 15s poll overlaps the initial
+  // load (and itself on a slow network), and an out-of-order response would
+  // overwrite fresher tracker state. Only the latest-issued request may write.
+  const trackerSeqRef = useRef(0);
 
   const fetchTracker = useCallback(() => {
+    const seq = ++trackerSeqRef.current;
     api.getActiveTracker()
-      .then(d => { setTracker(d.tracker); setLoading(false); })
-      .catch(() => setLoading(false));
+      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .catch(() => { if (seq === trackerSeqRef.current) setLoading(false); });
   }, []);
 
   useEffect(() => {
+    const seq = ++trackerSeqRef.current;
     api.getTodayTracker()
-      .then(d => { setTracker(d.tracker); setLoading(false); })
-      .catch(() => fetchTracker());
+      .then(d => { if (seq !== trackerSeqRef.current) return; setTracker(d.tracker); setLoading(false); })
+      .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
     api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
   }, [fetchTracker]);
@@ -9910,7 +9966,13 @@ function DocumentsTab({ customer, onSwitchTab }) {
         setShareStatus(prev => ({ ...prev, [doc.id]: null }));
         return;
       }
-      await navigator.clipboard?.writeText(shareLink);
+      // Optional chaining resolves undefined (no throw) when the Clipboard
+      // API is absent (in-app webviews, non-secure contexts) — never report
+      // "Copied" without an actual write. Mirrors ReportViewPage's share().
+      if (typeof navigator.clipboard?.writeText !== 'function') {
+        throw new Error('Clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(shareLink);
       setShareStatus(prev => ({ ...prev, [doc.id]: 'copied' }));
       setTimeout(() => setShareStatus(prev => ({ ...prev, [doc.id]: null })), 3000);
     } catch (err) {
@@ -10845,13 +10907,18 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const readPhotoFile = (file) => new Promise((resolve) => {
     const reader = new FileReader();
     reader.onload = (ev) => resolve({ preview: ev.target.result, data: ev.target.result, name: file.name });
+    // A corrupt/unreadable file fires error/abort instead of load — settle
+    // with null so one bad image can't hang Promise.all (and the photo
+    // picker) forever; nulls are filtered out below.
+    reader.onerror = () => resolve(null);
+    reader.onabort = () => resolve(null);
     reader.readAsDataURL(file);
   });
 
   const handlePhoto = async (e) => {
     const files = Array.from(e.target.files || []).slice(0, photosRemaining);
     if (!files.length) return;
-    const nextPhotos = await Promise.all(files.map(readPhotoFile));
+    const nextPhotos = (await Promise.all(files.map(readPhotoFile))).filter(Boolean);
     setPhotos(prev => [...prev, ...nextPhotos].slice(0, photoLimit));
     e.target.value = '';
   };
