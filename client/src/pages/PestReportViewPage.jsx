@@ -107,6 +107,9 @@ function NotFoundCard() {
   );
 }
 
+// Two-decimal money (owner 2026-07-11: every price shows cents).
+const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 function PricingCard({ pricing }) {
   const tiers = Array.isArray(pricing?.tiers) ? pricing.tiers : [];
   if (!tiers.length) return null;
@@ -127,15 +130,21 @@ function PricingCard({ pricing }) {
               ) : null}
             </div>
             <div style={{ textAlign: 'right' }}>
-              {tier.monthly != null ? (
+              {/* Recurring tiers price PER APPLICATION (owner 2026-07-11:
+                  never /mo where a per-application price is derivable, no
+                  per-year totals, always two decimals). annual ÷ visits is
+                  the per-application figure; /mo only survives as the
+                  fallback when the tier has no visit count. */}
+              {tier.monthly != null && tier.one_time == null ? (
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                  ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                  {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
+                    ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
+                    : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
                 </div>
               ) : null}
-              {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
               {tier.one_time != null ? (
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                  ${tier.one_time}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
+                  ${fmtCents(tier.one_time)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
                 </div>
               ) : null}
             </div>

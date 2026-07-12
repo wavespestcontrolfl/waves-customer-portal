@@ -135,15 +135,13 @@ async function releaseStage(estId, flag) {
 }
 
 function moneySummary(est = {}) {
+  // Residential estimate emails never restate a monthly or annual total
+  // (owner 2026-07-11) — the linked estimate page leads with per-application
+  // pricing, so the email defers to it. One-time totals stay (with cents).
   const monthlyTotal = parseFloat(est.monthly_total || est.monthlyTotal || 0);
-  const annualTotal = parseFloat(est.annual_total || est.annualTotal || 0);
   const oneTimeTotal = parseFloat(est.onetime_total || est.oneTimeTotal || est.onetimeTotal || 0);
-  if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
-  }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (monthlyTotal > 0) return "Priced per visit — full breakdown inside";
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return "";
 }
 

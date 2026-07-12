@@ -1409,32 +1409,51 @@ export default function QuotePage({ serviceSlug = '' }) {
                   </>
                 ) : (
                   <>
-                    <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
-                      <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                        ${Number(result.monthly_total).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
-                      </div>
-                      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
-                      {result.confidence === 'low' && (
-                        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
-                      )}
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
-                        {Number(result.per_application) > 0
-                          ? `$${Number(result.per_application).toLocaleString()} per application · ${result.service_interest}`
-                          : `$${Number(result.annual_total).toLocaleString()}/yr · ${result.service_interest}`}
-                      </div>
-                      {result.estimated_pricing && result.disclaimer && (
-                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, padding: '10px 14px', background: '#FEF3C7', borderRadius: 8, lineHeight: 1.5 }}>
-                          {result.disclaimer}
+                    {(() => {
+                      // Per-application headline (owner directive 2026-07-11):
+                      // every recurring price leads with the per-application
+                      // figure; the monthly rate is only the fallback when the
+                      // engine sent no per-application price. No per-year
+                      // totals anywhere. All amounts render with cents.
+                      const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                      const perApp = Number(result.per_application) || 0;
+                      const monthly = Number(result.monthly_total) || 0;
+                      // The variance band is computed on the monthly rate —
+                      // scale it onto the per-application figure so the range
+                      // brackets the number the customer is actually reading.
+                      const scale = perApp > 0 && monthly > 0 ? perApp / monthly : 0;
+                      const rangeLow = perApp > 0 ? Number(result.variance_low) * scale : Number(result.variance_low);
+                      const rangeHigh = perApp > 0 ? Number(result.variance_high) * scale : Number(result.variance_high);
+                      const visits = perApp > 0 && Number(result.annual_total) > 0
+                        ? Math.round(Number(result.annual_total) / perApp)
+                        : 0;
+                      return (
+                        <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
+                          <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
+                          <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
+                            ${money(perApp > 0 ? perApp : monthly)}
+                            <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>{perApp > 0 ? '/application' : '/mo'}</span>
+                          </div>
+                          <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${money(rangeLow)} – ${money(rangeHigh)}</strong> {perApp > 0 ? 'per application' : 'per month'}</div>
+                          {result.confidence === 'low' && (
+                            <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
+                          )}
+                          <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
+                            {visits > 0 ? `${visits} applications/year · ${result.service_interest}` : result.service_interest}
+                          </div>
+                          {result.estimated_pricing && result.disclaimer && (
+                            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, padding: '10px 14px', background: '#FEF3C7', borderRadius: 8, lineHeight: 1.5 }}>
+                              {result.disclaimer}
+                            </div>
+                          )}
+                          {result.has_setup_fee && (
+                            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
+                              + $99.00 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
+                            </div>
+                          )}
                         </div>
-                      )}
-                      {result.has_setup_fee && (
-                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
-                          + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
-                        </div>
-                      )}
-                    </div>
+                      );
+                    })()}
 
                     <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
                       We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.

@@ -4180,13 +4180,11 @@ function BillingTab({ customer }) {
     ? Number(customer.accountCredit)
     : credits.reduce((sum, c) => sum + (c.amount || 0), 0);
 
-  // WaveGuard membership — services & upsell
+  // WaveGuard membership — services & upsell. The old dollar "savings"
+  // figures (static catalog basePrice × 12 × discount) were fabricated
+  // annual totals — the card now speaks in the tier's real percentage
+  // (owner 2026-07-11: no per-year totals, no invented per-service rates).
   const includedServices = SERVICE_CATALOG.slice(0, numServices);
-  const totalFullPrice = includedServices.reduce((sum, s) => sum + s.basePrice * 12, 0);
-  const annualSavings = totalFullPrice * discount;
-  const platinumDiscount = TIER_DISCOUNTS.Platinum || 0.20;
-  const platinumSavings = totalFullPrice * platinumDiscount;
-  const additionalSavings = platinumSavings - annualSavings;
 
   const currentBalance = Number(balance?.currentBalance || 0);
   const balanceState = currentBalance > 0 ? 'Balance due' : 'Current';
@@ -4400,14 +4398,21 @@ function BillingTab({ customer }) {
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
           </div>
+          {/* Rate framing follows the REAL billing mode (owner 2026-07-11):
+              per-application / prepaid plans never restate a monthly total —
+              only true monthly billing keeps its /mo figure. */}
           <span style={{
             fontSize: 18,
             fontWeight: 850,
             color: B.blueDeeper,
             fontFamily: FONTS.ui,
-          }}>{money(monthlyRate)}/mo</span>
+          }}>{perApplicationBilling ? 'Billed per visit' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
         </div>
         <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
+          {/* Service rows list what the plan covers — no per-service price
+              chips: those figures came from the static catalog × tier
+              discount, not the customer's real billing (owner 2026-07-11:
+              no fabricated /mo rates). */}
           {includedServices.map(svc => (
             <div key={svc.id} style={{
               display: 'flex',
@@ -4422,22 +4427,17 @@ function BillingTab({ customer }) {
             }}>
               <Icon name={svc.icon} size={16} strokeWidth={1.8} style={{ color: B.blueDeeper }} />
               <span style={{ minWidth: 0, flex: 1 }}>{svc.name}</span>
-              {discount > 0 && (
-                <span style={{ fontSize: 14, color: B.blueDeeper, fontWeight: 850, whiteSpace: 'nowrap' }}>
-                  {money(svc.basePrice * (1 - discount), 0)}/mo
-                </span>
-              )}
             </div>
           ))}
         </div>
-        {annualSavings > 0 && (
+        {discount > 0 && (
           <div style={{ marginTop: 12, padding: '10px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.blueDeeper, fontWeight: 850 }}>
-            Saving {money(annualSavings, 0)}/year with your {tierName} bundle
+            Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
           </div>
         )}
-        {activeTierName && tierName !== 'Platinum' && additionalSavings > 0 && (
+        {activeTierName && tierName !== 'Platinum' && (TIER_DISCOUNTS.Platinum || 0) > discount && (
           <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
-            Platinum would add {money(additionalSavings, 0)}/year in bundle savings.
+            Platinum bumps that to {Math.round((TIER_DISCOUNTS.Platinum || 0.20) * 100)}% off every service.
           </div>
         )}
       </div>
@@ -7028,7 +7028,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 >
                   {options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {option.label} - {option.monthly ? `${money(option.monthly, 0)}/mo` : money(option.oneTime || option.dueAtStart, 0)}
+                      {option.label} - {option.perVisit ? `${money(option.perVisit)}/application` : option.monthly ? `${money(option.monthly)}/mo` : money(option.oneTime || option.dueAtStart)}
                     </option>
                   ))}
                 </select>
@@ -7050,7 +7050,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
                       <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
-                        {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
+                        {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
                       </div>
                       <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
@@ -7060,10 +7060,11 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
 
                   <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
                     {[
-                      selected.estimatedAdditionalMonthly != null && selected.monthly ? { label: 'Added monthly', value: money(selected.estimatedAdditionalMonthly, 0) } : null,
-                      selected.estimatedPlanMonthly ? { label: 'Plan after add', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
-                      selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart, 0) } : null,
-                      selected.oneTime ? { label: 'One-time', value: money(selected.oneTime, 0) } : null,
+                      // No combined plan-monthly tiles (owner 2026-07-11): the
+                      // option's own price leads above; only setup / one-time
+                      // / tier facts tile here.
+                      selected.dueAtStart ? { label: 'Setup', value: money(selected.dueAtStart) } : null,
+                      selected.oneTime ? { label: 'One-time', value: money(selected.oneTime) } : null,
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
                       <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
@@ -7411,7 +7412,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                     >
                       {options.map(option => (
                         <option key={option.id} value={option.id}>
-                          {option.label} - {option.monthly ? `${money(option.monthly, 0)}/mo` : money(option.oneTime || option.dueAtStart, 0)}
+                          {option.label} - {option.perVisit ? `${money(option.perVisit)}/application` : option.monthly ? `${money(option.monthly)}/mo` : money(option.oneTime || option.dueAtStart)}
                         </option>
                       ))}
                     </select>
@@ -7426,7 +7427,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         </div>
                         <div style={{ textAlign: compact ? 'left' : 'right' }}>
                           <div style={{ fontSize: 24, color: B.blueDeeper, fontWeight: 850, lineHeight: 1 }}>
-                            {selected.monthly ? `${money(selected.monthly, 0)}/mo` : money(selected.oneTime || selected.dueAtStart, 0)}
+                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
                           </div>
                           <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
                             {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
@@ -7436,8 +7437,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 
                       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
                         {[
-                          selected.estimatedAdditionalMonthly != null && selected.monthly ? { label: 'Added monthly', value: money(selected.estimatedAdditionalMonthly, 0) } : null,
-                          selected.estimatedPlanMonthly ? { label: 'Plan total', value: `${money(selected.estimatedPlanMonthly, 0)}/mo` } : null,
+                          // No combined plan-monthly tiles (owner 2026-07-11).
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
                           <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
@@ -7515,6 +7515,10 @@ function MyPlanTab({ customer }) {
   const [showTierExplorer, setShowTierExplorer] = useState(false);
   const lawnHealth = useLawnHealth(customer.id);
   const compact = useIsMobile(760);
+  // Real billing mode (owner 2026-07-11): per-application / prepaid plans
+  // must not present a "$X per month" plan rate — same source of truth as
+  // the Billing tab's AutopayCard.
+  const [billingMode, setBillingMode] = useState(null);
 
   useEffect(() => {
     api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
@@ -7522,6 +7526,7 @@ function MyPlanTab({ customer }) {
     api.getServices({ limit: 50 }).then(d => {
       if (d.services) setServiceHistory(d.services);
     }).catch(console.error);
+    api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
   }, []);
 
   const serviceMatches = (svcId, service = {}) => {
@@ -7597,9 +7602,6 @@ function MyPlanTab({ customer }) {
     .filter(Boolean);
   const numServices = includedServices.length;
 
-  // Calculate annual savings
-  const totalFullPrice = includedServices.reduce((sum, s) => sum + s.basePrice * 12, 0);
-  const annualSavings = totalFullPrice * discount;
   const monthlyRate = customer.monthlyRate || 0;
   const annualPrepay = customer.annualPrepay || null;
   const annualPrepayLabel = annualPrepayStatusLabel(annualPrepay);
@@ -7609,14 +7611,15 @@ function MyPlanTab({ customer }) {
   const planBillingLabel = !activeTierName
     ? 'No active plan'
     : (annualPrepayLabel || 'Active plan');
+  const perApplicationBilled = billingMode === 'per_application';
   const planBillingValue = !activeTierName
     ? '—'
     : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-      : formatPortalMoney(monthlyRate));
+      : (perApplicationBilled ? 'Per visit' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
-    : (annualPrepay ? annualPrepayLine : 'per month');
+    : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
 
   // Build bundled services one-liner
   const bundleSummary = includedServices.map(s => s.name.replace(/ Program| Barrier Treatment| Control/g, '').replace('Quarterly ', '')).join(' + ');
@@ -7770,7 +7773,6 @@ function MyPlanTab({ customer }) {
   const memberSinceLabel = customer.memberSince
     ? parseDate(customer.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
     : 'Not set';
-  const currentAnnual = totalFullPrice - annualSavings;
 
   const card = {
     background: B.white,
@@ -7881,7 +7883,7 @@ function MyPlanTab({ customer }) {
         }}>
           {[
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
-            { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: `${money(annualSavings)}/yr saved` },
+            { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every service' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].map((item) => (
             <div key={item.label} style={{
@@ -7922,7 +7924,6 @@ function MyPlanTab({ customer }) {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const totalVisits = scheduleMonths.length;
                 const completedVisits = scheduleMonths.filter(m => completedMonths.has(m)).length;
-                const annualSavingsForService = svc.basePrice * 12 * discount;
                 const progress = totalVisits > 0 ? Math.round((completedVisits / totalVisits) * 100) : 0;
                 const coverage = SERVICE_COVERAGE[svc.id];
                 const expanded = expandedService === svc.id;
@@ -7977,9 +7978,14 @@ function MyPlanTab({ customer }) {
                         </div>
                         <div style={{ textAlign: 'right', flexShrink: 0 }}>
                           <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} visits</div>
-                          <div style={{ marginTop: 4, fontSize: 14, color: annualSavingsForService > 0 ? B.green : muted, fontWeight: 850 }}>
-                            {annualSavingsForService > 0 ? `${money(annualSavingsForService)}/yr saved` : `${money(svc.basePrice * 12)}/yr`}
-                          </div>
+                          {/* Percentage framing only — the old $/yr figures were
+                              static catalog basePrice math, not real billing
+                              (owner 2026-07-11: no per-year totals). */}
+                          {discount > 0 ? (
+                            <div style={{ marginTop: 4, fontSize: 14, color: B.green, fontWeight: 850 }}>
+                              {Math.round(discount * 100)}% member rate
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     </button>
@@ -8156,11 +8162,14 @@ function MyPlanTab({ customer }) {
 
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}>Savings</div>
+            {/* Percentage only — the old dollar figure ($/yr from static
+                catalog basePrice × 12) was fabricated, and per-year totals
+                are banned customer-facing (owner 2026-07-11). */}
             <div style={{ marginTop: 8, color: B.blueDeeper, fontSize: 34, fontWeight: 850, lineHeight: 1 }}>
-              {money(annualSavings)}
+              {Math.round(discount * 100)}% off
             </div>
             <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
-              Full price {money(totalFullPrice)}/yr. Your current bundle is {money(currentAnnual)}/yr.
+              Your {tierName} bundle rate, applied to every service visit.
             </div>
           </section>
 
@@ -8172,7 +8181,7 @@ function MyPlanTab({ customer }) {
                   // Renewal-credit bullet removed: it promised a tenure-
                   // prorated dollar figure no server system grants (F-015).
                   tierIdx < TIER_ORDER.length - 1 && {
-                    text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25, 0)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
+                    text: `${money(tierIdx >= 2 ? 100 : tierIdx >= 1 ? 50 : 25)} upgrade credit toward ${TIER_ORDER[tierIdx + 1]}`,
                     icon: 'upgrade',
                   },
                   tierIdx >= 2 && { text: 'Priority hurricane scheduling', icon: 'tornado' },

@@ -216,16 +216,23 @@ function estimateEmailIdempotencyKey(estimate, explicitAttemptKey = null) {
   return `estimate.delivery:${crypto.createHash('sha256').update(rawKey).digest('hex')}`;
 }
 
-function moneySummary(estimate = {}) {
+function moneySummary(estimate = {}, { allowTotals = false } = {}) {
   const monthlyTotal = parseFloat(estimate.monthly_total || estimate.monthlyTotal || 0);
   const annualTotal = parseFloat(estimate.annual_total || estimate.annualTotal || 0);
   const oneTimeTotal = parseFloat(estimate.onetime_total || estimate.oneTimeTotal || estimate.onetimeTotal || 0);
   if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
+    // Commercial proposals (allowTotals) keep annual framing — boards budget
+    // annually; the owner exempted them (2026-07-11). Residential emails
+    // never restate monthly/annual totals: the linked estimate leads with
+    // per-application pricing.
+    if (allowTotals) {
+      return annualTotal > 0
+        ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
+        : `$${monthlyTotal.toFixed(2)}/mo`;
+    }
+    return 'Priced per visit — full breakdown inside';
   }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return '';
 }
 
@@ -251,7 +258,7 @@ function estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposa
   return {
     first_name: firstName,
     estimate_url: viewUrl,
-    price_summary: priceLine || moneySummary(estimate),
+    price_summary: priceLine || moneySummary(estimate, { allowTotals: proposalMode }),
     service_summary: serviceSummary || '',
     property_address: estimate.address || '',
     next_step_summary: proposalMode

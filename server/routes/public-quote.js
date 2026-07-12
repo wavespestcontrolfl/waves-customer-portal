@@ -1271,11 +1271,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // Per-application phrasing when the quote resolves to one (owner
+    // 2026-07-11: recurring emails lead per-application, never /mo where a
+    // per-application figure exists; every amount shows cents).
+    const emailPerApp = quoteRequired ? null : derivePerApplication(estimate);
     const priceSummary = quoteRequired
       ? 'Manual review needed'
       : isOneTimeOnly
-        ? `$${Math.round(oneTimeTotal)} one-time`
-        : `$${monthly.toFixed(2)}/mo`;
+        ? `$${oneTimeTotal.toFixed(2)} one-time`
+        : emailPerApp
+          ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
+          : `$${monthly.toFixed(2)}/mo`;
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected

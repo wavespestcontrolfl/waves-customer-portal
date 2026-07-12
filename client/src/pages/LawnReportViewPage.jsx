@@ -23,6 +23,9 @@ const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
 
+// Two-decimal money (owner 2026-07-11: every price shows cents).
+const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 const STATUS_DOT = {
   Healthy: COLORS.green,
   'Keep an eye on it': COLORS.orange,
@@ -299,12 +302,16 @@ export default function LawnReportViewPage() {
                   {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} applications per year</div> : null}
                 </div>
                 <div style={{ textAlign: 'right' }}>
+                  {/* Per-application pricing (owner 2026-07-11): annual ÷
+                      visits when derivable, /mo only as the no-visit-count
+                      fallback, never a /yr total, always two decimals. */}
                   {tier.monthly != null ? (
                     <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                      ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                      {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
+                        ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
+                        : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
                     </div>
                   ) : null}
-                  {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
                 </div>
               </div>
             ))}
