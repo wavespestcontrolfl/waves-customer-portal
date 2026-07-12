@@ -1114,6 +1114,25 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-45 findings (#2633) ──
+
+  test('Codex r45: single-quoted denial cells, intrinsic winners, and table-less provider #1 block', () => {
+    const singleQuoted = CATEGORY_TABLE.replace('"Usually"', "'No hidden fees'").replace('"Verify each"', "'Shady billing'");
+    const cells = gate.evaluate({ body: singleQuoted }, {});
+    expect(cells.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    for (const body of ['Best in town for pest control.', `Clear winner for pest control in Venice.\n\n${CATEGORY_TABLE}`, 'The #1 pest control company in Venice.', 'We are not cheap, but we are the best choice.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r45: usage-verb articles and prepositional #1 facts stay educational', () => {
+    for (const body of [`Waves uses a top-rated gel bait for roaches.\n\n${CATEGORY_TABLE}`, 'On inspections, we are near the #1 entry point for ants.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-44 findings (#2633) ──
 
   test('Codex r44: denial cells and clauses do not hide later insults', () => {

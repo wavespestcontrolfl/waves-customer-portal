@@ -312,7 +312,9 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // site" is instructional structure, not market position (Codex r26).
   // Accolade gerunds ride on the auxiliary ("we have been winning #1
   // awards" — Codex r36); instructional gerunds stay excluded via the gap.
-  `\\bwe(?:['’]re|['’]ve\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?|\\s+(?:are|were|remains?|remained|stays?|stayed|have\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?))\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Locational prepositions are excluded from the gap — "we are NEAR the
+  // #1 entry point for ants" describes a pest fact (Codex r45).
+  `\\bwe(?:['’]re|['’]ve\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?|\\s+(?:are|were|remains?|remained|stays?|stayed|have\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?))\\s+(?:(?![\\w'’]+ing\\b)(?!(?:at|near|behind|under|over|beside|around|inside|outside|past|by|about)\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Transitive "we rank #1" gets NO determiner tail: "below, we rank the
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
@@ -688,7 +690,7 @@ function finding(severity, code, message) {
 // "No. 1" ordinal abbreviation is never a negator.
 const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t|hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|couldn['’]?t|shouldn['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
 // Accusation vocabulary used by the conjunction-reset scope check.
-const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b`, 'i');
+const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b|${NUMERIC_ONE_ALT}|\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top[-\\s]?rated|unbeatable|unmatched)\\b`, 'i');
 function sentenceHasNegator(text, index, length) {
   // Clause boundaries count: "No hidden fees here; Waves charges hidden
   // fees." must not let the first clause deny the second (Codex r31).
@@ -923,6 +925,25 @@ function scanNameRankingArms(text, names) {
 // (Codex r35/r37): "We are the best choice in Venice" blocks; "Gel bait is
 // the best option for German roaches" is treatment advice; "We are not the
 // best choice for every home" is a denial.
+// Numeric #1 with adjacent provider syntax — shared by both paths
+// (Codex r45): "The #1 pest control company in Venice" declares a winner
+// with or without a table.
+const NUM_ADJACENT_PROVIDER_RE_SRC = `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest[\\s-]+control|lawn[\\s-]+care|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`;
+function scanAdjacentProviderNumeric(text) {
+  const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
+  const adjRe = new RegExp(NUM_ADJACENT_PROVIDER_RE_SRC, 'i');
+  let nm1;
+  while ((nm1 = numRe.exec(text)) !== null) {
+    if (sentenceHasNegator(text, nm1.index, nm1[0].length)) continue;
+    if (adjRe.test(text.slice(nm1.index, nm1.index + 60))) return nm1;
+  }
+  return null;
+}
+
+// Intrinsically self-ranking phrases need no subject — "Best in town for
+// pest control", "Clear winner …" declare a winner on their face
+// (Codex r45).
+const INTRINSIC_WINNER_RE = /\b(?:clear\s+winner|hands[-\s]down|best\s+in\s+(?:town|the\s+(?:area|business|region|county))|second\s+to\s+none|unbeatable|unmatched|can'?t\s+be\s+beat)\b/i;
 function scopedSelfRankingMatch(text) {
   const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
   let sm;
@@ -934,10 +955,14 @@ function scopedSelfRankingMatch(text) {
       text.lastIndexOf('\n', sm.index),
     ) + 1;
     const lead = text.slice(sentStart, sm.index + sm[0].length);
-    if (SENTENCE_NEGATOR_RE.test(lead)) continue;
+    // Clause-reset negation, shared with the accusation scans — "We are
+    // not cheap, but we are the best choice" blocks on the second clause
+    // (Codex r45).
+    if (sentenceHasNegator(text, sm.index, sm[0].length)) continue;
+    if (INTRINSIC_WINNER_RE.test(sm[0])) return sm;
     // A usage verb right before the superlative marks PRODUCT copy — "Waves
     // uses top-rated gel bait" rates the bait, not Waves (Codex r44).
-    if (/\b(?:uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installed|installing|carr(?:y|ies|ied|ying)|stocks?|stocked|recommends?|recommended|sprays?|sprayed|deploys?|deployed|with|sells?|sold)\s*$/i.test(text.slice(sentStart, sm.index))) continue;
+    if (/\b(?:uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installed|installing|carr(?:y|ies|ied|ying)|stocks?|stocked|recommends?|recommended|sprays?|sprayed|deploys?|deployed|with|sells?|sold)(?:\s+(?:a|an|the|this|these|those|our|some|really|very))*\s*$/i.test(text.slice(sentStart, sm.index))) continue;
     let subjLead = lead.replace(/^\s*(?:for|with|in|about|regarding|against|when\s+it\s+comes\s+to)\s+[^,]{0,40},\s*/i, '');
     // The pronoun/brand must GOVERN the ranking phrase — "Our guide says
     // gel bait is the best option" embeds it under a reporting verb
@@ -1305,6 +1330,7 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   // (Codex r35/r38); generic names get the shared winner arms too
   // ("The winner is Bug Busters." — Codex r39).
   let ownRank = scopedSelfRankingMatch(scanText)
+    || scanAdjacentProviderNumeric(scanText)
     || scanNameRankingArms(nameScanText, [...genericNames, ...curatedNames]);
   if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
@@ -1979,7 +2005,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const g = new RegExp(DISPARAGEMENT_RE.source, 'gi');
       let bm;
       while ((bm = g.exec(block)) !== null) {
-        const cellStart = block.lastIndexOf('"', bm.index) + 1;
+        const cellStart = Math.max(block.lastIndexOf('"', bm.index), block.lastIndexOf("'", bm.index)) + 1;
         if (SENTENCE_NEGATOR_RE.test(block.slice(cellStart, bm.index + bm[0].length))) continue;
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
           `Comparison table contains disparaging language about an option ("${bm[0].trim()}"). State attributes, never insults.`));
