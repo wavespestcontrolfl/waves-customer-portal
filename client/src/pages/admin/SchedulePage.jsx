@@ -618,6 +618,16 @@ function lawnAreaForProtocol(service) {
   return null;
 }
 
+// Total product for an area-based application: rate (per 1,000 sq ft) × sq ft
+// treated, in the rate's own unit. Empty string when either side is unusable
+// so the field stays blank rather than showing NaN/0.
+export function derivedTotalAmount(rate, areaSqft) {
+  const r = Number(rate);
+  const a = Number(areaSqft);
+  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(a) || a <= 0) return "";
+  return Math.round(r * (a / 1000) * 100) / 100;
+}
+
 function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
@@ -5956,11 +5966,20 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "") {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
   if (category.includes("bait") || category.includes("gel") || category.includes("glue")) return "bait_placement";
+  // Liquid fertilizers (K-Flow, Green Flo, chelated micros — catalog rate
+  // unit fl_oz/gal or "Liquid" in the name) go down as a spray, not granular.
+  const rateUnit = String(
+    product.rate_unit || product.rateUnit || product.default_unit || product.defaultUnit || "",
+  ).toLowerCase();
+  const liquidProduct =
+    rateUnit.includes("fl") || rateUnit.includes("gal") ||
+    /\b(liquid|flow?)\b/i.test(String(product.name || ""));
+  if (category.includes("fert") && liquidProduct) return "broadcast_spray";
   if (category.includes("fert") || category.includes("granular")) return "granular_broadcast";
   const serviceLine = serviceLineFromType(serviceType);
   if (serviceLine === "mosquito") return "fog_ulv";
@@ -5968,6 +5987,19 @@ function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
   return "perimeter_spray";
+}
+
+// Whether a product controls something a tech would list as a target.
+// Fertilizers, adjuvants/surfactants, soil amendments, and growth regulators
+// don't — their cards skip the Targets picker. Unknown catalog rows keep it.
+export function productControlsTargets(product) {
+  const category = String(
+    product?.category || product?.product_category || "",
+  ).toLowerCase();
+  if (!category) return true;
+  return !/(fert|adjuvant|surfactant|soil|moisture|biostimulant|micronutrient|growth regulator|pgr)/.test(
+    category,
+  );
 }
 
 function requiresLinearFt(method) {
@@ -7027,6 +7059,25 @@ export function CompletionPanel({
       .catch(() => { if (live) setCustomerEmail(""); });
     return () => { live = false; };
   }, [service.customerId, service.customer_id]);
+  // Measured lawn sqft from the turf profile: seeds the Sq ft field (and the
+  // derived Total) when a broadcast/granular lawn product is added. No
+  // profile / not a lawn visit → the fields stay manual as before.
+  const [lawnSqftForPrefill, setLawnSqftForPrefill] = useState(null);
+  useEffect(() => {
+    let live = true;
+    setLawnSqftForPrefill(null);
+    const cid = service.customerId || service.customer_id;
+    const type = service?.serviceType || service?.service_type || "";
+    if (!cid || serviceLineFromType(type) !== "lawn") return undefined;
+    adminFetch(`/admin/customers/${cid}/turf-profile`)
+      .then((d) => {
+        if (!live) return;
+        const n = Number(d?.profile?.lawn_sqft);
+        setLawnSqftForPrefill(Number.isFinite(n) && n > 0 ? n : null);
+      })
+      .catch(() => { if (live) setLawnSqftForPrefill(null); });
+    return () => { live = false; };
+  }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
@@ -8679,23 +8730,42 @@ export function CompletionPanel({
       !dryFormProduct &&
       applicationMethod === "perimeter_spray" &&
       serviceLineFromType(serviceTypeForArea) === "pest";
+    // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
+    // tech a clean number.
+    const prefillRate = usePestSprayDefault
+      ? 4
+      : catalogRate === "" || !Number.isFinite(Number(catalogRate))
+        ? catalogRate
+        : Number(catalogRate);
+    // Lawn broadcast/granular products treat the whole measured lawn: start
+    // the Sq ft field at the turf profile's treatable area and derive Total =
+    // rate × area / 1,000 in the rate's own unit. Both stay editable; a
+    // hand-edited Total is never recomputed (see updateProduct).
+    const prefillArea =
+      areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
+        ? Number(lawnSqftForPrefill)
+        : "";
+    const prefillTotal = derivedTotalAmount(prefillRate, prefillArea);
     setSelectedProducts((prev) => [
       ...prev,
       {
         productId: product.id,
         name: product.name,
-        rate: usePestSprayDefault ? 4 : catalogRate,
+        // Card display only — the submitted record keeps the canonical name.
+        displayName: product.display_name || product.displayName || null,
+        rate: prefillRate,
         rateUnit: usePestSprayDefault ? "oz" : defaultUnit,
         catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
         maxLabelRatePer1000:
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           null,
-        totalAmount: "",
+        totalAmount: prefillTotal,
+        totalAmountManual: false,
         amountUnit: usePestSprayDefault ? "oz" : defaultUnit,
         applicationMethod,
         applicationArea: "",
-        areaValue: "",
+        areaValue: prefillArea,
         areaUnit: areaRequirement?.unit || "",
         // Prefill the targets from the manufacturer label (products_catalog
         // target_pests) so the tech starts from what the product is labeled to
@@ -8752,6 +8822,25 @@ export function CompletionPanel({
             serviceTypeForArea,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
+        }
+        // A hand-entered Total is the tech's actual and is never recomputed;
+        // otherwise rate/area edits keep the derived Total (rate × sq ft /
+        // 1,000) in sync on area-based applications — including back to blank
+        // when the rate/area is cleared or the method stops being area-based,
+        // so a stale full-lawn total can't be submitted. The derived total is
+        // in the rate's unit, so a rate-unit change moves the total unit too.
+        if (field === "totalAmount") {
+          next.totalAmountManual = true;
+        } else if (!next.totalAmountManual) {
+          if (next.areaUnit !== "sqft") {
+            if (field === "applicationMethod" && p.areaUnit === "sqft") {
+              next.totalAmount = "";
+            }
+          } else if (field === "rate" || field === "areaValue") {
+            next.totalAmount = derivedTotalAmount(next.rate, next.areaValue);
+          } else if (field === "rateUnit") {
+            next.amountUnit = value;
+          }
         }
         return next;
       }),
@@ -9370,7 +9459,9 @@ export function CompletionPanel({
   }
 
   const filteredProducts = (products || []).filter((p) =>
-    p.name.toLowerCase().includes(productSearch.toLowerCase()),
+    `${p.name} ${p.display_name || ""}`
+      .toLowerCase()
+      .includes(productSearch.toLowerCase()),
   );
   const selectedCalibration =
     equipmentCalibrations.find(
@@ -10986,7 +11077,7 @@ export function CompletionPanel({
                         }
                       >
                         {selected ? "" : ""}
-                        {p.name}
+                        {p.display_name || p.name}
                       </Chip>
                     );
                   })}
@@ -11028,7 +11119,7 @@ export function CompletionPanel({
                                 : `0.5px solid ${M.hairline}`,
                           }}
                         >
-                          {p.name}
+                          {p.display_name || p.name}
                         </div>
                       ))}
                     </div>
@@ -11069,7 +11160,10 @@ export function CompletionPanel({
                           minWidth: 120,
                         }}
                       >
-                        {sp.name}
+                        {sp.displayName || sp.name}
+                      </span>{" "}
+                      <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                        {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                       </span>{" "}
                       <input
                         type="number"
@@ -11109,6 +11203,9 @@ export function CompletionPanel({
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
                       </select>{" "}
+                      <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                        Total used
+                      </span>{" "}
                       <input
                         type="number"
                         placeholder="Total"
@@ -11256,28 +11353,34 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
-                      <ProductTargetsPicker
-                        idSuffix={sp.productId}
-                        targets={sp.targets}
-                        suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                        noun={isLawn ? "" : "pest"}
-                        onChange={(next) =>
-                          updateProduct(sp.productId, "targets", next)
-                        }
-                        theme={{
-                          labelColor: M.ink3,
-                          chipBg: M.muted,
-                          chipText: M.ink,
-                          chipBorder: M.hairline,
-                          inputStyle: {
-                            ...mInput,
-                            height: 40,
-                            padding: "0 12px",
-                            fontSize: 14,
-                            width: "auto",
-                          },
-                        }}
-                      />
+                      {productControlsTargets(
+                        (products || []).find(
+                          (p) => String(p.id) === String(sp.productId),
+                        ),
+                      ) && (
+                        <ProductTargetsPicker
+                          idSuffix={sp.productId}
+                          targets={sp.targets}
+                          suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                          noun={isLawn ? "" : "pest"}
+                          onChange={(next) =>
+                            updateProduct(sp.productId, "targets", next)
+                          }
+                          theme={{
+                            labelColor: M.ink3,
+                            chipBg: M.muted,
+                            chipText: M.ink,
+                            chipBorder: M.hairline,
+                            inputStyle: {
+                              ...mInput,
+                              height: 40,
+                              padding: "0 12px",
+                              fontSize: 14,
+                              width: "auto",
+                            },
+                          }}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -12947,7 +13050,7 @@ export function CompletionPanel({
                     }}
                   >
                     {isSelected ? "\u2713 " : ""}
-                    {p.name}
+                    {p.display_name || p.name}
                   </button>
                 );
               })}
@@ -12986,7 +13089,7 @@ export function CompletionPanel({
                         borderBottom: `1px solid ${D.border}`,
                       }}
                     >
-                      {p.name}
+                      {p.display_name || p.name}
                     </div>
                   ))}
                 </div>
@@ -13027,7 +13130,10 @@ export function CompletionPanel({
                       minWidth: 120,
                     }}
                   >
-                    {sp.name}
+                    {sp.displayName || sp.name}
+                  </span>{" "}
+                  <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                    {sp.areaUnit === "sqft" ? "Rate /1k sq ft" : "Rate"}
                   </span>{" "}
                   <input
                     type="number"
@@ -13052,6 +13158,9 @@ export function CompletionPanel({
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                   </select>{" "}
+                  <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                    Total used
+                  </span>{" "}
                   <input
                     type="number"
                     placeholder="Total"
@@ -13167,26 +13276,32 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
-                  <ProductTargetsPicker
-                    idSuffix={sp.productId}
-                    targets={sp.targets}
-                    suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
-                    noun={isLawn ? "" : "pest"}
-                    onChange={(next) =>
-                      updateProduct(sp.productId, "targets", next)
-                    }
-                    theme={{
-                      labelColor: D.muted,
-                      chipBg: D.bg,
-                      chipText: D.text,
-                      chipBorder: D.border,
-                      inputStyle: {
-                        ...inputStyle,
-                        marginBottom: 0,
-                        width: "auto",
-                      },
-                    }}
-                  />
+                  {productControlsTargets(
+                    (products || []).find(
+                      (p) => String(p.id) === String(sp.productId),
+                    ),
+                  ) && (
+                    <ProductTargetsPicker
+                      idSuffix={sp.productId}
+                      targets={sp.targets}
+                      suggestions={isLawn ? LAWN_TARGET_SUGGESTIONS : PEST_TARGET_SUGGESTIONS}
+                      noun={isLawn ? "" : "pest"}
+                      onChange={(next) =>
+                        updateProduct(sp.productId, "targets", next)
+                      }
+                      theme={{
+                        labelColor: D.muted,
+                        chipBg: D.bg,
+                        chipText: D.text,
+                        chipBorder: D.border,
+                        inputStyle: {
+                          ...inputStyle,
+                          marginBottom: 0,
+                          width: "auto",
+                        },
+                      }}
+                    />
+                  )}
                 </div>
               ))}
             </div>
