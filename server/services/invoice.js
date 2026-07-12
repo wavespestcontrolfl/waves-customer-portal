@@ -1217,7 +1217,13 @@ const InvoiceService = {
         ? (lineItemDiscountNames.length ? lineItemDiscountNames : ["Line-item discounts"])
         : []),
     ].filter(Boolean);
-    const discountLabel = labelParts.length ? labelParts.join(" + ") : null;
+    // invoices.discount_label is varchar(100) while discount names allow 200
+    // chars (codex 2652 r1) — bound the joined label so the insert can never
+    // fail on a long or multi-name label.
+    const joinedDiscountLabel = labelParts.join(" + ");
+    const discountLabel = labelParts.length
+      ? (joinedDiscountLabel.length > 100 ? `${joinedDiscountLabel.slice(0, 97)}...` : joinedDiscountLabel)
+      : null;
 
     const afterDiscount = subtotal - discountAmount;
 

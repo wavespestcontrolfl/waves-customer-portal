@@ -1706,46 +1706,31 @@ const EstimateConverter = {
             throw new Error(`deposit ledger read failed for annual prepay invoice (estimate ${estimateId}): ${ledgerErr.message}`);
           }
           const requestedPrepayDepositCredit = prepayDepositCredit ? Number(prepayDepositCredit.amount) : 0;
-          // Labeled manual-discount itemization (owner 2026-07-11): the
-          // caller (public accept) resolves the discount from the live
-          // pricing bundle and passes { label, annualAmount }. annualAmount
-          // here is already NET of that credit (annual_total is), so the
-          // prepay line grosses UP by the slice and the negative labeled
-          // line brings the total back — unchanged by construction, and
-          // create() rolls the negative line into discount_amount/label.
-          // Callers that can't resolve it (admin conversions, capped/
-          // suppressed cadences, multi-service) pass nothing → prior shape.
-          const prepayManualItemization = opts.manualDiscountItemization
+          // Labeled manual discount on the prepay invoice (owner 2026-07-11):
+          // DESCRIPTION-level only — the prepay line stays at the NET
+          // annualAmount because annual-prepay-renewals seeds each covered
+          // visit's fallback estimated_price from invoices.subtotal
+          // (annual-prepay-renewals.js ~375-379); a grossed subtotal would
+          // rebill voided/refunded prepay visits at the pre-credit rate
+          // (codex 2652 r1). The prepay % discount is already communicated
+          // the same way (in the line description), so the manual credit
+          // rides beside it. The standard (per-application) leg keeps the
+          // real labeled discount line — its invoice subtotal feeds nothing.
+          const prepayManualLabel = opts.manualDiscountItemization
             && Number(opts.manualDiscountItemization.annualAmount) > 0
-            && String(opts.manualDiscountItemization.label || '').trim()
-            ? {
-              label: String(opts.manualDiscountItemization.label).trim(),
-              amount: Math.round(Number(opts.manualDiscountItemization.annualAmount) * 100) / 100,
-            }
-            : null;
-          const prepayLineItems = prepayManualItemization
-            ? [
-              {
-                description: prepayLineDescription,
-                quantity: 1,
-                unit_price: Math.round((annualAmount + prepayManualItemization.amount) * 100) / 100,
-              },
-              {
-                description: prepayManualItemization.label,
-                quantity: 1,
-                unit_price: -prepayManualItemization.amount,
-              },
-            ]
-            : [{
-              description: prepayLineDescription,
-              quantity: 1,
-              unit_price: annualAmount,
-            }];
+            ? String(opts.manualDiscountItemization.label || '').trim()
+            : '';
           const inv = await InvoiceService.create({
             database,
             customerId,
             title: `${prepayPlanPrefix} — Annual Prepay (12 months)`,
-            lineItems: prepayLineItems,
+            lineItems: [{
+              description: prepayManualLabel
+                ? `${prepayLineDescription} — ${prepayManualLabel} applied`
+                : prepayLineDescription,
+              quantity: 1,
+              unit_price: annualAmount,
+            }],
             notes: prepayNotes,
             dueDate: etDateString(),
             ...(prepayTaxRate !== undefined ? { taxRate: prepayTaxRate } : {}),

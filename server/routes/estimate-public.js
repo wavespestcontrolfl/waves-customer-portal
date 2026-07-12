@@ -8240,6 +8240,11 @@ router.put('/:token/accept', async (req, res, next) => {
               });
               if (manualSlice > 0) {
                 lineItems.push({
+                  // _kind tags the row for the admin invoice editor's
+                  // discount accounting (codex 2652 r1: the editor only
+                  // counts _kind==='discount' rows toward lineDiscountAmt);
+                  // create() classifies it the same either way.
+                  _kind: 'discount',
                   description: acceptManualDiscountItemization.label,
                   quantity: 1,
                   unit_price: -manualSlice,
