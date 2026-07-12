@@ -904,13 +904,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // noun-based PROVIDER_DISPARAGEMENT_RE misses.
   const competitorNames = [...known, ...unknown];
   if (competitorNames.length) {
+    // These proximity scans run on the block-STRIPPED prose (proseText /
+    // proseNameText): a competitor named only inside a <ComparisonTable>
+    // must not lend "competitor context" to adjacent educational prose —
+    // "rest in shady foliage" right before a sourced Orkin table was still
+    // hard-blocking (Codex r3 P2 on #2633). In-table negativity is fully
+    // covered by the per-block scans below.
     const nearCompetitor = (idx, len) => {
-      // Slice the quote/backslash-stripped text (indices align with scanText) and
-      // collapse runs of whitespace so an escaped/embedded-quote brand — left as
-      // "All   U   Need" by the strip — still matches its canonical single-spaced
-      // name. NEG_ADJ/PROVIDER_NEGATIVE matches are quote-free, so their indices
-      // are identical in scanText and nameScanText.
-      const window = nameScanText
+      // Slice the quote/backslash-stripped text (indices align with proseText)
+      // and collapse runs of whitespace so an escaped/embedded-quote brand —
+      // left as "All   U   Need" by the strip — still matches its canonical
+      // single-spaced name. NEG_ADJ/PROVIDER_NEGATIVE matches are quote-free,
+      // so their indices are identical in proseText and proseNameText.
+      const window = proseNameText
         .slice(Math.max(0, idx - PROVIDER_NEGATIVE_PROXIMITY), idx + len + PROVIDER_NEGATIVE_PROXIMITY)
         .toLowerCase()
         .replace(/\s+/g, ' ');
@@ -919,7 +925,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // Disparaging adjective near a competitor name → P0.
     const adjRe = new RegExp(`\\b(?:${NEG_ADJ})\\b`, 'ig');
     let am;
-    while ((am = adjRe.exec(scanText)) !== null) {
+    while ((am = adjRe.exec(proseText)) !== null) {
       if (nearCompetitor(am.index, am[0].length)) {
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
           `Comparison draft disparages a named competitor ("${am[0].trim()}" near a competitor name). State neutral attributes only.`));
@@ -929,7 +935,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // Negative service-reliability claim near a competitor name → P1 review.
     const negRe = new RegExp(PROVIDER_NEGATIVE_RE.source, 'ig');
     let nm;
-    while ((nm = negRe.exec(scanText)) !== null) {
+    while ((nm = negRe.exec(proseText)) !== null) {
       if (nearCompetitor(nm.index, nm[0].length)) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
           `Comparison draft makes a negative service-reliability claim about a named provider ("${nm[0].trim()}"). Routed to human review — state neutral, verifiable attributes only.`));

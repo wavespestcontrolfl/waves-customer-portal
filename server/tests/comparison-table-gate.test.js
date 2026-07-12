@@ -1114,6 +1114,19 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  test('Codex r4 (P2): literal-shade prose adjacent to a sourced competitor table stays clean', () => {
+    const sourced = `<ComparisonTable
+  columns={["What to weigh","Orkin","Local SWFL company"]}
+  rows={[
+    { label: "Reach", values: ["National (US)","Local to Manatee/Sarasota/Charlotte"] }
+  ]}
+  caption="Attributes as of June 2026, per each company public website." />`;
+    const r = gate.evaluate({ body: `Adult mosquitoes rest in shady foliage between blood meals.\n${sourced}` }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true); // named competitor still never auto-publishes
+  });
+
   test('Codex r1 (P2): own-brand disparagement blocks; own brand near pest vocabulary does not', () => {
     for (const prose of ['Waves is dishonest.', 'Waves charges hidden fees on renewals.']) {
       const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
