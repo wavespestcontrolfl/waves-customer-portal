@@ -396,7 +396,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook))\\s+(?:${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -1048,8 +1048,11 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
       `Draft contains disparaging language about Waves itself ("${ownDisp[0].trim()}"). State attributes, never insults — in prose, the title, and the meta.`));
   }
-  let ownRank = null;
-  {
+  // Non-numeric superlatives ("We are the best choice in Venice", "Waves
+  // is the clear winner") enforce the same anti-ranking rule table-less
+  // (Codex r33) — plain whole-text match, matching the table path.
+  let ownRank = scanText.match(SELF_RANKING_RE);
+  if (!ownRank) {
     // Sentence-guarded and iterated, same as the table path (Codex r28).
     const numSelfRe = new RegExp(NUMERIC_SELF_RANKING_RE.source, 'gi');
     let nsm;
@@ -1142,9 +1145,12 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i')
         : null;
-      disparaged = Boolean(firstUnnegatedMatch(nameScanText, negBeforeName)
+      const am = firstUnnegatedMatch(nameScanText, negBeforeName)
         || firstUnnegatedMatch(nameScanText, fromP0)
-        || (objAssocP0 && firstUnnegatedMatch(nameScanText, objAssocP0)));
+        || (objAssocP0 && firstUnnegatedMatch(nameScanText, objAssocP0));
+      // Trailing verb-anchored denials clear these too — "Bug Busters:
+      // hidden fees are not present." (Codex r32/r33).
+      disparaged = Boolean(am && !trailingDenial(nameScanText, am.index, am[0].length));
     }
     if (disparaged) {
       findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',

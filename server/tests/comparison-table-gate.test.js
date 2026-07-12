@@ -1114,6 +1114,27 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-33 findings (#2633) ──
+
+  test('Codex r33: table-less trailing separator denials stay clean', () => {
+    for (const body of ['Bug Busters: hidden fees are not present.', 'Acme Pest Solutions: shady billing is not present.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(false);
+    }
+  });
+
+  test('Codex r33: table-less non-numeric self-rankings block', () => {
+    for (const body of ['We are the best choice in Venice.', 'Waves is the clear winner.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r33: whether/if clauses stay educational', () => {
+    const r = gate.evaluate({ body: `Waves explains whether the garage threshold is the #1 entry point.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
   // ── Codex round-32 findings (#2633) ──
 
   test('Codex r32: auxiliary self-rankings block', () => {
