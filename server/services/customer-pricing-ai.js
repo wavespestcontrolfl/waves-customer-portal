@@ -437,7 +437,10 @@ function quoteAmountFromLine(line) {
   // monthly/annualAfterDiscount). Derive it from the discounted annual and
   // the visit count whenever both exist; the raw fields are only the
   // fallback for lines with no visit cadence.
-  const visits = positiveNumber(line.visitsPerYear, line.frequency);
+  // line.visits covers mosquito's cadence field (codex 2642 r2); frequency
+  // is numeric on lawn shapes and a string ('quarterly') on pest shapes —
+  // positiveNumber ignores the string form.
+  const visits = positiveNumber(line.visitsPerYear, line.visits, line.frequency);
   const perVisit = annual && visits
     ? Math.round((annual / visits) * 100) / 100
     : positiveNumber(line.perApp, line.internalPerVisitRevenue, line.perVisit);
