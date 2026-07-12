@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Errors-only lint on STAGED files (lint-staged -> eslint --fix). Catches
+# broken code (undefined identifiers, duplicate keys, unreachable code)
+# before it lands; never checks untouched files and enforces no style rules
+# (see eslint.config.js).
+#
+# Contract, per the pre-push hook's failure policy: fast (<~3s), no
+# network, and missing infra never blocks a commit.
+#
+# Escape hatch: git commit -n   (--no-verify)
+
+set -u
+
+command -v npx >/dev/null 2>&1 || exit 0
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$REPO_ROOT" ] || exit 0
+cd "$REPO_ROOT"
+
+# Fresh clone/worktree without npm ci — advisory, don't block.
+if [ ! -d node_modules/lint-staged ]; then
+  echo "[pre-commit] lint-staged not installed — skipping lint (run npm ci)." >&2
+  exit 0
+fi
+
+exec npx lint-staged
