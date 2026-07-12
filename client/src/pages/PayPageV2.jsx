@@ -567,7 +567,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
@@ -596,8 +596,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 borderRadius: `${RADIUS.input}px`,
               },
               '.Tab--selected': {
-                borderColor: COLORS.blueDeeper,
-                backgroundColor: 'rgba(27,44,91,0.08)',
+                borderColor: COLORS.glassNavy,
+                backgroundColor: 'rgba(4,57,94,0.08)',
               },
             },
           },
@@ -1311,7 +1311,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,

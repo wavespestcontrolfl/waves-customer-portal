@@ -24,7 +24,7 @@ export const PrintContext = createContext(false);
 function usePrint() { return useContext(PrintContext); }
 
 // ── Surface tokens (shared with the lawn/pest V2 + public estimate surface) ─────
-const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (#1B2C5B old navy)
+const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (old marketing navy)
 const BODY = 'var(--text)'; // prose uses the same ink as the rest of the report body
 // muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
 const MUTED = 'var(--muted)'; // single supporting gray, matches the page
@@ -265,7 +265,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
         {customerAction
           ? <KeyLine label="Your next step" value={customerAction} dot={COLORS.green} />
           : (noActionNeeded ? <KeyLine label="Your next step" value="No action is needed from you right now — we completed today’s treatment and did not identify an urgent plant health issue." dot={COLORS.green} /> : null)}
-        {nextVisitText ? <KeyLine label="Next visit" value={nextVisitText} dot={COLORS.blueDeeper} /> : null}
+        {nextVisitText ? <KeyLine label="Next visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
     </Card>
   );

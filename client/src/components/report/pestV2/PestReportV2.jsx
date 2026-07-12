@@ -19,7 +19,7 @@ import { CUSTOMER_SURFACE } from '../../../theme-customer';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // ── Surface tokens (shared with the lawn V2 / public estimate surface) ──────────
-const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (#1B2C5B old navy)
+const TEXT = 'var(--text)'; // report ink var — resolves per theme (glass navy / doc ink); was CUSTOMER_SURFACE.text (old marketing navy)
 const BODY = 'var(--text)'; // prose uses the same ink as the rest of the report body
 // muted was drifted gray-500 #6B7280; normalized to the portal slate-600.
 const MUTED = 'var(--muted)'; // single supporting gray, matches the page
@@ -406,8 +406,8 @@ export function PestProtectionMap({ defense, print = false }) {
           ) : null}
 
           {/* home */}
-          <polygon points="160,84 134,106 186,106" fill={COLORS.blueDeeper} />
-          <rect x="138" y="106" width="44" height="30" rx="3" fill={COLORS.blueDeeper} />
+          <polygon points="160,84 134,106 186,106" fill={COLORS.glassNavy} />
+          <rect x="138" y="106" width="44" height="30" rx="3" fill={COLORS.glassNavy} />
           <rect x="155" y="118" width="10" height="18" rx="1.5" fill={COLORS.white} />
 
           {/* entry-point nodes — bloom on with a soft status glow; watch-state
@@ -476,7 +476,7 @@ export function PestPrimaryMove({ primaryMove }) {
       {primaryMove.why ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{primaryMove.why}</p> : null}
       {primaryMove.impact ? <p style={{ fontSize: 13, color: MUTED, lineHeight: 1.5, margin: 0 }}>{primaryMove.impact}</p> : null}
       {primaryMove.dueLabel ? (
-        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.blueDeeper, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
+        <span style={{ display: 'inline-block', marginTop: 10, padding: '4px 10px', background: COLORS.blueLight, color: COLORS.glassNavy, borderRadius: 999, fontSize: 12, fontWeight: 700 }}>{primaryMove.dueLabel}</span>
       ) : null}
     </section>
   );
