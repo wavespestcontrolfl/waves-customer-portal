@@ -499,6 +499,35 @@ const StripeService = {
   },
 
   /**
+   * SetupIntent for the recurring-accept Auto Pay card (dark until
+   * RECURRING_CARD_ON_FILE). Mirrors the one-time card-hold SetupIntent:
+   * customerless on purpose (the recurring estimate may have no customer
+   * record until acceptance creates one — the intent still yields a reusable
+   * payment_method that accept-time attaches + enrolls), usage:'off_session'
+   * so completed applications can charge with the cardholder absent, and
+   * pinned to the estimate via metadata so accept verification re-derives
+   * trust from purpose+estimate_id server-side rather than believing the
+   * client. Idempotency is keyed on (estimate, generation) — every create
+   * param is deterministic from them — so a reopened capture step replays the
+   * SAME intent (a succeeded replay short-circuits in the capture modal),
+   * while the caller walks `generation` forward past a canceled replay to
+   * mint a usable replacement (same reason the card-hold flow salts).
+   */
+  async createRecurringCardSetupIntent({ estimateId, generation = 0 }) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.setupIntents.create({
+      payment_method_types: ['card'],
+      usage: 'off_session',
+      description: 'Waves recurring plan — card on file for Auto Pay',
+      metadata: {
+        purpose: 'estimate_recurring_card',
+        estimate_id: String(estimateId),
+      },
+    }, { idempotencyKey: `estimate_recurring_card_${estimateId}${Number(generation) > 0 ? `_g${Number(generation)}` : ''}` });
+  },
+
+  /**
    * Off-session charge of a SPECIFIC saved payment method (not the default
    * autopay card the way charge() requires). Used by the one-time card-hold
    * flow for the flat no-show / late-cancel fee — a penalty with no invoice or
