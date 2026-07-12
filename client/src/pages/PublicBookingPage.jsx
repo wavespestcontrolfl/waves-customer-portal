@@ -922,7 +922,10 @@ export default function PublicBookingPage() {
                 <label htmlFor="book-phone" style={labelStyle}>Phone number</label>
                 <input
                   id="book-phone"
+                  name="phone"
                   type="tel" autoFocus
+                  autoComplete="tel"
+                  inputMode="tel"
                   placeholder="(941) 555-1234"
                   value={contact.phone}
                   onChange={e => setContact(c => ({ ...c, phone: e.target.value }))}
@@ -936,7 +939,9 @@ export default function PublicBookingPage() {
                   <label htmlFor="book-first-name" style={labelStyle}>First name</label>
                   <input
                     id="book-first-name"
+                    name="firstName"
                     type="text"
+                    autoComplete="given-name"
                     value={contact.firstName}
                     onChange={e => setContact(c => ({ ...c, firstName: e.target.value }))}
                     className="waves-focus-ring" style={inputStyle}
@@ -946,7 +951,9 @@ export default function PublicBookingPage() {
                   <label htmlFor="book-last-name" style={labelStyle}>Last name</label>
                   <input
                     id="book-last-name"
+                    name="lastName"
                     type="text"
+                    autoComplete="family-name"
                     value={contact.lastName}
                     onChange={e => setContact(c => ({ ...c, lastName: e.target.value }))}
                     className="waves-focus-ring" style={inputStyle}
@@ -957,7 +964,10 @@ export default function PublicBookingPage() {
                 <label htmlFor="book-email" style={labelStyle}>Email (optional)</label>
                 <input
                   id="book-email"
+                  name="email"
                   type="email"
+                  autoComplete="email"
+                  inputMode="email"
                   value={contact.email}
                   onChange={e => setContact(c => ({ ...c, email: e.target.value }))}
                   onBlur={() => captureBookingIntent()}

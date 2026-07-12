@@ -4730,7 +4730,8 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -4764,7 +4765,7 @@ function LegacyReport({ data, token, glass = false }) {
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </main>
+      </div>
       <BrandFooter />
     </div>
   );
@@ -5076,7 +5077,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.5;
           font-weight: 600;
           letter-spacing: 0;
@@ -6058,6 +6059,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .coverage-skeleton-map,
+          .coverage-skeleton-list span,
+          .workflow-skeleton-list span { animation: none; }
+        }
         .map-toggle {
           display: inline-flex;
           border: 1px solid var(--line);
@@ -6442,7 +6448,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           color: var(--text);
           font: inherit;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           padding: 9px 12px;
@@ -7893,7 +7899,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main className="sr-shell">
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
@@ -8197,7 +8204,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
-      </main>
+      </div>
     </div>
   );
 }

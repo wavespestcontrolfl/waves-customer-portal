@@ -63,7 +63,8 @@ function Page({ children }) {
       `}</style>
       {/* Page-local header removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       <BrandFooter variant="light" />
     </div>
@@ -163,10 +164,10 @@ function QuoteRequestForm({ token, firstName }) {
 
   return (
     <form onSubmit={submit} style={{ display: 'grid', gap: 10 }}>
-      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" autoComplete="name" className="waves-focus-ring" style={inputStyle} />
-      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
-      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
-      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" aria-label="Your name" autoComplete="name" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" aria-label="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" aria-label="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" aria-label="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
       <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>

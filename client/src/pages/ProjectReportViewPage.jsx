@@ -458,7 +458,8 @@ export default function ProjectReportViewPage() {
       `}</style>
       {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           {/* The kicker carries what the project is FOR (its title) when one
               is recorded — the bare type alone reads generic; the type still
@@ -638,7 +639,7 @@ export default function ProjectReportViewPage() {
           </div>
         </div>
 
-      </main>
+      </div>
       {/* Newsletter signup lives only on the newsletter pages (owner
           2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
       <BrandFooter variant={isCertificate ? 'contact' : undefined} />
