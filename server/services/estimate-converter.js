@@ -367,6 +367,10 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     consumedSupplementKeys.add(key);
     standalone.push({
       catalogServiceKey: standaloneRoute.catalogServiceKey,
+      // fromSupplement: this unit exists ONLY because of the scalar — a
+      // line-sourced unit was already counted in the recurring lines, so
+      // unit counting (prepay block, deposit-intent helper) adds only these.
+      fromSupplement: true,
       service: {
         name: standaloneRoute.name,
         frequency: explicitServiceCadence(supplement) || standaloneRoute.defaultPattern,
@@ -696,6 +700,17 @@ function shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices = [], es
   // public estimate page, which shows the fee struck through as waived.
   const data = normalizeEstimateData(estimateData);
   if (data.membershipSnapshot && data.membershipSnapshot.isExistingCustomer) return false;
+  // A standalone-scheduling supplement (rodent bait scalar after the
+  // pest+rodent route removal) makes the plan a multi-service bundle even
+  // with one recurring LINE — and the owner rule says bundles carry no
+  // setup fee (the bundle is the incentive). A scalar duplicating a real
+  // line doesn't count (the mix check below already handles that shape).
+  const recurringKeys = new Set(recurring.map(recurringServiceKey).filter(Boolean));
+  const hasStandaloneSupplement = supplementalCompanionLines(data).some((supplement) => {
+    const key = recurringServiceKey(supplement);
+    return !!STANDALONE_SUPPLEMENT_ROUTES[key] && !recurringKeys.has(key);
+  });
+  if (hasStandaloneSupplement) return false;
   // Solo pest / solo mosquito plans charge the setup (no 5% stacking).
   return recurringMixHasMembershipFeeService(recurring);
 }
@@ -924,9 +939,16 @@ function annualPrepayDiscountPctLabel(rate) {
   return oneDecimal > 0 ? `${oneDecimal}%` : '<0.1%';
 }
 
-function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [] } = {}) {
-  if (!Array.isArray(recurringServices) || recurringServices.length === 0) return false;
-  if (billingTerm === 'prepay_annual') return true;
+function shouldCreateDraftInvoiceForRecurring({ billingTerm = 'standard', recurringServices = [], standaloneUnitCount = 0 } = {}) {
+  const hasRecurringLines = Array.isArray(recurringServices) && recurringServices.length > 0;
+  if (!hasRecurringLines) {
+    // A supplemental-only accept (bait scalar, no recurring lines) still
+    // schedules a real recurring series — an annual prepay for it needs its
+    // term + invoice or the paid prepay never stamps the visits (Codex r2
+    // on the pest+rodent removal). Standard supplemental-only accepts keep
+    // the pre-existing no-draft shape.
+    return billingTerm === 'prepay_annual' && standaloneUnitCount > 0;
+  }
   return true;
 }
 
@@ -1237,19 +1259,19 @@ const EstimateConverter = {
     // downstream) guarantees no partial rows are created; all three convertEstimate
     // entrypoints run inside a transaction, so a throw rolls back cleanly.
     const supplementalCompanions = supplementalCompanionLines(estimateData);
-    const soloRecurringKey = recurringServicesForConversion.length === 1
-      ? recurringServiceKey(recurringServicesForConversion[0]) : null;
-    // A supplement counts as a recurring unit when it will schedule at all:
-    // absorbed into a combined route, OR as its own standalone visit
-    // (STANDALONE_SUPPLEMENT_ROUTES — e.g. rodent bait after the pest+rodent
-    // combined route's removal). Either way annual prepay can't span it.
-    const schedulableCompanions = supplementalCompanions.filter((companion) => {
-      const key = recurringServiceKey(companion);
-      if (STANDALONE_SUPPLEMENT_ROUTES[key]) return true;
-      return !!soloRecurringKey && COMBINED_SERVICE_ROUTES.some((route) =>
-        soloRecurringKey === route.primaryKey && key === route.companionKey);
+    // ONE scheduling decision for the whole accept (Codex r2 on the
+    // pest+rodent removal): the auto-schedule loop, the reservation branch,
+    // unit counting, and prepay coverage all read this same result, so the
+    // count can never disagree with what actually schedules. Only
+    // fromSupplement standalone units add to the count — a line-sourced
+    // standalone unit was already counted among the recurring lines, and
+    // the combine dedupes a line + duplicate scalar to one unit.
+    const combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+      acceptFrequency: estimateData.customerSelection?.frequency || null,
+      supplementalCompanions,
     });
-    const recurringUnitCount = recurringServicesForConversion.length + schedulableCompanions.length;
+    const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
+    const recurringUnitCount = recurringServicesForConversion.length + supplementStandaloneUnits.length;
     if (billingTerm === 'prepay_annual' && recurringUnitCount > 1) {
       const err = new Error(
         `Annual prepay isn't supported for multi-service plans (${recurringUnitCount} recurring services) yet — convert this estimate as monthly, or bill the annual prepay manually.`
@@ -1276,6 +1298,7 @@ const EstimateConverter = {
     const shouldCreateDraftInvoice = shouldCreateDraftInvoiceForRecurring({
       billingTerm,
       recurringServices: recurringServicesForConversion,
+      standaloneUnitCount: supplementStandaloneUnits.length,
     });
 
     // Determine tier
@@ -1488,10 +1511,7 @@ const EstimateConverter = {
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
-        const { combos, standalone: reservedStandalone } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
-          acceptFrequency: acceptedPlanFrequency,
-          supplementalCompanions: supplementalCompanionLines(estimateData),
-        });
+        const { combos, standalone: reservedStandalone } = combinedScheduling;
         // Standalone units (sold rodent bait) must schedule in reserved
         // accepts too (Codex P1): before the pest+rodent route removal the
         // combo REWRITE covered the bait on the reserved row; now the bait
@@ -1505,9 +1525,16 @@ const EstimateConverter = {
           const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === 'rodent_bait');
           if (alreadyReserved) continue;
           try {
+            // Copy the customer's picked slot onto the bait row (Codex r2):
+            // same trip, same window, same tech/zone — otherwise dispatch
+            // sees an un-slotted job floating on that day.
             const standaloneRow = {
               customer_id: customerId,
               scheduled_date: reservedStart.scheduled_date,
+              ...(reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
+              ...(reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
+              ...(reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
+              ...(reservedStart.zone ? { zone: reservedStart.zone } : {}),
               service_type: unit.service.name,
               status: 'pending',
               notes: `Auto-scheduled from estimate #${estimateId} (standalone bait program alongside reserved visit). Frequency: ${unit.service.frequency}.`,
@@ -1529,6 +1556,14 @@ const EstimateConverter = {
               ? inserted[0]
               : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
             scheduledCount += 1;
+            // The reserved row's reminders were registered by the public
+            // accept route; this added row needs its own (Codex r2) —
+            // same fail-soft registration the seeded follow-ups use.
+            if (!deferFollowUpReminderRegistration && parentRow.id && standaloneRow.window_start) {
+              await registerSeededFollowUpReminders([parentRow], customerId);
+            } else if (deferFollowUpReminderRegistration && parentRow.id) {
+              deferredFollowUpReminderRows.push(parentRow);
+            }
             try {
               const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, unit.service, {
                 fallbackFrequency: unit.service.frequency,
@@ -1622,10 +1657,9 @@ const EstimateConverter = {
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; standalone rewrites (e.g. rodent bait) schedule
       // as their own catalog visit; everything else flows through unchanged.
-      const { remaining, combos, standalone } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
-        acceptFrequency: acceptedPlanFrequency,
-        supplementalCompanions: supplementalCompanionLines(estimateData),
-      });
+      // Shares the hoisted combinedScheduling so scheduling can never
+      // disagree with the unit count / prepay coverage derivation.
+      const { remaining, combos, standalone } = combinedScheduling;
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
@@ -1938,6 +1972,22 @@ const EstimateConverter = {
               // term-creation try fails closed (routes to manual).
               logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
             }
+          } else if (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1) {
+            // Supplemental-only accept (Codex r2 on the pest+rodent removal):
+            // a server-priced bait-only estimate carries just the scalar —
+            // the standalone unit schedules a real quarterly series (the
+            // auto-schedule loop uses this same combinedScheduling), so the
+            // prepay term MUST carry its coverage or those visits complete-
+            // bill again on top of the prepaid amount. The unit's catalog
+            // name is exactly the scheduled rows' service_type, so
+            // ensureCoverageRowsForTerm attaches the existing visits.
+            const unit = supplementStandaloneUnits[0];
+            const CADENCE_VISITS = {
+              monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+            };
+            coverageServiceType = unit.service.name;
+            coverageCadence = unit.service.frequency || undefined;
+            coverageVisitCount = CADENCE_VISITS[unit.service.frequency] || 4;
           } else if (recurringServicesForConversion.length > 1) {
             // Unreachable — multi-service prepay_annual is hard-blocked at the top
             // of convertEstimate. Re-assert fail-closed so a future refactor that
@@ -1963,7 +2013,9 @@ const EstimateConverter = {
             // it IS set stamping matches; when it can't be, refuse and route to
             // manual rather than ship an unstampable term. The catch below voids
             // the draft invoice; the enclosing transaction rolls back the rest.
-            if (recurringServicesForConversion.length === 1 && !coverageServiceType) {
+            if ((recurringServicesForConversion.length === 1
+              || (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1))
+              && !coverageServiceType) {
               const err = new Error(
                 `Couldn't derive annual-prepay coverage for estimate ${estimateId} (the recurring service line has no resolvable name) — convert as monthly or bill the prepay manually.`
               );
@@ -2315,14 +2367,17 @@ module.exports.recurringServiceKey = recurringServiceKey;
 // absorbs into one combo visit). Shared with the public /deposit-intent mirror
 // so a deposit is never collected for a prepay the converter will 422.
 module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUnitCount(estimateData = {}) {
+  // MUST mirror convertEstimate's recurringUnitCount exactly — the public
+  // deposit-intent flow gates on this helper, and a mismatch collects a
+  // prepay deposit that acceptance later 422s (Codex r2 on the pest+rodent
+  // removal). Same source of truth: recurring lines + fromSupplement
+  // standalone units (combine dedupes a line + duplicate scalar to one).
   const recurring = recurringServicesFromEstimateData(estimateData);
-  const companions = supplementalCompanionLines(estimateData);
-  const soloKey = recurring.length === 1 ? recurringServiceKey(recurring[0]) : null;
-  const absorbed = soloKey
-    ? companions.filter((companion) => COMBINED_SERVICE_ROUTES.some((route) =>
-      soloKey === route.primaryKey && recurringServiceKey(companion) === route.companionKey))
-    : [];
-  return recurring.length + absorbed.length;
+  const { standalone } = combineRecurringServicesForScheduling(recurring, {
+    acceptFrequency: estimateData?.customerSelection?.frequency || null,
+    supplementalCompanions: supplementalCompanionLines(estimateData),
+  });
+  return recurring.length + standalone.filter((unit) => unit.fromSupplement).length;
 };
 module.exports.recurringServicesFromEstimateData = recurringServicesFromEstimateData;
 module.exports.combineRecurringServicesForScheduling = combineRecurringServicesForScheduling;

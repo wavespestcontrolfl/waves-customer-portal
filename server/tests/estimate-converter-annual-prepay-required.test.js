@@ -278,4 +278,25 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(invoiceService.create).not.toHaveBeenCalled();
     expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
   });
+
+  test('bait-scalar-ONLY estimate: single unit passes the block and the term carries bait coverage', async () => {
+    // A server-priced bait-only estimate has NO recurring lines — just the
+    // rodentBaitMo scalar. The standalone unit schedules a real quarterly
+    // series, so the prepay term must carry its coverage (service type =
+    // the scheduled rows' catalog name) or those visits complete-bill again
+    // on top of the prepaid amount (Codex r2 on the pest+rodent removal).
+    const { EstimateConverter, renewals } = setup(
+      [],
+      { recurringExtra: { rodentBaitMo: 25 } },
+    );
+
+    await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
+      .rejects.toThrow('Annual prepay term was not created');
+    expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coverageServiceType: 'Quarterly Rodent Bait Station Service',
+        coverageVisitCount: 4,
+      }),
+    );
+  });
 });

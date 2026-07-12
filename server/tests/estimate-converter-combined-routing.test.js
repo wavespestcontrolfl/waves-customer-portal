@@ -281,6 +281,43 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
   });
 
+  test('a pest plan with a bait supplement is a bundle — no WaveGuard setup fee (owner rule: bundles carry no setup)', () => {
+    const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+    const pestLine = [{ name: 'Quarterly Pest Control', service: 'pest_control', frequency: 'quarterly' }];
+    // Solo pest still charges the setup.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: pestLine,
+      estimateData: {},
+    })).toBe(true);
+    // Pest + bait scalar schedules as two services → bundle → no setup fee.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: pestLine,
+      estimateData: { recurring: { rodentBaitMo: 39 } },
+    })).toBe(false);
+  });
+
+  test('annualPrepayRecurringUnitCount counts standalone bait and dedupes line+scalar (deposit-intent parity)', () => {
+    const { annualPrepayRecurringUnitCount } = require('../services/estimate-converter');
+    // Bait scalar only → one unit (a bait-only prepay is a single program).
+    expect(annualPrepayRecurringUnitCount({
+      recurring: { rodentBaitMo: 25 }, services: [],
+    })).toBe(1);
+    // A real bait line + duplicate scalar → still one unit, not two.
+    expect(annualPrepayRecurringUnitCount({
+      recurring: {
+        rodentBaitMo: 25,
+        services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', frequency: 'quarterly' }],
+      },
+    })).toBe(1);
+    // Lawn line + bait scalar → two units (prepay blocks / deposit-intent must too).
+    expect(annualPrepayRecurringUnitCount({
+      recurring: {
+        rodentBaitMo: 25,
+        services: [{ name: 'Lawn Care', service: 'lawn_care', frequency: 'monthly' }],
+      },
+    })).toBe(2);
+  });
+
   test('supplemental extraction reads both persisted shapes', () => {
     expect(supplementalCompanionLines({ recurring: { rodentBaitMo: 25 } })).toHaveLength(1);
     expect(supplementalCompanionLines({ result: { results: { rodBaitMo: 25 } } })).toHaveLength(1);
