@@ -11343,9 +11343,20 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
 
   const payerBilled = !!invoice?.payer_id;
   const invoiceAmount = invoice ? (Number(invoice.total) || 0) : null;
+  // Card-on-file lane suppression must survive RETRIES (Codex #2680 r2): a
+  // double-tap after a card-lane accept re-enters here, and rebuilding the
+  // accept-mint invoice into a pay link would resurrect the retired pay-now
+  // step the fresh response suppressed. Same lane derivation the webhook
+  // backstop uses: recurring, non-invoice-mode, no prepay term — the
+  // accept-mint invoice waits for completion auto-charge.
+  const recurringCardLaneRetry = RecurringCards.isRecurringCardOnFileEnabled()
+    && !treatAsOneTime
+    && !billByInvoice
+    && !prepayTerm;
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
-  // for a settled invoice (nothing is owed).
-  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && invoice.token
+  // for a settled invoice (nothing is owed), nor a pay-now link for a
+  // card-lane accept whose invoice completion will auto-charge.
+  const invoicePayUrl = invoice && !invoiceSettled && !payerBilled && !recurringCardLaneRetry && invoice.token
     ? `/pay/${invoice.token}`
     : null;
   const invoiceNotes = String(invoice?.notes || '');
@@ -11361,8 +11372,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     ...buildAcceptSuccessPayload({
       // A settled invoice is not an open payable — invoiceMode stays false so
       // no consumer (including the client's legacy invoiceMode fallback) can
-      // route the customer to a pay step for it.
-      invoiceMode: !!invoice && !invoiceSettled,
+      // route the customer to a pay step for it. Card-lane retries likewise
+      // stay out of the pay step (see recurringCardLaneRetry above).
+      invoiceMode: !!invoice && !invoiceSettled && !recurringCardLaneRetry,
       invoiceLinkDelivered: !!(invoice?.sent_at || invoice?.sms_sent_at),
       invoiceId: invoice?.id || null,
       invoiceAmount,

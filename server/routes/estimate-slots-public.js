@@ -624,6 +624,20 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
     if (!policy.required) {
       return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: policy.exemptReason || null });
     }
+    // One-time card hold supersedes the deposit (mirrors the accept gate's
+    // card_hold_supersedes): whether the hold is satisfied by a captured
+    // SetupIntent or a saved consented card, the accept refuses the deposit
+    // — never pre-collect one here (Codex #2680 r2).
+    if (oneTime) {
+      const holdPolicy = resolveCardHoldPolicy({
+        treatAsOneTime: true,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+        paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+      });
+      if (holdPolicy.required) {
+        return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'card_hold_supersedes' });
+      }
+    }
     // Recurring card-on-file lane supersedes the deposit (mirrors the accept
     // gate + /data): during the rollout window with both flags on, minting a
     // deposit here would collect the retired $49 from a customer whose card

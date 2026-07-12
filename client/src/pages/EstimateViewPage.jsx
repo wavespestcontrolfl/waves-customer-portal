@@ -4012,10 +4012,20 @@ export default function EstimateViewPage() {
     // required:false when the lane is active, but a stale snapshot (flag
     // flipped mid-session) or a just-captured card must not open the
     // deposit modal — /deposit-intent and the accept gate both 409/exempt
-    // it server-side regardless.
+    // it server-side regardless. PREPAY is NOT the card lane (Codex #2680
+    // r2): the server exempts prepay from the card policy but still
+    // requires its deposit, so suppressing it here would 402-loop the
+    // prepay checkout.
     const recurringCardLaneActive = serviceMode !== 'one_time'
+      && paymentPreference !== 'prepay_annual'
       && (data?.recurringCardPolicy?.required || !!recurringCardSetupIntentIdRef.current);
-    const depositRequired = !recurringCardLaneActive && (depositPolicy?.required
+    // One-time: a REQUIRED card hold supersedes the deposit server-side
+    // whether it is satisfied by a captured SetupIntent OR a saved consented
+    // card (the /card-hold-intent 409 'saved_method' path sets no ref) —
+    // never pre-collect a deposit the accept gate will refuse (Codex #2680
+    // r2).
+    const oneTimeHoldSupersedes = serviceMode === 'one_time' && !!data?.cardHoldPolicy?.requiredForOneTime;
+    const depositRequired = !recurringCardLaneActive && !oneTimeHoldSupersedes && (depositPolicy?.required
       || (serviceMode === 'one_time' && depositPolicy?.requiredForOneTime));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.

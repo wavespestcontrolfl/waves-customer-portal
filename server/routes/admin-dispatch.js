@@ -4951,11 +4951,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ? Number(svc.cust_per_application_fee) : null);
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
       // The setup/first-application invoice minted INSIDE the accept
-      // transaction is consented by construction (its lines + deposit
-      // credit are exactly what the customer approved) and legitimately
-      // exceeds the per-visit amount (setup fee) — exempt it from the cap.
+      // transaction legitimately exceeds the per-visit amount (setup fee),
+      // but a notes-marker EXEMPTION would survive office edits that
+      // retotal the draft upward (Codex #2680 r2) — so accept-minted
+      // invoices get a bounded ALLOWANCE (accepted per-visit + the setup
+      // fee) instead of a free pass, and everything still fails closed
+      // when no accepted amount exists to anchor the cap.
       const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
-      if (!acceptMintedInvoice && acceptedPerVisit == null) {
+      const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      const capCeiling = acceptedPerVisit != null
+        ? acceptedPerVisit + (acceptMintedInvoice ? WAVEGUARD_SETUP_FEE_ALLOWANCE : 0)
+        : null;
+      if (acceptedPerVisit == null) {
         // No accepted amount to cap against (multi-service plan with no
         // row price or customer fee) — never auto-charge uncapped
         // (Codex #2680): route to office review, keep the pay-link flow.
@@ -4968,7 +4975,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
-      } else if (!acceptMintedInvoice && acceptedPerVisit != null && invoiceSubtotal > acceptedPerVisit + 0.005) {
+      } else if (invoiceSubtotal > capCeiling + 0.005) {
         logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${invoiceSubtotal} exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
