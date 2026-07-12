@@ -4089,7 +4089,7 @@ function BillingTab({ customer }) {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
       badge: 'Auto Pay active', titleColor: B.blueDeeper, subtitleColor: B.grayDark,
       title: perApplicationBilling
-        ? 'Auto Pay is on — charged per visit'
+        ? 'Auto Pay is on — charged per application'
         : annualPrepayBilling
           ? 'Auto Pay is on — plan prepaid'
           : autopayMonthlyUnpriced
@@ -4325,13 +4325,13 @@ function BillingTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per visit' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
+            { label: 'Auto Pay', value: autopayLabel, sub: autopayState === 'active' ? (perApplicationBilling ? 'Charged per application' : annualPrepayBilling ? 'Plan prepaid' : `Next ${dueDateLabel}`) : 'Manage below' },
             { label: 'Default method', value: defaultMethodLabel, sub: cards.length ? `${cards.length} saved` : 'None saved' },
             // Billing-mode aware (codex 2642 r4): per-application / prepaid
             // customers never see a combined monthly total here either.
             {
               label: perApplicationBilling ? 'Plan billing' : annualPrepayBilling ? 'Plan billing' : 'Monthly plan',
-              value: perApplicationBilling ? 'Per visit' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
+              value: perApplicationBilling ? 'Per application' : annualPrepayBilling ? 'Prepaid' : money(monthlyRate),
               sub: activeTierName ? `WaveGuard ${tierName}` : (membershipTierKey(customer?.tier) === 'commercial' ? 'Commercial service plan' : 'No active plan'),
             },
             { label: `${currentYear} paid`, value: money(ytdTotal), sub: `${ytdPayments.length} payment${ytdPayments.length === 1 ? '' : 's'}` },
@@ -4412,7 +4412,7 @@ function BillingTab({ customer }) {
             fontWeight: 850,
             color: B.blueDeeper,
             fontFamily: FONTS.ui,
-          }}>{perApplicationBilling ? 'Billed per visit' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
+          }}>{perApplicationBilling ? 'Billed per application' : annualPrepayBilling ? 'Prepaid for the year' : `${money(monthlyRate)}/mo`}</span>
         </div>
         <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
           {/* Service rows list what the plan covers — no per-service price
@@ -7622,7 +7622,7 @@ function MyPlanTab({ customer }) {
     ? '—'
     : (annualPrepay
       ? (annualPrepay.status === 'payment_pending' ? 'Pending' : 'Prepaid')
-      : (perApplicationBilled ? 'Per visit' : formatPortalMoney(monthlyRate)));
+      : (perApplicationBilled ? 'Per application' : formatPortalMoney(monthlyRate)));
   const planBillingSub = !activeTierName
     ? 'No WaveGuard plan on file'
     : (annualPrepay ? annualPrepayLine : (perApplicationBilled ? 'Charged per application' : 'per month'));
