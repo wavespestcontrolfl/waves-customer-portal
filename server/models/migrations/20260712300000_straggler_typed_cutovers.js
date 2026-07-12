@@ -10,8 +10,9 @@
  *   cockroach_control     project_required → service_report / cockroach
  *   bed_bug_treatment     project_required → service_report / bed_bug
  *   one_time_pest_control project_required → service_report / one_time_pest_treatment
- *   palm_treatment        service_report/NULL → service_report / palm_injection
- *                         (owner 2026-07-12; archived key — self-heals if absent)
+ *
+ * (palm_treatment's repoint to palm_injection is DEFERRED — see the note on
+ * the CUTOVERS list: the typed palm path lacks the legacy closeout gates.)
  *
  * All five keep/gain delivery_mode auto_send (all already auto_send in prod,
  * verified read-only 2026-07-12): wildlife/bed-bug/cockroach customers get
@@ -54,9 +55,14 @@ const CUTOVERS = [
   { key: 'cockroach_control', fromMode: 'project_required', acceptedTypes: ['cockroach'], toType: 'cockroach', category: 'pest_control' },
   { key: 'bed_bug_treatment', fromMode: 'project_required', acceptedTypes: ['bed_bug'], toType: 'bed_bug', category: 'specialty' },
   { key: 'one_time_pest_control', fromMode: 'project_required', acceptedTypes: ['one_time_pest_treatment'], toType: 'one_time_pest_treatment', category: 'pest_control' },
-  // palm_treatment is already service_report but generic (NULL pointer) —
-  // fromMode reflects that; a non-null pointer means someone already decided.
-  { key: 'palm_treatment', fromMode: 'service_report', acceptedTypes: [null], toType: 'palm_injection', category: 'tree_shrub' },
+  // palm_treatment repoint DEFERRED (Codex r3 P1): typed palm_injection
+  // completions skip the legacy palm/T&S closeout gates (product actuals,
+  // N/P blackout, pollinator, photo minimums) and
+  // validateTreeShrubTypedCompliance only covers tree_shrub — repointing
+  // would drop those compliance gates. The key is archived with zero
+  // upcoming visits, so nothing is lost by waiting; the repoint ships once
+  // the typed palm path carries equivalent validation (owner decision to
+  // repoint stands — see the ratified plan).
 ];
 
 exports.up = async function up(knex) {

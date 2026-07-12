@@ -68,6 +68,11 @@ const {
 // 'As needed' intentionally absent: it keeps the profile's default interval
 // (the report copy for it is interval-free, so no date can contradict it).
 const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
+// Two-treatment package keys (20260712300000 cutover): the ALERT follow-up
+// policy means visit 1 owes an included second visit — and ONLY visit 1;
+// an included follow-up completing must not mint a third (Codex r3).
+// Trapping programs deliberately chain and are excluded.
+const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -2453,6 +2458,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         const chipsValidation = ActivityIndicators.validateNextStepChips(
           nextStepChips, typedFindingsType, structuredFindings.values || {},
+          // Visit 1 of a two-treatment package owes the included follow-up
+          // regardless of findings — "No action needed" would land in the
+          // immutable report beside a completion response demanding the
+          // second visit (Codex r3). Visit 2 (followup_included) may say it.
+          {
+            packageFollowupPending: TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
+              && svc.followup_included !== true,
+          },
         );
         if (!chipsValidation.ok) {
           return { status: 400, body: { error: chipsValidation.error, code: 'next_step_chips_invalid' } };
@@ -5764,6 +5777,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         && String(typedFindings.values?.species || '') !== 'German') {
         followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
       }
+      // Two-treatment packages stop at visit 2: the included follow-up
+      // (followup_included, minted by /schedule-followup) resolves the same
+      // ALERT profile on ITS completion, which would suggest — and let the
+      // CTA mint — a third $0 visit, then a fourth (Codex r3). Trapping
+      // programs deliberately chain and are not in this set.
+      if (followupSuggestion?.required
+        && TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
+        && svc.followup_included === true) {
+        followupSuggestion = { ...followupSuggestion, required: false, reason: 'included_followup_visit' };
+      }
       // German knockdown: the tech's explicit follow-up selection wins over
       // the profile's standing ALERT policy — a "No" must not leave the
       // success overlay demanding a follow-up the customer report says is
@@ -6217,6 +6240,14 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (followupRequired && profile.findingsType === 'cockroach'
       && profile.serviceKey !== 'cockroach_control') {
       if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
+    }
+    // Mirrors /complete: two-treatment packages stop at visit 2 — an
+    // included follow-up visit never mints another included follow-up
+    // (Codex r3).
+    if (followupRequired
+      && TWO_TREATMENT_PACKAGE_KEYS.has(profile.serviceKey)
+      && svc.followup_included === true) {
+      followupRequired = false;
     }
     // Knockdown typed-value overrides mirror /complete (Codex P2 rounds
     // 3–4): the stored snapshot's explicit German "No" wins over the
