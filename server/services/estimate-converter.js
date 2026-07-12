@@ -343,9 +343,15 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   );
   for (let i = remaining.length - 1; i >= 0; i -= 1) {
     const line = remaining[i];
-    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[recurringServiceKey(line)];
+    const key = recurringServiceKey(line);
+    const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute) continue;
     remaining.splice(i, 1);
+    // A recurring LINE covering this program also consumes any duplicate
+    // supplement below — legacy payloads can carry rodent bait in BOTH
+    // places (a lineItems row plus the rodentBaitMo scalar), and scheduling
+    // both would double-book the same sold program (Codex P2).
+    consumedSupplementKeys.add(key);
     standalone.push({
       catalogServiceKey: standaloneRoute.catalogServiceKey,
       service: {
@@ -358,6 +364,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
     const key = recurringServiceKey(supplement);
     const standaloneRoute = STANDALONE_SUPPLEMENT_ROUTES[key];
     if (!standaloneRoute || consumedSupplementKeys.has(key)) continue;
+    consumedSupplementKeys.add(key);
     standalone.push({
       catalogServiceKey: standaloneRoute.catalogServiceKey,
       service: {
@@ -1057,6 +1064,11 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // monthly), so seed follow-ups for whichever pattern the customer accepted —
   // otherwise the accepted plan would stop after the first visit.
   if (key === 'foam_recurring') return ['quarterly', 'bimonthly', 'monthly'].includes(pattern);
+  // Standalone rodent bait (owner 2026-07-12, pest+rodent combined route
+  // removed): the quarterly bait-station program seeds its own series — the
+  // old combined row keyed as pest_control and seeded; a standalone row
+  // keying rodent_bait must not stop after the first check (Codex P1).
+  if (key === 'rodent_bait') return pattern === 'quarterly';
   return false;
 }
 
@@ -1370,14 +1382,19 @@ const EstimateConverter = {
             // so overwriting it with the add-on's cadence amount would
             // re-price the ORIGINAL series; the add-on's own rows carry
             // their explicit estimated_price (single-service writer).
+            // recurringUnitCount, not raw line count (Codex P1 on the
+            // pest+rodent removal): a standalone-scheduling supplement
+            // (rodent bait) makes the plan multi-row even with ONE
+            // recurring line — a customer-level whole-plan fee would bill
+            // the full package on BOTH rows' completions.
             per_application_fee: preservesExistingMembership
               ? (customer.per_application_fee ?? null)
               : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
                 ? Number(customer.per_application_fee)
-                : ((recurringServicesForConversion.length === 1
+                : ((recurringUnitCount === 1
                   && billingCadence && Number(billingCadence.amount) > 0)
                   ? Number(billingCadence.amount)
-                  : (recurringServicesForConversion.length === 1 && Number(monthlyRate) > 0
+                  : (recurringUnitCount === 1 && Number(monthlyRate) > 0
                     ? Number(monthlyRate)
                     : null))),
           } : {}),
@@ -1471,10 +1488,64 @@ const EstimateConverter = {
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
       try {
-        const { combos } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+        const { combos, standalone: reservedStandalone } = combineRecurringServicesForScheduling(recurringServicesForConversion, {
           acceptFrequency: acceptedPlanFrequency,
           supplementalCompanions: supplementalCompanionLines(estimateData),
         });
+        // Standalone units (sold rodent bait) must schedule in reserved
+        // accepts too (Codex P1): before the pest+rodent route removal the
+        // combo REWRITE covered the bait on the reserved row; now the bait
+        // is its own visit, so insert it (anchored to the reserved date —
+        // same-trip check) and seed its quarterly series. This preserves
+        // the coverage the rewrite used to provide; it does NOT auto-
+        // schedule other `remaining` lines (adjudicated semantic intact).
+        for (const unit of (reservedStandalone || [])) {
+          if (!reservedStart?.scheduled_date) break;
+          // A reserved row already covering this program means nothing to add.
+          const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === 'rodent_bait');
+          if (alreadyReserved) continue;
+          try {
+            const standaloneRow = {
+              customer_id: customerId,
+              scheduled_date: reservedStart.scheduled_date,
+              service_type: unit.service.name,
+              status: 'pending',
+              notes: `Auto-scheduled from estimate #${estimateId} (standalone bait program alongside reserved visit). Frequency: ${unit.service.frequency}.`,
+              source_estimate_id: estimateId,
+            };
+            try {
+              const catalogRow = await database('services')
+                .where({ service_key: unit.catalogServiceKey })
+                .first('id', 'default_duration_minutes');
+              if (catalogRow) {
+                standaloneRow.service_id = catalogRow.id;
+                if (catalogRow.default_duration_minutes) standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+              }
+            } catch (lookupErr) {
+              logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+            }
+            const inserted = await database('scheduled_services').insert(standaloneRow).returning('*');
+            const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
+              ? inserted[0]
+              : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+            scheduledCount += 1;
+            try {
+              const seedResult = await seedRecurringFollowUpsForParent(database, parentRow, unit.service, {
+                fallbackFrequency: unit.service.frequency,
+                registerReminders: !deferFollowUpReminderRegistration,
+              });
+              if (deferFollowUpReminderRegistration && Array.isArray(seedResult.insertedRows)) {
+                deferredFollowUpReminderRows.push(...seedResult.insertedRows);
+              }
+              scheduledCount += seedResult.insertedCount || 0;
+            } catch (seedErr) {
+              logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
+            }
+            logger.info(`[estimate-converter] standalone "${unit.service.name}" scheduled alongside reserved accept for estimate ${estimateId}`);
+          } catch (standaloneErr) {
+            logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
+          }
+        }
         for (const { row, combo } of reservedRowComboRewrites(reservedRows, combos)) {
           const update = { service_type: combo.route.name, updated_at: new Date() };
           try {
@@ -1589,7 +1660,11 @@ const EstimateConverter = {
           fallbackFrequency: inferredFrequencyKey,
         });
         const frequency = svc.frequency || pattern || 'monthly';
-        const estimatedPrice = billingCadence && recurringServicesForConversion.length === 1
+        // recurringUnitCount, not raw line count (Codex P1): with a
+        // standalone bait unit beside one pest line, stamping the whole
+        // plan amount on BOTH rows would double-charge at completion.
+        // Multi-unit plans leave rows unpriced for manual allocation.
+        const estimatedPrice = billingCadence && recurringUnitCount === 1
           ? billingCadence.amount
           : null;
         const durationMinutes = durationMinutesForRecurringService(svc, pattern);

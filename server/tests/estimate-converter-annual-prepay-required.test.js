@@ -261,19 +261,21 @@ describe('estimate converter annual prepay orchestration', () => {
     expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
   });
 
-  test('single lawn line + stray rodent-bait scalar (no matching primary): NOT blocked — rodent does not combine with lawn', async () => {
-    // rodent_bait's combo primary is pest_control, not lawn_care, so it is dropped
-    // (never scheduled) → lawn coverage still matches the lawn visit. Prepay proceeds
-    // (reaching the term-creation stub, which rejects — proving we passed the block).
-    const { EstimateConverter, renewals } = setup(
+  test('single lawn line + rodent-bait scalar: BLOCKED — bait now schedules standalone, so this is a 2-unit plan', async () => {
+    // Semantics changed with the pest+rodent combined-route removal (owner
+    // 2026-07-12): the bait scalar used to be silently DROPPED beside a
+    // lawn line (rodent_bait's combo primary was pest_control), so prepay
+    // could proceed covering only lawn. Bait now always schedules its own
+    // standalone program, making this a genuine multi-service plan that
+    // annual prepay cannot span.
+    const { EstimateConverter, renewals, invoiceService } = setup(
       [{ service: 'lawn_care', name: 'Lawn Care', frequency: 'monthly' }],
       { recurringExtra: { rodentBaitMo: 25 } },
     );
 
     await expect(EstimateConverter.convertEstimate('estimate-1', convertOpts))
-      .rejects.toThrow('Annual prepay term was not created');
-    expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(
-      expect.objectContaining({ coverageServiceType: 'Lawn Care' }),
-    );
+      .rejects.toMatchObject({ code: 'ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED', statusCode: 422 });
+    expect(invoiceService.create).not.toHaveBeenCalled();
+    expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
   });
 });

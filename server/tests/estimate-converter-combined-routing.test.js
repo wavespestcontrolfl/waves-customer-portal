@@ -258,6 +258,18 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(standalone[0].service.frequency).toBe('quarterly');
   });
 
+  test('a bait recurring LINE and a duplicate rodentBaitMo supplement schedule ONE standalone visit, not two (Codex P2)', () => {
+    const { standalone } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+        { name: 'Rodent Bait Stations', service: 'rodent_bait', frequency: 'quarterly' },
+      ],
+      { supplementalCompanions: supplementalCompanionLines({ recurring: { rodentBaitMo: 39 } }) },
+    );
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
+  });
+
   test('a rodent bait supplement schedules standalone even with NO recurring lines at all', () => {
     const { remaining, combos, standalone } = combineRecurringServicesForScheduling(
       [],
