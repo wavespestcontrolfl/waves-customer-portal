@@ -109,7 +109,10 @@ const ACTIVE_ADVERBS = '(?:(?:also|often|always|never|routinely|repeatedly|regul
 // where a bare disparagement token is no longer enough (see evaluate).
 const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   `(?:${DISPARAGEMENT_RE.source})(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  // Linking AND possession/usage verbs: "companies have hidden fees",
+  // "chains use shady billing" are provider-directed accusations too
+  // (Codex r2 on #2633).
+  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got|has|have|had|comes?\\s+with|uses?|used)\\b(?:\\s+\\w+){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,2}\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
 ].join('|'), 'i');
 
@@ -135,7 +138,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
 const NUMERIC_ONE_ALT = '(?:#\\s?1|no\\.?\\s?1|number one)';
 const NUMERIC_SELF_RANKING_RE = new RegExp([
   `${NUMERIC_ONE_ALT}\\s+(?:in|around|near)\\b(?!-)`,
-  `\\bwe(?:'re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bwe(?:'re|\\s+(?:are|were))\\s+(?:(?:still|now|proudly)\\s+)?(?:the\\s+)?${NUMERIC_ONE_ALT}`,
   `\\b(?:ranked|rated|voted)\\s+${NUMERIC_ONE_ALT}`,
 ].join('|'), 'i');
 
@@ -284,8 +287,11 @@ const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|C
 
 // Business-shaped PROSE mentions that only the header detectors recognize —
 // bare or less-common suffixes the prose name regex misses ("Bug Busters",
-// "Acme Rodent Removal"). Proximity-TARGET collection only (Codex on #2633),
-// so it must not turn section headings into "businesses":
+// "Acme Rodent Removal"), in ANY casing ("bug busters scams customers" must
+// stay a target — Codex r2 on #2633). Target collection only, so it must not
+// turn section headings into "businesses":
+//  - lead tokens use the CI token discipline (common prose words excluded at
+//    every position);
 //  - a generic category phrase in ANY casing is skipped (unlike
 //    classifyOption, no Title-Case tightening — "Professional Mosquito
 //    Control" in prose is a heading, not a name);
@@ -293,9 +299,9 @@ const HEADER_LEGAL_MARKER_RE = /\b(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|C
 //    ("Bug Busters", "Mosquito Squad" read as names; bare "Termite
 //    Prevention"/"Rodent Removal" read as headings).
 const PROSE_HEADER_SHAPE_RE = new RegExp(
-  `\\b((?:[A-Z][A-Za-z0-9&'.\\-]*\\s+){0,3})(${HEADER_BUSINESS_SUFFIX_RE.source})`, 'g',
+  `\\b((?:${CI_TOKEN}\\s+){0,3})(${HEADER_BUSINESS_SUFFIX_RE.source})`, 'gi',
 );
-const PERSONIFIED_SUFFIX_RE = /\b(?:Busters?|Squad|Patrol|Brigade|Pros?|Experts?|Specialists?|Defenders?|Exterminators?)\s*$/;
+const PERSONIFIED_SUFFIX_RE = /\b(?:Busters?|Squad|Patrol|Brigade|Pros?|Experts?|Specialists?|Defenders?|Exterminators?)\s*$/i;
 const GENERIC_LEAD_SET = new Set(GENERIC_LEAD_EXCLUSIONS.split('|').map((w) => w.toLowerCase()));
 function collectHeaderShapedProseTargets(text) {
   const out = new Set();
@@ -816,7 +822,19 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       );
       const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
       const activeP0 = new RegExp(`${escaped}(?:'s)?\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`, 'i');
-      const dm = proseNameText.match(directedP0) || proseNameText.match(negBeforeName) || proseNameText.match(activeP0);
+      // Punctuation-separated claims ("Bug Busters: shady billing",
+      // "Mosquito Squad — shady billing") carry no verb for the shapes
+      // above (Codex r2 on #2633). Only PERSONIFIED suffixes get this arm:
+      // they read as names on their face, while noisy CI captures ("and
+      // termite prevention") would turn "… — shady corners" back into the
+      // original false positive.
+      const sepP0 = PERSONIFIED_SUFFIX_RE.test(name)
+        ? new RegExp(`${escaped}(?:'s)?\\s*[:,—–-]\\s*(?:\\w+\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i')
+        : null;
+      const dm = proseNameText.match(directedP0)
+        || proseNameText.match(negBeforeName)
+        || proseNameText.match(activeP0)
+        || (sepP0 && proseNameText.match(sepP0));
       if (dm) { disp = dm; break; }
     }
   }

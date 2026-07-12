@@ -1042,6 +1042,42 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-2 findings (#2633) ──
+
+  test('Codex r2: punctuation-separated disparagement of a personified name blocks', () => {
+    for (const prose of ['Bug Busters: shady billing practices.', 'Mosquito Squad — shady billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r2: "We\'re the #1!" self-ranking blocks with no nearby brand token', () => {
+    for (const prose of ["We're the #1!", 'We are the #1!']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r2: possessive/usage fee accusations at provider nouns block', () => {
+    for (const prose of ['Pest control companies have hidden fees.', 'National chains use shady billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r2: lowercase header-shaped names stay disparagement targets', () => {
+    for (const prose of ['bug busters scams customers in Venice.', 'acme rodent removal is shady about pricing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r2: descriptive personified idiom with no negativity stays clean', () => {
+    const r = gate.evaluate({ body: `Dry rock borders and tight door sweeps are the real bug busters here.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(r.pass).toBe(true);
+  });
+
   test('Codex r1 (P2): own-brand disparagement blocks; own brand near pest vocabulary does not', () => {
     for (const prose of ['Waves is dishonest.', 'Waves charges hidden fees on renewals.']) {
       const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
