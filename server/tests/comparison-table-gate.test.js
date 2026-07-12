@@ -1114,6 +1114,65 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-17 findings (#2633) ──
+
+  test('Codex r17: bait-and-switch as a verb with a victim object blocks', () => {
+    for (const prose of ['Pest control companies bait-and-switch homeowners with teaser prices.', 'Bug Busters bait-and-switched customers last spring.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r17: fee-adding verb variants block', () => {
+    for (const prose of ['Waves adds hidden fees.', 'Pest control companies tack on hidden fees.', 'Bug Busters sneaks in hidden fees at renewal.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r17: scam/ripoff practice modifiers block', () => {
+    for (const prose of ['Pest control companies use scam pricing.', 'Waves has ripoff pricing.', 'Bug Busters uses rip-off billing.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r17: accusation-phrase sourced at an extra name blocks; denials stay clean', () => {
+    const r = gate.evaluate({ body: `Avoid dishonest pricing from acme pest solutions.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    // Still routes to review as an unclassified business name (fail-closed,
+    // by design) — the guard is only that the denial is not DISPARAGEMENT.
+    const denial = gate.evaluate({ body: `No hidden fees from Acme Pest Solutions, ever.\n\n${CATEGORY_TABLE}` }, {});
+    expect(denial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(denial.findings.every((f) => f.severity !== 'P0')).toBe(true);
+  });
+
+  test('Codex r17: modal own-brand disparagement blocks', () => {
+    for (const prose of ['Waves may be dishonest.', 'Waves could be dishonest about coverage.', 'We may be dishonest.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r17: first-person people-noun insults block; literal shade stays clean', () => {
+    for (const prose of ['Our team is dishonest.', 'Our team is a scam.', 'Our technicians are clueless.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+    const literal = gate.evaluate({ body: `Our service area is shady and humid through September.\n\n${CATEGORY_TABLE}` }, {});
+    expect(literal.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(literal.pass).toBe(true);
+  });
+
+  test('Codex r17: marketing-verb reflexive #1 claims block; product mentions stay clean', () => {
+    for (const prose of ['Waves advertises itself as #1.', 'Waves markets itself as the #1 choice.', 'We market ourselves as the #1 choice.', 'Bug Busters advertises itself as #1.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const product = gate.evaluate({ body: `We advertise the #1-rated mosquito trap on the market.\n\n${CATEGORY_TABLE}` }, {});
+    expect(product.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
   // ── Codex round-16 findings (#2633) ──
 
   test('Codex r16: standalone appear copulas block across subject classes', () => {

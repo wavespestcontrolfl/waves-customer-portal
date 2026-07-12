@@ -58,9 +58,12 @@ const TABLE_DISPARAGEMENT_RE = /\b(worst|terrible|awful|horrible|useless|inferio
 // provider noun, either order) so "worst infestation" / "the best time" don't trip.
 const NEG_ADJ = 'worst|terrible|awful|horrible|unreliable|useless|inferior|sub[\\s-]?par|pathetic|mediocre|lousy|sloppy|incompetent|shady|dishonest|untrustworthy';
 const PROVIDER_NOUN = 'pest control|exterminators?|lawn (?:care|service)|compan(?:y|ies)|providers?|chains?|services?|businesses?|operators?|outfits?';
+// "service area(s)" is literal geography, not a provider — "our service
+// area is shady and humid" is educational copy (Codex r17 guard on #2633).
+const NOT_SERVICE_AREA = '(?!\\s+areas?\\b)';
 const PROVIDER_DISPARAGEMENT_RE = new RegExp([
-  `\\b(?:${NEG_ADJ})\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b`,
-  `\\b(?:${PROVIDER_NOUN})\\b(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
+  `\\b(?:${NEG_ADJ})\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}(?:\\s+\\w+){0,3}\\s+(?:are|is|were|was|seem|seems|tend to be|can be|get|got)\\b(?:\\s+\\w+){0,2}\\s+\\b(?:${NEG_ADJ})\\b`,
 ].join('|'), 'i');
 
 // Negative service-reliability claims about a provider. Flagged inside table
@@ -85,13 +88,18 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   `rips?\\s+off\\s+${DISPARAGEMENT_VICTIM}`,
   `gouges?\\s+(?:${DISPARAGEMENT_VICTIM}|prices)`,
   `overcharges?(?:\\s+(?:${DISPARAGEMENT_VICTIM}|for\\b))?`,
-  'charges?\\s+hidden\\s+fees?',
+  // Fee-adding verb variants — "adds hidden fees", "tacks on hidden fees"
+  // are the same accusation as "charges hidden fees" (Codex r17 on #2633).
+  '(?:charges?|charged|adds?|added|tacks?\\s+on|tacked\\s+on|sneaks?\\s+in|snuck\\s+in|slips?\\s+in|slipped\\s+in)\\s+hidden\\s+fees?',
   `cheats?\\s+${DISPARAGEMENT_VICTIM}`,
   `deceives?\\s+${DISPARAGEMENT_VICTIM}`,
   `lies\\s+to\\s+${DISPARAGEMENT_VICTIM}`,
   `defrauds?\\s+${DISPARAGEMENT_VICTIM}`,
   'pulls?\\s+(?:a\\s+)?bait[\\s-]and[\\s-]switch',
   'uses?\\s+bait[\\s-]and[\\s-]switch',
+  // Verb form with a victim object — "companies bait-and-switch homeowners
+  // with teaser prices" (Codex r17 on #2633).
+  `bait[\\s-]and[\\s-]switch(?:es|ed|ing)?\\s+${DISPARAGEMENT_VICTIM}`,
 ].join('|');
 const PROVIDER_NEGATIVE_PROXIMITY = 90; // chars between a reliability term and a competitor name
 
@@ -114,7 +122,9 @@ const ACTIVE_ADVERBS = '(?:(?:may|might|could|can|will|would)\\s+)?(?:(?:also|of
 // billing". The object is REQUIRED — a bare disparagement token after
 // has/use recreates the literal-shade false positive ("companies use shady
 // foliage to locate mosquitoes" is field advice, not an accusation).
-const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
+// scam/ripoff qualify as practice modifiers too — "scam pricing", "ripoff
+// billing" (Codex r17 on #2633).
+const POSSESSION_ACCUSATION_SRC = '(?:hidden\\s+fees?|bait[\\s-]and[\\s-]switch(?:\\s+(?:tactics?|pricing))?|(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip[\\s-]?off)\\s+(?:billing|pricing|fees?|tactics?|practices?|contracts?|sales))';
 // Disparagement tokens with NO literal/benign sense in pest content — safe
 // for separator headings on lower-confidence name captures ("acme pest
 // solutions: dishonest"), unlike shady/sloppy/lousy which read literally
@@ -134,7 +144,7 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // as the own-brand arm). Standalone appear counts as a copula too —
   // "companies appear dishonest" (Codex r16). Post-verb gap words are
   // negator-excluded too ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   // Prepositional form takes the noun directly — "companies with hidden
@@ -167,16 +177,18 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // The DISP token must still sit right after the verb (short determiner
   // gap only): that adjacency is what keeps "Waves keeps shady corners
   // treated" clean.
-  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bwaves\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   // First-person possessive claims with a linking verb ("Our billing is
-  // shady", "Our pricing is dishonest") — business-practice nouns ONLY, so
-  // literal shade stays clean ("our lanais are shady and humid") (Codex
-  // r14 on #2633).
-  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  // shady", "Our pricing is dishonest") — business-practice and people/org
+  // nouns ONLY ("Our team is dishonest" — Codex r17), so literal shade
+  // stays clean ("our lanais are shady and humid") (Codex r14 on #2633).
+  // "service" is deliberately absent: "our service area is shady" is
+  // educational geography, and NOUN_VERB_GAP would bridge "area".
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
-  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|appear(?:s|ed)?(?:\\s+to\\s+be)?)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
+  `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source})`,
   `(?:${DISPARAGEMENT_RE.source})\\s+(?:\\w+\\s+)?\\bwaves\\b`,
   // Object-position insult idiom against the own brand ("homeowners call
   // Waves a scam", "customers describe us as dishonest") — verb-anchored,
@@ -213,6 +225,12 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1 breeding sites" is educational list framing, not self-ranking
   // (Codex r14 on #2633).
   `\\bwe\\s+rank(?:s|ed)?\\s+(?:(?:still|now|proudly)\\s+)?${NUMERIC_ONE_ALT}`,
+  // Marketing verbs with a reflexive object — "Waves advertises itself as
+  // #1", "we market ourselves as the #1 choice" (Codex r17 on #2633). The
+  // reflexive is REQUIRED: "we advertise the #1-rated mosquito trap" is a
+  // product mention, not self-ranking.
+  `\\bwaves\\b(?:['’]s?)?[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `\\bwe\\s+(?:advertise|market|promote|position|tout|brand|bill|present|describe)(?:s|d)?\\s+ourselves\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // Own brand in OBJECT position ("customers rated us #1", "voted us the
   // #1 choice") — "us" makes it own-brand by construction, so the verb
   // list can be broad without educational collisions (Codex r14 on #2633).
@@ -946,7 +964,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     const bareDispRe = new RegExp(DISPARAGEMENT_RE.source, 'gi');
     let dm;
     while ((dm = bareDispRe.exec(proseText)) !== null) {
-      if (nearBusinessName(dm.index, dm[0].length)) { disp = dm; break; }
+      if (!nearBusinessName(dm.index, dm[0].length)) continue;
+      // Sentence-level negation check, same as the objAssoc arm (Codex r12):
+      // "No hidden fees from Acme Pest Solutions" is a denial even though
+      // the token sits near a business name (Codex r17 guard on #2633).
+      const sentStart = Math.max(
+        proseText.lastIndexOf('.', dm.index),
+        proseText.lastIndexOf('!', dm.index),
+        proseText.lastIndexOf('?', dm.index),
+        proseText.lastIndexOf('\n', dm.index),
+      ) + 1;
+      const sentence = proseText.slice(sentStart, dm.index + dm[0].length);
+      if (/\b(?:no|not|never|without|zero|don'?t|doesn'?t|do\s+not|does\s+not|aren'?t|isn'?t)\b/i.test(sentence)) continue;
+      disp = dm;
+      break;
     }
   }
   if (!disp) {
@@ -963,7 +994,9 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const directedP0 = new RegExp(
         `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
       );
-      const negBeforeName = new RegExp(`(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
+      // Denial-guarded: "No hidden fees from Acme" is marketing-clean, not
+      // an accusation (Codex r17 guard on #2633).
+      const negBeforeName = new RegExp(`(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)\\s+(?:\\w+\\s+)?${escaped}\\b`, 'i');
       // Active predicates take the same appositive-tolerant gap as the
       // provider-noun active arm — "Bug Busters, frankly, scams customers"
       // (Codex r15 on #2633). NOUN_VERB_GAP's words are negator-excluded, so
@@ -995,6 +1028,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       const possessionP0 = new RegExp(
         `${escaped}\\b(?:['’]s?)?(?:${NOUN_VERB_GAP}(?:has|have|had|uses?|used|comes?\\s+with)|\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}`, 'i',
       );
+      // Accusation-phrase SOURCED at the name — "dishonest pricing from
+      // acme pest solutions" (Codex r17 on #2633). Denial-guarded: "no
+      // hidden fees from Acme" is marketing-clean.
+      const fromP0 = new RegExp(
+        `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+${escaped}\\b`, 'i',
+      );
       // Name-confident PERSONIFIED names also get a same-sentence
       // accusation-object association ("Customers report hidden fees after
       // choosing Bug Busters" — Codex r11), denial-guarded so "with no
@@ -1015,6 +1054,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         || proseNameText.match(negBeforeName)
         || proseNameText.match(activeP0)
         || proseNameText.match(possessionP0)
+        || proseNameText.match(fromP0)
         || proseNameText.match(objInsultP0)
         || (sepP0 && proseNameText.match(sepP0));
       if (!dm && objAssocP0) {
@@ -1123,8 +1163,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const sepRank = PERSONIFIED_SUFFIX_RE.test(name)
           ? new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i')
           : new RegExp(`${escaped}\\b(?:['’]s?)?\\s*[,:—–-]\\s*(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:choices?|picks?|options?|compan(?:y|ies)|providers?|teams?|services?|programs?|contractors?|exterminators?)\\b`, 'i');
+        // Marketing verbs with a reflexive object, same as the own-brand
+        // arm — "Bug Busters advertises itself as #1" (Codex r17 parity).
+        const marketingRank = new RegExp(
+          `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described)\\s+(?:itself|themselves)\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
+        );
         const rm = proseNameText.match(selfRank)
           || proseNameText.match(calledRank)
+          || proseNameText.match(marketingRank)
           || (sepRank && proseNameText.match(sepRank));
         if (rm) { rank = rm; break; }
       }
