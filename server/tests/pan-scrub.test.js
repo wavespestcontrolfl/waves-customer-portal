@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { scrubTranscriptArtifacts } = require('../services/call-recording-processor')._test;
+const { scrubTranscriptArtifacts, scrubStructuredTranscript } = require('../services/call-recording-processor')._test;
 
 // Luhn-valid fixtures: standard Stripe test PANs.
 const VISA16 = '4242424242424242';
@@ -92,6 +92,55 @@ describe('scrubPans — numeric forms', () => {
       expect(scrubPans(s)).toBe(s);
     });
   });
+
+  // Codex #2676 round-2: provider punctuation at pauses must not break the
+  // run into unmatchable islands.
+  describe('punctuation separators', () => {
+    it('masks a comma-separated readback', () => {
+      expect(scrubPans('card 4242, 4242, 4242, 4242, thanks'))
+        .toBe('card [card ending 4242], thanks');
+    });
+    it('masks a period-separated readback', () => {
+      expect(scrubPans('4242. 4242. 4242. 4242.'))
+        .toBe('[card ending 4242].');
+    });
+  });
+
+  // Codex #2676 round-2 P1: a code-shaped tail whose concatenation with the
+  // PAN happens to ALSO pass Luhn must never leak into the last4 mask —
+  // PAN-length priority picks the real 16 before the colliding 19.
+  it('prefers the real 16-digit PAN over a Luhn-colliding 19-digit span', () => {
+    // Find a 3-digit tail that makes the combined 19 digits Luhn-valid.
+    let collidingTail = null;
+    for (let t = 0; t < 1000; t += 1) {
+      const tail = String(t).padStart(3, '0');
+      if (luhnValid(`${VISA16}${tail}`)) { collidingTail = tail; break; }
+    }
+    expect(collidingTail).not.toBeNull();
+    expect(scrubPans(`card ${VISA16} ${collidingTail} ok`))
+      .toBe('card [card ending 4242] [code removed] ok');
+  });
+
+  // Codex #2676 round-2 P2: dictated phone numbers in area/exchange/line
+  // groups feed contact extraction — a Luhn coincidence must never eat them.
+  describe('NANP phone-block protection', () => {
+    it('never masks grouped phone numbers', () => {
+      const s = 'call 239 555 1234 239 555 9876 anytime';
+      expect(scrubPans(s)).toBe(s);
+    });
+    it('locks the country-code "1" prefix with the phone block', () => {
+      const s = 'reach me at 1 941 555 1234 or 1 941 555 9876';
+      expect(scrubPans(s)).toBe(s);
+    });
+    it('still masks a card that FOLLOWS a grouped phone in the same run', () => {
+      expect(scrubPans(`239 555 1234 ${VISA16}`))
+        .toBe('239 555 1234 [card ending 4242]');
+    });
+    it('never absorbs a trailing phone block as expiry/CVV', () => {
+      expect(scrubPans(`${VISA16} 239 555 9876`))
+        .toBe('[card ending 4242] 239 555 9876');
+    });
+  });
 });
 
 describe('scrubPans — spoken-digit form', () => {
@@ -162,5 +211,27 @@ describe('scrubTranscriptArtifacts (processor wrapper)', () => {
     const r = scrubTranscriptArtifacts({ transcription: 'hello', contactPassTranscript: null, segments: null });
     expect(r).toEqual({ transcription: 'hello', contactPassTranscript: null, segments: null, count: 0 });
     expect(scrubTranscriptArtifacts({}).count).toBe(0);
+  });
+});
+
+describe('scrubStructuredTranscript (fallback-heal for legacy transcript_structured)', () => {
+  it('scrubs segments and the contact-pass stream inside the stored JSON', () => {
+    const stored = JSON.stringify({
+      provider: 'openai',
+      segments: [{ id: 's1', text: `card ${VISA16}` }, { id: 's2', text: 'hello' }],
+      contact_pass_transcript: `digits ${VISA16}`,
+    });
+    const r = scrubStructuredTranscript(stored);
+    expect(r.count).toBe(2);
+    const parsed = JSON.parse(r.json);
+    expect(parsed.segments[0].text).toBe('card [card ending 4242]');
+    expect(parsed.segments[1].text).toBe('hello');
+    expect(parsed.contact_pass_transcript).toBe('digits [card ending 4242]');
+  });
+  it('passes null/unparseable/clean blobs through untouched', () => {
+    expect(scrubStructuredTranscript(null)).toEqual({ json: null, count: 0 });
+    expect(scrubStructuredTranscript('not-json{')).toEqual({ json: 'not-json{', count: 0 });
+    const clean = JSON.stringify({ segments: [{ text: 'hi' }] });
+    expect(scrubStructuredTranscript(clean)).toEqual({ json: clean, count: 0 });
   });
 });

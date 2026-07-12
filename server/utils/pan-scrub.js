@@ -74,9 +74,37 @@ function maskFor(digits) {
   return `[card ending ${digits.slice(-4)}]`;
 }
 
-// Maximal digit run: digits joined by single space/dash separators.
-const NUMERIC_RUN_RE = /(?<![\d-])\d(?:[ -]?\d)*(?![\d-])/g;
+// Maximal digit run: digits joined by short separators. Transcription
+// providers punctuate pauses, so a card readback commonly lands as
+// "4242, 4242, 4242, 4242" or period/newline-separated groups — commas,
+// periods, and whitespace must join a run or each group is an unmatchable
+// <13-digit island (Codex #2676 round-2 P1).
+const NUMERIC_RUN_RE = /(?<![\d-])\d(?:[\s,.-]{1,2}?\d|\d)*(?![\d-])/g;
 const MAX_RUN_DIGITS = 40;
+
+// Real-world PAN length priority: 16 (Visa/MC dominant), 15 (Amex), 19
+// (extended Visa/JCB), 14 (Diners), 13 (legacy Visa), then the rare tail.
+// Priority order — NOT longest-first — so a 16-digit PAN followed by a
+// code-shaped tail whose concatenation happens to also pass Luhn masks as
+// the real card and the tail is absorbed, instead of the tail's digits
+// leaking into the last4 mask (Codex #2676 round-2 P1).
+const PAN_LENGTH_PRIORITY = [16, 15, 19, 14, 13, 18, 17];
+
+// NANP phone shape: consecutive groups of (3,3,4) digits (optionally led by
+// a lone "1") are a dictated phone number — locked out of span candidates
+// entirely so contact numbers feeding the dictation decoder can never be
+// eaten by a Luhn coincidence (Codex #2676 round-2 P2). A card read in
+// 3-3-4 chunks is indistinguishable from a phone and loses to the phone.
+function lockPhoneGroups(groups) {
+  const locked = new Array(groups.length).fill(false);
+  for (let i = 0; i + 2 < groups.length; i += 1) {
+    if (groups[i].digits.length === 3 && groups[i + 1].digits.length === 3 && groups[i + 2].digits.length === 4) {
+      locked[i] = locked[i + 1] = locked[i + 2] = true;
+      if (i > 0 && groups[i - 1].digits === '1') locked[i - 1] = true;
+    }
+  }
+  return locked;
+}
 
 // Scrub one numeric run via group-span search. Returns the replacement
 // string for the run and how many PANs were masked.
@@ -90,26 +118,31 @@ function scrubNumericRun(run) {
   }
   const totalDigits = groups.reduce((n, grp) => n + grp.digits.length, 0);
   if (totalDigits < 13 || totalDigits > MAX_RUN_DIGITS) return { text: run, count: 0 };
+  const locked = lockPhoneGroups(groups);
 
   let count = 0;
   let out = '';
   let cursor = 0;
   let i = 0;
   while (i < groups.length) {
-    // Longest valid span starting at group i (sum capped at 19).
+    if (locked[i]) { i += 1; continue; }
+    // Candidate spans from group i (sum capped at 19, never crossing a
+    // phone-locked group), selected by PAN-length priority.
     let matched = null;
     let sum = 0;
-    const sums = [];
+    const byLen = new Map();
     for (let j = i; j < groups.length; j += 1) {
+      if (locked[j]) break;
       sum += groups[j].digits.length;
       if (sum > 19) break;
-      sums.push({ j, sum });
+      if (sum >= 13 && !byLen.has(sum)) byLen.set(sum, j);
     }
-    for (let k = sums.length - 1; k >= 0; k -= 1) {
-      if (sums[k].sum < 13) break;
-      const spanDigits = groups.slice(i, sums[k].j + 1).map((grp) => grp.digits).join('');
+    for (const len of PAN_LENGTH_PRIORITY) {
+      if (!byLen.has(len)) continue;
+      const j = byLen.get(len);
+      const spanDigits = groups.slice(i, j + 1).map((grp) => grp.digits).join('');
       if (panCandidateValid(spanDigits)) {
-        matched = { endGroup: sums[k].j, digits: spanDigits };
+        matched = { endGroup: j, digits: spanDigits };
         break;
       }
     }
@@ -120,9 +153,11 @@ function scrubNumericRun(run) {
       count += 1;
       // Absorb trailing expiry/CVV-shaped groups (≤4 digits, up to 3 of
       // them) from the same run: "…4242 12 28 123" must not leave a CVV
-      // sitting next to the mask it belongs to.
+      // sitting next to the mask it belongs to. Never absorbs into a
+      // phone-locked block — a dictated callback number after the card
+      // survives intact.
       let absorbed = 0;
-      while (i < groups.length && groups[i].digits.length <= 4 && absorbed < 3) {
+      while (i < groups.length && !locked[i] && groups[i].digits.length <= 4 && absorbed < 3) {
         cursor = groups[i].end;
         i += 1;
         absorbed += 1;
@@ -144,19 +179,22 @@ const DIGIT_WORDS = {
 const DIGIT_WORD_ALT = Object.keys(DIGIT_WORDS).join('|');
 // Maximal spoken-digit run: 13+ digit words (candidate windows are carved
 // inside, so the run itself may include trailing expiry/CVV words).
+// Comma/period pause punctuation joins the run, mirroring the numeric side.
 const WORD_RUN_RE = new RegExp(
-  `\\b(?:(?:${DIGIT_WORD_ALT})[ ,]+){12,}(?:${DIGIT_WORD_ALT})\\b`,
+  `\\b(?:(?:${DIGIT_WORD_ALT})[ ,.]+){12,}(?:${DIGIT_WORD_ALT})\\b`,
   'gi'
 );
 
 // Prefix-anchored window search over a spoken-digit run: the card readback
-// leads the run; expiry/CVV words trail it.
+// leads the run; expiry/CVV words trail it. Windows are tried in
+// PAN-length-priority order (see the numeric twin) so a Luhn-colliding
+// tail never leaks into the last4 mask.
 function scrubSpokenRun(run) {
-  const words = run.split(/[ ,]+/);
+  const words = run.split(/[ ,.]+/);
   const digits = words.map((w) => DIGIT_WORDS[w.toLowerCase()] ?? '').join('');
   if (digits.length > MAX_RUN_DIGITS) return { text: run, count: 0 };
-  const maxLen = Math.min(19, digits.length);
-  for (let len = maxLen; len >= 13; len -= 1) {
+  for (const len of PAN_LENGTH_PRIORITY) {
+    if (len > digits.length) continue;
     const candidate = digits.slice(0, len);
     if (panCandidateValid(candidate)) {
       // Mask the first `len` words. A short spoken tail (≤8 digit words) is

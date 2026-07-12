@@ -1109,7 +1109,8 @@ router.post('/transcription', async (req, res) => {
       // transcript persistence path that bypasses call-recording-processor's
       // scrub (Twilio's built-in transcription writes the row directly), so
       // a blurted card number must be masked here too.
-      const scrubbedTranscription = require('../utils/pan-scrub').scrubPans(TranscriptionText);
+      const panScrub = require('../utils/pan-scrub').scrubPansDetailed(TranscriptionText);
+      const scrubbedTranscription = panScrub.text;
       const update = {
         transcription: scrubbedTranscription,
         transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
@@ -1137,6 +1138,21 @@ router.post('/transcription', async (req, res) => {
       }
 
       if (updated > 0) {
+        // Card data detected: the recording itself still carries it — the
+        // transcript mask alone leaves the PAN replayable from the audio.
+        // Quarantine (Twilio delete + reference strip + office heads-up)
+        // BEFORE the message sync so the media never lands in the thread.
+        if (panScrub.count > 0) {
+          try {
+            const callRow = await db('call_log').where('twilio_call_sid', matchedSid).first();
+            if (callRow) {
+              await require('../services/call-recording-processor')
+                .quarantineCardRecording(callRow, { source: 'twilio_transcription_webhook' });
+            }
+          } catch (qErr) {
+            logger.error(`[transcription] PAN quarantine failed for ${maskSid(matchedSid)}: ${qErr.message}`);
+          }
+        }
         queueVoiceMessageSync(matchedSid);
         logger.info(`Transcription received: ${maskSid(CallSid)} (${TranscriptionText.length} chars)`);
       } else {

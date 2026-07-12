@@ -164,6 +164,99 @@ function scrubTranscriptArtifacts({ transcription, contactPassTranscript, segmen
   };
 }
 
+// Scrub a persisted transcript_structured JSON blob (segments +
+// contact_pass_transcript) — the fallback-heal path touches legacy rows
+// whose structured artifact may predate the PAN guard, and healing only
+// call_log.transcription would leave the raw card number stored in the
+// sibling column (Codex #2676 round-2 P1). Returns { json, count }; a
+// null/unparseable blob passes through untouched.
+function scrubStructuredTranscript(json) {
+  if (!json) return { json, count: 0 };
+  let parsed;
+  try {
+    parsed = typeof json === 'string' ? JSON.parse(json) : json;
+  } catch {
+    return { json, count: 0 };
+  }
+  if (!parsed || typeof parsed !== 'object') return { json, count: 0 };
+  let count = 0;
+  if (Array.isArray(parsed.segments)) {
+    parsed.segments = parsed.segments.map((seg) => {
+      if (!seg || typeof seg.text !== 'string') return seg;
+      const s = scrubPansDetailed(seg.text);
+      count += s.count;
+      return s.count ? { ...seg, text: s.text } : seg;
+    });
+  }
+  if (typeof parsed.contact_pass_transcript === 'string') {
+    const s = scrubPansDetailed(parsed.contact_pass_transcript);
+    count += s.count;
+    if (s.count) parsed.contact_pass_transcript = s.text;
+  }
+  return { json: count ? JSON.stringify(parsed) : json, count };
+}
+
+// ── PAN quarantine ── Spec invariant #1: card data may not persist in ANY
+// medium, including audio. When the scrub masks card data from a call's
+// transcript, the RECORDING still carries it and stays replayable from the
+// message thread — so the Twilio recording is deleted, our references are
+// stripped (call_log.recording_url + the voice message's media), and the
+// detection is stamped into transcription_metadata. Best-effort and
+// idempotent: a failed Twilio delete still strips local references, and the
+// office gets a heads-up either way (a quarantined recording is an
+// exception a human should know about, never a silent event).
+async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
+  if (!call?.id) return { quarantined: false };
+  const recordingUrl = call.recording_url || null;
+  const sid = call.recording_sid
+    || (recordingUrl && (recordingUrl.match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
+    || null;
+  let twilioDeleted = false;
+  if (sid) {
+    try {
+      const client = twilioClient();
+      if (client) {
+        await client.recordings(sid).remove();
+        twilioDeleted = true;
+      }
+    } catch (err) {
+      logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+    }
+  }
+  try {
+    const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+    let meta = {};
+    try { meta = row?.transcription_metadata ? JSON.parse(row.transcription_metadata) : {}; } catch { meta = {}; }
+    await db('call_log').where({ id: call.id }).update({
+      recording_url: null,
+      transcription_metadata: JSON.stringify({
+        ...meta,
+        pan_detected: true,
+        recording_quarantined: twilioDeleted,
+        quarantine_source: source,
+      }),
+      updated_at: new Date(),
+    });
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);
+  }
+  // Clear the recording media already synced onto the unified voice message
+  // — recording_url null keeps the helper from re-adding it, and the
+  // explicit media:null patch removes what an earlier sync attached.
+  try {
+    await updateUnifiedVoiceMessage({ ...call, recording_url: null }, { media: null });
+  } catch { /* best-effort */ }
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Card number heard on a recorded call',
+      'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
+      { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+    );
+  } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
+  return { quarantined: true, twilioDeleted };
+}
+
 // Spoken-content length only: strip diarization speaker labels and collapse
 // whitespace so a valid short diarized call's formatting overhead ("Agent:",
 // "Caller:", newlines) can't push it over the ceiling. Labels first (line-
@@ -3718,6 +3811,11 @@ const CallRecordingProcessor = {
       result.structuredSegments = scrubbed.segments;
       if (scrubbed.count > 0) {
         logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) in transcript for ${maskSid(callSid)}`);
+        // The audio still carries the card — quarantine it (spec invariant
+        // #1) and drop the in-memory reference so nothing downstream (lead
+        // updates, message media sync) re-attaches the recording.
+        await quarantineCardRecording(call, { source: 'primary_transcription' });
+        call.recording_url = null;
       }
       // recordingSeconds is hoisted so the primary gate here and the terminal
       // rejection below share one value.
@@ -3774,12 +3872,16 @@ const CallRecordingProcessor = {
     // call_log.transcription, so treat it (and cached copies of it) as no fallback.
     const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
-      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured').first();
       if (isUsableFallback(freshCall?.transcription)) {
         // Rows written before the PAN guard deployed (or by an unscrubbed
         // legacy path) re-enter the live pipeline here — scrub on read so
-        // the LLM consumers downstream never see a stored PAN.
-        transcription = scrubPansDetailed(freshCall.transcription).text;
+        // the LLM consumers downstream never see a stored PAN, and heal the
+        // sibling transcript_structured artifact in the same touch (its
+        // segments/contact-pass may carry the same pre-guard PAN).
+        const fallbackScrub = scrubPansDetailed(freshCall.transcription);
+        const structuredScrub = scrubStructuredTranscript(freshCall.transcript_structured);
+        transcription = fallbackScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -3795,14 +3897,21 @@ const CallRecordingProcessor = {
           // PAN-bearing row would otherwise stay exposed to every
           // persisted-row consumer (Codex #2676 round-1 P1).
           transcription,
+          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
           updated_at: new Date(),
         });
+        if (fallbackScrub.count + structuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (isUsableFallback(call.transcription)) {
-        transcription = scrubPansDetailed(call.transcription).text;
+        const cachedScrub = scrubPansDetailed(call.transcription);
+        const cachedStructuredScrub = scrubStructuredTranscript(call.transcript_structured);
+        transcription = cachedScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -3815,11 +3924,16 @@ const CallRecordingProcessor = {
         };
         await db('call_log').where({ id: call.id }).update({
           transcription, // scrubbed — see the fresh-row twin above
+          ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
           updated_at: new Date(),
         });
+        if (cachedScrub.count + cachedStructuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
@@ -7452,6 +7566,7 @@ const CallRecordingProcessor = {
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
   scrubTranscriptArtifacts,
+  scrubStructuredTranscript,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
@@ -7503,5 +7618,6 @@ CallRecordingProcessor._test = {
 // backfilled transcript can never be lower-integrity than a live one.
 CallRecordingProcessor.transcribeRecording = transcribeRecording;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
+CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 
 module.exports = CallRecordingProcessor;
