@@ -5754,7 +5754,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         project: {},
         profile: completionProfile,
       });
+      // cockroach_control is exempt from the German-only rule: it is sold
+      // as a two-treatment package (profile alert/14d,
+      // services.requires_follow_up) — the included second visit applies
+      // regardless of species, matching its pre-cutover project-flow
+      // behavior (20260712300000).
       if (followupSuggestion?.required && typedFindingsType === 'cockroach'
+        && completionProfile?.serviceKey !== 'cockroach_control'
         && String(typedFindings.values?.species || '') !== 'German') {
         followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
       }
@@ -6206,7 +6212,10 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     }
     let suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
     let followupRequired = !!suggestion?.required;
-    if (followupRequired && profile.findingsType === 'cockroach') {
+    // Mirrors /complete: cockroach_control's two-treatment package is exempt
+    // from the German-only rule (20260712300000).
+    if (followupRequired && profile.findingsType === 'cockroach'
+      && profile.serviceKey !== 'cockroach_control') {
       if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
     }
     // Knockdown typed-value overrides mirror /complete (Codex P2 rounds

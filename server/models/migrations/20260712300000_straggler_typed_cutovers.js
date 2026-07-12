@@ -76,12 +76,21 @@ exports.up = async function up(knex) {
       // when the services row is live; skip only when the service itself
       // is absent.
       const service = hasServices
-        ? await knex('services').where({ service_key: target.key }).first('name', 'billing_type', 'is_active', 'is_archived')
+        ? await knex('services').where({ service_key: target.key }).first('name', 'billing_type', 'requires_follow_up', 'follow_up_interval_days', 'is_active', 'is_archived')
         : null;
       if (!service) {
         console.warn(`[straggler-cutover] ${target.key}: no services row and no profile in this environment — skipping`);
         continue;
       }
+      // Follow-up policy rides the catalog row (Codex r2): the seeded
+      // profiles for these keys carry alert/interval (two-treatment
+      // cockroach 14d, bed bug 14d, wildlife 1d) — a healed profile
+      // hard-coded to 'none' would silently drop the included follow-up
+      // CTA/booking gate.
+      const followupPolicy = service.requires_follow_up ? 'alert' : 'none';
+      const followupDays = service.requires_follow_up
+        ? (Number(service.follow_up_interval_days) || 14)
+        : null;
       await knex('service_completion_profiles').insert({
         service_key: target.key,
         service_name_snapshot: service.name,
@@ -93,11 +102,12 @@ exports.up = async function up(knex) {
         creates_service_record: true,
         portal_visibility: 'customer_portal',
         portal_attach_policy: 'active_portal_customer',
-        followup_policy: 'none',
+        followup_policy: followupPolicy,
+        default_followup_days: followupDays,
         active: true,
         notes: withMarker('', 'inserted'),
       });
-      console.log(`[straggler-cutover] ${target.key}: profile inserted → service_report/${target.toType}/auto_send`);
+      console.log(`[straggler-cutover] ${target.key}: profile inserted → service_report/${target.toType}/auto_send (followup ${followupPolicy}${followupDays ? `/${followupDays}d` : ''})`);
       continue;
     }
     if (!row.active) {
@@ -128,16 +138,20 @@ exports.up = async function up(knex) {
       continue;
     }
     const prior = `${row.completion_mode || '-'}:${row.project_type || '-'}:${row.delivery_mode || '-'}`;
+    // A pre-existing 'disabled' kill switch survives the mode/pointer flip
+    // (Codex r2) — after cutover the typed path DOES consult delivery_mode,
+    // so overwriting it would re-enable customer sends someone turned off.
+    const targetDelivery = row.delivery_mode === 'disabled' ? 'disabled' : 'auto_send';
     await knex('service_completion_profiles')
       .where({ service_key: target.key })
       .update({
         completion_mode: 'service_report',
         project_type: target.toType,
-        delivery_mode: 'auto_send',
+        delivery_mode: targetDelivery,
         notes: withMarker(row.notes, `updated:${prior}`),
         updated_at: knex.fn.now(),
       });
-    console.log(`[straggler-cutover] ${target.key}: ${prior} → service_report/${target.toType}/auto_send (prior recorded)`);
+    console.log(`[straggler-cutover] ${target.key}: ${prior} → service_report/${target.toType}/${targetDelivery} (prior recorded)`);
   }
 };
 
