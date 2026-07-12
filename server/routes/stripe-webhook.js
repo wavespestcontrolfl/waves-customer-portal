@@ -2264,6 +2264,89 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE):
+  // durability backstop for the accept path's awaited enrollment. The accept
+  // handler normally enrolls inline; this re-runs the same idempotent
+  // save → consent → enroll when the event lands AFTER the accept committed
+  // (3DS redirect the browser never finished, or a crash between the accept
+  // commit and the inline enrollment). A pre-accept delivery no-ops silently —
+  // an abandoned capture must not enroll anything, and the accept path owns
+  // the normal case. The exemption guards below are the ones that stay
+  // authoritative POST-accept — payer-billed, invoice-mode, commercial
+  // manual-billing, and a prepay conversion. (The accept-time resolver's
+  // plan-member check is deliberately NOT reused: the accept itself converts
+  // the customer into a plan member, so re-running it here would no-op the
+  // backstop for exactly the signups it exists to heal.) Enrollment itself is
+  // idempotent — an already-enrolled inline run skips as already_enrolled.
+  if (setupIntent.metadata?.purpose === 'estimate_recurring_card' && setupIntent.payment_method) {
+    const RecurringCards = require('../services/recurring-card-on-file');
+    if (!RecurringCards.isRecurringCardOnFileEnabled()) return;
+    const estimate = await db('estimates').where({ id: setupIntent.metadata.estimate_id }).first();
+    if (!estimate) return;
+    // This event normally arrives BEFORE the accept commits (the customer
+    // confirms the card, then clicks through the deposit + accept). Acking it
+    // then would burn the only durable retry this capture has — a deploy/crash
+    // between the accept commit and the awaited inline enrollment would leave
+    // the plan accepted with no Auto Pay card and no alert (Codex #2668
+    // round-4 P2). THROW instead: the dispatcher records the error and 500s,
+    // Stripe retries on backoff, and the reclaim path re-runs this handler —
+    // by then the estimate is accepted (enroll) or terminal (ack + drop).
+    // Bounded noise: retries stop as soon as the estimate leaves the
+    // still-acceptable state or Stripe's retry window ends; a normal signup
+    // sees at most a couple of benign "awaiting accept" retries, and the
+    // inline accept-path enrollment makes them no-op as already_enrolled.
+    if (estimate.status !== 'accepted') {
+      const { isEstimateAcceptActive } = require('./estimate-public');
+      if (isEstimateAcceptActive(estimate)) {
+        throw new Error(`recurring card capture for estimate ${estimate.id} is awaiting accept — retry later`);
+      }
+      return; // terminal estimate — abandoned capture, nothing to enroll
+    }
+    // The FINAL accepted lane wins (Codex #2668 round-2): one-time accepts,
+    // invoice-mode, commercial manual billing, and the prepay lane never
+    // enroll. A payment-pending prepay term deliberately keeps billing_mode
+    // 'per_application' until the invoice is paid, so any prepay term sourced
+    // from THIS estimate marks the lane, not just billing_mode. These are
+    // PERMANENT skips (ack the event); UNCERTAIN lookups throw instead —
+    // Stripe's retry is the durable path, and a soft skip here would silently
+    // drop the backstop (round-4: resolveForInvoice is fail-soft by default,
+    // and the payer must be checked against the ACCEPTED job's per-job scope,
+    // not just the customer default).
+    const { isCommercialAutoAcceptEstimate, findLinkedUpcomingAppointment } = require('./estimate-public');
+    if (!estimate.customer_id
+      || estimate.accepted_service_mode === 'one_time'
+      || estimate.bill_by_invoice === true
+      || isCommercialAutoAcceptEstimate(estimate)) {
+      return;
+    }
+    const customer = await db('customers').where({ id: estimate.customer_id }).first('billing_mode');
+    let prepayLane = customer?.billing_mode === 'annual_prepay';
+    if (!prepayLane) {
+      prepayLane = (await db.schema.hasTable('annual_prepay_terms'))
+        && !!(await db('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id'));
+    }
+    if (prepayLane) return;
+    const PayerService = require('../services/payer');
+    const appt = await findLinkedUpcomingAppointment(estimate).catch((err) => {
+      throw new Error(`recurring-cof backstop: linked-appointment lookup failed (${err.message}) — retry`);
+    });
+    const payer = await PayerService.resolveForInvoice({
+      customerId: estimate.customer_id,
+      scheduledServiceId: appt?.id ? String(appt.id) : null,
+      throwOnError: true,
+    });
+    if (payer?.payerId) return; // payer-billed — permanent skip
+    const stripePmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method.id;
+    await RecurringCards.completeRecurringCardEnrollment({
+      customerId: estimate.customer_id,
+      stripePaymentMethodId: stripePmId,
+      setupIntentId: setupIntent.id,
+      estimateId: estimate.id,
+    });
+    return;
+  }
   // Covered-by-credit capture (Codex #2507 P1 round-3): the SetupIntent the
   // pay page minted for a required-save, credit-covered invoice can finish
   // AFTER the browser is gone — a 3DS/bank-auth redirect that never returns,

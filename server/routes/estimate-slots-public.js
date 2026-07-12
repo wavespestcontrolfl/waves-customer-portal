@@ -76,6 +76,10 @@ const {
   createCardHoldSetupIntentForEstimate,
   resolveCardHoldPolicy,
 } = require('../services/estimate-card-holds');
+const {
+  createRecurringCardSetupIntentForEstimate,
+  resolveRecurringCardPolicyForEstimate,
+} = require('../services/recurring-card-on-file');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -740,6 +744,96 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     });
   } catch (err) {
     logger.error(`[estimate-slots-public:card-hold-intent] ${err.message}`, { stack: err.stack });
+    return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// POST /:token/recurring-card-intent — Stripe SetupIntent that saves the card
+// powering Auto Pay on a RECURRING accept (dark until RECURRING_CARD_ON_FILE).
+// No money is taken: the deposit is charged separately through /deposit-intent
+// exactly as before, and completed applications later auto-charge the enrolled
+// method. Gates mirror accept: token format, terminal/expired rejection, the
+// quote gate, and the recurring card policy (one-time / invoice-mode / prepay /
+// plan-member / payer-billed / already-on-Auto-Pay owe no card here). The
+// client confirms the SetupIntent, then calls accept with
+// recurringCardSetupIntentId.
+router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const estData = parseEstimateData(estimate);
+    const pricingBundle = await buildPricingBundle(estimate);
+    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
+    if (quoteRequirement.quoteRequired) {
+      return res.status(409).json({ error: 'Estimate is no longer active' });
+    }
+    if (estimateTrenchingReviewRequired(estData)) {
+      return res.status(409).json(TRENCHING_REVIEW_409);
+    }
+
+    // The Auto Pay card only applies to the recurring lane — a one-time
+    // request keeps its own card-hold intent endpoint.
+    const treatAsOneTime = req.body?.serviceMode === 'one_time'
+      || isStructuralOneTimeOnlyEstimate(estData, estimate);
+    // Mirror accept's contact gate BEFORE capturing a card: a recurring accept
+    // with no linked customer and no phone is rejected pre-commit
+    // (CUSTOMER_CONTACT_REQUIRED — accept-time customer creation is
+    // phone-keyed), so letting an email-only estimate confirm a SetupIntent
+    // here would strand a captured payment method on an acceptance the server
+    // will refuse (Codex #2668 P2). Same shape as /deposit-intent's
+    // invoice-mode contact mirror.
+    if (!treatAsOneTime && !estimate.customer_id && !estimate.customer_phone) {
+      return res.status(400).json({ error: 'Please call Waves to complete this estimate.' });
+    }
+    // Commercial manual-billing accepts collect nothing at accept — the SAME
+    // commercialAcceptDepositExempt predicate the accept gate and
+    // /deposit-intent run. Without it, a commercial auto-priced recurring
+    // estimate could capture a card the accept-side exemption never enrolls.
+    {
+      const lc = commercialLowConfidenceRange(estData);
+      if (commercialAcceptDepositExempt({
+        isCommercialAccept: isCommercialAutoAcceptEstimate(estimate),
+        siteConfirmationHold: !treatAsOneTime && lc.hasLowConfidence && !lc.forceSiteQuote,
+        treatAsOneTime,
+        billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      })) {
+        return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: 'commercial_manual_billing' });
+      }
+    }
+    const membership = await buildEstimateMembershipContext(estimate);
+    const policy = await resolveRecurringCardPolicyForEstimate({
+      estimate,
+      membership,
+      treatAsOneTime,
+      billByInvoice: resolveEstimateInvoiceMode(estimate, estData),
+      paymentMethodPreference: req.body?.paymentMethodPreference === 'prepay_annual' ? 'prepay_annual' : null,
+    });
+    if (!policy.required) {
+      return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null });
+    }
+
+    const intent = await createRecurringCardSetupIntentForEstimate(estimate);
+    if (!intent) {
+      return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
+    }
+    return res.json({
+      success: true,
+      clientSecret: intent.clientSecret,
+      setupIntentId: intent.setupIntentId,
+      // Both estimate UIs bootstrap Stripe Elements from this response — the
+      // public estimate pages have no other authenticated key source.
+      publishableKey: require('../config/stripe-config').publishableKey,
+    });
+  } catch (err) {
+    logger.error(`[estimate-slots-public:recurring-card-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
   }
 });
