@@ -792,3 +792,8 @@ review.
 - **Q4 (general_appointment / waveguard_initial_setup):** "Leave both
   as-is" — recorded as explicitly owner-excluded lanes in the B0 coverage
   audit.
+- **Q11 (combined booking, E1):** "Yes to both" — the estimate converter
+  auto-combines the three known pairs (pest+rodent bait, pest+termite
+  bait, lawn+tree&shrub) into ONE combined scheduled service; the Harris
+  re-type onto `pest_rodent_quarterly` ships as a marker-reversible
+  one-off.
