@@ -1,0 +1,150 @@
+/**
+ * Stripe webhook-health ops tools — unit tests with a mocked Stripe API.
+ * Verifies the read-only contract: benign shape when unconfigured (must not
+ * trip the shared admin breaker), that event PAYLOADS (customer data) never
+ * appear in results, and that every failure surfaces as { error }.
+ */
+
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const STRIPE_ENV_KEYS = ['STRIPE_SECRET_KEY', 'STRIPE_API_BASE'];
+
+const savedEnv = {};
+let executeStripeOpsTool;
+
+function jsonResponse(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body };
+}
+
+beforeAll(() => {
+  for (const key of STRIPE_ENV_KEYS) savedEnv[key] = process.env[key];
+});
+
+afterAll(() => {
+  for (const key of STRIPE_ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
+  }
+});
+
+beforeEach(() => {
+  jest.resetModules();
+  for (const key of STRIPE_ENV_KEYS) delete process.env[key];
+  global.fetch = jest.fn();
+  ({ executeStripeOpsTool } = require('../services/intelligence-bar/stripe-ops-tools'));
+});
+
+describe('intelligence bar Stripe ops tools', () => {
+  test('unconfigured state is benign — no error field and no network call', async () => {
+    const result = await executeStripeOpsTool('get_stripe_webhook_endpoints', {});
+    expect(result.error).toBeUndefined();
+    expect(result.configured).toBe(false);
+    expect(result.message).toMatch(/STRIPE_SECRET_KEY/);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('unknown tool name returns an error result', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const result = await executeStripeOpsTool('create_refund', {});
+    expect(result.error).toMatch(/Unknown tool/);
+  });
+
+  test('get_stripe_webhook_endpoints maps status and truncates the event list', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const manyEvents = Array.from({ length: 40 }, (_, i) => `event.type.${i}`);
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      data: [{
+        id: 'we_1',
+        url: 'https://portal.example.com/api/stripe/webhook',
+        status: 'enabled',
+        api_version: '2026-01-01',
+        enabled_events: manyEvents,
+      }],
+    }));
+
+    const result = await executeStripeOpsTool('get_stripe_webhook_endpoints', {});
+    expect(result.error).toBeUndefined();
+    expect(result.endpoints[0].status).toBe('enabled');
+    expect(result.endpoints[0].enabled_events).toHaveLength(25);
+    expect(result.endpoints[0].enabled_events_total).toBe(40);
+  });
+
+  test('get_stripe_webhook_failures separates real failures from recent pending, never payload data', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const oldCreated = Math.floor(Date.now() / 1000) - 3600; // 1h ago — failing
+    const freshCreated = Math.floor(Date.now() / 1000) - 60; // 1 min ago — still delivering
+    global.fetch.mockResolvedValueOnce(jsonResponse({
+      has_more: false,
+      data: [
+        {
+          id: 'evt_old',
+          type: 'invoice.payment_failed',
+          created: oldCreated,
+          pending_webhooks: 2,
+          data: { object: { customer_email: 'private@example.com', amount_due: 12345 } },
+        },
+        {
+          id: 'evt_fresh',
+          type: 'charge.succeeded',
+          created: freshCreated,
+          pending_webhooks: 1,
+          data: { object: { customer_email: 'private2@example.com' } },
+        },
+      ],
+    }));
+
+    const result = await executeStripeOpsTool('get_stripe_webhook_failures', { hours: 24 });
+    expect(result.error).toBeUndefined();
+    expect(result.undelivered_events).toEqual([{
+      id: 'evt_old',
+      type: 'invoice.payment_failed',
+      created: new Date(oldCreated * 1000).toISOString(),
+      pending_webhooks: 2,
+    }]);
+    // Young events are mid-delivery, not failures — reported separately so a
+    // routine health check doesn't raise false alarms.
+    expect(result.recent_pending_events.map(e => e.id)).toEqual(['evt_fresh']);
+    expect(result.total_undelivered).toBe(1);
+    expect(result.total_recent_pending).toBe(1);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('private@example.com');
+    expect(JSON.stringify(result)).not.toContain('private2@example.com');
+
+    const calledUrl = String(global.fetch.mock.calls[0][0]);
+    expect(calledUrl).toContain('delivery_success=false');
+    expect(calledUrl).toContain('created%5Bgte%5D=');
+  });
+
+  test('get_stripe_webhook_failures pages past fresh pending events to find older failures', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_test_1';
+    const freshCreated = Math.floor(Date.now() / 1000) - 60;
+    const oldCreated = Math.floor(Date.now() / 1000) - 7200;
+    // Page 1: 50 fresh pending events (newest first) with more behind them.
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      id: `evt_fresh_${i}`, type: 'charge.succeeded', created: freshCreated, pending_webhooks: 1,
+    }));
+    const page2 = [
+      { id: 'evt_failed_old', type: 'invoice.payment_failed', created: oldCreated, pending_webhooks: 3 },
+    ];
+    global.fetch
+      .mockResolvedValueOnce(jsonResponse({ has_more: true, data: page1 }))
+      .mockResolvedValueOnce(jsonResponse({ has_more: false, data: page2 }));
+
+    const result = await executeStripeOpsTool('get_stripe_webhook_failures', { hours: 24 });
+    expect(result.error).toBeUndefined();
+    // The older real failure behind a page of pending noise is found.
+    expect(result.undelivered_events.map(e => e.id)).toEqual(['evt_failed_old']);
+    expect(result.total_recent_pending).toBe(50);
+    expect(result.scan_exhaustive).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(String(global.fetch.mock.calls[1][0])).toContain('starting_after=evt_fresh_49');
+  });
+
+  test('auth rejection surfaces as { error }, never a throw', async () => {
+    process.env.STRIPE_SECRET_KEY = 'sk_bad';
+    global.fetch.mockResolvedValueOnce(jsonResponse({}, 401));
+
+    const result = await executeStripeOpsTool('get_stripe_webhook_endpoints', {});
+    expect(result.error).toMatch(/rejected the key/);
+  });
+});
