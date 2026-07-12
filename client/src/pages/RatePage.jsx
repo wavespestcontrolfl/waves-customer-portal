@@ -340,7 +340,8 @@ export default function RatePage() {
   if (loading) return (
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
-        <div style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.blueDeeper, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <style>{`@media (prefers-reduced-motion: reduce) { [data-rate-spinner] { animation: none !important; } }`}</style>
+        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.blueDeeper, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
         <span style={{ fontSize: 14, color: MUTED }}>Loading...</span>
       </div>
     </Page>
@@ -533,6 +534,7 @@ export default function RatePage() {
                   onChange={e => setPersonalNote(e.target.value)}
                   placeholder="e.g. No more ants in the kitchen!"
                   maxLength={150}
+                  aria-label="Anything specific you loved?"
                   className="waves-focus-ring"
                   style={inputBaseStyle}
                 />
@@ -584,6 +586,7 @@ export default function RatePage() {
                 value={generatedReview}
                 onChange={(e) => setGeneratedReview(e.target.value)}
                 rows={5}
+                aria-label="Your review"
                 className="waves-focus-ring"
                 style={{
                   ...inputBaseStyle,
@@ -647,7 +650,7 @@ export default function RatePage() {
           <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>
             {score <= 3 ? "What went wrong? We'll personally follow up." : "What could we have done better?"}
           </div>
-          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} className="waves-focus-ring" style={{
+          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} aria-label="Tell us what happened" className="waves-focus-ring" style={{
             ...inputBaseStyle,
             minHeight: 100,
             padding: 14,

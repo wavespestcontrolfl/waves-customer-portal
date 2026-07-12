@@ -3187,7 +3187,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const mosquitoResumes = (currentMonth >= 3 && currentMonth <= 9) ? null : 'April';
 
   // Pulsing dot animation
-  const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }`;
+  const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
+@media (prefers-reduced-motion: reduce) {
+  [data-sched-pulse] { animation: none !important; }
+}`;
 
   // Time TBD note helper
   const renderTimeTBD = (s) => {
@@ -3248,7 +3251,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           borderBottom: `1px solid ${toneBorder}`,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{
+            <span data-sched-pulse="" style={{
               width: 34, height: 34, borderRadius: 8, background: '#fff',
               border: `1px solid ${toneBorder}`,
               color: toneColor, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -11000,7 +11003,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
         @keyframes requestOverlayIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes checkPop { 0% { transform: scale(0); opacity: 0; } 50% { transform: scale(1.2); } 100% { transform: scale(1); opacity: 1; } }
         @media (prefers-reduced-motion: reduce) {
-          [data-request-overlay] { animation: none !important; }
+          [data-request-overlay], [data-request-check] { animation: none !important; }
         }
       `}</style>
 
@@ -11061,7 +11064,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
             padding: compact ? 20 : 32,
           }}>
             <div style={{ ...card, width: '100%', maxWidth: 460, padding: compact ? 24 : 30, textAlign: 'center' }}>
-              <div style={{ animation: 'checkPop 0.5s ease-out' }}>
+              <div data-request-check="" style={{ animation: 'checkPop 0.5s ease-out' }}>
                 <span style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -11755,7 +11758,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
       }}
     >
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="More navigation" data-glass="modal" style={{
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="More navigation" data-more-sheet="" data-glass="modal" style={{
         background: PORTAL_SHELL.page,
         borderRadius: '8px 8px 0 0',
         position: 'relative',
@@ -11768,7 +11771,10 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat }) {
         WebkitOverflowScrolling: 'touch',
         overscrollBehavior: 'contain',
       }}>
-        <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+        <style>{`@keyframes moreSheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  [data-more-sheet] { animation: none !important; }
+}`}</style>
         <div style={{
           width: 36, height: 4, borderRadius: 999, background: '#D8D0C0',
           margin: '0 auto 12px',
@@ -12042,6 +12048,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
         role="dialog"
         aria-modal="true"
         aria-label="Waves assistant"
+        data-chat-sheet=""
         data-glass="modal"
         style={{
           background: PORTAL_SHELL.page,
@@ -12063,7 +12070,10 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           overflow: 'hidden',
         }}
       >
-        <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }`}</style>
+        <style>{`@keyframes chatSlideUp { from { opacity: .65; transform: translateY(${compact ? '100%' : '16px'}); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  [data-chat-sheet], [data-chat-typing] { animation: none !important; }
+}`}</style>
 
         <div style={{
           flexShrink: 0,
@@ -12145,7 +12155,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           {sending && (
             <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
               <div style={{ background: PORTAL_SHELL.surface, padding: '10px 14px', borderRadius: 8, fontSize: 14, color: PORTAL_SHELL.muted, border: `1px solid ${PORTAL_SHELL.border}` }}>
-                <span style={{ animation: 'pulse 1.5s ease infinite' }}>{'•••'}</span>
+                <span data-chat-typing="" style={{ animation: 'pulse 1.5s ease infinite' }}>{'•••'}</span>
               </div>
             </div>
           )}
@@ -12354,6 +12364,9 @@ export default function PortalPage() {
       fontFamily: FONTS.body,
       color: PORTAL_SHELL.body,
     }}>
+      {/* First focusable element: hidden-until-focus skip link past the
+          sticky header (styles in index.css). */}
+      <a href="#portal-main" className="waves-skip-link">Skip to content</a>
       {/* Header */}
       <div data-glass="soft" style={{
         background: PORTAL_SHELL.surface,
@@ -12740,7 +12753,7 @@ export default function PortalPage() {
       </div>
 
       {/* Content — bottom padding clears the mobile nav so fixed UI doesn't hide the last section. */}
-      <div style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
+      <main id="portal-main" style={{ padding: `16px 16px ${isMobileShell ? 92 : 32}px`, maxWidth: shellMaxWidth, margin: '0 auto' }}>
         {activeTab !== 'dashboard' && <h1 style={VISUALLY_HIDDEN}>{TAB_TITLES[activeTab] || 'Customer Portal'}</h1>}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
             Home · Plan · Visits · Billing · Refer · Documents · My Property ·
@@ -12770,7 +12783,7 @@ export default function PortalPage() {
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
-      </div>
+      </main>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
       {isMobileShell && (

@@ -50,11 +50,14 @@ export default function WavesShell({
           fontFamily: "'Inter', system-ui, sans-serif",
         }}
       >
+        {/* First focusable element: hidden-until-focus skip link past the
+            header chrome (styles in index.css). */}
+        <a href="#waves-shell-main" className="waves-skip-link">Skip to content</a>
         {/* data-waves-shell-header: EstimateGlassTheme's classify walker must
             NOT pill-compact the standard shell bar (it hides the icon row
             behind the centered logo). */}
         <header data-waves-shell-header="" style={topBarStyle}>
-          <div style={{
+          <nav aria-label="Waves" style={{
             width: 'min(100%, 1120px)',
             margin: '0 auto',
             padding: '14px 20px',
@@ -65,7 +68,9 @@ export default function WavesShell({
             boxSizing: 'border-box',
             position: 'relative',
           }}>
-            <HeaderStoreLinks tone={phoneTone} />
+            {/* Logo first in DOM so reading order matches the visual
+                hierarchy; absolute positioning keeps the flex layout of the
+                in-flow store links + phone CTA unchanged. */}
             <img
               src="/waves-logo.png"
               alt="Waves"
@@ -75,6 +80,7 @@ export default function WavesShell({
                 filter: isTransparent ? 'brightness(0) invert(1)' : 'none',
               }}
             />
+            <HeaderStoreLinks tone={phoneTone} />
             {/* marginLeft:auto keeps the phone CTA on the right even when
                 HeaderStoreLinks renders null inside the native app (the
                 logo is absolutely positioned, so space-between alone would
@@ -82,9 +88,9 @@ export default function WavesShell({
             <span style={{ marginLeft: 'auto' }}>
               <HelpPhoneLink tone={phoneTone} />
             </span>
-          </div>
+          </nav>
         </header>
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <main id="waves-shell-main" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
           {children}
         </main>
         {showFooter && (

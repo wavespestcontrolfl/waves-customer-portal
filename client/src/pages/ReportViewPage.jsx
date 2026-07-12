@@ -5076,7 +5076,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.5;
           font-weight: 600;
           letter-spacing: 0;
@@ -6058,6 +6058,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .coverage-skeleton-map,
+          .coverage-skeleton-list span,
+          .workflow-skeleton-list span { animation: none; }
+        }
         .map-toggle {
           display: inline-flex;
           border: 1px solid var(--line);
@@ -6442,7 +6447,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           color: var(--text);
           font: inherit;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           padding: 9px 12px;

@@ -140,6 +140,8 @@ export default function LoginPage() {
           display: inline-flex;
           align-items: center;
           gap: 10px;
+          /* 44px touch-target floor — the 42px logo mark alone fell short */
+          min-height: 44px;
           text-decoration: none;
           color: var(--login-blue);
         }
@@ -392,7 +394,7 @@ export default function LoginPage() {
           background: var(--login-soft);
           border: 1px solid var(--login-soft-border);
           color: var(--login-blue);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.45;
           font-weight: 700;
           display: flex;
@@ -421,7 +423,7 @@ export default function LoginPage() {
           gap: 8px;
         }
         .portal-login-help a {
-          min-height: 42px;
+          min-height: 44px;
           border-radius: 10px;
           border: 1px solid var(--login-border);
           color: var(--login-blue);
