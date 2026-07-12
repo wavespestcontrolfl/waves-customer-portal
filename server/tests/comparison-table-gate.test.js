@@ -1114,6 +1114,22 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-46 findings (#2633) ──
+
+  test('Codex r46: reputation, rumor, being-form, and discourse-not accusations block', () => {
+    for (const prose of ['Waves has a reputation for hidden fees.', 'Pest control companies have a reputation for hidden fees.', 'Providers are rumored to be scams.', 'Providers draw complaints about hidden fees.', 'Rumors about acme pest solutions being overpriced keep spreading.', 'Not surprisingly, pest control companies charge hidden fees.', 'Not surprisingly, Waves charges hidden fees.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r46: service mistakes, product appositives, and shady locatives stay educational', () => {
+    for (const body of ['The #1 pest control mistake homeowners make is overspraying.', `Waves uses Advion, a top-rated gel bait, for German roaches.\n\n${CATEGORY_TABLE}`, `Check shady areas near pest control monitors for millipedes.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-45 findings (#2633) ──
 
   test('Codex r45: single-quoted denial cells, intrinsic winners, and table-less provider #1 block', () => {
