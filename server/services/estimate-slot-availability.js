@@ -31,6 +31,7 @@ const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const {
   pricingBundleMatchesEstimateTotals,
 } = require('./estimate-pricing-bundle-utils');
@@ -1028,53 +1029,96 @@ function selectCustomerFacingSlots(slots, limit) {
   return diversified.slice(0, safeLimit);
 }
 
-// Drop any candidate whose rounded display window collides with a real
-// booking on the same tech/date. find-time evaluates the un-rounded
-// earliestStart; the hour-rounding done in classifySlot can shift the
-// displayed window forward by up to 59 minutes, which can land on top of
-// the very next anchor that find-time was routing around. Without this
-// guard the slot is shown to the customer but reserveSlot() then fails
-// with SLOT_UNAVAILABLE on tap.
-async function filterCollidingSlots(slots, { dateFrom, dateTo }) {
+// Drop any candidate the reserve gate would reject, so every offered slot is
+// actually reservable on tap. Two ways a shown slot used to 409:
+//   1. Rounded display window landing on a same-tech booking — find-time
+//      evaluates the un-rounded earliestStart; classifySlot's hour-rounding
+//      can shift the displayed window forward by up to 59 minutes, onto the
+//      very next anchor find-time was routing around.
+//   2. An UNASSIGNED booking in the estimate's zone overlapping the window —
+//      reserveSlot's zone-capacity check treats the zone as one capacity
+//      pool, but this filter only compared same-tech rows, so the generator
+//      kept offering the window, every tap 409'd, and the refreshed list
+//      still showed the same slot (dead-end loop, found live 2026-07-13).
+// This filter must mirror reserveSlot's conflict checks; the shared zone
+// resolution lives in slot-zone.js so the two sides can't drift.
+async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null }) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   const rows = await db('scheduled_services')
-    .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('status', ['cancelled'])
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
+    .whereNotIn('scheduled_services.status', ['cancelled'])
     .andWhere((q) => {
-      q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()');
+      q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     })
-    .select('technician_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+    .select(
+      'scheduled_services.technician_id',
+      'scheduled_services.scheduled_date',
+      'scheduled_services.window_start',
+      'scheduled_services.window_end',
+      'scheduled_services.estimated_duration_minutes',
+      'scheduled_services.zone',
+      'customers.city as customer_city',
+    );
+
+  const zoneSlug = zoneSlugOf(estimateZone);
+  const zoneCities = new Set(
+    (estimateZone?.cities || []).map((c) => String(c || '').toLowerCase()).filter(Boolean),
+  );
 
   const byTechDate = new Map();
+  // Every live row per date: reserveSlot's tech-conflict query drops its
+  // technician filter for a techless slot, so an unassigned candidate must
+  // collide against ALL bookings that day — not just unassigned ones.
+  const allByDate = new Map();
+  // Unassigned rows in the estimate's zone per date — the generator half of
+  // reserveSlot's zone-capacity check. Matching is by zone slug or customer
+  // city, both case-insensitive: over-filtering here at worst hides a
+  // window, while under-filtering recreates the 409 loop.
+  const zoneByDate = new Map();
   for (const row of rows) {
     const date = (typeof row.scheduled_date === 'string'
       ? row.scheduled_date
       : row.scheduled_date.toISOString()).slice(0, 10);
-    const key = `${row.technician_id || 'unassigned'}|${date}`;
-    if (!byTechDate.has(key)) byTechDate.set(key, []);
     const startMin = timeToMinutes(String(row.window_start || '').slice(0, 5));
     const explicitEndMin = timeToMinutes(String(row.window_end || '').slice(0, 5));
     const fallbackDuration = Number(row.estimated_duration_minutes) > 0
       ? Number(row.estimated_duration_minutes)
       : DEFAULT_OPTS.durationMinutes;
-    byTechDate.get(key).push({
+    const busy = {
       startMin,
       endMin: explicitEndMin ?? (startMin != null ? startMin + fallbackDuration : null),
-    });
+    };
+    const key = `${row.technician_id || 'unassigned'}|${date}`;
+    if (!byTechDate.has(key)) byTechDate.set(key, []);
+    byTechDate.get(key).push(busy);
+    if (!allByDate.has(date)) allByDate.set(date, []);
+    allByDate.get(date).push(busy);
+    if (!row.technician_id && estimateZone) {
+      const rowZone = String(row.zone || '').toLowerCase();
+      const rowCity = String(row.customer_city || '').toLowerCase();
+      if ((zoneSlug && rowZone === zoneSlug) || (rowCity && zoneCities.has(rowCity))) {
+        if (!zoneByDate.has(date)) zoneByDate.set(date, []);
+        zoneByDate.get(date).push(busy);
+      }
+    }
   }
 
+  const overlapsAny = (busyList, slotStart, slotEnd) => busyList.some((b) => {
+    if (b.startMin == null || b.endMin == null) return false;
+    return slotStart < b.endMin && slotEnd > b.startMin;
+  });
+
   return slots.filter((s) => {
-    const key = `${s.techId || 'unassigned'}|${s.date}`;
-    const existing = byTechDate.get(key) || [];
     const slotStart = timeToMinutes(s.windowStart);
     const slotEnd = timeToMinutes(s.windowEnd);
     if (slotStart == null || slotEnd == null) return true;
     if (!slotWindowFitsDay(s.windowStart, s.windowEnd)) return false;
-    if (existing.length === 0) return true;
-    return !existing.some((b) => {
-      if (b.startMin == null || b.endMin == null) return false;
-      return slotStart < b.endMin && slotEnd > b.startMin;
-    });
+    const techBusy = s.techId
+      ? (byTechDate.get(`${s.techId}|${s.date}`) || [])
+      : (allByDate.get(s.date) || []);
+    if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
+    return !overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd);
   });
 }
 
@@ -1226,6 +1270,16 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     ? { dateFrom: opts.dateFrom, dateTo: opts.dateTo }
     : etDateRange(opts.windowDays);
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
+  // Resolved once per (uncached) generation and threaded through every
+  // filterCollidingSlots pass — reserveSlot resolves the same zone (same
+  // shared helper) for its zone-capacity gate. Degrade to null on failure:
+  // offering slots without the zone exclusion beats offering none.
+  let estimateZone = null;
+  try {
+    estimateZone = await resolveEstimateZone(db, estimate);
+  } catch (zoneErr) {
+    logger.warn(`[estimate-slots] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
+  }
   const coords = await resolveEstimateCoords(estimate);
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
@@ -1240,9 +1294,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
     });
-    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
     const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
-    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
+    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
     const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
@@ -1295,12 +1349,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Re-dedupe after spreading: a re-windowed ASAP slot can land on the same
   // slotId as a preserved route slot; dedupeSlots keeps the route/nearby one.
@@ -1308,7 +1362,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
   // slots; that can land them on an existing booking, so re-filter once
   // more before choosing the final customer-facing list.
-  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo });
+  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
   // Trim any window that has already passed (or is inside the booking lead
   // time) on today's date — covers route-aware and spread-reassigned slots
   // that buildAsapCapacitySlots' own guard never saw.
@@ -1507,6 +1561,7 @@ module.exports = {
     addMinutesToHHMM,
     slotWindowFitsDay,
     signCustomerFacingSlots,
+    filterCollidingSlots,
     clearCaches() { wrapperCache.clear(); geocodeCache.clear(); },
   },
 };
