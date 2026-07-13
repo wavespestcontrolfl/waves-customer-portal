@@ -367,11 +367,13 @@ export default function TechHomePage() {
       .catch(() => setProjectTypesRegistry({}));
   }, [continueProjectId, projectTypesRegistry]);
   const openProjectOrContinue = useCallback((service) => {
-    // Terminal guard (Codex P1, mirrors DispatchPageV2's
-    // projectCompletionIsClosed): a completed visit / closed report is a
-    // customer-facing compliance record — the field portal must not reopen
-    // it for editing. Admin corrections go through the Jobs page.
-    if (service?.linkedProject?.status === 'closed' || service?.status === 'completed') return;
+    // Terminal guard (Codex P1 + r3, stricter than DispatchPageV2's
+    // projectCompletionIsClosed on purpose): a completed visit, a closed
+    // report, or a SENT report is a delivered customer-facing compliance
+    // record — the field portal must not reopen it for editing. Admin
+    // corrections go through the Jobs page / dispatch.
+    const linkedStatus = service?.linkedProject?.status;
+    if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
     if (service?.linkedProject?.id) {
       setContinueProjectId(service.linkedProject.id);
       return;
@@ -1013,11 +1015,13 @@ function ServiceRow({ service, onPhotos, onProject }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           {/* A visit with an existing linked report continues it (in-place
-              editor) instead of creating a duplicate; a closed report /
-              completed visit is terminal (openProjectOrContinue no-ops). */}
-          {service.linkedProject?.status === 'closed' || service.status === 'completed'
-            ? '🗂️ Completed'
-            : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
+              editor) instead of creating a duplicate; a sent/closed report
+              or completed visit is terminal (openProjectOrContinue no-ops). */}
+          {service.linkedProject?.status === 'sent'
+            ? '🗂️ Sent'
+            : service.linkedProject?.status === 'closed' || service.status === 'completed'
+              ? '🗂️ Completed'
+              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
         </button>
         <button onClick={onPhotos} style={{
           padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,

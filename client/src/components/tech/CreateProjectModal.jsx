@@ -525,14 +525,19 @@ export default function CreateProjectModal({
   // appointmentManaged types complete through the standard appointment flow
   // now — they're not creatable as projects (server 422s them too).
   // linkedCreationOnly types (WDO, pre-treat cert — owner ruling 2026-07-13)
-  // create only from their scheduled visit, so the ad-hoc picker hides them.
-  // An explicit allowedProjectTypes prop (the special-project dispatch path)
-  // still wins so visit-linked WDO/pre-treat routing keeps working.
+  // create only from their scheduled visit, so the AD-HOC picker hides them
+  // — but a visit-linked open (defaultScheduledServiceId set) IS the allowed
+  // door, and a legacy visit's profile may resolve no pointer to build an
+  // explicit allowedProjectTypes from (Codex r3): keep the compliance types
+  // selectable whenever a linked visit is present; the server still rejects
+  // a mismatched visit (project_type_link_mismatch). An explicit
+  // allowedProjectTypes prop (the special-project dispatch path) still wins.
+  const linkedVisitContext = !!defaultScheduledServiceId;
   const visibleTypes = typesRegistry
     ? Object.entries(typesRegistry).filter(([key, cfg]) => (
       allowedProjectTypes
         ? allowedProjectTypes.includes(key)
-        : !cfg?.appointmentManaged && !cfg?.linkedCreationOnly
+        : !cfg?.appointmentManaged && (!cfg?.linkedCreationOnly || linkedVisitContext)
     ))
     : [];
 

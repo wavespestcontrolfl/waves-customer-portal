@@ -1363,18 +1363,36 @@ router.post('/', async (req, res, next) => {
       });
     }
     // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
-    // scheduled visit, so ad-hoc/unlinked creation closes. The requirement is
-    // the LINK itself (validateProjectCreateScope pins it to the customer),
-    // not a resolved profile pointer — legacy scheduled WDO rows without a
-    // service_id resolve no project-backed profile by name and must not be
-    // rejected (Codex P2). Typed visits still cannot side-door in: they were
-    // already 422'd above as scheduled_service_appointment_managed. The
-    // completion machinery (FDACS signature/PDF/filing) is unchanged.
-    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type) && !linkedScheduledServiceId) {
-      return res.status(422).json({
-        error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
-        code: 'project_type_linked_only',
-      });
+    // scheduled visit, so ad-hoc/unlinked creation closes, and the link must
+    // be THE compliance visit itself — either the linked profile's pointer
+    // matches, or (legacy rows with no service_id, whose name-based profile
+    // resolution finds nothing — Codex r2) the visit's own service text
+    // matches the compliance service. A random lawn/pest visit must not
+    // carry a WDO/cert create (Codex r3). Typed visits already 422'd above
+    // as scheduled_service_appointment_managed; the completion machinery
+    // (FDACS signature/PDF/filing) is unchanged.
+    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type)) {
+      if (!linkedScheduledServiceId) {
+        return res.status(422).json({
+          error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
+          code: 'project_type_linked_only',
+        });
+      }
+      if (!linkedProjectTypeMatches) {
+        const linkedVisit = await db('scheduled_services')
+          .where({ id: linkedScheduledServiceId })
+          .first('service_type');
+        const label = String(linkedVisit?.service_type || '');
+        const legacyLabelMatches = project_type === 'wdo_inspection'
+          ? /\bwdo\b|wood[\s-]?destroying/i.test(label)
+          : /pre[\s-]?treat|slab/i.test(label);
+        if (!legacyLabelMatches) {
+          return res.status(422).json({
+            error: 'The linked appointment is not a WDO / pre-treat visit — open the report from the compliance visit it documents.',
+            code: 'project_type_link_mismatch',
+          });
+        }
+      }
     }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });

@@ -611,6 +611,45 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('linked-only gate rejects a WDO create linked to an unrelated visit', async () => {
+    // The link must be THE compliance visit (pointer match or legacy WDO
+    // service text) — a stale client posting wdo_inspection against a lawn
+    // visit must not attach a compliance report to the wrong appointment
+    // (Codex r3).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-lawn', service_id: null, service_type: 'Lawn Care Visit',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-lawn' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('project_type_link_mismatch');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('record-only linked WDO create persists the DERIVED scheduled_service_id', async () => {
     // The linked-only gate accepts a service_record_id link via the record's
     // scheduled_service_id — the insert must persist that derived id or the
