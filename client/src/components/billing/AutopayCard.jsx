@@ -566,8 +566,9 @@ export default function AutopayCard({ onStateChange }) {
                 payment_methods.map((pm) => {
                   // A micro-deposit bank account can't be put in charge of
                   // Auto Pay until verification clears (the server refuses
-                  // it too) — shown, but not selectable.
-                  const pendingBank = pm.method_type === 'ach' && pm.ach_status === 'pending_verification';
+                  // it too) — shown, but not selectable. Same for a failed
+                  // verification.
+                  const pendingBank = pm.method_type === 'ach' && ['pending_verification', 'verification_failed'].includes(pm.ach_status);
                   return (
                     <label key={pm.id} style={{
                       display: 'flex', alignItems: 'center', gap: 10, padding: 12,
@@ -581,7 +582,7 @@ export default function AutopayCard({ onStateChange }) {
                         onChange={() => setSelectedCard(pm.id)} />
                       <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
                         {pm.method_type === 'ach'
-                          ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pendingBank ? ' - verification pending' : ''}`
+                          ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pm.ach_status === 'verification_failed' ? ' - verification failed' : (pendingBank ? ' - verification pending' : '')}`
                           : `${pm.brand || 'Card'} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
                       </span>
                     </label>

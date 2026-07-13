@@ -183,7 +183,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     const current = await db('customers')
       .where({ id: req.customerId })
-      .select('autopay_enabled', 'autopay_payment_method_id', 'billing_day')
+      .select('autopay_enabled', 'autopay_payment_method_id', 'billing_day', 'ach_status')
       .first();
 
     if (!current) return res.status(404).json({ error: 'Customer not found' });
@@ -229,16 +229,32 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       return res.status(400).json({ error: 'Add a payment method before enabling Auto Pay.' });
     }
 
-    // A micro-deposit bank account that hasn't verified yet must not be
-    // put in charge of Auto Pay (portal ACH lane): collection would debit
-    // an unverified account and Stripe's rejection would escalate through
-    // handleAchFailure. The setup_intent.succeeded webhook flips the row
-    // to 'verified' and enrolls it; until then the portal shows it as
-    // pending.
+    // A micro-deposit bank account that hasn't verified (or failed
+    // verification) must not be put in charge of Auto Pay (portal ACH
+    // lane): collection would debit an account that can't be debited and
+    // Stripe's rejection would escalate through handleAchFailure. The
+    // setup_intent.succeeded webhook flips the row to 'verified' and
+    // enrolls it; until then the portal shows it as pending.
     if (willBeEnabled
       && selectedPaymentMethod?.method_type === 'ach'
-      && selectedPaymentMethod?.ach_status === 'pending_verification') {
-      return res.status(400).json({ error: 'This bank account is still being verified. You can use it for Auto Pay as soon as verification clears.' });
+      && ['pending_verification', 'verification_failed'].includes(selectedPaymentMethod?.ach_status)) {
+      return res.status(400).json({
+        error: selectedPaymentMethod.ach_status === 'verification_failed'
+          ? 'This bank account could not be verified. Remove it and add it again.'
+          : 'This bank account is still being verified. You can use it for Auto Pay as soon as verification clears.',
+      });
+    }
+
+    // Customer-level ACH block (Codex #2706 r3): while customers.ach_status
+    // is non-active, customerOnAutopay/cron refuse every non-card method —
+    // persisting Auto Pay flags onto a bank here would silently stop
+    // collection while the UI shows Active. Reject honestly instead;
+    // 'suspended' clears through a successful ACH payment (or
+    // needs_verification through a bank verification).
+    if (willBeEnabled
+      && selectedPaymentMethod?.method_type === 'ach'
+      && current.ach_status && current.ach_status !== 'active') {
+      return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — Auto Pay needs a card until that clears.' });
     }
 
     if (typeof autopay_enabled === 'boolean' && autopay_enabled !== current.autopay_enabled) {

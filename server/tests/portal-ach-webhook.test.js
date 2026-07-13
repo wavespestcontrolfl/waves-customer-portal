@@ -25,7 +25,8 @@ jest.mock('../services/stripe-invoice-state', () => ({
   INVOICE_COLLECTIBLE_STATUSES: [],
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {} }));
+const mockGateEnabled = jest.fn(() => true);
+jest.mock('../config/feature-gates', () => ({ isEnabled: (...a) => mockGateEnabled(...a), gates: {} }));
 jest.mock('../services/invoice-helpers', () => ({ INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));
@@ -66,7 +67,10 @@ jest.mock('../models/db', () => {
 });
 const updatesFor = (table) => state.updates.filter((u) => u.table === table);
 
-const { _handleSetupIntentSucceeded: handleSetupIntentSucceeded } = require('../routes/stripe-webhook');
+const {
+  _handleSetupIntentSucceeded: handleSetupIntentSucceeded,
+  _handleSetupIntentFailed: handleSetupIntentFailed,
+} = require('../routes/stripe-webhook');
 
 const setupIntent = (over = {}) => ({
   id: 'si_1',
@@ -78,6 +82,7 @@ const setupIntent = (over = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockGateEnabled.mockReturnValue(true);
   mockHasConsentFor.mockResolvedValue(true);
   mockHasEnrollmentScopedConsent.mockResolvedValue(true);
   mockEnroll.mockResolvedValue({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' });
@@ -168,4 +173,27 @@ test('a REMOVED pending method is never resurrected: detached PM skips the backs
   expect(mockRecordConsent).not.toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
   expect(state.updates).toHaveLength(0);
+});
+
+test('gate off: an in-flight bank completion is skipped — the kill switch closes the whole portal bank lane (Codex r3)', async () => {
+  mockGateEnabled.mockReturnValue(false);
+  await handleSetupIntentSucceeded(setupIntent());
+  expect(state.updates).toHaveLength(0);
+  expect(mockRecordConsent).not.toHaveBeenCalled();
+  expect(mockEnroll).not.toHaveBeenCalled();
+});
+
+test('setup_failed moves a pending bank row to verification_failed (Codex r3)', async () => {
+  await handleSetupIntentFailed({
+    id: 'si_md',
+    payment_method: 'pm_bank_1',
+    last_setup_error: { message: 'Microdeposit amounts do not match' },
+    metadata: { waves_customer_id: 'cust-1' },
+  });
+  const pmUpdates = updatesFor('payment_methods');
+  expect(pmUpdates).toHaveLength(1);
+  expect(pmUpdates[0].patch).toEqual({ ach_status: 'verification_failed' });
+  // Scoped to PENDING rows only — a stale failure event can never demote a
+  // verified account.
+  expect(pmUpdates[0].wheres).toContainEqual(expect.objectContaining({ ach_status: 'pending_verification' }));
 });

@@ -3930,7 +3930,12 @@ function BillingTab({ customer }) {
         if (cardMountRef.current) {
           const pe = elements.create('payment', {
             layout: { type: 'tabs' },
-            paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
+            // Card-first (Codex #2706 r3): the consent state initializes to
+            // 'card' and only follows change events — a bank-first default
+            // tab could show the CARD authorization while a bank account
+            // saves. Card-first makes the initial copy match the initial
+            // tab deterministically; picking the bank tab fires 'change'.
+            paymentMethodOrder: ['card', 'apple_pay', 'google_pay', 'us_bank_account'],
           });
           pe.mount(cardMountRef.current);
           paymentElementRef.current = pe;
@@ -4007,6 +4012,25 @@ function BillingTab({ customer }) {
       setStripeError(err.message || 'Failed to save card');
     }
     setStripeLoading(false);
+  };
+
+  // Resume micro-deposit verification for a pending bank row (Codex #2706
+  // r3): the hosted link from save time doesn't survive a reload, so this
+  // rebuilds it server-side. The endpoint also heals stale states (already
+  // verified / verification failed) — refresh the list on those.
+  const handleResumeBankVerification = async (cardId) => {
+    setStripeError('');
+    try {
+      const result = await api.getBankVerificationLink(cardId);
+      if (result?.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      await refreshCards();
+      if (result?.verified) setAutopayRefreshKey((k) => k + 1);
+    } catch (err) {
+      setStripeError(err.message || 'Could not load the verification link');
+    }
   };
 
   const handleRemoveCard = async (cardId) => {
@@ -4609,16 +4633,30 @@ function BillingTab({ customer }) {
               {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {c.methodType === 'ach' && c.achStatus === 'pending_verification' && (
                 <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
-                  Verification pending — watch for two small deposits
+                  Verification pending — watch for two small deposits.
+                  {' '}
+                  <button
+                    type="button"
+                    onClick={() => handleResumeBankVerification(c.id)}
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 850, color: B.glassNavy, textDecoration: 'underline' }}
+                  >
+                    Confirm deposits
+                  </button>
+                </div>
+              )}
+              {c.methodType === 'ach' && c.achStatus === 'verification_failed' && (
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.red, marginTop: 2 }}>
+                  Verification failed — remove this account and add it again
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
                 <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
-              ) : (c.methodType === 'ach' && c.achStatus === 'pending_verification') ? (
-                // Server refuses a pending bank as default (set-default
-                // carries Auto Pay) — don't offer the dead-end button.
+              ) : (c.methodType === 'ach' && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
+                // Server refuses a pending/failed bank as default
+                // (set-default carries Auto Pay) — don't offer the
+                // dead-end button.
                 null
               ) : (
                 <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Set default</button>

@@ -206,7 +206,7 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     expect(mockRecordConsent).not.toHaveBeenCalled();
   });
 
-  test('returned from hosted verification: succeeded SI marks the pending row VERIFIED before enrolling (Codex r2)', async () => {
+  test('returned from hosted verification: succeeded SI marks the pending row VERIFIED and clears needs_verification before enrolling (Codex r2+r3)', async () => {
     mockIsEnabled.mockReturnValue(true);
     mockRetrieveSetupIntent.mockResolvedValue({
       id: 'si_md',
@@ -217,9 +217,25 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_md' } });
     expect(statusCode).toBe(200);
     // The customer beat the webhook back to the portal — without this the
-    // enrollment runs against a row the autopay routes still refuse.
+    // enrollment runs against a row the autopay routes still refuse, and
+    // without the customer-level clear enrollConsentedMethod still 409s.
     expect(state.updates).toContainEqual({ table: 'payment_methods', patch: { ach_status: 'verified' } });
+    expect(state.updates).toContainEqual({ table: 'customers', patch: { ach_status: 'active' } });
     expect(mockEnroll).toHaveBeenCalled();
+  });
+
+  test('gate OFF: an in-flight SUCCEEDED bank SetupIntent is refused before any mirror (kill-switch integrity, Codex r3)', async () => {
+    mockIsEnabled.mockReturnValue(false);
+    mockRetrieveSetupIntent.mockResolvedValue({
+      id: 'si_late',
+      status: 'succeeded',
+      payment_method: { id: 'pm_bank_1', type: 'us_bank_account' },
+    });
+    const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_late' } });
+    expect(statusCode).toBe(409);
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+    expect(mockEnroll).not.toHaveBeenCalled();
   });
 
   test('ownership mismatch on the pending row → 409, nothing recorded', async () => {
@@ -283,5 +299,118 @@ describe('PUT /api/billing/autopay — pending bank cannot take charge', () => {
     });
     expect(statusCode).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  test('a VERIFIED bank is still refused while the customer-level ACH block is non-active (Codex r3)', async () => {
+    state.tables.customers = [{ autopay_enabled: false, autopay_payment_method_id: null, billing_day: 1, ach_status: 'suspended' }];
+    state.tables.payment_methods = [{
+      id: 'pm-bank',
+      processor: 'stripe',
+      stripe_payment_method_id: 'pm_bank_1',
+      method_type: 'ach',
+      ach_status: 'verified',
+    }];
+    const { statusCode, body } = await invoke(handler(), {
+      body: { autopay_enabled: true, autopay_payment_method_id: 'pm-bank' },
+    });
+    // customerOnAutopay/cron would treat these flags as inactive — reject
+    // honestly instead of silently stopping collection.
+    expect(statusCode).toBe(400);
+    expect(body.error).toMatch(/unavailable on your account/i);
+  });
+
+  test('a verification_failed bank row is refused with the remove-and-re-add message (Codex r3)', async () => {
+    state.tables.customers = [{ autopay_enabled: false, autopay_payment_method_id: null, billing_day: 1 }];
+    state.tables.payment_methods = [{
+      id: 'pm-bank',
+      processor: 'stripe',
+      stripe_payment_method_id: 'pm_bank_1',
+      method_type: 'ach',
+      ach_status: 'verification_failed',
+    }];
+    const { statusCode, body } = await invoke(handler(), {
+      body: { autopay_enabled: true, autopay_payment_method_id: 'pm-bank' },
+    });
+    expect(statusCode).toBe(400);
+    expect(body.error).toMatch(/could not be verified/i);
+  });
+});
+
+describe('PUT /cards/:id/default — customer-level ACH block (Codex r3)', () => {
+  test('set-default on a VERIFIED bank is refused while the customer ACH block is non-active', async () => {
+    state.tables.payment_methods = [{
+      id: 'pm-bank',
+      customer_id: 'cust-1',
+      processor: 'stripe',
+      stripe_payment_method_id: 'pm_bank_1',
+      method_type: 'ach',
+      ach_status: 'verified',
+      is_default: false,
+      autopay_enabled: false,
+    }];
+    state.tables.customers = [{ ach_status: 'suspended' }];
+    const setDefault = routeHandler(billingRouter, 'put', '/cards/:id/default');
+    const { statusCode, body } = await invoke(setDefault, { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(400);
+    expect(body.error).toMatch(/unavailable on your account/i);
+  });
+});
+
+describe('GET /cards/:id/bank-verification-link — durable resume (Codex r3)', () => {
+  const handler = () => routeHandler(billingRouter, 'get', '/cards/:id/bank-verification-link');
+  const pendingBankRow = {
+    id: 'pm-bank',
+    customer_id: 'cust-1',
+    method_type: 'ach',
+    ach_status: 'pending_verification',
+    stripe_setup_intent_id: 'si_md',
+  };
+
+  test('gate OFF → 404', async () => {
+    mockIsEnabled.mockReturnValue(false);
+    state.tables.payment_methods = [pendingBankRow];
+    const { statusCode } = await invoke(handler(), { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(404);
+  });
+
+  test('SI still awaiting deposits → returns the hosted verification url', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    state.tables.payment_methods = [pendingBankRow];
+    mockRetrieveSetupIntent.mockResolvedValue({
+      id: 'si_md',
+      status: 'requires_action',
+      next_action: { type: 'verify_with_microdeposits', verify_with_microdeposits: { hosted_verification_url: 'https://verify.stripe.com/x' } },
+    });
+    const { statusCode, body } = await invoke(handler(), { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(200);
+    expect(body.url).toBe('https://verify.stripe.com/x');
+  });
+
+  test('SI already succeeded → heals the stale pending row (verified + needs_verification clear)', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    state.tables.payment_methods = [pendingBankRow];
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_md', status: 'succeeded' });
+    const { statusCode, body } = await invoke(handler(), { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(200);
+    expect(body.verified).toBe(true);
+    expect(state.updates).toContainEqual({ table: 'payment_methods', patch: { ach_status: 'verified' } });
+    expect(state.updates).toContainEqual({ table: 'customers', patch: { ach_status: 'active' } });
+  });
+
+  test('SI dead (canceled/failed) → row moves to verification_failed instead of pending forever', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    state.tables.payment_methods = [pendingBankRow];
+    mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_md', status: 'canceled' });
+    const { statusCode, body } = await invoke(handler(), { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(200);
+    expect(body.failed).toBe(true);
+    expect(state.updates).toContainEqual({ table: 'payment_methods', patch: { ach_status: 'verification_failed' } });
+  });
+
+  test('no persisted SetupIntent id → 404', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    state.tables.payment_methods = [{ ...pendingBankRow, stripe_setup_intent_id: null }];
+    const { statusCode } = await invoke(handler(), { params: { id: 'pm-bank' } });
+    expect(statusCode).toBe(404);
   });
 });

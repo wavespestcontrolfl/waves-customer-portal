@@ -143,6 +143,51 @@ router.get('/cards', async (req, res, next) => {
 });
 
 // =========================================================================
+// GET /api/billing/cards/:id/bank-verification-link — resume micro-deposit
+// verification (portal ACH lane, Codex #2706 r3): the hosted URL only
+// lives in browser state at save time; this rebuilds it from the persisted
+// SetupIntent id so a reload can't strand a pending bank row. Also heals
+// stale rows: a succeeded SI marks the row verified, a dead SI marks it
+// failed.
+// =========================================================================
+router.get('/cards/:id/bank-verification-link', async (req, res, next) => {
+  try {
+    const featureGates = require('../config/feature-gates');
+    if (!featureGates.isEnabled('portalAchAutopay')) {
+      return res.status(404).json({ error: 'Not available' });
+    }
+    const row = await db('payment_methods')
+      .where({ id: req.params.id, customer_id: req.customerId })
+      .first();
+    if (!row || row.method_type !== 'ach' || !row.stripe_setup_intent_id) {
+      return res.status(404).json({ error: 'No verification in progress for this payment method' });
+    }
+    const si = await StripeService.retrieveSetupIntent(row.stripe_setup_intent_id);
+    if (!si) return res.status(404).json({ error: 'No verification in progress for this payment method' });
+    if (si.status === 'succeeded') {
+      // Stale pending row (missed webhook) — heal the visible state.
+      // Enrollment keeps its consent-gated webhook/POST path; this only
+      // fixes what the customer sees and what the autopay guards read.
+      if (row.ach_status !== 'verified') {
+        await db('payment_methods').where({ id: row.id }).update({ ach_status: 'verified' });
+        await db('customers')
+          .where({ id: req.customerId, ach_status: 'needs_verification' })
+          .update({ ach_status: 'active' });
+      }
+      return res.json({ verified: true });
+    }
+    if (si.status === 'requires_action' && si.next_action?.type === 'verify_with_microdeposits') {
+      return res.json({ url: si.next_action.verify_with_microdeposits?.hosted_verification_url || null });
+    }
+    // Canceled/failed SI — stop the row reading as pending forever.
+    if (row.ach_status === 'pending_verification') {
+      await db('payment_methods').where({ id: row.id }).update({ ach_status: 'verification_failed' });
+    }
+    return res.json({ failed: true });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
 // GET /api/billing/processor — Stripe publishable key + availability
 // =========================================================================
 router.get('/processor', async (req, res, next) => {
@@ -212,11 +257,29 @@ router.post('/cards', async (req, res, next) => {
     });
 
     const { paymentMethodId, setupIntentId } = await schema.validateAsync(req.body);
-    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+    const setupIntent = await StripeService.retrieveSetupIntent(setupIntentId, { expand: ['payment_method'] });
     const setupPaymentMethodId = typeof setupIntent?.payment_method === 'string'
       ? setupIntent.payment_method
       : setupIntent?.payment_method?.id;
     const resolvedPaymentMethodId = paymentMethodId || setupPaymentMethodId;
+    const setupPaymentMethodType = typeof setupIntent?.payment_method === 'object'
+      ? setupIntent?.payment_method?.type || null
+      : null;
+
+    // Kill-switch integrity (Codex #2706 r3): the mint route downgrades
+    // NEW requests while GATE_PORTAL_ACH_AUTOPAY is off, but an in-flight
+    // bank SetupIntent minted before the flip could still complete here —
+    // refuse it BEFORE any mirror/consent/enrollment so the gate actually
+    // closes the whole portal bank lane. (Banks saved and enrolled through
+    // the live pay-page flow are untouched — this route is the portal add
+    // lane.)
+    const featureGates = require('../config/feature-gates');
+    const achAllowed = featureGates.isEnabled('portalAchAutopay');
+    if (setupPaymentMethodType === 'us_bank_account' && !achAllowed) {
+      return res.status(409).json({
+        error: 'Bank accounts aren’t available right now. Add a card instead.',
+      });
+    }
 
     // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent
     // that fell back from Financial Connections stays requires_action for
@@ -231,8 +294,7 @@ router.post('/cards', async (req, res, next) => {
       && setupIntent?.next_action?.type === 'verify_with_microdeposits'
       && !!resolvedPaymentMethodId
       && setupPaymentMethodId === resolvedPaymentMethodId;
-    const featureGates = require('../config/feature-gates');
-    if (awaitingMicrodeposits && featureGates.isEnabled('portalAchAutopay')) {
+    if (awaitingMicrodeposits && achAllowed) {
       let pendingRow = await db('payment_methods')
         .where({ stripe_payment_method_id: resolvedPaymentMethodId })
         .first();
@@ -246,6 +308,13 @@ router.post('/cards', async (req, res, next) => {
           makeDefault: false,
           achStatus: 'pending_verification',
         });
+      }
+      // Durable resume handle (Codex r3): the hosted verification URL only
+      // lives in browser state — persist the SetupIntent id so
+      // GET /cards/:id/bank-verification-link can rebuild the link after a
+      // reload instead of stranding a permanently pending row.
+      if (!pendingRow.stripe_setup_intent_id) {
+        await db('payment_methods').where({ id: pendingRow.id }).update({ stripe_setup_intent_id: setupIntentId });
       }
       const ConsentService = require('../services/payment-method-consents');
       if (!(await ConsentService.hasConsentFor(req.customerId, resolvedPaymentMethodId))) {
@@ -317,9 +386,16 @@ router.post('/cards', async (req, res, next) => {
     // VERIFIED — the customer beat the setup_intent.succeeded webhook back
     // to the portal. Without this mirror of the webhook's update, the
     // enrollment below runs against a row the autopay routes still refuse.
+    // Same mirror for the customer-level needs_verification block (r3) —
+    // enrollConsentedMethod refuses ACH targets while it's non-active, so
+    // clearing only the row still 409'd this return path. 'suspended'
+    // deliberately stays (see the webhook branch).
     if (card.method_type === 'ach' && card.ach_status !== 'verified') {
       await db('payment_methods').where({ id: card.id }).update({ ach_status: 'verified' });
       card.ach_status = 'verified';
+      await db('customers')
+        .where({ id: req.customerId, ach_status: 'needs_verification' })
+        .update({ ach_status: 'active' });
     }
 
     // Record consent — the portal add-card modal shows SaveCardConsent
@@ -562,11 +638,25 @@ router.put('/cards/:id/default', async (req, res, next) => {
 
     if (!card) return res.status(404).json({ error: 'Payment method not found' });
 
-    // A micro-deposit bank account that hasn't verified can't take the
-    // default role (portal ACH lane): this route CARRIES autopay onto the
-    // new default, which would point collection at an unverified account.
-    if (card.method_type === 'ach' && card.ach_status === 'pending_verification') {
-      return res.status(400).json({ error: 'This bank account is still being verified. You can make it your default as soon as verification clears.' });
+    // A bank account that isn't chargeable can't take the default role
+    // (portal ACH lane): this route CARRIES autopay onto the new default.
+    // Pending/failed verification would point collection at an account
+    // that can't be debited, and a customer-level ACH block (Codex r3)
+    // means customerOnAutopay/cron treat a bank default as inactive — a
+    // suspended customer clicking Set default on a bank would silently
+    // turn a chargeable card setup into one that never collects.
+    if (card.method_type === 'ach' && ['pending_verification', 'verification_failed'].includes(card.ach_status)) {
+      return res.status(400).json({
+        error: card.ach_status === 'verification_failed'
+          ? 'This bank account could not be verified. Remove it and add it again.'
+          : 'This bank account is still being verified. You can make it your default as soon as verification clears.',
+      });
+    }
+    if (card.method_type === 'ach') {
+      const achCustomer = await db('customers').where({ id: req.customerId }).first('ach_status');
+      if (achCustomer?.ach_status && achCustomer.ach_status !== 'active') {
+        return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — keep a card as your default until that clears.' });
+      }
     }
 
     // Auto Pay eligibility requires the DEFAULT method to carry

@@ -2514,6 +2514,15 @@ async function handleSetupIntentSucceeded(setupIntent) {
           throw saveErr;
         }
       }
+      // Kill-switch integrity (Codex r3): with GATE_PORTAL_ACH_AUTOPAY off,
+      // an in-flight bank SetupIntent must not complete the portal bank
+      // lane through this backstop either. Ack and skip — the row (if any)
+      // stays as-is; banks enrolled through the live pay-page flow are a
+      // different lane and unaffected.
+      if (saved.method_type === 'ach' && !require('../config/feature-gates').isEnabled('portalAchAutopay')) {
+        logger.info(`[stripe-webhook] portal-add-method bank pm ${stripePmId} skipped — GATE_PORTAL_ACH_AUTOPAY off`);
+        return;
+      }
       // Verification cleared — a pending bank row becomes chargeable.
       if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {
         await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
@@ -3701,6 +3710,27 @@ async function handleSetupIntentFailed(setupIntent) {
   const reason = setupIntent.last_setup_error?.message || 'Unknown';
   logger.warn(`[stripe-webhook] SetupIntent failed: ${setupIntent.id} — ${reason}`);
 
+  // Portal ACH lane (Codex #2706 r3): a failed micro-deposit verification
+  // must move the durable pending row OUT of pending — otherwise the
+  // portal shows "Verification pending — watch for two small deposits"
+  // forever with no failure state or retry path. Matched on the persisted
+  // SetupIntent id; only pending rows flip (a verified row is never
+  // demoted by a stale/duplicate failure event).
+  try {
+    const failedPmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method?.id;
+    const rowFilter = failedPmId
+      ? { stripe_payment_method_id: failedPmId }
+      : { stripe_setup_intent_id: setupIntent.id };
+    await db('payment_methods')
+      .where(rowFilter)
+      .where({ method_type: 'ach', ach_status: 'pending_verification' })
+      .update({ ach_status: 'verification_failed' });
+  } catch (markErr) {
+    logger.warn(`[stripe-webhook] failed to mark pending bank row for SI ${setupIntent.id}: ${markErr.message}`);
+  }
+
   try {
     const customerId = setupIntent.metadata?.waves_customer_id;
     if (customerId) {
@@ -3732,3 +3762,4 @@ module.exports = router;
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
+module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
