@@ -18,11 +18,14 @@ jest.mock('../models/db', () => {
   db.__builder = builder;
   return db;
 });
-jest.mock('twilio', () => jest.fn(() => ({
-  recordings: Object.assign(jest.fn(() => ({ remove: jest.fn(async () => {}) })), {
+jest.mock('twilio', () => {
+  const recordingsSpy = Object.assign(jest.fn(() => ({ remove: jest.fn(async () => {}) })), {
     list: jest.fn(async () => []),
-  }),
-})));
+  });
+  const factory = jest.fn(() => ({ recordings: recordingsSpy }));
+  factory.__recordingsSpy = recordingsSpy;
+  return factory;
+});
 
 const db = require('../models/db');
 
@@ -61,6 +64,23 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
     };
     const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000002');
     expect(out).toMatchObject({ skipped: true, reason: 'pan_quarantined' });
+  });
+
+  test('a stamped row with a STILL-POPULATED recording_url is quarantine work, not already_has_recording (round-14)', async () => {
+    const processor = require('../services/call-recording-processor');
+    const recordingsSpy = require('twilio').__recordingsSpy;
+    recordingsSpy.mockClear();
+    db.__state.call = {
+      id: 'c-stamped-url',
+      recording_url: 'https://api.twilio.com/x.mp3',
+      recording_sid: 'REold000000000000000000000000000',
+      transcription_metadata: { pan_detected: true, recording_quarantined: false, quarantine_recording_sid: 'REfresh0000000000000000000000000' },
+    };
+    const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000004');
+    expect(out).toMatchObject({ skipped: true, reason: 'pan_quarantined' });
+    // The retry ran the REAL quarantine and targeted the SAVED quarantine
+    // SID (the delete that failed), not the row's older recording_sid.
+    expect(recordingsSpy).toHaveBeenCalledWith('REfresh0000000000000000000000000');
   });
 
   test('an unstamped call still proceeds into the Twilio lookup', async () => {

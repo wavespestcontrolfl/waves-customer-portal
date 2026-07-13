@@ -291,6 +291,12 @@ async function withPanStamps(callId, metadata) {
       if (prior.recording_quarantined === true) out.recording_quarantined = true;
       if (prior.quarantine_source && !out.quarantine_source) out.quarantine_source = prior.quarantine_source;
       if (prior.pan_count && !out.pan_count) out.pan_count = prior.pan_count;
+      // The retry SID and the notify marker are load-bearing (round-14 P1):
+      // dropping quarantine_recording_sid on a later provenance write
+      // leaves recovery with nothing to retry a failed Twilio delete
+      // against, and dropping pan_notified re-fires the office alert.
+      if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
+      if (prior.pan_notified === true) out.pan_notified = true;
     }
   } catch (err) {
     logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
@@ -7586,21 +7592,26 @@ const CallRecordingProcessor = {
 
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) return { success: false, reason: 'call_not_found' };
-    if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
-    // PAN quarantine guard (Codex #2676 round-7 P1): a quarantined call's
-    // nulled recording_url makes it look exactly like a missing-recording
-    // candidate — if the Twilio delete was transient/slow, recovery would
-    // reattach the card audio and undo the quarantine. The stamp is the
-    // durable guard; every recovery entry point flows through here.
+    // PAN quarantine guard (Codex #2676 round-7 P1) — checked BEFORE the
+    // recording-url short-circuit (round-14 P1): a same-write stamp can
+    // land while recording_url is still populated (crash before the
+    // quarantine nulled it), and 'already_has_recording' would leave that
+    // replayable card audio untouched forever. Stamped rows are
+    // quarantine work whatever the URL state; the stamp is the durable
+    // guard, and every recovery entry point flows through here.
     try {
       const rawMeta = call.transcription_metadata;
       const meta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
       if (meta.pan_detected === true) {
-        // Incomplete quarantine (transient Twilio delete failure left
-        // recording_quarantined false): this sweep is the durable place to
-        // RETRY the delete — skipping forever would leave the card audio
-        // at Twilio (round-12 P1). Complete quarantines just skip.
-        const retrySid = call.recording_sid || meta.quarantine_recording_sid || null;
+        // Incomplete quarantine (transient Twilio delete failure, or a
+        // crash between stamp and quarantine): this sweep is the durable
+        // place to RETRY — skipping forever would leave the card audio at
+        // Twilio (round-12 P1). The saved quarantine SID is the audio
+        // whose delete actually FAILED — prefer it over the row's possibly
+        // older recording_sid (round-14 P1: the two-recording flow deleted
+        // the old audio and never retried the fresh one). Complete
+        // quarantines just skip.
+        const retrySid = meta.quarantine_recording_sid || call.recording_sid || null;
         if (meta.recording_quarantined !== true && (retrySid || call.recording_url)) {
           try {
             await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
@@ -7611,6 +7622,7 @@ const CallRecordingProcessor = {
         return { success: true, skipped: true, reason: 'pan_quarantined' };
       }
     } catch { /* unparseable metadata -> treat as unstamped */ }
+    if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
     let recordings;
     try {
