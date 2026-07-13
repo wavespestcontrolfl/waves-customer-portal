@@ -80,8 +80,22 @@ function isTypedFindingsService(service) {
   return !!service?.completionProfile?.findingsType;
 }
 
-function typedFindingsNotice() {
-  alert('This service completes through the Dispatch completion form (with its service-specific fields) — open Dispatch to finish the visit.');
+// C4 (universal one-time services, ratified Q9): instead of an alert telling
+// the tech to go find the job in Dispatch, deep-link straight into the
+// dispatch completion for this service — DispatchPageV2 consumes
+// ?completeService and opens the typed completion panel (the only tech is
+// the owner, so the admin surface is always reachable). Terminal visits
+// refuse the deep-link (Codex P1): the completion endpoint would accept a
+// re-submission with a fresh idempotency key, minting duplicate
+// artifacts/invoices/SMS.
+const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
+function openTypedCompletion(service) {
+  const status = String(service?.status || "");
+  if (TERMINAL_SERVICE_STATUSES.has(status)) {
+    alert(`This visit is already ${status} — nothing to complete.`);
+    return;
+  }
+  window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
 }
 
 // adminFetch-style helper for the tech portal: bearer-token fetch against
@@ -334,7 +348,7 @@ export default function TechHomePage() {
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
       if (isTypedFindingsService(only)) {
-        typedFindingsNotice();
+        openTypedCompletion(only);
       } else if (isPestControlService(only)) {
         setRecapService(only);
       } else {
@@ -542,7 +556,7 @@ export default function TechHomePage() {
                 service={s}
                 onProject={() => (
                   isTypedFindingsService(s)
-                    ? typedFindingsNotice()
+                    ? openTypedCompletion(s)
                     : isPestControlService(s) ? setRecapService(s) : openProjectForService(s)
                 )}
                 onPhotos={() => setPhotoTarget({
@@ -576,7 +590,7 @@ export default function TechHomePage() {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (isTypedFindingsService(service)) typedFindingsNotice();
+            if (isTypedFindingsService(service)) openTypedCompletion(service);
             else if (isPestControlService(service)) setRecapService(service);
             else openProjectForService(service);
           }}
