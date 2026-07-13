@@ -4907,7 +4907,12 @@ export default function EstimateViewPage() {
               <ExistingAppointmentCard appointment={existingAppointment} />
               <PaymentPreferenceButtons
                 onSelect={handlePaymentChoice}
-                disabled={adminDraftPreview}
+                // Locked while an accept or the inline card confirmation is
+                // in flight (Codex #2681 r4): a preference switch here
+                // unmounts the inline Payment Element mid-confirmSetup and
+                // the in-flight handleConfirm closure would book the OLD
+                // choice the UI no longer shows.
+                disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 setupFee={pricing.setupFee || null}

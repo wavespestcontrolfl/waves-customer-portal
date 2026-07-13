@@ -107,7 +107,16 @@ export function bootPostHog() {
           if (typeof window.posthog.capture === 'function') window.posthog.capture('$pageview');
           bootedMode = mode;
         } else if (mode === 'tokenized') {
+          // Persistence FIRST (memory becomes the active store), THEN
+          // reset: the rotation lands in the memory store only, the
+          // funnel identity stays untouched in its cookie, and the
+          // tokenized events attach to a fresh anonymous id instead of
+          // the persistent marketing identity (Codex #2681 r4). Crossing
+          // back to the funnel rotates again via set_config's store
+          // migration — identity continuity is deliberately traded for
+          // tokenized-mode isolation.
           window.posthog.set_config({ persistence: 'memory' });
+          if (typeof window.posthog.reset === 'function') window.posthog.reset();
           bootedMode = mode;
         }
       } catch { /* set_config unavailable until array.js loads — next nav retries */ }
@@ -193,7 +202,11 @@ export function bootPostHog() {
         if (typeof u !== 'string') return u;
         try { return new URL(u).origin; } catch (e) { return strip(u); }
       };
-      const URL_KEYS = ['$current_url', '$initial_current_url', '$session_entry_url', '$pathname', '$initial_pathname', '$session_entry_pathname'];
+      const URL_KEYS = ['$current_url', '$initial_current_url', '$session_entry_url', '$pathname', '$initial_pathname', '$session_entry_pathname',
+        // Page-timing props carry the PREVIOUS page's path — a tokenized →
+        // funnel navigation would otherwise ship /estimate/<token> on the
+        // funnel event even with the current-URL fields redacted (r4).
+        '$prev_pageview_pathname', '$prev_pageview_current_url'];
       const REFERRER_KEYS = ['$referrer', '$initial_referrer', '$session_entry_referrer'];
       // PostHog auto-copies UTM / click-id params onto events + person props, so
       // a crafted /book?utm_campaign=<email> would carry PII. Drop campaign
