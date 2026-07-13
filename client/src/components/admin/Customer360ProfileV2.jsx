@@ -83,7 +83,8 @@ import {
 } from "../ui";
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
-import { ZoneMarkingStep } from "../../pages/admin/SchedulePage";
+import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
+import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import {
   CONSENT_TEXT,
   CONSENT_VERSION,
@@ -2662,6 +2663,260 @@ function PropertyZonesPanel({ customerId }) {
   );
 }
 
+// Flag gate — the stations panel stays dark until station-map-v1 is on for
+// this operator (DB-backed user_feature_flags, fails closed).
+function TermiteStationsGate({ customerId }) {
+  const { enabled, ready } = useFeatureFlagReady("station-map-v1");
+  if (!ready || !enabled) return null;
+  return <TermiteStationsPanel customerId={customerId} />;
+}
+
+// ─── Termite bait stations panel (station-map-v1) ────────────────
+// Office desk flow for the bait station map: drop/move/retire the
+// property's station pins on the satellite view outside a completion.
+// This is the takeover path — an account inherited from another company
+// gets its stations mapped from the office before our first visit, and
+// the tech confirms positions in the field. Positions only: statuses are
+// per-visit data and belong to the completion flow.
+function TermiteStationsPanel({ customerId }) {
+  const [open, setOpen] = useState(false);
+  const [map, setMap] = useState(null); // property-map payload
+  const [loading, setLoading] = useState(false);
+  const [preloads, setPreloads] = useState([]); // property's existing stations
+  const [newPins, setNewPins] = useState([]); // [{ key, number, shape }]
+  const [moves, setMoves] = useState({}); // id → shape
+  const [retired, setRetired] = useState([]); // ids retired this session
+  const [numberBase, setNumberBase] = useState(1);
+  const newSeqRef = useRef(0);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [loadNonce, setLoadNonce] = useState(0);
+
+  // The 360 sheet swaps customers in place — drop all per-property state on
+  // a switch, same rules as PropertyZonesPanel above.
+  const customerRef = useRef(customerId);
+  useEffect(() => {
+    customerRef.current = customerId;
+    setOpen(false);
+    setMap(null);
+    setPreloads([]);
+    setNewPins([]);
+    setMoves({});
+    setRetired([]);
+    setNumberBase(1);
+    setErr("");
+    setMsg("");
+    setSaving(false);
+  }, [customerId]);
+
+  useEffect(() => {
+    if (!open || map) return undefined;
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    adminFetch(`/admin/dispatch/customers/${customerId}/property-map`)
+      .then((res) => {
+        if (cancelled) return;
+        setMap(res || { available: false, reason: "empty_response" });
+        setPreloads((Array.isArray(res?.stations) ? res.stations : []).map((station) => ({
+          id: String(station.id),
+          number: station.number,
+          label: station.label || null,
+          shape: station.geometryImage && station.geometryImage.type === "circle"
+            ? station.geometryImage
+            : null,
+          stale: Boolean(station.staleMark),
+        })));
+        setNumberBase(Number(res?.nextStationNumber) || 1);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setErr(e.message || "Failed to load the property map");
+        setMap({ available: false, reason: "load_failed" });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, customerId, loadNonce]);
+
+  const display = [
+    ...preloads
+      .filter((station) => !retired.includes(station.id))
+      .map((station) => ({
+        key: station.id,
+        id: station.id,
+        number: station.number,
+        label: station.label,
+        shape: moves[station.id] || station.shape,
+        stale: station.stale && !moves[station.id],
+      })),
+    ...newPins.map((station) => ({
+      key: station.key,
+      id: null,
+      number: station.number,
+      label: null,
+      shape: station.shape,
+      stale: false,
+    })),
+  ];
+  const dirtyCount = newPins.length + Object.keys(moves).length + retired.length;
+
+  const addPin = (pt) => {
+    if (saving) return;
+    newSeqRef.current += 1;
+    setNewPins((prev) => {
+      const base = Math.max(
+        Number(numberBase) || 1,
+        ...prev.map((station) => (Number(station.number) || 0) + 1),
+      );
+      return [
+        ...prev,
+        {
+          key: `new-${newSeqRef.current}`,
+          number: base,
+          shape: { type: "circle", cx: pt.cx, cy: pt.cy, r: 0.035 },
+        },
+      ];
+    });
+  };
+  const movePin = (key, pt) => {
+    if (saving) return;
+    const shape = { type: "circle", cx: pt.cx, cy: pt.cy, r: 0.035 };
+    if (newPins.some((station) => station.key === key)) {
+      setNewPins((prev) => prev.map((station) => (station.key === key ? { ...station, shape } : station)));
+    } else {
+      setMoves((prev) => ({ ...prev, [key]: shape }));
+    }
+  };
+  const removePin = (key) => {
+    if (saving) return;
+    if (newPins.some((station) => station.key === key)) {
+      setNewPins((prev) => prev.filter((station) => station.key !== key));
+    } else {
+      setRetired((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    }
+  };
+
+  const save = async () => {
+    if (!dirtyCount || saving || !map?.available) return;
+    setSaving(true);
+    setErr("");
+    setMsg("");
+    try {
+      const image = map.image || {};
+      const ref = {
+        lat: image.center?.lat,
+        lng: image.center?.lng,
+        zoom: image.zoom,
+        width: image.width || 640,
+        height: image.height || 340,
+        capturedAt: new Date().toISOString(),
+      };
+      const entries = [
+        ...retired.map((id) => ({ id, retire: true })),
+        ...Object.entries(moves).map(([id, shape]) => ({ id, shape: { ...shape, ref } })),
+        ...newPins.map((station) => ({ shape: { ...station.shape, ref } })),
+      ];
+      const res = await adminFetch(
+        `/admin/dispatch/customers/${customerId}/termite-stations`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ stations: entries }),
+        },
+      );
+      if (customerRef.current !== customerId) return;
+      const s = res?.summary || {};
+      setMsg(
+        `Saved — ${s.created || 0} added${s.moved ? `, ${s.moved} moved` : ""}${s.retired ? `, ${s.retired} retired` : ""}`,
+      );
+      // Refetch so pins show their REAL persisted numbers (the server
+      // allocates; provisional numbers were a preview) and edit state
+      // starts clean.
+      setNewPins([]);
+      setMoves({});
+      setRetired([]);
+      setMap(null);
+      setLoadNonce((n) => n + 1);
+    } catch (e) {
+      if (customerRef.current === customerId) setErr(e.message || "Save failed");
+    } finally {
+      if (customerRef.current === customerId) setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
+      <div className="flex items-center justify-between gap-2">
+        <SectionTitle className="mb-0">Termite Bait Stations</SectionTitle>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Hide" : "Mark stations"}
+        </Button>
+      </div>
+      {open && (
+        <div className="mt-3">
+          {loading && (
+            <div className="text-13 text-ink-secondary">Loading the satellite view…</div>
+          )}
+          {!loading && map && !map.available && (
+            <div className="flex items-center gap-3">
+              <span className={cn("text-13", map.reason === "load_failed" ? "text-alert-fg" : "text-ink-secondary")}>
+                {map.reason === "load_failed"
+                  ? err || "Failed to load the property map"
+                  : `Satellite view unavailable (${map.reason || "unknown"}).`}
+              </span>
+              {map.reason === "load_failed" && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setMap(null);
+                    setErr("");
+                    setLoadNonce((n) => n + 1);
+                  }}
+                >
+                  Retry
+                </Button>
+              )}
+            </div>
+          )}
+          {!loading && map?.available && (
+            <div>
+              <StationMarkingStep
+                map={map}
+                stations={display}
+                statuses={{}}
+                onAddStation={addPin}
+                onMoveStation={movePin}
+                onSetStatus={() => {}}
+                onRemoveStation={removePin}
+                showStatuses={false}
+                disabled={saving}
+              />
+              <div className="flex items-center gap-3 mt-2">
+                <Button size="sm" onClick={save} disabled={!dirtyCount || saving}>
+                  {saving ? "Saving…" : "Save stations"}
+                </Button>
+                {msg && <span className="text-12 text-zinc-700">{msg}</span>}
+                {err && map && (
+                  <span className="text-12 text-alert-fg">{err}</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Autopay panel ───────────────────────────────────────────────
 function AdminAutopayPanelV2({
   customerId,
@@ -4777,6 +5032,7 @@ export default function Customer360ProfileV2({
               {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
               {isAdmin && <PropertyZonesPanel customerId={customerId} />}
+              {isAdmin && <TermiteStationsGate customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}

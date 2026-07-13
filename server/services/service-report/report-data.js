@@ -15,6 +15,7 @@ const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
+const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
@@ -1942,7 +1943,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
-  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments] = await Promise.all([
+  const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
     knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
@@ -1950,6 +1951,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('service_photos').where({ service_record_id: service.id }).orderBy('sort_order').orderBy('created_at').catch(() => []),
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
+    // Bait station map (station-map-v1) — fail-soft to [] so a missing table
+    // (pre-migration) or a load error never takes down the report.
+    knex('termite_stations').where({ customer_id: service.customer_id, is_active: true }).orderBy('station_number').catch(() => []),
+    knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
 
@@ -2257,6 +2262,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     geometryRow,
     mode: 'live',
   }).catch(() => ({ available: false, fallbackReason: 'build_failed' }));
+
+  // Bait station map (station-map-v1): numbered pins + this visit's statuses
+  // over the same live satellite image. Gated to termite-bait-typed reports —
+  // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
+  // station data never reaches the customer copy and pins never leak onto
+  // unrelated (lawn / pest-only) reports for the same property.
+  const stationMap = buildStationMapReportContext({
+    stationRows,
+    checkRows: stationCheckRows,
+    satelliteMap,
+    imageContext: {
+      center: mapCenter,
+      zoom: Number(geometryRow?.zoom) || 20,
+      width: 640,
+      height: 340,
+    },
+    typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
+  });
 
   const onSiteMin = computeOnSiteMin({
     ...service,
@@ -2853,6 +2876,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       satellite: satelliteMap,
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
+    stationMap,
     serviceCoverage,
     nextAppointment,
     visitTimeline,
