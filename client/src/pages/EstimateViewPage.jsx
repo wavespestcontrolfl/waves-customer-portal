@@ -2222,6 +2222,9 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
       body: JSON.stringify({ quoteToken: activeQuote.quoteToken }),
     });
     const data = await res.json().catch(() => ({}));
+    // Deposit gate flipped off mid-modal — nothing is owed; proceed to
+    // accept without a PI (the accept gate re-verifies the policy).
+    if (res.status === 409 && data.exemptReason) return null;
     if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
     if (data.requiresAction && data.clientSecret) {
       const action = await stripeRef.current.handleNextAction({ clientSecret: data.clientSecret });
@@ -2276,6 +2279,11 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
         body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
       });
       const priced = await res.json().catch(() => ({}));
+      // Deposit gate flipped off mid-modal — nothing owed; proceed without.
+      if (res.status === 409 && priced.exemptReason) {
+        onSuccess(null);
+        return;
+      }
       if (!res.ok) throw new Error(priced.error || 'Could not price the deposit payment. Please try again.');
       if (Number(priced.surcharge) > 0) {
         setQuote(priced);

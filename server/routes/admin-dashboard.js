@@ -866,7 +866,12 @@ async function computeCoreKpis(period = 'mtd', range = null) {
       );
       const [window] = await db('estimate_deposits')
         .modify((qb) => applyETTimestampWindow(qb, 'received_at', start, todayStr))
-        .select(db.raw('COALESCE(SUM(amount), 0) as collected'), db.raw('COUNT(*) as n'));
+        // Collected = CASH that arrived in the window: face value + the
+        // card surcharge captured with it (amount stays face-only by
+        // design — it is the credit authority; the fee rides
+        // card_surcharge). on_hand above deliberately stays face-based:
+        // the fee is never creditable to an invoice.
+        .select(db.raw('COALESCE(SUM(amount + COALESCE(card_surcharge, 0)), 0) as collected'), db.raw('COUNT(*) as n'));
       deposits = {
         onHand: parseFloat(ledger.on_hand),
         onHandCount: parseInt(ledger.on_hand_count, 10),

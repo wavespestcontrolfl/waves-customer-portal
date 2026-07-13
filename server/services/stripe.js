@@ -518,7 +518,11 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
-    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+    // Preview API version on ALL deposit PI re-reads: amount_details is a
+    // preview-only field (terminal precedent, stripe-terminal.js) — the
+    // default version omits it, which would blind the stale-breakdown
+    // detection in finalize/reset (Codex #2705 r3 P2).
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
     assertDepositIntentForEstimate(pi, estimateId);
     if (pi.status === 'succeeded' || pi.status === 'processing') {
       const err = new Error('This deposit is already paid');
@@ -599,7 +603,9 @@ const StripeService = {
       throw new Error('Quote expired — please try again');
     }
 
-    const pi = await stripe.paymentIntents.retrieve(quote.paymentIntentId);
+    // Preview version — amount_details is invisible on the default version
+    // (see quoteEstimateDepositSurcharge).
+    const pi = await stripe.paymentIntents.retrieve(quote.paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
     assertDepositIntentForEstimate(pi, estimateId);
     if (pi.status === 'succeeded') {
       // Replay tolerance, mirroring the client's retrieve-before-confirm
@@ -719,7 +725,9 @@ const StripeService = {
   async resetEstimateDepositIntentToFace({ estimateId, paymentIntentId }) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
-    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+    // Preview version — amount_details is invisible on the default version
+    // (see quoteEstimateDepositSurcharge).
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
     assertDepositIntentForEstimate(pi, estimateId);
     if (!['requires_payment_method', 'requires_confirmation'].includes(pi.status)) {
       return { reset: false, status: pi.status };

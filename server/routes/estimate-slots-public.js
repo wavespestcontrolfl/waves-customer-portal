@@ -727,6 +727,15 @@ router.post('/:token/deposit-quote', depositLimiter, async (req, res) => {
     if (!paymentIntentId || !paymentMethodId) {
       return res.status(400).json({ error: 'paymentIntentId and paymentMethodId required' });
     }
+    // Kill switch honored mid-modal (Codex #2705 r3 P2): if the deposit
+    // gate flips off while a customer has the payment form open, the
+    // already-minted PI must not be charged through this server-side
+    // path — the accept no longer requires it. (Per-estimate exemptions
+    // arising mid-modal are handled the same way they always were: the
+    // unconsumed-deposit sweep refunds money nothing consumes.)
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
@@ -760,6 +769,10 @@ router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
   try {
     const { quoteToken } = req.body || {};
     if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
+    // Kill switch honored mid-modal — see /deposit-quote above.
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });

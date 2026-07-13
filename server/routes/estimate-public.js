@@ -6400,6 +6400,12 @@ ${shellQuestionsBar()}
         // Any edit invalidates the quote — the priced PaymentMethod is stale.
         paymentElement.on('change', function () { resetQuote(); });
 
+        var proceedExempt = function () {
+          // Deposit gate flipped off mid-modal — nothing owed; close and
+          // continue to accept (the server accept gate re-verifies).
+          closeDepositOverlay();
+          resolve({ ok: true });
+        };
         const finalizeQuoted = function (quote) {
           return fetch('/api/public/estimates/' + TOKEN + '/deposit-finalize', {
             method: 'POST',
@@ -6407,6 +6413,7 @@ ${shellQuestionsBar()}
             body: JSON.stringify({ quoteToken: quote.quoteToken }),
           }).then(function (res) {
             return res.json().catch(function () { return {}; }).then(function (data) {
+              if (res.status === 409 && data.exemptReason) { proceedExempt(); return; }
               if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
               if (data.requiresAction && data.clientSecret) {
                 return stripe.handleNextAction({ clientSecret: data.clientSecret }).then(function (action) {
@@ -6459,6 +6466,7 @@ ${shellQuestionsBar()}
                 body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
               }).then(function (res) {
                 return res.json().catch(function () { return {}; }).then(function (quote) {
+                  if (res.status === 409 && quote.exemptReason) { proceedExempt(); return null; }
                   if (!res.ok) throw new Error(quote.error || 'Could not price the deposit payment. Please try again.');
                   if (Number(quote.surcharge) > 0) {
                     // Disclose, then require the second tap on the total.
