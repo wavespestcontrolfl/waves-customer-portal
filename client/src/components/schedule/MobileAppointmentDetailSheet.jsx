@@ -223,6 +223,17 @@ export default function MobileAppointmentDetailSheet({
     }
   };
 
+  // Both close affordances (top ✕ and the note-section button) run through
+  // here so a dirty note is saved, never silently discarded. saveNote alerts
+  // on failure and returns false — keep the sheet open so the text survives.
+  const saveAndClose = async () => {
+    if (noteDirty) {
+      const saved = await saveNote();
+      if (!saved) return;
+    }
+    onClose?.();
+  };
+
   const cancelAppointment = async () => {
     if (!window.confirm(`Cancel appointment for ${service.customerName || 'customer'}? This cannot be undone.`)) return;
     // Busy BEFORE the async card-hold preview — a slow preview must not
@@ -288,9 +299,10 @@ export default function MobileAppointmentDetailSheet({
       >
         <button
           type="button"
-          onClick={onClose}
+          onClick={saveAndClose}
+          disabled={savingNote}
           aria-label="Close"
-          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring"
+          className="inline-flex items-center justify-center gap-1.5 rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring disabled:opacity-50"
           style={{ height: 44, padding: '0 18px', fontSize: 15 }}
         >
           <span style={{ fontSize: 18, lineHeight: 1 }}>✕</span>
@@ -532,19 +544,12 @@ export default function MobileAppointmentDetailSheet({
             </span>
             <button
               type="button"
-              onClick={async () => {
-                if (!noteDirty) {
-                  onClose?.();
-                  return;
-                }
-                const saved = await saveNote();
-                if (saved) onClose?.();
-              }}
+              onClick={saveAndClose}
               disabled={savingNote}
               className="rounded-sm bg-zinc-900 text-white font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '8px 18px', fontSize: 14 }}
             >
-              {savingNote ? 'Saving…' : 'Back'}
+              {savingNote ? 'Saving…' : noteDirty ? 'Save note' : 'Done'}
             </button>
           </div>
         </section>
