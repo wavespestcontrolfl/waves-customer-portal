@@ -60,6 +60,31 @@ const MODEL_TIMEOUT_MS = 60000;
 const ADOPT_CONFIDENCE_FLOOR = 0.9;
 const STORE_CONFIDENCE_FLOOR = 0.6;
 
+// Google is the one major provider that ignores dots in the local part:
+// local-part dot-variants on these domains are literally the same mailbox.
+// Do NOT extend this to other providers (dots are significant elsewhere),
+// and do NOT strip +tags anywhere (a tag is deliberate, not a mishear).
+const GOOGLE_DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
+
+/**
+ * Canonical mailbox for Google's dot-insensitivity, or null when the rule
+ * does not apply. googlemail.com aliases gmail.com, so both collapse to the
+ * same canonical key.
+ */
+function gmailCanonicalMailbox(email) {
+  const [local, domain] = String(email || '').toLowerCase().split('@');
+  if (!local || !domain || !GOOGLE_DOT_INSENSITIVE_DOMAINS.has(domain)) return null;
+  return `${local.replace(/\./g, '')}@gmail.com`;
+}
+
+// Did the caller actually SAY a dot? A dotted candidate is dictation-faithful
+// only when the word was spoken — otherwise the dot is transcription
+// punctuation leaking into the address (a spoken initial "W" rendered as
+// "W." became charlesw.robb@ on a real call, 2026-07-13).
+function dotSpokenInDictation(rawSpoken) {
+  return /\b(?:dot|period)\b/i.test(String(rawSpoken || ''));
+}
+
 // ── Evidence gathering (deterministic, no model) ─────────────────────────────
 
 function withTimeout(promise, ms) {
@@ -189,6 +214,7 @@ ${transcripts.contactPass}
 HOW TO DECIDE — evidence hierarchy, strongest first:
 1. HARD EXTERNAL FACTS beat everything. A candidate email domain with no DNS records (deliverable: false) cannot receive mail — eliminate it. deliverable: null means DNS could not be checked (transient resolver error) — treat it as UNKNOWN, never as a negative.
 2. COHERENCE with the call. If the caller names their business or organization and a candidate's domain plainly matches that name, the candidate is corroborated. A near-miss variant that also resolves is NOT automatically right — note when it plausibly belongs to an unrelated entity.
+2b. INDEPENDENT EXTRACTOR AGREEMENT. CALLER_CONTEXT.v2_email (when present) is the same call extracted by a SEPARATE schema-validated model. Exact agreement with a candidate corroborates that candidate; it is stronger than phonetic plausibility but weaker than hard external facts.
 3. THE CALLER'S OWN SPELLING beats agent read-backs and call summaries. A read-back is one more chance to mishear; trust it only when the caller explicitly confirmed it.
 4. PHONETIC PLAUSIBILITY last. Use "which mishear is more likely" only when facts and coherence do not separate the candidates.
 
@@ -240,7 +266,8 @@ function parseArbiterResponse(rawText) {
  *   entry            — decoder email entry ({ raw_spoken, candidates, confirmation_question })
  *   demotedEmail     — the value the primary extraction stored before demotion (extra candidate)
  *   transcripts      — { primary, contactPass }
- *   callerContext    — { first_name, last_name, organization, call_summary, phone }
+ *   callerContext    — { first_name, last_name, organization, call_summary, phone,
+ *                        v2_email: the schema-valid V2 extraction's caller email (independent second opinion) }
  *   ownCustomerId    — caller's own customer id (exempt from the ownership gate)
  *   deps             — test injection: { resolveMx, resolve4, ownedByOther, createMessage }
  * @returns {object|null} { verdict, chosenValue, confidence, reasoning, eliminated,
@@ -272,6 +299,49 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
       // can't verify it isn't someone else's, the arbiter is told it is.
       const owned = await Promise.resolve(ownedByOther(ev.value, ownCustomerId)).catch(() => true);
       evidence.push({ ...ev, owned_by_other_customer: owned });
+    }
+
+    // ── Same-mailbox short-circuit (deterministic, no model) ──
+    // When EVERY candidate collapses to the same Google mailbox, the "coin
+    // flip" is illusory: whichever spelling is stored, mail reaches the same
+    // inbox, so mail-the-wrong-person risk is zero and a read-back question
+    // would ask the caller to pick between equals. Adopt without consulting
+    // the model, preferring the spelling with independent support: exact
+    // agreement from the schema-valid V2 extraction first, else the
+    // dictation-faithful form (dotted only if the caller actually spoke
+    // "dot"), else the decoder's top candidate. Hard gates still apply —
+    // an ownership hit or dead domain falls through to the model path.
+    if (candidates.length > 1) {
+      const canonicals = new Set(candidates.map((c) => gmailCanonicalMailbox(c.value)));
+      if (!canonicals.has(null) && canonicals.size === 1) {
+        const v2Email = cleanValidEmailOrNull(callerContext?.v2_email);
+        const dotSpoken = dotSpokenInDictation(entry?.raw_spoken);
+        const pick = (v2Email && candidates.find((c) => c.value === v2Email))
+          || candidates.find((c) => c.value.split('@')[0].includes('.') === dotSpoken)
+          || candidates[0];
+        const ev = evidence.find((e) => e.value === pick.value);
+        if (ev && ev.deliverable !== false && !ev.owned_by_other_customer) {
+          logger.info(`[quarantine-arbiter] Same-mailbox collapse (gmail dot-equivalence): adopted deterministically without model`);
+          return {
+            // Unknown deliverability keeps the read-back card, mirroring the
+            // model-path cap on non-decisive adopts.
+            verdict: ev.deliverable === null ? 'adopt_with_confirmation' : 'adopt',
+            chosenValue: pick.value,
+            confidence: 0.95,
+            reasoning: 'All candidates differ only by local-part dots on a Google domain — the same mailbox, not a coin flip. '
+              + (v2Email === pick.value
+                ? 'Stored the spelling the independent V2 extraction also produced.'
+                : `Stored the dictation-faithful form (the caller ${dotSpoken ? 'spoke' : 'never spoke'} "dot").`),
+            eliminated: [],
+            evidenceUsed: ['gmail local-part dot-equivalence: all candidates are one mailbox'],
+            confirmationQuestion: ev.deliverable === null ? (entry?.confirmation_question || null) : null,
+            domainEvidence: evidence.map(({ value, domain, deliverable, dns_error, owned_by_other_customer }) => ({
+              value, domain, deliverable, dns_error, owned_by_other_customer,
+            })),
+            model: null,
+          };
+        }
+      }
     }
 
     const prompt = buildArbiterPrompt({
@@ -353,6 +423,8 @@ module.exports = {
   gatherEmailDomainEvidence,
   buildArbiterPrompt,
   parseArbiterResponse,
+  gmailCanonicalMailbox,
+  dotSpokenInDictation,
   ADOPT_CONFIDENCE_FLOOR,
   STORE_CONFIDENCE_FLOOR,
 };

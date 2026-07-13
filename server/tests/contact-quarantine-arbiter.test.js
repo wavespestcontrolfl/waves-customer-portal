@@ -321,3 +321,163 @@ describe('buildArbiterPrompt', () => {
     expect(prompt).toContain('Gulf Coast Shutter Co');
   });
 });
+
+// ── Same-mailbox short-circuit (gmail dot-equivalence) ──────────────────────
+// Real case 2026-07-13: "Charles W. Robb ... at Gmail" — the transcript's
+// punctuation after the spoken initial became a literal dot and the arbiter
+// coin-flipped between charlesw.robb@ and charleswrobb@, two spellings of the
+// SAME mailbox. These pin the deterministic collapse.
+
+const GMAIL_ENTRY = {
+  raw_spoken: 'Charles W. Robb, R-O-B-B, at Gmail.',
+  candidates: [
+    { value: 'charlesw.robb@gmail.com', confidence: 0.8, basis: ['diarized transcript'], risks: [] },
+    { value: 'charleswrobb@gmail.com', confidence: 0.7, basis: ['contact-pass transcript'], risks: [] },
+  ],
+  needs_confirmation: true,
+  confirmation_question: 'Is there a period after the W?',
+};
+
+const GMAIL_DNS = {
+  resolveMx: () => Promise.resolve([{ exchange: 'gmail-smtp-in.l.google.com', priority: 5 }]),
+  resolve4: nxdomain,
+  resolve6: nxdomain,
+};
+
+describe('same-mailbox short-circuit', () => {
+  beforeEach(() => { process.env.CONTACT_QUARANTINE_ARBITER_ENABLED = 'true'; });
+  afterEach(() => { delete process.env.CONTACT_QUARANTINE_ARBITER_ENABLED; });
+
+  test('gmail dot-variants adopt the V2-agreed spelling without calling the model', async () => {
+    const createMessage = jest.fn();
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      callerContext: { v2_email: 'charleswrobb@gmail.com' },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(out.verdict).toBe('adopt');
+    expect(out.chosenValue).toBe('charleswrobb@gmail.com');
+    expect(out.confirmationQuestion).toBeNull();
+    expect(out.model).toBeNull();
+  });
+
+  test('without a V2 opinion, prefers the dot-free form when "dot" was never spoken', async () => {
+    const createMessage = jest.fn();
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(out.verdict).toBe('adopt');
+    expect(out.chosenValue).toBe('charleswrobb@gmail.com');
+  });
+
+  test('prefers the dotted form when the caller actually spoke "dot"', async () => {
+    const out = await arbitrateQuarantinedEmail({
+      entry: { ...GMAIL_ENTRY, raw_spoken: 'charles w dot robb at gmail dot com' },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+    });
+    expect(out.verdict).toBe('adopt');
+    expect(out.chosenValue).toBe('charlesw.robb@gmail.com');
+  });
+
+  test('googlemail.com collapses into the same mailbox as gmail.com', async () => {
+    const out = await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'charlesw.robb@googlemail.com', confidence: 0.8, basis: [], risks: [] },
+          { value: 'charleswrobb@gmail.com', confidence: 0.7, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+    });
+    expect(out.verdict).toBe('adopt');
+    expect(out.chosenValue).toBe('charleswrobb@gmail.com');
+  });
+
+  test('ownership hit on the preferred spelling falls through to the model', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.3, reasoning: 'owned elsewhere' }));
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(true), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+    expect(out.verdict).toBe('review');
+  });
+
+  test('unknown deliverability caps the collapse at adopt_with_confirmation', async () => {
+    const timeoutErr = () => { const e = new Error('queryMx timeout'); e.code = 'ETIMEOUT'; return Promise.reject(e); };
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: { resolveMx: timeoutErr, resolve4: timeoutErr, resolve6: timeoutErr, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+    });
+    expect(out.verdict).toBe('adopt_with_confirmation');
+    expect(out.chosenValue).toBe('charleswrobb@gmail.com');
+    expect(out.confirmationQuestion).toBe('Is there a period after the W?');
+  });
+
+  test('non-Google domains never collapse — dots are significant elsewhere', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'coin flip' }));
+    await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'charlesw.robb@yahoo.com', confidence: 0.8, basis: [], risks: [] },
+          { value: 'charleswrobb@yahoo.com', confidence: 0.7, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+  });
+
+  test('a mixed gmail/non-gmail candidate set never collapses', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'genuinely different mailboxes' }));
+    await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'charleswrobb@gmail.com', confidence: 0.8, basis: [], risks: [] },
+          { value: 'charleswrobb@comcast.net', confidence: 0.7, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+  });
+
+  test('v2_email reaches the model prompt as caller context', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'coin flip' }));
+    await arbitrateQuarantinedEmail({
+      entry: ENTRY,
+      callerContext: { v2_email: 'marty@gulfcoastshutterco.com' },
+      deps: deps({ createMessage }),
+    });
+    const prompt = createMessage.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('v2_email');
+    expect(prompt).toContain('INDEPENDENT EXTRACTOR AGREEMENT');
+  });
+});
+
+describe('gmailCanonicalMailbox', () => {
+  const { gmailCanonicalMailbox, dotSpokenInDictation } = require('../services/contact-quarantine-arbiter');
+
+  test('collapses dots on gmail and googlemail only', () => {
+    expect(gmailCanonicalMailbox('a.b.c@gmail.com')).toBe('abc@gmail.com');
+    expect(gmailCanonicalMailbox('a.b@googlemail.com')).toBe('ab@gmail.com');
+    expect(gmailCanonicalMailbox('a.b@yahoo.com')).toBeNull();
+    expect(gmailCanonicalMailbox('')).toBeNull();
+  });
+
+  test('plus-tags are preserved — tags are deliberate, not mishears', () => {
+    expect(gmailCanonicalMailbox('a.b+leads@gmail.com')).toBe('ab+leads@gmail.com');
+  });
+
+  test('dotSpokenInDictation matches the word, not punctuation', () => {
+    expect(dotSpokenInDictation('Charles W. Robb at Gmail.')).toBe(false);
+    expect(dotSpokenInDictation('charles w dot robb at gmail')).toBe(true);
+    expect(dotSpokenInDictation('a period after the w')).toBe(true);
+  });
+});

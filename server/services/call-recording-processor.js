@@ -4501,6 +4501,11 @@ const CallRecordingProcessor = {
               last_name: extracted.last_name || null,
               organization: v2Result?.extraction?.caller?.organization_name || null,
               call_summary: extracted.call_summary || null,
+              // Independent second opinion: the schema-valid V2 extraction's
+              // caller email. Only a VALIDATED payload counts as evidence —
+              // and it's exactly the tiebreaker the arbiter lacked when it
+              // stored charlesw.robb@ over V2's (correct) charleswrobb@.
+              v2_email: (v2Result?.status === 'valid' && v2Result?.extraction?.caller?.email) || null,
             },
             ownCustomerId,
           });
