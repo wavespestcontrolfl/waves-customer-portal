@@ -207,3 +207,62 @@ describe('Manatee GIS layer: commercial BLDG_C1_* fallback', () => {
     expect(parcel).toMatchObject({ livingAreaSqft: 2450, stories: 2, yearBuilt: 2020 });
   });
 });
+
+// ── Codex round-1 findings (#2718) ──
+
+describe('classifyPropertySource: commercial listing sites (codex P2)', () => {
+  const { classifyPropertySource } = aiPrivate;
+
+  test('LoopNet/Crexi/CommercialCafe detail pages classify as listing, not unknown', () => {
+    expect(classifyPropertySource('https://www.loopnet.com/Listing/2216-51st-Ave-E-Palmetto-FL/15035937/').type).toBe('listing');
+    expect(classifyPropertySource('https://www.crexi.com/properties/123/some-warehouse').type).toBe('listing');
+    expect(classifyPropertySource('https://www.commercialcafe.com/commercial-property/us/fl/palmetto/x/').type).toBe('listing');
+  });
+});
+
+describe('DOR-only commercial signal reaches _raw.landUse (codex P2)', () => {
+  test('no land-use description + commercial DOR major → synthesized commercial landUse', () => {
+    const record = buildCadastralRecord({
+      parcelId: '123',
+      county: 'Sarasota',
+      gisProvider: 'sarasota_gis',
+      situsAddress: '100 COMMERCE CT',
+      lotSqft: 20000,
+      livingAreaSqft: 42000,
+      dorUseCode: '4800',
+      landUseDescription: null,
+      sourceUrl: 'https://ags3.scgov.net/',
+    }, '100 Commerce Ct, Sarasota, FL 34240');
+
+    expect(record.squareFootage).toBe(42000); // cap relaxed by the DOR signal…
+    expect(record._raw.landUse).toMatch(/commercial\/industrial/i); // …and the signal votes commercial
+  });
+
+  test('residential DOR major synthesizes nothing', () => {
+    const record = buildCadastralRecord({
+      parcelId: '124',
+      county: 'Sarasota',
+      gisProvider: 'sarasota_gis',
+      situsAddress: '102 HOME ST',
+      lotSqft: 8000,
+      livingAreaSqft: 2200,
+      dorUseCode: '0100',
+      landUseDescription: null,
+      sourceUrl: 'https://ags3.scgov.net/',
+    }, '102 Home St, Sarasota, FL 34240');
+
+    expect(record._raw.landUse).toBeNull();
+  });
+});
+
+describe('pickPrimaryHtmlBuilding: >100k main building outranks accessory rows (codex P2)', () => {
+  const { pickPrimaryHtmlBuilding } = aiPrivate;
+
+  test('a 150k sf commercial main building is not displaced by a shed', () => {
+    const rows = [
+      { Description: 'UTILITY SHED', 'Total Area': '1,200' },
+      { Description: 'WAREHOUSE', 'Total Area': '150,000' },
+    ];
+    expect(pickPrimaryHtmlBuilding(rows, ['A/C Area', 'Area', 'Total Area']).Description).toBe('WAREHOUSE');
+  });
+});

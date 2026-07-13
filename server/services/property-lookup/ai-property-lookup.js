@@ -773,9 +773,13 @@ function isCommercialBuildingType(propertyType) {
 // commercial, 40-49 industrial) or the county land-use description even when
 // neither maps to an estimator property type ("Warehousing, Distribution"
 // returns null from countyUseDescToPropertyType by design).
+function dorCodeLooksCommercial(dorUseCode) {
+  const major = parseInt(dorMajorCategory(dorUseCode), 10);
+  return Number.isFinite(major) && major >= 10 && major <= 49;
+}
+
 function parcelLooksCommercial(parcel) {
-  const major = parseInt(dorMajorCategory(parcel?.dorUseCode), 10);
-  if (Number.isFinite(major) && major >= 10 && major <= 49) return true;
+  if (dorCodeLooksCommercial(parcel?.dorUseCode)) return true;
   return /warehous|industrial|commercial|office|retail|restaurant|store|shop|plaza|medical|clinic|hotel|motel|distribution/i
     .test(String(parcel?.landUseDescription || ''));
 }
@@ -862,8 +866,15 @@ function buildCadastralRecord(parcel, address) {
     // county description here so a county-GIS-only record whose use is
     // commercial / municipal / common-area routes to the manual commercial
     // quote path instead of defaulting to Single Family pricing — even when
-    // countyUseDescToPropertyType returned null for it (codex P1).
-    landUse: parcel.landUseDescription || null,
+    // countyUseDescToPropertyType returned null for it (codex P1). When the
+    // parcel has NO description but its DOR major is commercial/industrial
+    // (Sarasota stcd, FDOR cadastral), synthesize the signal — otherwise the
+    // relaxed >15k building sqft rides into a residential/Single Family
+    // profile with no commercial vote (codex P2 #2718).
+    landUse: parcel.landUseDescription
+      || (dorCodeLooksCommercial(parcel.dorUseCode)
+        ? `DOR use code ${String(parcel.dorUseCode)} — commercial/industrial`
+        : null),
     subdivision: parcel.subdivision || null,
     assessmentYear: parcel.assessmentYear ?? parcel.rollYear ?? null,
   };
@@ -1386,6 +1397,10 @@ const LISTING_SLUG_HOSTS = [
   'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
   'coldwellbankerhomes.com', 'coldwellbanker.com', 'movoto.com',
   'apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com',
+  // Commercial listing sites also slug the address ("/Listing/2216-51st-Ave-E-
+  // Palmetto-FL/…") — live miss: a lead at 2215 was sourced from the 2216
+  // listing across the street and nothing flagged it.
+  'loopnet.com', 'crexi.com', 'commercialcafe.com',
 ];
 
 function isListingSlugHost(url) {
@@ -2126,9 +2141,14 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const counties = auditCountyCandidates(address, geoContext);
     if (!counties.length) return null;
     // ZIP scope: the customer-typed ZIP wins over the canonical/geocoded one
-    // (Google can rewrite the ZIP while snapping). No ZIP → county-wide
-    // audit, exactly the pre-ZIP behavior.
-    const typedZip = extractAuditZip(options.typedAddress) || extractAuditZip(address);
+    // (Google can rewrite the ZIP while snapping). When a typed address was
+    // supplied but carries NO ZIP, do NOT fall back to the canonical ZIP —
+    // Google may have snapped a city-only entry to a neighboring ZIP, and
+    // scoping to it would validate/flag against the geocoder's guess (codex
+    // P2 #2718). No ZIP → county-wide audit, exactly the pre-ZIP behavior.
+    const typedZip = options.typedAddress
+      ? extractAuditZip(options.typedAddress)
+      : extractAuditZip(address);
 
     // End-pinned like the relaxed pattern below: `\b` alone would let
     // "123 MAIN ST" prefix-match a "123 MAIN ST CIR" roll row and fake an
@@ -2255,6 +2275,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       }
 
       let hasExactMatch = numbers.has(houseNumber);
+      let targetedRan = false;
       // The 2000-row page cap can hide the real number on a long street — a
       // truncated "missing" is not evidence. Confirm with a targeted query,
       // and only accept it when the collected numbers actually CONTAIN the
@@ -2262,6 +2283,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       if (!hasExactMatch && result.truncated) {
         const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
         if (targeted === null) { anyFailed = true; continue; }
+        targetedRan = true;
         const targetedNumbers = mergeNumbers(
           collect(targeted.situs, targeted.zips, strictPattern),
           collect(targeted.situs, targeted.zips, relaxedPattern),
@@ -2270,6 +2292,20 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
           hasExactMatch = true;
           mergeNumbers(numbers, targetedNumbers);
         }
+      }
+      // Same page-cap rule for ZIPs: a truncated page that shows the number
+      // ONLY in another ZIP may simply be missing the in-ZIP row past the
+      // 2000-row cap. Confirm with the targeted query (which returns every
+      // row for this number) before a wrong-ZIP verdict can form (codex P2
+      // #2718).
+      if (hasExactMatch && result.truncated && !targetedRan
+          && !zipCompatible(numbers.get(houseNumber))) {
+        const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+        if (targeted === null) { anyFailed = true; continue; }
+        mergeNumbers(numbers, mergeNumbers(
+          collect(targeted.situs, targeted.zips, strictPattern),
+          collect(targeted.situs, targeted.zips, relaxedPattern),
+        ));
       }
 
       const scoped = scopedNumbers(numbers);
@@ -2310,9 +2346,12 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
         streetExists: true,
         hasExactMatch: false,
         parcelCount: result.situs.length,
-        // Nearest neighbors from the typed ZIP when it has any — a suggestion
-        // from another city is worse than none.
-        nearestNumbers: nearestHouseNumbers(scoped.size ? scoped : new Set(numbers.keys()), houseNumber),
+        // Nearest neighbors from the typed ZIP only — a suggestion from
+        // another city would tell the operator to "fix" the number toward a
+        // premise in the wrong city, the exact miss ZIP scoping exists to
+        // prevent. No ZIP typed → scoped IS the county-wide set (codex P2
+        // #2718).
+        nearestNumbers: scoped.size ? nearestHouseNumbers(scoped, houseNumber) : [],
       };
       missingVerdict = missingVerdict || verdict;
     }
@@ -2848,7 +2887,10 @@ function pickPrimaryHtmlBuildingIndex(rows, areaFields) {
   let bestIndex = -1;
   let bestArea = -1;
   rows.forEach((row, index) => {
-    const area = coerceFirstInt(areaFields.map((field) => row[field]), 1, 100000) || 0;
+    // Sort key only — generous ceiling so a 100k+ sf commercial main
+    // building still outranks its accessory rows; the record-level
+    // coerceBuildingSqft applies the real type-aware bound afterwards.
+    const area = coerceFirstInt(areaFields.map((field) => row[field]), 1, 1000000) || 0;
     if (area > bestArea) {
       bestArea = area;
       bestIndex = index;
@@ -3765,7 +3807,15 @@ function classifyPropertySource(url) {
   ].some((domain) => host.includes(domain))) {
     return { type: 'builder', weight: SOURCE_TYPE_WEIGHTS.builder };
   }
-  if (['zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com'].some((domain) => host.includes(domain))) {
+  // Commercial listing sites (LoopNet/Crexi/CommercialCafe) ride the same
+  // lane as residential listings — the prompt sends the model there for
+  // warehouse/office leads, and an unknown-classified source would score the
+  // record below the field-verify bar and strip its commercial signal out of
+  // detectCategory (codex P2 #2718).
+  if ([
+    'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
+    'loopnet.com', 'crexi.com', 'commercialcafe.com',
+  ].some((domain) => host.includes(domain))) {
     if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
     return { type: 'listing', weight: SOURCE_TYPE_WEIGHTS.listing };
   }
@@ -3944,6 +3994,8 @@ module.exports = {
     pickSarasotaPrimaryBuildingLink,
     pickSarasotaSearchResult,
     pickCharlotteAddressResult,
+    pickPrimaryHtmlBuilding,
+    classifyPropertySource,
     coerceBuildingSqft,
     isCommercialBuildingType,
     parcelLooksCommercial,
