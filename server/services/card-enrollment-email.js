@@ -83,12 +83,14 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
     // Codex #2698 r1). getConsentText is only the fallback for a missing
     // row (shouldn't happen: recordConsent precedes enrollment).
     let authorizationText = null;
+    let consentRowId = null;
     if (pm?.stripe_payment_method_id) {
       const consentRow = await db('payment_method_consents')
         .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
         .orderBy('created_at', 'desc')
-        .first('consent_text_snapshot');
+        .first('id', 'consent_text_snapshot');
       authorizationText = clean(consentRow?.consent_text_snapshot) || null;
+      consentRowId = consentRow?.id || null;
     }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'autopay.enrollment_confirmation',
@@ -103,8 +105,14 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
       },
       recipientType: 'customer',
       recipientId: customerId,
-      idempotencyKey: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}`,
-      triggerEventId: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}`,
+      // Keyed on the CONSENT ROW, not just (customer, method) — Codex
+      // #2698 r2: an opt-out keeps the payment_methods row, and a later
+      // re-authorization of the SAME card is a NEW agreement that owes a
+      // fresh copy (possibly with updated consent text). Backstop re-runs
+      // of the SAME enrollment still read the same newest consent row →
+      // same key → deduped.
+      idempotencyKey: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRowId || 'noconsent'}`,
+      triggerEventId: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRowId || 'noconsent'}`,
       categories: ['autopay_enrollment_confirmation'],
       suppressProviderErrorLog: true,
     });

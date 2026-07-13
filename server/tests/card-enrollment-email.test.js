@@ -66,7 +66,7 @@ describe('autopay enrollment confirmation (gate on)', () => {
     state.tables = {
       customers: [CUSTOMER],
       payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_stripe_1', card_brand: 'visa', last_four: '4242', method_type: 'card' }],
-      payment_method_consents: [{ consent_text_snapshot: 'SNAPSHOT: the exact text the customer agreed to (v9)' }],
+      payment_method_consents: [{ id: 'consent-77', consent_text_snapshot: 'SNAPSHOT: the exact text the customer agreed to (v9)' }],
     };
   });
   afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
@@ -82,7 +82,10 @@ describe('autopay enrollment confirmation (gate on)', () => {
     // later consent-version wording bump must never rewrite their copy.
     expect(call.payload.authorization_text).toBe('SNAPSHOT: the exact text the customer agreed to (v9)');
     expect(call.payload.company_email).toBe('billing@wavespestcontrol.com');
-    expect(call.idempotencyKey).toBe('autopay.enrollment_confirmation:cust-1:pm-1');
+    // Consent-row-scoped key (Codex r2): a re-authorization after an
+    // opt-out is a NEW consent row → new key → fresh copy sends; backstop
+    // re-runs of the same enrollment reuse the same row → deduped.
+    expect(call.idempotencyKey).toBe('autopay.enrollment_confirmation:cust-1:pm-1:consent-77');
   });
 
   test('falls back to the current card text only when no consent row exists', async () => {
