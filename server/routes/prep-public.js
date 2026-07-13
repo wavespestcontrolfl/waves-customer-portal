@@ -20,21 +20,18 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { getServiceContactSlots } = require('../services/customer-contact');
 
-// Display masks for the prep contact block — same shapes as the tracker's
-// (track-public.js): a token-only public payload never carries raw contact
-// PII, but the customer still recognizes their own details.
-function maskEmail(email) {
-  const clean = String(email || '').trim();
-  const at = clean.indexOf('@');
-  if (at < 1) return null;
-  return `${clean[0]}•••@${clean.slice(at + 1)}`;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length < 4) return null;
-  return `(•••) •••-${digits.slice(-4)}`;
+// Full names of the configured service-contact slots (tenant, home buyer,
+// property manager) — same shape as the tracker's contact block
+// (track-public.js).
+function serviceContactNamesOf(customer) {
+  return [...new Set(
+    getServiceContactSlots(customer)
+      .filter((slot) => slot.phone || slot.email)
+      .map((slot) => slot.name)
+      .filter(Boolean),
+  )];
 }
 
 router.use(rateLimit({
@@ -244,14 +241,14 @@ router.get('/:token', async (req, res) => {
 
     return res.json({
       customerFirstName,
-      // Contact block (owner 2026-07-09): the prep page renders the same
-      // name / email / phone / address lines as the report heroes — but
-      // email/phone are MASKED like the tracker payload (track-public.js):
-      // track responses expose prepToken, so a forwarded/leaked link must
-      // never yield usable contact PII.
+      // Contact block (owner 2026-07-13): names and address ONLY — never
+      // email/phone. Prep guides are emailed to the account's service
+      // contacts (tenant / home buyer / property manager) via the same
+      // tokenized link, so contact PII stays off the payload entirely;
+      // their names render under the account holder's. Matches the tracker
+      // (track-public.js).
       customerName: vars.customer_name,
-      customerEmail: maskEmail(customer?.email),
-      customerPhone: maskPhone(customer?.phone),
+      serviceContactNames: serviceContactNamesOf(customer),
       projectTypeLabel: typeLabel,
       serviceDate,
       propertyAddress,

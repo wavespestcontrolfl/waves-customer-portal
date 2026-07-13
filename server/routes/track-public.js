@@ -43,6 +43,7 @@ const {
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const { SERVICE_CONTACT_COLUMNS, getServiceContactSlots } = require('../services/customer-contact');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -78,21 +79,15 @@ function firstNameOf(fullName) {
   return trimmed.split(/\s+/)[0];
 }
 
-// Display masks for the tracker's client block: the token-only payload never
-// carries raw contact PII (a forwarded tracking SMS link must not become a
-// contact-info disclosure), but the customer still recognizes their own
-// details on the card.
-function maskEmail(email) {
-  const clean = String(email || '').trim();
-  const at = clean.indexOf('@');
-  if (at < 1) return null;
-  return `${clean[0]}•••@${clean.slice(at + 1)}`;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length < 4) return null;
-  return `(•••) •••-${digits.slice(-4)}`;
+// Full names of the configured service-contact slots (tenant, home buyer,
+// property manager) for the card's identity block.
+function serviceContactNamesOf(customerRow) {
+  return [...new Set(
+    getServiceContactSlots(customerRow)
+      .filter((slot) => slot.phone || slot.email)
+      .map((slot) => slot.name)
+      .filter(Boolean),
+  )];
 }
 
 function composeWindowIso(scheduledDate, windowTime) {
@@ -296,7 +291,17 @@ async function buildSummary(service) {
   };
 }
 
+// Same privacy headers as the other tokenized PII routes (prep-public.js,
+// card-public.js): the payload now carries full contact info, so shared
+// browser/proxy caches must never retain it past the request.
+const PRIVACY_HEADERS = {
+  'Cache-Control': 'private, no-store',
+  'X-Robots-Tag': 'noindex, nofollow',
+  'Referrer-Policy': 'no-referrer',
+};
+
 router.get('/:token', async (req, res, next) => {
+  res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -325,8 +330,11 @@ router.get('/:token', async (req, res, next) => {
         's.track_token_expires_at',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
-        'c.email as cust_email',
-        'c.phone as cust_phone',
+        // Service-contact slots (unaliased — getServiceContactSlots reads
+        // the raw column names) supply the tenant / property-manager names
+        // for the identity block. Deliberately NOT selecting c.email or
+        // c.phone: contact PII never enters this tokenized payload.
+        ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
         db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
@@ -420,15 +428,14 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
-      // Client identity block for the card. Name + address ride the same
-      // trusted track-token boundary the property address always used;
-      // email/phone are MASKED server-side (s•••@domain, last-4) so a
-      // forwarded or leaked tracking link never yields usable contact PII —
-      // the customer still recognizes their own details on the card.
+      // Client identity block for the card (owner 2026-07-13): names,
+      // address, and service ONLY — never email/phone. The en-route SMS
+      // sends this same tokenized link to the account's service contacts
+      // (tenant / home buyer / property manager), so contact PII stays off
+      // it entirely; their names render under the account holder's.
       customer: {
         name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
-        email: maskEmail(row.cust_email),
-        phone: maskPhone(row.cust_phone),
+        serviceContactNames: serviceContactNamesOf(row),
       },
       prepToken: null,
       meta: {

@@ -245,18 +245,17 @@ export default function PrepGuidePage() {
               </p>
             )}
             {(() => {
-              // Same contact block as the report/estimate heroes: name /
-              // email / phone / address, one line each, empties dropped.
-              const digits = String(data.customerPhone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-              const phone = digits.length === 10
-                ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
-                : data.customerPhone;
-              const contactLines = [
+              // Contact block (owner 2026-07-13): names and address only,
+              // one line each, empties dropped — account holder's name,
+              // then any service-contact names (tenant / home buyer /
+              // property manager). Never email/phone: the tokenized link
+              // is shared with service contacts. The service itself is the
+              // H1 above ("{type} Prep Guide").
+              const contactLines = [...new Set([
                 data.customerName,
-                data.customerEmail,
-                phone,
+                ...(data.serviceContactNames || []),
                 data.propertyAddress,
-              ].map((line) => String(line || '').trim()).filter(Boolean);
+              ].map((line) => String(line || '').trim()).filter(Boolean))];
               return contactLines.length ? (
                 <div style={{ margin: `${SP.sm}px 0 ${SP.xl}px`, display: 'grid', gap: SP.xxs }}>
                   {contactLines.map((line) => (
