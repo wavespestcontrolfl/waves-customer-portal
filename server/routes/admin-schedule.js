@@ -1193,6 +1193,17 @@ router.get('/', async (req, res, next) => {
   try {
     const date = req.query.date || etDateString();
 
+    // Server-resolved Bill-To for the completion banner: per-job payer, else
+    // the customer default (unless the visit is pinned to self-pay), and only
+    // when the payer is ACTIVE — the same resolution resolveForInvoice applies.
+    // Resolved HERE because this day view is the tech-visible payload
+    // (requireTechOrAdmin) while /admin/payers/* is admin-only, so the client
+    // can't look the payer up itself in the field. Column-guarded (cached).
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    const effectiveBillToSql = hasSelfPayCol
+      ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
+      : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
+
     const services = await db('scheduled_services')
       .where({ 'scheduled_services.scheduled_date': date })
       // Exclude 'rescheduled' alongside 'cancelled': the customer-portal
@@ -1204,8 +1215,12 @@ router.get('/', async (req, res, next) => {
       .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
       .select(
         'scheduled_services.*',
+        'bill_to_payer.id as billed_to_payer_id',
+        'bill_to_payer.display_name as billed_to_payer_name',
+        'bill_to_payer.company_name as billed_to_payer_company',
         'customers.first_name', 'customers.last_name', 'customers.phone as customer_phone',
         // Visit-specific stamped address (call bookings for a secondary/
         // rental property) wins over the customer's primary mirror — same
@@ -1306,6 +1321,14 @@ router.get('/', async (req, res, next) => {
         createInvoiceOnComplete: !!s.create_invoice_on_complete,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
+        selfPayOverride: s.self_pay_override === true,
+        // Resolved ACTIVE Bill-To (or null = self-pay) — see the join above.
+        billedToPayer: s.billed_to_payer_id
+          ? {
+            id: s.billed_to_payer_id,
+            name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
+          }
+          : null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -1427,6 +1450,9 @@ router.get('/week', async (req, res, next) => {
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
+    // Column-guarded (cached) — an unguarded explicit select would 500 this
+    // whole endpoint on a pre-migration database.
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
 
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
@@ -1450,6 +1476,7 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
           'scheduled_services.payer_id', 'scheduled_services.po_number',
+          ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
           'scheduled_services.technician_id',
           'scheduled_services.zone', 'scheduled_services.route_order',
           'scheduled_services.is_recurring',
@@ -1522,6 +1549,7 @@ router.get('/week', async (req, res, next) => {
           createInvoiceOnComplete: !!s.create_invoice_on_complete,
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
+        selfPayOverride: s.self_pay_override === true,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
@@ -2664,6 +2692,9 @@ router.get('/list', async (req, res, next) => {
     const page = Math.max(1, parseInt(pageParam) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(limitParam) || 25));
     const offset = (page - 1) * limit;
+    // Column-guarded (cached) — an unguarded explicit select would 500 this
+    // whole endpoint on a pre-migration database.
+    const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
 
     let q = db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -2733,6 +2764,7 @@ router.get('/list', async (req, res, next) => {
         // blank payerId/poNumber and silently clears an existing per-job payer/PO
         // (and trips the admin-only actual-change 403 for techs).
         'scheduled_services.payer_id', 'scheduled_services.po_number',
+        ...(hasSelfPayCol ? ['scheduled_services.self_pay_override'] : []),
         'customers.first_name', 'customers.last_name',
         // Stamped visit-specific address wins over the primary mirror here
         // too — this list is a display surface for the booked property. The
@@ -2779,6 +2811,7 @@ router.get('/list', async (req, res, next) => {
       sourceEstimateId: s.source_estimate_id || null,
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
+      selfPayOverride: s.self_pay_override === true,
     }));
 
     res.json({
@@ -3064,7 +3097,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       addons,
       serviceId,
       createInvoice,
-      payerId, poNumber,
+      payerId, poNumber, selfPayOverride,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
@@ -3215,32 +3248,46 @@ router.put('/:id/update-details', async (req, res, next) => {
     }
     // Per-job third-party Bill-To override + PO. Null clears the override so
     // the job falls back to the customer's default payer (or self-pay).
-    // CHANGING the payer/PO is admin-only (it controls where the invoice is
-    // routed and who pays). The edit modal always echoes these fields on every
-    // save, so a tech editing something unrelated must NOT be rejected — only
-    // an actual change vs the stored values is admin-gated.
-    if (payerId !== undefined || poNumber !== undefined) {
+    // selfPayOverride=true pins the visit to "customer pays (self)" so the
+    // account-default payer is NOT inherited; a concrete payerId always wins
+    // over the flag (mutually exclusive on write, so the flag can never mask
+    // an explicitly-routed Bill-To).
+    // CHANGING the payer/PO/self-pay pin is admin-only (it controls where the
+    // invoice is routed and who pays). The edit modal always echoes these
+    // fields on every save, so a tech editing something unrelated must NOT be
+    // rejected — only an actual change vs the stored values is admin-gated.
+    if (payerId !== undefined || poNumber !== undefined || selfPayOverride !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
         const hasPayerCol = !!cols.payer_id;
         const hasPoCol = !!cols.po_number;
-        if (hasPayerCol || hasPoCol) {
+        const hasSelfPayCol = !!cols.self_pay_override;
+        if (hasPayerCol || hasPoCol || hasSelfPayCol) {
+          const existingCols = ['payer_id', 'po_number'].filter((c) => cols[c]);
+          if (hasSelfPayCol) existingCols.push('self_pay_override');
           const existing = await db('scheduled_services')
             .where({ id: req.params.id })
-            .first('payer_id', 'po_number');
+            .first(existingCols);
           const nextPayerId = payerId === undefined
             ? (existing?.payer_id ?? null)
             : ((payerId === '' || payerId == null) ? null : (parseInt(payerId, 10) || null));
           const nextPo = poNumber === undefined
             ? (existing?.po_number ?? null)
             : (poNumber ? String(poNumber).trim().slice(0, 64) : null);
+          let nextSelfPay = selfPayOverride === undefined
+            ? (existing?.self_pay_override === true)
+            : (selfPayOverride === true || selfPayOverride === 'true');
+          // Mutual exclusion: a concrete per-job payer beats the self-pay pin.
+          if (nextPayerId) nextSelfPay = false;
           const payerChanged = hasPayerCol && (existing?.payer_id ?? null) !== nextPayerId;
           const poChanged = hasPoCol && (existing?.po_number ?? null) !== nextPo;
-          if ((payerChanged || poChanged) && req.techRole !== 'admin') {
+          const selfPayChanged = hasSelfPayCol && (existing?.self_pay_override === true) !== nextSelfPay;
+          if ((payerChanged || poChanged || selfPayChanged) && req.techRole !== 'admin') {
             return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
           }
           if (payerChanged) updates.payer_id = nextPayerId;
           if (poChanged) updates.po_number = nextPo;
+          if (selfPayChanged) updates.self_pay_override = nextSelfPay;
         }
       } catch {}
     }
@@ -3489,7 +3536,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         // doesn't run when only the Bill-To changed). Without this, editing just
         // the payer/PO on a series leaves future visits routed to the old payer.
         const payerOrPoChanged = Object.prototype.hasOwnProperty.call(updates, 'payer_id')
-          || Object.prototype.hasOwnProperty.call(updates, 'po_number');
+          || Object.prototype.hasOwnProperty.call(updates, 'po_number')
+          || Object.prototype.hasOwnProperty.call(updates, 'self_pay_override');
         if (payerOrPoChanged) {
           const parentRow = await trx('scheduled_services')
             .where({ id: req.params.id })
@@ -3502,6 +3550,9 @@ router.put('/:id/update-details', async (req, res, next) => {
             }
             if (Object.prototype.hasOwnProperty.call(updates, 'po_number') && seriesCols.po_number) {
               childPayerUpdates.po_number = parentRow.po_number ?? null;
+            }
+            if (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && seriesCols.self_pay_override) {
+              childPayerUpdates.self_pay_override = updates.self_pay_override === true;
             }
             if (Object.keys(childPayerUpdates).length > 0) {
               await trx('scheduled_services')
@@ -3766,6 +3817,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               // (freshly-updated) series parent so a payer change propagates.
               if (seriesCols.payer_id) childUpdates.payer_id = parent.payer_id ?? null;
               if (seriesCols.po_number) childUpdates.po_number = parent.po_number ?? null;
+              if (seriesCols.self_pay_override) childUpdates.self_pay_override = parent.self_pay_override === true;
               await trx('scheduled_services').where({ id: child.id }).update(childUpdates);
               if (childDateChanged) {
                 await resetAppointmentReminderForScheduleRewrite(
@@ -3906,6 +3958,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               // of silently falling back to the customer default / self-pay.
               if (cols.payer_id) childData.payer_id = parent.payer_id ?? null;
               if (cols.po_number) childData.po_number = parent.po_number ?? null;
+              if (cols.self_pay_override) childData.self_pay_override = parent.self_pay_override === true;
             } catch { /* non-blocking */ }
             const [childRow] = await trx('scheduled_services').insert(childData).returning('*');
             if (childRow?.id) {

@@ -74,6 +74,44 @@ describe('PayerService.resolveForInvoice precedence', () => {
     expect(out).toMatchObject({ payerId: 20, poNumber: null, taxExempt: false });
   });
 
+  test('per-job self_pay_override pins the visit to self-pay — customer default NOT inherited', async () => {
+    const database = makeDb({
+      scheduled_services: { payer_id: null, po_number: null, self_pay_override: true },
+      customers: { payer_id: 20 },
+      payers: { id: 20, active: true },
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
+  });
+
+  test('a concrete per-job payer wins over a (stale) self_pay_override flag', async () => {
+    // The write path keeps payer_id and self_pay_override mutually exclusive,
+    // but if a stale row carries both, the explicit Bill-To must not be hidden.
+    const database = makeDb({
+      scheduled_services: { payer_id: 10, po_number: null, self_pay_override: true },
+      customers: { payer_id: 20 },
+      payers: { id: 10, active: true },
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: 10, poNumber: null, taxExempt: false });
+  });
+
+  test('self_pay_override on a no-default-payer customer is a plain self-pay no-op', async () => {
+    const database = makeDb({
+      scheduled_services: { payer_id: null, po_number: null, self_pay_override: true },
+      customers: { payer_id: null },
+      payers: null,
+    });
+    const out = await PayerService.resolveForInvoice({
+      database, customerId: 'c1', scheduledServiceId: 's1',
+    });
+    expect(out).toMatchObject({ payerId: null, poNumber: null, taxExempt: false });
+  });
+
   test('an inactive payer link resolves to self-pay (null), not a dead AP inbox', async () => {
     const database = makeDb({
       customers: { payer_id: 20 },
@@ -276,14 +314,14 @@ describe('PayerService.findOrCreatePayerByEmail', () => {
     const existing = { id: 7, ap_email: 'jim@example.com', active: true };
     withTx({ matches: [existing] });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'JIM@Example.com' });
-    expect(out).toEqual({ payer: existing });
+    expect(out).toEqual({ payer: existing, created: false });
   });
 
   test('prefers the ACTIVE row when both active and inactive share the email', async () => {
     const active = { id: 8, ap_email: 'jim@example.com', active: true };
     withTx({ matches: [{ id: 3, ap_email: 'jim@example.com', active: false }, active] });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com' });
-    expect(out).toEqual({ payer: active });
+    expect(out).toEqual({ payer: active, created: false });
   });
 
   test('does NOT recreate a DEACTIVATED payer for the same email (fail closed)', async () => {

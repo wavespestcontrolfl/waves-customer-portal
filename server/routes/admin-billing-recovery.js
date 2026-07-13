@@ -103,11 +103,18 @@ function dueDateFromVisit(v) {
 // whose follow-up rows seed estimated_price NULL by design (Codex round-12;
 // same row-price → fee precedence as completion and the bill route, never
 // monthly_rate). All req-derived values are bound, never interpolated.
-function uninvoicedLeakQuery(days, { perAppAware = false } = {}) {
+function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false } = {}) {
   const autopay = autopayActivePredicate();
   const effectivePriceSql = perAppAware
     ? "COALESCE(NULLIF(ss.estimated_price, 0), CASE WHEN c.billing_mode = 'per_application' THEN c.per_application_fee END, 0)"
     : 'COALESCE(ss.estimated_price, 0)';
+  // Effective payer mirrors resolveForInvoice: a per-job self-pay pin blocks
+  // inheriting the customer default, so a pinned visit on a default-payer
+  // account is genuinely self-pay and must surface here (selfPayAware is
+  // column-guarded by the caller for pre-migration environments).
+  const effectivePayerSql = selfPayAware
+    ? 'COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END)'
+    : 'COALESCE(ss.payer_id, c.payer_id)';
   const q = db({ ss: 'scheduled_services' })
     .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
     .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
@@ -120,7 +127,7 @@ function uninvoicedLeakQuery(days, { perAppAware = false } = {}) {
     .whereRaw('COALESCE(ss.is_callback, false) = false') // not a callback (free re-treat)
     .whereRaw('COALESCE(sr.is_callback, false) = false')
     .whereRaw(`COALESCE(ss.prepaid_amount, 0) < ${effectivePriceSql}`) // not FULLY prepaid (partial surfaces in needs-review)
-    .whereRaw('COALESCE(ss.payer_id, c.payer_id) IS NULL') // self-pay only (v1); payer-billed = payer AP flow
+    .whereRaw(`${effectivePayerSql} IS NULL`) // self-pay only (v1); payer-billed = payer AP flow
     .whereRaw(
       `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${ALWAYS_FREE_PATTERNS.map(() => '?').join(',')}]::text[])`,
       ALWAYS_FREE_PATTERNS,
@@ -160,7 +167,11 @@ router.get('/leaks', async (req, res) => {
     try {
       perAppAware = await db.schema.hasColumn('customers', 'billing_mode');
     } catch { /* keep legacy */ }
-    const rows = await uninvoicedLeakQuery(days, { perAppAware })
+    let selfPayAware = false;
+    try {
+      selfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
+    } catch { /* keep legacy */ }
+    const rows = await uninvoicedLeakQuery(days, { perAppAware, selfPayAware })
       .select(
         'ss.id as scheduled_service_id',
         'sr.id as service_record_id',
@@ -299,6 +310,13 @@ router.get('/at-risk-mrr', async (req, res) => {
 router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
   const { scheduledServiceId } = req.params;
   try {
+    // Same effective-payer resolution as the leak list: a per-job self-pay pin
+    // means the visit bills the customer directly, so the payer-billed reject
+    // below must not fire off the ignored account default. Column-guarded.
+    let billSelfPayAware = false;
+    try {
+      billSelfPayAware = await db.schema.hasColumn('scheduled_services', 'self_pay_override');
+    } catch { /* keep legacy */ }
     const visit = await db({ ss: 'scheduled_services' })
       .join({ c: 'customers' }, 'c.id', 'ss.customer_id')
       .leftJoin({ sr: 'service_records' }, 'sr.scheduled_service_id', 'ss.id')
@@ -312,7 +330,9 @@ router.post('/:scheduledServiceId/bill', requireAdmin, async (req, res) => {
         'ss.prepaid_method',
         'ss.annual_prepay_term_id',
         'ss.scheduled_date',
-        db.raw('COALESCE(ss.payer_id, c.payer_id) as payer_id'),
+        db.raw(billSelfPayAware
+          ? 'COALESCE(ss.payer_id, CASE WHEN COALESCE(ss.self_pay_override, false) THEN NULL ELSE c.payer_id END) as payer_id'
+          : 'COALESCE(ss.payer_id, c.payer_id) as payer_id'),
         db.raw('COALESCE(ss.is_callback, false) as ss_callback'),
         db.raw('COALESCE(sr.is_callback, false) as sr_callback'),
         'sr.status as sr_status',

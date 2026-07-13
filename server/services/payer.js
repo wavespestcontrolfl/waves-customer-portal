@@ -136,7 +136,7 @@ async function findOrCreatePayerByEmail(body = {}) {
         .whereRaw('LOWER(ap_email) = ?', [apEmail])
         .orderBy('id', 'asc');
       const active = matches.find((p) => p.active !== false);
-      if (active) return { payer: active };
+      if (active) return { payer: active, created: false };
       // An INACTIVE payer with this email means an operator deliberately
       // disabled that Bill-To — do NOT silently recreate it (that would defeat
       // the fail-closed deactivation and route a new invoice to a disabled AP
@@ -153,7 +153,7 @@ async function findOrCreatePayerByEmail(body = {}) {
       );
       if (error) return { error };
       const [row] = await trx('payers').insert(dbUpdates).returning('*');
-      return { payer: row };
+      return { payer: row, created: true };
     });
   } catch (err) {
     logger.warn(`[payer] findOrCreatePayerByEmail failed: ${err.message}`);
@@ -207,6 +207,25 @@ function parseSnapshot(value) {
   }
 }
 
+// Column guard for scheduled_services.self_pay_override (migration
+// 20260713000001). Selecting it unguarded on a pre-migration database would
+// error the whole scheduled-service lookup — and on the fail-soft path that
+// silently DROPS an existing per-job payer_id/PO. Introspection result is
+// cached process-wide on success (migrations run pre-deploy, so a booted
+// process's schema is stable); introspection that itself fails (e.g. mocked
+// databases in tests) assumes the modern schema and is NOT cached.
+let selfPayColumnCache = null;
+async function scheduledServicesHasSelfPay(database) {
+  if (selfPayColumnCache !== null) return selfPayColumnCache;
+  try {
+    const present = await database.schema.hasColumn('scheduled_services', 'self_pay_override');
+    selfPayColumnCache = present;
+    return present;
+  } catch {
+    return true;
+  }
+}
+
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null, throwOnError = false } = {}) {
   const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null };
   // throwOnError: callers whose contract is "skip on uncertainty" (e.g. the
@@ -219,6 +238,7 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
   try {
     let payerId = null;
     let poNumber = null;
+    let selfPayOverride = false;
 
     // The owning customer of this invoice; used to scope the per-job lookup so
     // a stale/mismatched scheduledServiceId can never snapshot a DIFFERENT
@@ -228,16 +248,24 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     if (scheduledServiceId) {
       const ssWhere = { id: scheduledServiceId };
       if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
+      const ssCols = ['payer_id', 'po_number'];
+      if (await scheduledServicesHasSelfPay(database)) ssCols.push('self_pay_override');
       const ss = await softNull(database('scheduled_services')
         .where(ssWhere)
-        .first('payer_id', 'po_number'));
+        .first(ssCols));
       if (ss) {
         if (ss.payer_id) payerId = ss.payer_id;
         if (clean(ss.po_number)) poNumber = clean(ss.po_number);
+        selfPayOverride = ss.self_pay_override === true;
       }
     }
 
     if (!payerId) {
+      // Explicit per-job self-pay: the visit is pinned to "customer pays
+      // (self)", so the account-default payer must NOT be inherited. A concrete
+      // per-job payer_id above still wins (the write path keeps the two
+      // mutually exclusive), so the flag only blocks the fallback.
+      if (selfPayOverride) return SELF_PAY;
       let cust = customer;
       if (!cust && customerId) {
         cust = await softNull(database('customers').where({ id: customerId }).first('payer_id'));
@@ -406,5 +434,6 @@ module.exports = {
   freezeApEmail,
   payerRecipient,
   payerSnapshot,
+  scheduledServicesHasSelfPay,
   _private: { isEmailLike, normalizeTerms, parseSnapshot },
 };
