@@ -63,9 +63,12 @@ const SECTIONS = [
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
       // Consolidated assessments hub — Lead Magnets tab + Field Assessment
-      // tab (the old standalone /admin/lawn-assessment flow). Mirrors the
-      // desktop sidebar's Marketing entry.
-      { path: "/admin/lawn-assessments", icon: Camera, label: "Assessments" },
+      // tab (the old standalone /admin/lawn-assessment flow). Mobile lands
+      // on the Field tab: it matches the entry this replaced, and tech-role
+      // users are allowed on the lawn-assessment API (requireTechOrAdmin)
+      // but not on the admin-only photo-assessments API backing the
+      // default Lead Magnets tab.
+      { path: "/admin/lawn-assessments?tab=field", icon: Camera, label: "Assessments" },
     ],
   },
   {

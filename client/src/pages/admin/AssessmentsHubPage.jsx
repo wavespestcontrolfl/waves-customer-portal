@@ -14,7 +14,7 @@
  * and the Field & Equipment "Lawn Assessment" page were two top-level areas
  * for the same subject — one canonical section removes the split.
  */
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -31,21 +31,19 @@ const TAB_LIST = [
 const VALID_TABS = TAB_LIST.map((t) => t.key);
 
 export default function AssessmentsHubPage() {
+  // The URL is the source of truth for the active tab — no mirrored local
+  // state. Query-only navigation while the hub is mounted (sidebar click
+  // clearing ?tab, a ?tab=field deep link from lawn-protocol) re-renders
+  // with the right tab instead of going stale.
   const [searchParams, setSearchParams] = useSearchParams();
-  const initial = VALID_TABS.includes(searchParams.get(TAB_KEY))
-    ? searchParams.get(TAB_KEY)
-    : TABS.FUNNEL;
-  const [tab, setTab] = useState(initial);
+  const requested = searchParams.get(TAB_KEY);
+  const tab = VALID_TABS.includes(requested) ? requested : TABS.FUNNEL;
 
-  // Keep URL in sync without remount-thrashing the active tab content.
-  useEffect(() => {
-    const current = searchParams.get(TAB_KEY);
-    if (current !== tab) {
-      const next = new URLSearchParams(searchParams);
-      next.set(TAB_KEY, tab);
-      setSearchParams(next, { replace: true });
-    }
-  }, [tab]); // deliberately not keyed on searchParams — tab drives the URL
+  const setTab = (key) => {
+    const next = new URLSearchParams(searchParams);
+    next.set(TAB_KEY, key);
+    setSearchParams(next, { replace: true });
+  };
 
   return (
     <div className="max-w-[1200px]">
