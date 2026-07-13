@@ -2103,15 +2103,33 @@ function ExistingAppointmentCard({ appointment }) {
 // Acceptance-deposit Payment Element modal (flat $49/$99, PR #1660).
 // `intent` is the POST /deposit-intent response: clientSecret, amount,
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
-// card-only server-side, so the Payment Element renders card fields only.
-function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
+// card-only server-side.
+// Surcharge revert (owner ruling 2026-07-13): manual card entry runs the
+// two-step /deposit-quote → /deposit-finalize disclosure (credit cards pay
+// the 2.9% fee, debit/prepaid pay face value); Apple/Google Pay/Link render
+// in an Express Checkout element above the card form and confirm the PI at
+// FACE value — Phase-1, the same wallets-surcharge-free rule as PayPageV2.
+function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
   const dialogRef = useModalFocus();
   const mountRef = useRef(null);
+  const expressMountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
+  const [expressAvailable, setExpressAvailable] = useState(false);
+  // Pending surcharge quote for the entered card: {quoteToken, base,
+  // surcharge, total}. Set after the pricing tap when a fee applies; the
+  // confirm tap finalizes it. Cleared on any card edit (stale PM).
+  const [quote, setQuote] = useState(null);
+
+  // Accept-gate contract: ensureDepositSatisfied live-verifies the PI and
+  // only honors status === 'succeeded' — a processing PI would 402 at
+  // accept. So only succeeded advances; processing shows a pending message,
+  // and re-taps re-check the PI status instead of re-confirming an
+  // in-flight intent.
+  const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
 
   useEffect(() => {
     let cancelled = false;
@@ -2124,9 +2142,56 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
       });
-      const paymentElement = elements.create('payment');
+      // Express Checkout — wallets pay the PI at face value (no surcharge;
+      // Phase-1 parity with the invoice pay page). googlePay stays 'auto':
+      // forcing 'always' renders its button on iOS where the popup flow is
+      // blocked and the tap dead-ends (PayPageV2's OR_BIBED_15 trap).
+      const express = elements.create('expressCheckout', {
+        buttonTheme: { applePay: 'black', googlePay: 'black' },
+        buttonType: { applePay: 'buy', googlePay: 'buy' },
+        buttonHeight: 48,
+        paymentMethodOrder: ['applePay', 'googlePay', 'link'],
+        paymentMethods: { googlePay: 'auto' },
+      });
+      express.on('ready', (ev) => {
+        if (!cancelled && ev?.availablePaymentMethods) setExpressAvailable(true);
+      });
+      express.on('confirm', async () => {
+        setError(null);
+        setSubmitting(true);
+        try {
+          const result = await stripe.confirmPayment({
+            elements,
+            confirmParams: { return_url: window.location.href },
+            redirect: 'if_required',
+          });
+          if (result.error) {
+            setError(result.error.message || 'Payment did not go through. Try another card.');
+            setSubmitting(false);
+            return;
+          }
+          const pi = result.paymentIntent;
+          if (pi && pi.status === 'succeeded') {
+            onSuccess(pi.id);
+            return;
+          }
+          setError(pi && pi.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+          setSubmitting(false);
+        } catch {
+          setError('Payment did not go through. Try again.');
+          setSubmitting(false);
+        }
+      });
+      if (expressMountRef.current) express.mount(expressMountRef.current);
+
+      // Manual card entry — wallets hidden here (they live above).
+      const paymentElement = elements.create('payment', {
+        wallets: { applePay: 'never', googlePay: 'never' },
+      });
       paymentElement.mount(mountRef.current);
       paymentElement.on('ready', () => { if (!cancelled) setReady(true); });
+      // Any edit invalidates a pending quote — the priced PM is stale.
+      paymentElement.on('change', () => { if (!cancelled) setQuote(null); });
       stripeRef.current = stripe;
       elementsRef.current = elements;
     }).catch(() => {
@@ -2135,12 +2200,27 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
     return () => { cancelled = true; };
   }, [intent]);
 
-  // Accept-gate contract: ensureDepositSatisfied live-verifies the PI and
-  // only honors status === 'succeeded' — a processing PI would 402 at
-  // accept. So only succeeded advances; processing shows a pending message,
-  // and re-taps re-check the PI status instead of re-confirming an
-  // in-flight intent.
-  const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
+  // Finalize a quoted card payment server-side (the server re-derives the
+  // amount from the live PM — the quote token is proof of disclosure, not
+  // the pricing authority). 3DS comes back as requiresAction + clientSecret.
+  const finalizeQuoted = useCallback(async (activeQuote) => {
+    const res = await fetch(`${API_BASE}/public/estimates/${token}/deposit-finalize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ quoteToken: activeQuote.quoteToken }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
+    if (data.requiresAction && data.clientSecret) {
+      const action = await stripeRef.current.handleNextAction({ clientSecret: data.clientSecret });
+      if (action.error) throw new Error(action.error.message || 'Card verification failed. Try another card.');
+      if (action.paymentIntent?.status === 'succeeded') return action.paymentIntent.id;
+      throw new Error(action.paymentIntent?.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+    }
+    if (data.status === 'succeeded') return data.paymentIntentId;
+    throw new Error(data.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+  }, [token]);
+
   const handlePay = useCallback(async () => {
     if (!stripeRef.current || !elementsRef.current) return;
     setSubmitting(true);
@@ -2156,28 +2236,40 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
         setSubmitting(false);
         return;
       }
-      const result = await stripeRef.current.confirmPayment({
-        elements: elementsRef.current,
-        confirmParams: { return_url: window.location.href },
-        redirect: 'if_required',
-      });
-      if (result.error) {
-        setError(result.error.message || 'Payment did not go through. Try another card.');
+      if (quote) {
+        // Second tap — the disclosed total was on the button.
+        const paidId = await finalizeQuoted(quote);
+        onSuccess(paidId);
+        return;
+      }
+      // First tap — price the entered card (credit funding pays the fee;
+      // debit/prepaid quote $0 and finalize on this same tap).
+      const pmResult = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
+      if (pmResult.error) {
+        setError(pmResult.error.message || 'Check your card details and try again.');
         setSubmitting(false);
         return;
       }
-      const pi = result.paymentIntent;
-      if (pi && pi.status === 'succeeded') {
-        onSuccess(pi.id);
-        return;
+      const res = await fetch(`${API_BASE}/public/estimates/${token}/deposit-quote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
+      });
+      const priced = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(priced.error || 'Could not price the deposit payment. Please try again.');
+      if (Number(priced.surcharge) > 0) {
+        setQuote(priced);
+        setSubmitting(false);
+        return; // button relabels to the total; next tap confirms
       }
-      setError(pi && pi.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
-      setSubmitting(false);
-    } catch {
-      setError('Payment did not go through. Try again.');
+      const paidId = await finalizeQuoted(priced);
+      onSuccess(paidId);
+    } catch (err) {
+      setQuote(null);
+      setError(err?.message || 'Payment did not go through. Try again.');
       setSubmitting(false);
     }
-  }, [intent, onSuccess]);
+  }, [intent, quote, token, finalizeQuoted, onSuccess]);
 
   return (
     <div
@@ -2194,7 +2286,16 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
           A {fmtMoney(intent.amount)} deposit holds your spot. It is applied to {creditTarget}.
           {Number(intent.receivedTotal) > 0 ? ` (${fmtMoney(intent.receivedTotal)} already received.)` : ''}
         </div>
+        <div ref={expressMountRef} />
+        {expressAvailable ? (
+          <div style={{ textAlign: 'center', fontSize: 14, color: ESTIMATE_BODY, margin: '10px 0' }}>or pay by card</div>
+        ) : null}
         <div ref={mountRef} />
+        {quote ? (
+          <div aria-live="polite" style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 10 }}>
+            Credit card payments include a {fmtMoney(quote.surcharge)} processing fee — total {fmtMoney(quote.total)}. Debit cards pay {fmtMoney(quote.base)}.
+          </div>
+        ) : null}
         {error ? (
           <div role="alert" style={{ color: W.red, fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
         ) : null}
@@ -2204,7 +2305,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
             onClick={handlePay}
             disabled={!ready || submitting}
             style={{ ...estimateCtaStyle, opacity: !ready || submitting ? 0.6 : 1 }}
-          >{submitting ? 'Processing…' : `Pay ${fmtMoney(intent.amount)} deposit`}</button>
+          >{submitting ? 'Processing…' : `Pay ${fmtMoney(quote ? quote.total : intent.amount)}${quote ? '' : ' deposit'}`}</button>
           <button
             type="button"
             onClick={onCancel}
@@ -5014,6 +5115,7 @@ export default function EstimateViewPage() {
           {depositIntent ? (
             <DepositModal
               intent={depositIntent}
+              token={token}
               onSuccess={handleDepositSuccess}
               onCancel={handleDepositCancel}
               creditTarget={paymentPreference === 'prepay_annual' ? 'your annual prepay invoice' : 'your first invoice'}

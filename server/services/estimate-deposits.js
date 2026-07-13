@@ -44,6 +44,17 @@ const db = require('../models/db');
 const logger = require('./logger');
 const StripeService = require('./stripe');
 const { DEPOSIT } = require('./pricing-engine/constants');
+// Surcharge revert (owner ruling 2026-07-13): a deposit PI can now capture
+// face value + card surcharge (credit funding, quoted at confirm). The
+// LEDGER stays face-value denominated — amount/credited_amount/
+// refunded_amount all speak in deposit dollars, and card_surcharge rides
+// alongside — so every consumer derives face value through these helpers,
+// never from amount_received.
+const {
+  depositFaceValueDollars,
+  depositSurchargeDollars,
+  computeRefundSurcharge,
+} = require('./stripe-pricing');
 
 function isDepositEnforced() {
   const flag = process.env.ESTIMATE_DEPOSIT_REQUIRED;
@@ -354,11 +365,18 @@ async function receivedDepositTotal(estimateId) {
 // and credit the deposit before the webhook arrives; a late webhook must
 // never downgrade credited (or refunded/failed) back to received, which
 // would make the same money eligible for a second credit.
-async function markDepositReceived({ paymentIntentId, estimateId, amountDollars }) {
+async function markDepositReceived({ paymentIntentId, estimateId, amountDollars, cardSurcharge = 0 }) {
+  // amountDollars is the FACE value (depositFaceValueDollars) — the credit
+  // authority. cardSurcharge is the fee collected on top (0 for wallets,
+  // non-credit funding, and pre-revert deposits); recorded so revenue and
+  // reconciliation reports see the fee (deposits have no payments row).
+  // The migration adding the column ships in this PR and Railway runs
+  // migrations pre-deploy, so the column exists before this code runs.
   const inserted = await db('estimate_deposits')
     .insert({
       estimate_id: estimateId,
       amount: amountDollars,
+      card_surcharge: Number(cardSurcharge) || 0,
       stripe_payment_intent_id: paymentIntentId,
       status: 'received',
       received_at: db.fn.now(),
@@ -371,6 +389,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars 
     .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
     .update({
       status: 'received',
+      card_surcharge: Number(cardSurcharge) || 0,
       received_at: db.fn.now(),
       updated_at: db.fn.now(),
     });
@@ -685,11 +704,15 @@ async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null,
       logger.warn('[estimate-deposits] live PI verification failed', { error: err.message });
     }
     if (depositIntentMatchesEstimate(paymentIntent, estimate.id)) {
-      const amountDollars = Math.round(paymentIntent.amount_received) / 100;
+      // Face value, not amount_received — a surcharged capture must not
+      // inflate the credit (a $49 deposit paid on a credit card captures
+      // $50.42 but credits $49; the $1.42 is the recorded fee).
+      const amountDollars = depositFaceValueDollars(paymentIntent);
       await markDepositReceived({
         paymentIntentId: paymentIntent.id,
         estimateId: estimate.id,
         amountDollars,
+        cardSurcharge: depositSurchargeDollars(paymentIntent),
       });
       // Ledger state is the authority, not Stripe's status: a refunded PI
       // still reports succeeded/amount_received, the monotonic mark above
@@ -986,7 +1009,10 @@ async function claimDepositRowForRefund({ paymentIntentId, estimateId, amountDol
 // same PI must not refund money the accept just consumed). Returns
 // 'refunded' | 'consumed' (accept owns it — treat as received) | 'failed'.
 async function refundStaleDeposit(paymentIntent, estimateId, reason) {
-  const amountDollars = Math.round(Number(paymentIntent.amount_received) || 0) / 100;
+  // Ledger stamps stay face-denominated; the Stripe refund below is the
+  // FULL PI (no amountCents), so a surcharged capture returns the fee to
+  // the customer too — stale money keeps nothing.
+  const amountDollars = depositFaceValueDollars(paymentIntent);
   const { claimed, row } = await claimDepositRowForRefund({
     paymentIntentId: paymentIntent.id,
     estimateId,
@@ -1034,7 +1060,7 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 async function refundUnconsumedDeposits({ estimateId, reason }) {
   const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
-    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount');
+    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge');
 
   let refunded = 0;
   for (const row of rows) {
@@ -1055,9 +1081,29 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
     if (!claimedCount) continue; // consumed or reversed mid-sweep — their win
 
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
+    // The ledger speaks face value; the Stripe charge may include a card
+    // surcharge on top. Refund the remainder's prorated share of the fee
+    // with it — the credited slice's fee stays earned, the returned slice's
+    // fee goes back. Prior refunds' fee share re-derives from the same
+    // cumulative proration (this sweep is the only partial-refund writer,
+    // so the reconstruction matches what was actually refunded before).
+    const faceCents = Math.round(Number(row.amount || 0) * 100);
+    const surchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
+    const priorSurchargeRefundCents = computeRefundSurcharge({
+      refundBaseCents: priorRefundedCents,
+      originalBaseCents: faceCents,
+      originalSurchargeCents: surchargeCents,
+    });
+    const surchargeRefundCents = computeRefundSurcharge({
+      refundBaseCents: remainderCents,
+      originalBaseCents: faceCents,
+      originalSurchargeCents: surchargeCents,
+      totalRefundedBaseCents: priorRefundedCents,
+      alreadyRefundedSurchargeCents: priorSurchargeRefundCents,
+    });
     try {
       await StripeService.refundPaymentIntent(row.stripe_payment_intent_id, {
-        amountCents: remainderCents,
+        amountCents: remainderCents + surchargeRefundCents,
       });
       await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
@@ -1190,7 +1236,9 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   await markDepositReceived({
     paymentIntentId: paymentIntent.id,
     estimateId,
-    amountDollars: Math.round(Number(paymentIntent.amount_received) || 0) / 100,
+    // Face value, not amount_received — see ensureDepositSatisfied.
+    amountDollars: depositFaceValueDollars(paymentIntent),
+    cardSurcharge: depositSurchargeDollars(paymentIntent),
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
@@ -1252,23 +1300,36 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const row = await db('estimate_deposits')
       .where({ stripe_payment_intent_id: paymentIntentId })
-      .first('id', 'status', 'estimate_id', 'amount', 'credited_amount', 'credited_invoice_id', 'refunded_amount');
+      .first('id', 'status', 'estimate_id', 'amount', 'credited_amount', 'credited_invoice_id', 'refunded_amount', 'card_surcharge');
     if (!row) return { handled: false };
     if (row.status === 'refunded') return { handled: true, replay: true };
 
+    const amountCents = Math.round(Number(row.amount || 0) * 100);
+    // Stripe's cumulative refund total is GROSS (face + any card surcharge
+    // captured with it); the ledger speaks face value. Deflate the gross to
+    // its face component before every comparison below, or a sweep echo
+    // that returned remainder + prorated fee reads as "larger than what we
+    // stamped" and false-fires the manual-reconciliation alert.
+    const rowSurchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
+    const grossToFaceCents = (gross) => {
+      if (gross == null) return null;
+      if (rowSurchargeCents <= 0 || amountCents <= 0) return gross;
+      return Math.min(amountCents, Math.round((gross * amountCents) / (amountCents + rowSurchargeCents)));
+    };
+    const faceRefundedCents = grossToFaceCents(amountRefundedCents);
+
     const recordedRefundCents = Math.round(Number(row.refunded_amount || 0) * 100);
-    if (amountRefundedCents != null && recordedRefundCents > 0 && amountRefundedCents <= recordedRefundCents) {
+    if (faceRefundedCents != null && recordedRefundCents > 0 && faceRefundedCents <= recordedRefundCents) {
       // Echo of a refund WE issued and stamped (sweep / remainder) — the row
       // already reflects it; a 'credited' row here keeps its credit because
       // only the unapplied remainder was returned.
       return { handled: true, replay: true };
     }
-    const amountCents = Math.round(Number(row.amount || 0) * 100);
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
     // Unknown refund size (dispute path) = treat as a full reversal — fail
     // toward the loud path, never toward silently keeping money available.
-    const refundCents = amountRefundedCents != null
-      ? Math.min(amountRefundedCents, amountCents)
+    const refundCents = faceRefundedCents != null
+      ? Math.min(faceRefundedCents, amountCents)
       : amountCents;
     const fullyRefunded = refundCents >= amountCents;
     // Does the cumulative refund reach past the unapplied remainder into
