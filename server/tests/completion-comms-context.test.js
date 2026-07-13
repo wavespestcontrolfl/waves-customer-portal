@@ -133,6 +133,19 @@ describe('resolveContextWindow', () => {
     void knex;
   });
 
+  test('recurring floor uses the prior visit\'s COMPLETION time over its midnight schedule date', async () => {
+    const scheduledMidnight = new Date(NOW - 45 * DAY);
+    const completedThatEvening = new Date(scheduledMidnight.getTime() + 18 * 60 * 60 * 1000);
+    const knex = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Quarterly Pest Control Service', recurring_parent_id: 'p1', scheduled_date: new Date(NOW), created_at: new Date(NOW - 400 * DAY) },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control Service', scheduled_date: scheduledMidnight, completed_at: completedThatEvening },
+      ],
+    });
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex });
+    expect(win.floor.getTime()).toBe(completedThatEvening.getTime());
+  });
+
   test('estimate without accepted_at falls through to the booking created_at', async () => {
     const booked = new Date(NOW - 15 * DAY);
     const knex = stubKnex({

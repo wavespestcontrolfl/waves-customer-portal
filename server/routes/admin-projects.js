@@ -1353,11 +1353,13 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     const previewComms = include_communications === false
       ? { text: '', promptHint: '' }
       : await buildCompletionCommsContext({
+        // Preview has no job origin: the create modal posts only
+        // customer/type/date, and project_date is the INSPECTION date —
+        // anchoring there would filter out the pre-visit booking comms
+        // this feature exists to summarize (Codex r2, reversing r1's
+        // project_date suggestion). The bare 180-day cap is the honest
+        // window until the project is saved with a linked booking.
         customerId: customer_id,
-        // Anchor the preview window to the drafted job's date (Codex P2) —
-        // without it a brand-new report drafted for a recent inspection
-        // fell back to the full 180-day cap.
-        originDate: normalizeDateOnly(project_date) || null,
       }).catch(() => ({ text: '', promptHint: '' }));
     const communicationContext = previewComms.text
       ? `${previewComms.promptHint}\n${previewComms.text}`

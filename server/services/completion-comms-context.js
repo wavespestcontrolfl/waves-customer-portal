@@ -112,22 +112,31 @@ async function resolveContextWindow({
     try {
       let query = knex('scheduled_services')
         .where({ customer_id: customerId, status: 'completed' })
-        .whereNot({ id: svc.id });
+        .whereNot({ id: svc.id })
+        // Bound by the cap instead of an arbitrary row limit (Codex r2):
+        // a match older than the cap loses to the cap anyway, and limiting
+        // BEFORE the JS line-filter could miss the true prior same-line
+        // visit behind >N other-line completions.
+        .where('scheduled_date', '>=', cap);
       // Drafting a HISTORICAL visit must anchor to the last completion
       // BEFORE that visit — the customer's most recent completion overall
       // could postdate it and move the floor past the drafted visit
-      // (Codex P2).
+      // (Codex r1).
       const svcDate = asDate(svc.scheduled_date);
       if (svcDate) query = query.where('scheduled_date', '<', svcDate);
       const recent = await query
         .orderBy('scheduled_date', 'desc')
-        .limit(30)
-        .select('service_type', 'scheduled_date');
+        .limit(200)
+        .select('service_type', 'scheduled_date', 'completed_at');
       lastVisit = recent.find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
     } catch (err) {
       logger.warn(`[comms-context] last-visit lookup failed: ${err.message}`);
     }
-    const lastDate = asDate(lastVisit?.scheduled_date);
+    // Anchor at COMPLETION time when recorded (Codex r2): scheduled_date is
+    // a midnight date, so pre/during-visit coordination chatter from that
+    // day would leak into the next draft; legacy rows without completed_at
+    // fall back to the schedule date.
+    const lastDate = asDate(lastVisit?.completed_at) || asDate(lastVisit?.scheduled_date);
     if (lastDate && lastDate > cap) {
       return { floor: lastDate, reason: `since the last completed ${serviceLine || 'service'} visit (${contextDate(lastDate)})`, serviceLine, isRecurring };
     }
