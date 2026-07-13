@@ -234,6 +234,27 @@ describe('StationMarkingStep', () => {
     expect(onMoveStation).toHaveBeenCalledWith('st-2', { cx: 0.5, cy: 0.5 });
   });
 
+  it('rodent program swaps the copy: title, consumption chip/counter — mechanics unchanged', () => {
+    const onSetStatus = vi.fn();
+    const { container } = render(
+      <StationMarkingStep
+        {...baseProps}
+        stations={[station('st-1', 1, 0.25, 0.5), station('st-2', 2, 0.75, 0.5)]}
+        statuses={{ 'st-2': 'activity' }}
+        onSetStatus={onSetStatus}
+        program="rodent"
+      />,
+    );
+    expect(screen.getByText('Rodent bait station map')).toBeInTheDocument();
+    expect(screen.getByText('2 pinned · 1 with consumption')).toBeInTheDocument();
+    const svg = stubSvgRect(container);
+    firePointer(svg, 'pointerup', 160, 170); // select station 1
+    fireEvent.click(screen.getByRole('button', { name: 'Consumption' }));
+    // the wire status value stays 'activity' — labels differ, the enum doesn't
+    expect(onSetStatus).toHaveBeenCalledWith('st-1', 'activity');
+    expect(screen.queryByRole('button', { name: 'Activity' })).not.toBeInTheDocument();
+  });
+
   it('office mode (showStatuses=false) hides status chips and the legend but keeps Move/Retire', () => {
     const { container } = render(
       <StationMarkingStep

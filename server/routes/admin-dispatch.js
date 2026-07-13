@@ -1174,7 +1174,7 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1 }));
+  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1 } }));
 
   return {
     available: true,
@@ -1188,6 +1188,7 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     },
     stations: stationSlice.stations,
     nextStationNumber: stationSlice.nextStationNumber,
+    nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
     zones: resolvedZones.map((zone, i) => ({
       id: zone.id,
@@ -1351,6 +1352,15 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
     if (!Array.isArray(entries) || !entries.length) {
       return res.status(400).json({ error: 'stations must be a non-empty array', code: 'termite_stations_invalid' });
     }
+    // Program routes the save to the termite or rodent registry slice —
+    // explicit and validated, never inferred from pins.
+    const program = req.body?.program == null ? 'termite' : req.body.program;
+    if (!TermiteStations.STATION_PROGRAMS.includes(program)) {
+      return res.status(400).json({
+        error: `program must be one of: ${TermiteStations.STATION_PROGRAMS.join(', ')}`,
+        code: 'termite_stations_invalid',
+      });
+    }
     const entriesError = TermiteStations.validateStationEntriesBody(entries, { allowStatus: false });
     if (entriesError) {
       return res.status(400).json({ error: entriesError, code: 'termite_stations_invalid' });
@@ -1359,7 +1369,7 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
     // skipped pin would leave the office view claiming a station the
     // registry never got. Shared helper keeps the netting arithmetic
     // aligned with the sync (validated retires only, replay-aware creates).
-    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries)) {
+    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries, program)) {
       return res.status(400).json({
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — retire stations before adding more`,
         code: 'termite_stations_cap',
@@ -1370,6 +1380,7 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
       const result = await TermiteStations.upsertStationsForCustomer(trx, {
         customerId: customer.id,
         entries,
+        program,
       });
       // Unlike the completion's post-commit sync, this write IS the primary
       // action and runs inside its own transaction — a cap skip under the
@@ -2418,21 +2429,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Station cap must reject BEFORE the completion commits: the typed
-    // counts were auto-filled from every pin the tech can see, so a pin
-    // silently dropped later by the fail-soft sync's cap guard would freeze
-    // findings the registry and customer map contradict. The helper nets
-    // the payload exactly the way the sync will (validated retires only,
-    // replay-aware creates), so idempotent resumes of an already-committed
-    // completion pass straight through to the stored-response path.
-    if (Array.isArray(termiteStations) && svc.customer_id
-      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations)) {
-      return res.status(400).json({
-        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
-        code: 'termite_stations_cap',
-      });
-    }
-
     // Stale-recap guard: a live job force-rescheduled to a future day
     // (rebooker allowLive) is rewound to a fresh confirmed appointment —
     // a recap submit from a CompletionPanel opened before the reschedule
@@ -2484,6 +2480,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       return res.status(503).json({
         error: 'Could not verify the completion type for this service. Try again in a moment.',
         code: 'completion_profile_lookup_failed',
+      });
+    }
+    // Station cap must reject BEFORE the completion commits: the typed
+    // counts were auto-filled from every pin the tech can see, so a pin
+    // silently dropped later by the fail-soft sync's cap guard would freeze
+    // findings the registry and customer map contradict. Sits after profile
+    // resolution because the profile picks the PROGRAM (termite vs rodent)
+    // whose registry slice the cap applies to; still ahead of every commit.
+    // The helper nets the payload exactly the way the sync will (validated
+    // retires only, replay-aware creates), so idempotent resumes of an
+    // already-committed completion pass straight through to the
+    // stored-response path.
+    const stationProgram = TermiteStations.stationProgramForProfile(completionProfile);
+    if (Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
+      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations, stationProgram)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
+        code: 'termite_stations_cap',
       });
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
@@ -4387,8 +4401,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // zero-tap default "ok" checks for a visit that didn't happen would
     // corrupt the station history future reports and trends read.
     if (Array.isArray(termiteStations) && termiteStations.length) {
-      if (isIncompleteVisit || !TermiteStations.profileAllowsStationSync(completionProfile)) {
-        logger.warn('[completion] termite stations payload skipped', {
+      if (isIncompleteVisit || !stationProgram) {
+        logger.warn('[completion] station payload skipped', {
           serviceId: svc.id,
           incomplete: isIncompleteVisit,
           findingsType: completionProfile?.findingsType || null,
@@ -4399,6 +4413,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerId: svc.customer_id,
             serviceRecordId: record.id,
             entries: termiteStations,
+            program: stationProgram,
           });
           if (stationSync.skipped.length) {
             // post-commit skips (cap race / foreign id) can't 400 a
