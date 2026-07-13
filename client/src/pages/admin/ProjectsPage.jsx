@@ -1432,7 +1432,11 @@ function ProjectRow({ project, active, onSelect, compactType }) {
   );
 }
 
-function ProjectDetail({
+// Named export: DispatchPageV2 and the tech portal mount this same editor
+// in an overlay so project-backed visits (WDO, pre-treat cert) open their
+// report in place from the schedule — the pest-completion interaction
+// (owner ask 2026-07-13). Self-contained: fetches its own project by id.
+export function ProjectDetail({
   projectId,
   typesRegistry,
   onClose,
