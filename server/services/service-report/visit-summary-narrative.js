@@ -213,6 +213,10 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
 
 module.exports = {
   applyVisitSummaryNarrative,
+  // The summary slot's extra forbidden-language list (beyond the shared
+  // banned-copy guard) — consumed by technician-report-copy.js so tech-
+  // reviewed AI report copy meets the same bar as the narrative rewrite.
+  EXTRA_FORBIDDEN,
   // exported for tests
   _test: {
     groundingFacts,

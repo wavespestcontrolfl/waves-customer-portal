@@ -17,6 +17,7 @@
 
 const {
   technicianReportCustomerCopy,
+  summaryCopySignature,
   MAX_REPORT_CHARS,
 } = require('../services/service-report/technician-report-copy');
 const {
@@ -80,17 +81,22 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     )).toBeNull();
   });
 
+  test('an appended note WITHOUT a blank line also rejects — it must never join the paragraph (Codex P1)', () => {
+    expect(technicianReportCustomerCopy(
+      `${AI_REPORT}\ngate code 4411`
+    )).toBeNull();
+  });
+
   test('a second paragraph inside a section is unreviewed free text — parses to null', () => {
     expect(technicianReportCustomerCopy(
       'WHAT WE DID\n\nTreated the perimeter.\n\nAlso replaced the bait stations.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'
     )).toBeNull();
   });
 
-  test('soft line wraps inside a section paragraph still parse as one paragraph', () => {
-    const parsed = technicianReportCustomerCopy(
+  test('any newline inside a section rejects — sections are exactly one prose line', () => {
+    expect(technicianReportCustomerCopy(
       'WHAT WE DID\n\nTreated the exterior perimeter\nand the garage entry.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'
-    );
-    expect(parsed?.body).toBe('Treated the exterior perimeter and the garage entry. Light activity near the lanai.');
+    )).toBeNull();
   });
 
   test('an empty section parses to null', () => {
@@ -128,7 +134,72 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     );
     expect(parsed).not.toBeNull();
     expect(parsed.body).toBeNull();
-    expect(parsed.violations).toContain('forbidden_language');
+    expect(parsed.violations.length).toBeGreaterThan(0);
+  });
+
+  test('the narrative EXTRA_FORBIDDEN vocabulary applies ("safe", "solved", plural "infestations")', () => {
+    const safeParsed = technicianReportCustomerCopy(
+      'WHAT WE DID\nTreated the baseboards.\nWHAT WE FOUND\nThe treated areas are safe for pets right away.'
+    );
+    expect(safeParsed.body).toBeNull();
+    expect(safeParsed.violations).toContain('safe');
+
+    const solvedParsed = technicianReportCustomerCopy(
+      'WHAT WE DID\nTreated the baseboards.\nWHAT WE FOUND\nThe ant issue is solved.'
+    );
+    expect(solvedParsed.body).toBeNull();
+    expect(solvedParsed.violations).toContain('solved');
+
+    const pluralParsed = technicianReportCustomerCopy(
+      'WHAT WE DID\nTreated the baseboards.\nWHAT WE FOUND\nWe stopped two infestations this visit.'
+    );
+    expect(pluralParsed.body).toBeNull();
+    expect(pluralParsed.violations).toContain('infestations');
+  });
+
+  test('"safety" wording stays legal (the ban is \\bsafe\\b, not safety)', () => {
+    const parsed = technicianReportCustomerCopy(
+      'WHAT WE DID\nTreated the baseboards.\nWHAT WE FOUND\nAs a safety step, keep pets off treated areas until dry.'
+    );
+    expect(parsed?.body).toBeTruthy();
+    expect(parsed.violations).toEqual([]);
+  });
+});
+
+describe('summaryCopySignature — PDF cache-key component', () => {
+  test('empty for recap-driven records so existing cached PDF keys stay valid', () => {
+    expect(summaryCopySignature({ technician_notes: 'wiped webs, treated perimeter' })).toBe('');
+    expect(summaryCopySignature({})).toBe('');
+  });
+
+  test('content-hashed suffix when the technician report drives a non-typed summary', () => {
+    const sig = summaryCopySignature({ technician_notes: AI_REPORT });
+    expect(sig).toMatch(/^-tr[0-9a-f]{8}$/);
+    // Deterministic for the same record, different for different copy.
+    expect(summaryCopySignature({ technician_notes: AI_REPORT })).toBe(sig);
+    const other = summaryCopySignature({
+      technician_notes: 'WHAT WE DID\nTreated the lanai.\nWHAT WE FOUND\nLight ant trailing.',
+    });
+    expect(other).toMatch(/^-tr[0-9a-f]{8}$/);
+    expect(other).not.toBe(sig);
+  });
+
+  test('typed records suffix only when the frozen snapshot body came from the technician report', () => {
+    const withTechBody = {
+      technician_notes: AI_REPORT,
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'one_time_pest_treatment', todaysResult: { bodySource: 'technician_report' } },
+      }),
+    };
+    expect(summaryCopySignature(withTechBody)).toMatch(/^-tr[0-9a-f]{8}$/);
+
+    const templateBody = {
+      technician_notes: AI_REPORT,
+      service_data: JSON.stringify({
+        typedReportSnapshot: { type: 'one_time_pest_treatment', todaysResult: {} },
+      }),
+    };
+    expect(summaryCopySignature(templateBody)).toBe('');
   });
 });
 
