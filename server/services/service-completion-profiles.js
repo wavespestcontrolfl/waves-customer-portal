@@ -21,13 +21,15 @@ const V1_EXCLUDED_PROJECT_TYPES = new Set(['wdo_inspection']);
 const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_treatment_termite_certificate']);
 // Types that stay CREATABLE as standalone documentation projects even though
 // their routine appointment completions have fully cut over to the typed
-// service-report flow (owner directive 2026-07-04: flea + rodent belong in
-// the Create Project Report picker). UNLIKE V1_EXCLUDED_PROJECT_TYPES this
-// carries no completion-safety semantics: serializeProfile does NOT coerce
-// these profiles, so appointments keep completing through service reports —
-// the exemption only keeps the Projects creation path (picker + create
-// gate) open for inspection/documentation-heavy one-off jobs.
-const PROJECT_CREATION_KEPT_TYPES = new Set(['flea', 'rodent_trapping']);
+// service-report flow. UNLIKE V1_EXCLUDED_PROJECT_TYPES this carries no
+// completion-safety semantics: serializeProfile does NOT coerce these
+// profiles — the exemption only keeps the Projects creation path (picker +
+// create gate) open for inspection/documentation-heavy one-off jobs.
+// EMPTY since 2026-07-13: the owner retired the flea + rodent_trapping
+// ad-hoc lanes (directive superseding 2026-07-04) — with the termite family
+// cut over (#2708), every fully-typed family now completes through the
+// appointment flow only. The mechanism stays for a future exemption.
+const PROJECT_CREATION_KEPT_TYPES = new Set([]);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
