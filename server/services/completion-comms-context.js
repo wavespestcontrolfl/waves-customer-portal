@@ -110,9 +110,16 @@ async function resolveContextWindow({
     // small recent set (waves-db: names, not keys, live on the rows).
     let lastVisit = null;
     try {
-      const recent = await knex('scheduled_services')
+      let query = knex('scheduled_services')
         .where({ customer_id: customerId, status: 'completed' })
-        .whereNot({ id: svc.id })
+        .whereNot({ id: svc.id });
+      // Drafting a HISTORICAL visit must anchor to the last completion
+      // BEFORE that visit — the customer's most recent completion overall
+      // could postdate it and move the floor past the drafted visit
+      // (Codex P2).
+      const svcDate = asDate(svc.scheduled_date);
+      if (svcDate) query = query.where('scheduled_date', '<', svcDate);
+      const recent = await query
         .orderBy('scheduled_date', 'desc')
         .limit(30)
         .select('service_type', 'scheduled_date');
@@ -136,9 +143,12 @@ async function resolveContextWindow({
     try {
       const est = await knex('estimates')
         .where({ id: svc.source_estimate_id })
-        .first('accepted_at', 'created_at');
-      origin = asDate(est?.accepted_at) || asDate(est?.created_at);
-      if (origin) originLabel = `since the estimate (${contextDate(origin)})`;
+        .first('accepted_at');
+      // accepted_at ONLY (Codex P2): an unaccepted/legacy estimate's
+      // creation time is pre-booking chatter — fall through to the
+      // booking's created_at instead.
+      origin = asDate(est?.accepted_at);
+      if (origin) originLabel = `since the estimate was accepted (${contextDate(origin)})`;
     } catch (err) {
       logger.warn(`[comms-context] estimate origin lookup failed: ${err.message}`);
     }

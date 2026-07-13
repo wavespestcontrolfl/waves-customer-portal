@@ -1350,9 +1350,18 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     const typeCfg = getProjectType(project_type);
     const customer = customer_id ? await db('customers').where({ id: customer_id }).first() : null;
     const tech = req.technicianId ? await db('technicians').where({ id: req.technicianId }).first() : null;
-    const communicationContext = include_communications === false
-      ? ''
-      : (await buildCompletionCommsContext({ customerId: customer_id }).catch(() => ({ text: '' }))).text;
+    const previewComms = include_communications === false
+      ? { text: '', promptHint: '' }
+      : await buildCompletionCommsContext({
+        customerId: customer_id,
+        // Anchor the preview window to the drafted job's date (Codex P2) —
+        // without it a brand-new report drafted for a recent inspection
+        // fell back to the full 180-day cap.
+        originDate: normalizeDateOnly(project_date) || null,
+      }).catch(() => ({ text: '', promptHint: '' }));
+    const communicationContext = previewComms.text
+      ? `${previewComms.promptHint}\n${previewComms.text}`
+      : '';
     const report = await draftProjectReport({
       typeCfg,
       findings: findings || {},
@@ -3767,12 +3776,17 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       : null;
     const includeCommunications = req.body.include_communications !== false;
     const includePhotos = req.body.include_photos !== false;
-    const communicationContext = includeCommunications
-      ? (await buildCompletionCommsContext({
+    const projectComms = includeCommunications
+      ? await buildCompletionCommsContext({
         customerId: project.customer_id,
         scheduledServiceId: project.scheduled_service_id || null,
         originDate: project.project_date || project.created_at || null,
-      }).catch(() => ({ text: '' }))).text
+      }).catch(() => ({ text: '', promptHint: '' }))
+      : { text: '', promptHint: '' };
+    // Thread the relevance hint with the block (Codex P2) — the window
+    // alone can hold unrelated-line comms the prompt must be told to skip.
+    const communicationContext = projectComms.text
+      ? `${projectComms.promptHint}\n${projectComms.text}`
       : '';
     const photos = includePhotos
       ? await db('project_photos')

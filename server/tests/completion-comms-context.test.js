@@ -107,6 +107,46 @@ describe('resolveContextWindow', () => {
     expect(Math.abs(win.floor.getTime() - expectedCap)).toBeLessThan(60 * 1000);
   });
 
+  test('historical draft: the floor is the last completion BEFORE the drafted visit, not after it', async () => {
+    const draftedVisit = new Date(NOW - 60 * DAY);
+    const before = new Date(NOW - 90 * DAY);
+    const after = new Date(NOW - 10 * DAY); // completed since — must NOT move the floor
+    const knex = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Quarterly Pest Control Service', recurring_parent_id: 'p1', scheduled_date: draftedVisit, created_at: new Date(NOW - 400 * DAY) },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control Service', scheduled_date: after },
+        { id: 'svc-3', service_type: 'Quarterly Pest Control Service', scheduled_date: before },
+      ],
+    });
+    // The stub ignores range where()s, so assert the BOUND was requested
+    // instead: the '<' clause must carry the drafted visit's date...
+    const whereArgs = {};
+    const knex2 = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Quarterly Pest Control Service', recurring_parent_id: 'p1', scheduled_date: draftedVisit, created_at: new Date(NOW - 400 * DAY) },
+      ],
+    }, whereArgs);
+    await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex: knex2 });
+    const bound = (whereArgs.scheduled_services || []).find((args) => args.length === 3 && args[0] === 'scheduled_date' && args[1] === '<');
+    expect(bound).toBeTruthy();
+    expect(bound[2].getTime()).toBe(draftedVisit.getTime());
+    void knex;
+  });
+
+  test('estimate without accepted_at falls through to the booking created_at', async () => {
+    const booked = new Date(NOW - 15 * DAY);
+    const knex = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Rodent Exclusion Service', source_estimate_id: 'est-1', created_at: booked },
+      ],
+      estimates: [{ accepted_at: null }],
+      service_completion_profiles: [],
+    });
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex });
+    expect(win.floor.getTime()).toBe(booked.getTime());
+    expect(win.reason).toContain('booking');
+  });
+
   test('no scheduled service: caller-supplied origin anchors the one-time window', async () => {
     const origin = new Date(NOW - 30 * DAY);
     const knex = stubKnex({});
