@@ -62,12 +62,11 @@ const PENDING_COMPLIANCE_REVIEW_KEYS = [
 // ANY typed pointer would pass a repoint onto the wrong form); null = the
 // typed target is not designed yet, any registered typed pointer passes.
 const CUTOVER_IN_FLIGHT_KEYS = {
-  wildlife_trapping: { before: 'project', to: 'wildlife_trapping', note: 'Phase B — typed sectioned form built, cutover migration pending' },
-  bed_bug_treatment: { before: 'project', to: 'bed_bug', note: 'Phase B — Q2: customer copy approved 2026-07-12, visibility later' },
-  cockroach_control: { before: 'project', to: 'cockroach', note: 'Phase B — Q3: flip to the typed cockroach flow' },
-  one_time_pest_control: { before: 'project', to: 'one_time_pest_treatment', note: 'Phase B — straggler found by the B0 scan 2026-07-12' },
-  rodent_monitoring: { before: 'generic', to: 'rodent_bait_station', note: 'PR #2673 — repoint to the typed rodent_bait_station flow' },
-  palm_treatment: { before: 'generic', to: 'palm_injection', note: 'owner 2026-07-12 — repoint to the typed palm form' },
+  // Shipped 2026-07-12 and REMOVED from this list (entries come out as
+  // their migrations land): wildlife_trapping, cockroach_control,
+  // bed_bug_treatment, one_time_pest_control (#2675 — now typed) and
+  // rodent_monitoring (#2673 — repointed, catalog row inactive).
+  palm_treatment: { before: 'generic', to: 'palm_injection', note: 'owner 2026-07-12 — repoint to the typed palm form, DEFERRED pending typed-palm closeout-gate parity (#2675 r3)' },
   lawn_inspection: { before: 'consultation', to: null, note: 'owner 2026-07-12 — tie to the lawn-assessment experience; customers get a report (typed target TBD)' },
 };
 
@@ -103,7 +102,8 @@ const RECURRING_GENERIC_BY_DESIGN = [
   'pest_general_monthly',
   'pest_general_quarterly',
   'pest_general_semiannual',
-  'pest_rodent_quarterly',
+  // pest_rodent_quarterly RETIRED 2026-07-12 (#2679 + 20260712700000
+  // archives the catalog row everywhere) — removed from this list.
   'pest_termite_bait_quarterly',
   'waveguard_membership',
 ];

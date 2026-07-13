@@ -61,10 +61,11 @@ describe('completion-lane registry (static)', () => {
   });
 
   test('cutover-in-flight is not a suppression blanket', () => {
-    // Missing profile on an in-flight key is still a defect.
+    // palm_treatment is the standing in-flight exemplar (repoint deferred
+    // pending typed-palm gate parity). Missing profile is still a defect.
     const missing = classifyCatalogRow({
-      service_key: 'wildlife_trapping',
-      billing_type: 'one_time',
+      service_key: 'palm_treatment',
+      billing_type: 'recurring',
       completion_mode: null,
       project_type: null,
       profile_active: null,
@@ -72,29 +73,29 @@ describe('completion-lane registry (static)', () => {
     expect(missing.flags).toContain('cutover_key_missing_profile:no_decision_recorded_in_db');
     // A shape that is neither the declared before state nor typed is a defect.
     const weird = classifyCatalogRow({
-      service_key: 'wildlife_trapping',
-      billing_type: 'one_time',
+      service_key: 'palm_treatment',
+      billing_type: 'recurring',
+      completion_mode: 'project_required',
+      project_type: 'palm_injection',
+      delivery_mode: 'auto_send',
+      profile_active: true,
+    });
+    expect(weird.flags.some((f) => f.startsWith('cutover_key_unexpected_state'))).toBe(true);
+    // The declared before state (generic) and the typed after state are clean.
+    const before = classifyCatalogRow({
+      service_key: 'palm_treatment',
+      billing_type: 'recurring',
       completion_mode: 'service_report',
       project_type: null,
       delivery_mode: 'auto_send',
       profile_active: true,
     });
-    expect(weird.flags.some((f) => f.startsWith('cutover_key_unexpected_state'))).toBe(true);
-    // The declared before state (project) and the typed after state are clean.
-    const before = classifyCatalogRow({
-      service_key: 'wildlife_trapping',
-      billing_type: 'one_time',
-      completion_mode: 'project_required',
-      project_type: 'wildlife_trapping',
-      delivery_mode: 'auto_send',
-      profile_active: true,
-    });
     expect(before.flags).toEqual([]);
     const after = classifyCatalogRow({
-      service_key: 'wildlife_trapping',
-      billing_type: 'one_time',
+      service_key: 'palm_treatment',
+      billing_type: 'recurring',
       completion_mode: 'service_report',
-      project_type: 'wildlife_trapping',
+      project_type: 'palm_injection',
       delivery_mode: 'auto_send',
       profile_active: true,
     });
@@ -166,8 +167,8 @@ describe('completion-lane registry (static)', () => {
 
   test('cutover typed after-state must land on the declared target form', () => {
     const wrongForm = classifyCatalogRow({
-      service_key: 'wildlife_trapping',
-      billing_type: 'one_time',
+      service_key: 'palm_treatment',
+      billing_type: 'recurring',
       completion_mode: 'service_report',
       project_type: 'cockroach',
       delivery_mode: 'auto_send',
