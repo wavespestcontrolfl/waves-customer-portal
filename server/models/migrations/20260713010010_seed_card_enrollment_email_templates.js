@@ -32,19 +32,25 @@ const TEMPLATES = [
     key: 'autopay.enrollment_confirmation',
     name: 'Auto Pay Enrolled — Your Authorization Copy',
     category: 'billing',
-    sensitivity: 'billing',
+    // Must be a member of the admin route's SENSITIVITIES enum (Codex r3)
+    // or later admin saves of the seeded template fail validation.
+    sensitivity: 'financial',
     // The authorization copy is a required transactional record, never a
     // marketing send — same stream class as appointment notices.
     stream: 'transactional_required',
     description: "Sent when a customer's card is enrolled in Auto Pay: confirms the enrollment and gives them a copy of the exact authorization text they agreed to, with the revocation paths. Gated behind GATE_CARD_ENROLLMENT_EMAILS.",
-    required: ['first_name', 'card_line', 'authorization_text'],
+    required: ['first_name', 'card_line', 'charge_timing_line', 'authorization_text'],
     optional: [],
     subject: 'Auto Pay is set up on your Waves account',
     preview: 'Your card on file, and a copy of the authorization you approved.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, Auto Pay is now set up on your account using {{card_line}}.' },
       { type: 'heading', content: 'How Auto Pay works' },
-      { type: 'paragraph', content: "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time." },
+      // SENDER-COMPOSED by billing mode (Codex r3): monthly-billed
+      // accounts are charged by the monthly cron, not per completed
+      // service — a fixed per-service sentence would misstate their
+      // authorization's timing/amount basis.
+      { type: 'paragraph', content: '{{charge_timing_line}}' },
       { type: 'heading', content: 'Your authorization' },
       { type: 'paragraph', content: '{{authorization_text}}' },
       { type: 'paragraph', content: 'You can turn Auto Pay off or remove your card anytime in the Waves app or your customer portal.' },
@@ -54,6 +60,7 @@ const TEMPLATES = [
     fixture: {
       first_name: 'Taylor',
       card_line: 'your Visa ending 4242',
+      charge_timing_line: "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.",
       authorization_text: 'By checking this box, I authorize Waves Pest Control, LLC to save this card and charge it for future service visits and invoices as agreed, until I revoke authorization…',
       customer_portal_url: 'https://portal.wavespestcontrol.com/login',
       company_email: BILLING_EMAIL,
@@ -63,17 +70,20 @@ const TEMPLATES = [
     key: 'cardhold.confirmation',
     name: 'Card on File — Visit Hold Confirmation',
     category: 'billing',
-    sensitivity: 'billing',
+    sensitivity: 'financial',
     stream: 'transactional_required',
     description: 'Sent when a one-time visit is booked with a card hold: nothing charged today, charged after completion; the fee line is SENDER-COMPOSED from the FROZEN hold-row terms (never live config). Gated behind GATE_CARD_ENROLLMENT_EMAILS.',
-    required: ['first_name', 'card_line', 'fee_line'],
+    required: ['first_name', 'card_line', 'fee_line', 'surcharge_line'],
     optional: [],
     subject: 'Your card securely holds your Waves visit — nothing charged today',
     preview: 'What your card on file covers for your upcoming visit.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, your visit is booked and {{card_line}} securely holds your appointment. Nothing is charged today.' },
       { type: 'heading', content: 'How your card is used' },
-      { type: 'paragraph', content: 'After your service is completed, your card is charged the final total you approved. {{fee_line}}' },
+      // surcharge_line is SENDER-COMPOSED from the canonical consent copy
+      // (Codex r3): the capture UI disclosed the card surcharge with the
+      // hold terms, so the customer's copy must carry the same term.
+      { type: 'paragraph', content: 'After your service is completed, your card is charged the final total you approved. {{fee_line}} {{surcharge_line}}' },
       { type: 'paragraph', content: "Rescheduling is always free — reply to your reminder text or call {{company_phone}} and we'll find a new time." },
       { type: 'cta', label: 'View my account', url_variable: 'customer_portal_url' },
       { type: 'signature', content: '— Waves Pest Control' },
@@ -82,6 +92,7 @@ const TEMPLATES = [
       first_name: 'Taylor',
       card_line: 'your Visa ending 4242',
       fee_line: 'A $49.00 fee applies only if you cancel within 24 hours of your visit or we cannot get access.',
+      surcharge_line: 'A credit card surcharge of up to 2.9% may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.',
       customer_portal_url: 'https://portal.wavespestcontrol.com/login',
       company_email: BILLING_EMAIL,
     },
@@ -203,3 +214,7 @@ exports.down = async function down(knex) {
     .whereIn('template_key', TEMPLATES.map((t) => t.key))
     .update({ status: 'archived', updated_at: new Date() });
 };
+
+// Test-only (knex ignores extra exports): lets the suite pin that every
+// seeded field stays inside the admin route's validation enums.
+exports._TEMPLATES = TEMPLATES;

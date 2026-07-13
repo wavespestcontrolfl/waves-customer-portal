@@ -16,18 +16,35 @@
  * === 'true' (owner flips — customer comms are owner-authorized only).
  * Best-effort by contract: callers fire-and-forget; a template/SendGrid
  * failure never affects enrollment or the accept. Idempotent per
- * (customer, method) / per estimate, so webhook-backstop re-runs and
- * accept retries can't double-send.
+ * (customer, method, consent version) / per estimate, so webhook-backstop
+ * re-runs, consent-row races, and accept retries can't double-send.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { getConsentText } = require('./payment-method-consent-text');
+const { CARD_CONSENT_TEXT } = require('./payment-method-consent-text');
+const {
+  consentVersionQualifiesForEnrollment,
+  NON_ENROLLMENT_CONSENT_SOURCES,
+} = require('./payment-method-consents');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const BILLING_EMAIL = 'billing@wavespestcontrol.com';
+
+// Quantified card-fee disclosure for the hold confirmation, extracted
+// VERBATIM from the canonical consent copy — the same derivation the
+// capture UI uses (PaymentPreferenceButtons.CARD_SURCHARGE_DISCLOSURE),
+// so the rate can never drift from the versioned consent module into a
+// second hardcoded constant (AGENTS.md classifies a disclosure figure
+// drifting from the server surcharge policy as a P0). Fail-safe: if the
+// consent copy is reworded so the phrase can't be extracted, disclose
+// unquantified rather than a possibly-stale number.
+const SURCHARGE_RATE_PHRASE = (CARD_CONSENT_TEXT.match(/up to \d+(?:\.\d+)?%/) || [])[0];
+const CARD_SURCHARGE_LINE = SURCHARGE_RATE_PHRASE
+  ? `A credit card surcharge of ${SURCHARGE_RATE_PHRASE} may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.`
+  : 'A credit card surcharge may apply; debit cards, prepaid cards, and bank transfers have no added card surcharge.';
 
 function emailsEnabled() {
   return process.env.GATE_CARD_ENROLLMENT_EMAILS === 'true';
@@ -56,6 +73,31 @@ async function loadCustomerEmail(customerId) {
   return { customer, email };
 }
 
+// The "How Auto Pay works" timing line must match the customer's actual
+// billing mode (Codex #2698 r3): monthly-billed accounts are charged
+// monthly_rate by the monthly billing cron, not after each visit, so the
+// per-service sentence would state the wrong timing/amount basis on their
+// authorization copy. Column-guarded like the autopay GET route —
+// pre-migration DBs default to the per-service copy.
+async function chargeTimingLine(customerId) {
+  let mode = null;
+  let monthlyRate = 0;
+  try {
+    const row = await db('customers').where({ id: customerId }).first('billing_mode', 'monthly_rate');
+    mode = row?.billing_mode || null;
+    monthlyRate = Number(row?.monthly_rate) || 0;
+  } catch { /* billing_mode column absent pre-migration */ }
+  if (mode === 'annual_prepay') {
+    // Term is prepaid; echo the consent's own scope rather than promising
+    // a charge cadence the annual flow doesn't have.
+    return 'Your card is charged for your service invoices as agreed, and you get a receipt every time.';
+  }
+  if (mode !== 'per_application' && monthlyRate > 0) {
+    return 'Your card is charged your monthly plan amount on your billing day each month, and you get a receipt every time.';
+  }
+  return "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.";
+}
+
 async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId } = {}) {
   try {
     if (!emailsEnabled() || !customerId || !paymentMethodRowId) return null;
@@ -80,17 +122,29 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
     // The customer's copy must be the EXACT text they agreed to — the
     // STORED ledger snapshot, not whatever copy is deployed at send time
     // (a consent-version wording bump must never rewrite history —
-    // Codex #2698 r1). getConsentText is only the fallback for a missing
-    // row (shouldn't happen: recordConsent precedes enrollment).
-    let authorizationText = null;
-    let consentRowId = null;
-    if (pm?.stripe_payment_method_id) {
-      const consentRow = await db('payment_method_consents')
-        .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
-        .orderBy('created_at', 'desc')
-        .first('id', 'consent_text_snapshot');
-      authorizationText = clean(consentRow?.consent_text_snapshot) || null;
-      consentRowId = consentRow?.id || null;
+    // Codex #2698 r1). The agreement of record is the newest ENROLLMENT-
+    // SCOPED, enrollment-QUALIFYING consent (Codex r3): hold-scoped rows
+    // ('estimate_card_hold') only authorize one visit's completion charge,
+    // and pre-v8 rows never authorized recurring charges — a later hold on
+    // the same card, or a legacy row, must never become "Your
+    // authorization" in this email. No qualifying row → NO send: an
+    // authorization copy is a copy of a stored agreement, never fabricated
+    // from the currently-deployed text.
+    if (!pm?.stripe_payment_method_id) {
+      logger.info(`[card-enrollment-email] no stripe payment method row for customer ${customerId}; autopay confirmation skipped (no agreement of record)`);
+      return null;
+    }
+    const consentRows = await db('payment_method_consents')
+      .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
+      .select('id', 'source', 'consent_text_version', 'consent_text_snapshot', 'created_at');
+    const consentRow = (consentRows || [])
+      .filter((r) => !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source)
+        && consentVersionQualifiesForEnrollment(r.consent_text_version)
+        && clean(r.consent_text_snapshot))
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
+    if (!consentRow) {
+      logger.info(`[card-enrollment-email] no enrollment-scoped consent for customer ${customerId}; autopay confirmation skipped (no agreement of record)`);
+      return null;
     }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'autopay.enrollment_confirmation',
@@ -98,21 +152,25 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
       payload: {
         first_name: clean(customer.first_name) || 'there',
         card_line: cardLineFor(pm),
-        authorization_text: authorizationText || getConsentText('card'),
+        charge_timing_line: await chargeTimingLine(customerId),
+        authorization_text: clean(consentRow.consent_text_snapshot),
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: BILLING_EMAIL,
       },
       recipientType: 'customer',
       recipientId: customerId,
-      // Keyed on the CONSENT ROW, not just (customer, method) — Codex
-      // #2698 r2: an opt-out keeps the payment_methods row, and a later
-      // re-authorization of the SAME card is a NEW agreement that owes a
-      // fresh copy (possibly with updated consent text). Backstop re-runs
-      // of the SAME enrollment still read the same newest consent row →
-      // same key → deduped.
-      idempotencyKey: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRowId || 'noconsent'}`,
-      triggerEventId: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRowId || 'noconsent'}`,
+      // Keyed on the CONSENT VERSION, not the row id (Codex r2 + r3): the
+      // browser /consent path and the Stripe webhook can race on the same
+      // SetupIntent and insert TWO rows for one authorization — both
+      // snapshot the same deployed version, so version-keying collapses
+      // the duplicate that row-id keying double-sent. The r2 behavior it
+      // must keep: a re-authorization under BUMPED consent copy is a new
+      // agreement → new version → fresh copy; a re-authorization under
+      // identical copy is deduped — the customer already holds a verbatim
+      // copy of that exact agreement for this card.
+      idempotencyKey: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
+      triggerEventId: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
       categories: ['autopay_enrollment_confirmation'],
       suppressProviderErrorLog: true,
     });
@@ -163,6 +221,9 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
         first_name: clean(customer.first_name) || 'there',
         card_line: cardLineFor(pm),
         fee_line: feeLine,
+        // The capture UI disclosed the card surcharge alongside the hold
+        // terms (Codex r3) — the customer's copy must carry the same term.
+        surcharge_line: CARD_SURCHARGE_LINE,
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: BILLING_EMAIL,

@@ -183,4 +183,5 @@ module.exports = {
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),
+  NON_ENROLLMENT_CONSENT_SOURCES,
 };
