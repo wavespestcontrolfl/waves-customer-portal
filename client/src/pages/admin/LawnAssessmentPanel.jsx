@@ -96,7 +96,10 @@ const EMPTY_TURF_PROFILE = {
   active: true,
 };
 
-export default function LawnAssessmentPanel() {
+// `embedded` — rendered as the "Field Assessment" tab inside
+// AssessmentsHubPage: the hub owns the AdminCommandHeader, so skip ours and
+// render the Back action as an inline button instead.
+export default function LawnAssessmentPanel({ embedded = false }) {
   // 'profile' step lets the tech edit a customer's turf profile from
   // the lawn-care surface — feeds the WaveGuard plan engine later.
   const [step, setStep] = useState("select"); // select, capture, analyzing, review, history, profile
@@ -365,12 +368,19 @@ export default function LawnAssessmentPanel() {
   const updateProfileField = (key, value) =>
     setTurfProfile((prev) => ({ ...prev, [key]: value }));
 
+  const backToSelect = () => {
+    setStep("select");
+    setPhotos([]);
+    setResult(null);
+    setAssessmentConfirmed(false);
+  };
+
   // First-use guide
   if (showGuide) {
     return (
       <div>
         {" "}
-        <AdminCommandHeader title="Lawn Assessment" icon={Leaf} />{" "}
+        {!embedded && <AdminCommandHeader title="Lawn Assessment" icon={Leaf} />}{" "}
         <div
           style={{
             ...cardStyle,
@@ -427,25 +437,37 @@ export default function LawnAssessmentPanel() {
   return (
     <div>
       {" "}
-      <AdminCommandHeader
-        title="Lawn Assessment"
-        icon={Leaf}
-        action={
-          step !== "select"
-            ? {
-                label: "Back",
-                icon: ArrowLeft,
-                variant: "secondary",
-                onClick: () => {
-                  setStep("select");
-                  setPhotos([]);
-                  setResult(null);
-                  setAssessmentConfirmed(false);
-                },
-              }
-            : null
-        }
-      />
+      {embedded ? (
+        step !== "select" && (
+          <button
+            onClick={backToSelect}
+            style={{
+              ...btnOutline,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              marginBottom: 12,
+            }}
+          >
+            <ArrowLeft size={14} /> Back
+          </button>
+        )
+      ) : (
+        <AdminCommandHeader
+          title="Lawn Assessment"
+          icon={Leaf}
+          action={
+            step !== "select"
+              ? {
+                  label: "Back",
+                  icon: ArrowLeft,
+                  variant: "secondary",
+                  onClick: backToSelect,
+                }
+              : null
+          }
+        />
+      )}
       {/* STEP 1: Select Customer */}
       {step === "select" && (
         <div>

@@ -2043,7 +2043,7 @@ router.get('/lawn/command-center', async (req, res, next) => {
         fieldExecution: [
           bridgeLink('/admin/dispatch?tab=schedule', 'Appointments', 'Protocol closeout checklist is enforced on lawn appointments.'),
           bridgeLink('/admin/equipment?tab=calibrations', 'Calibration', 'Keep tank and backpack carrier rates current.'),
-          bridgeLink('/admin/lawn-assessment', 'Lawn Assessment', 'Capture turf, irrigation, thatch, pest, disease, and chronic decline inputs.'),
+          bridgeLink('/admin/lawn-assessments?tab=field', 'Field Assessment', 'Capture turf, irrigation, thatch, pest, disease, and chronic decline inputs.'),
         ],
         officeControl: [
           bridgeLink('/admin/inventory?tab=protocols', 'Inventory Protocols', 'Map products, cost, stock, labels, and reorder status.'),

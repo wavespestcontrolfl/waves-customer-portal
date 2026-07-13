@@ -27,7 +27,7 @@ import {
   ChevronRight,
   Bot,
   Sprout,
-  Leaf,
+  Camera,
   Newspaper,
   Send,
 } from "lucide-react";
@@ -62,14 +62,15 @@ const SECTIONS = [
       { path: "/admin/social-media", icon: Share2, label: "Social Media" },
       { path: "/admin/blog", icon: Newspaper, label: "Blog" },
       { path: "/admin/newsletter", icon: Send, label: "Newsletter" },
+      // Consolidated assessments hub — Lead Magnets tab + Field Assessment
+      // tab (the old standalone /admin/lawn-assessment flow). Mirrors the
+      // desktop sidebar's Marketing entry.
+      { path: "/admin/lawn-assessments", icon: Camera, label: "Assessments" },
     ],
   },
   {
     section: "Field & Equipment",
     items: [
-      // Restored alongside the desktop sidebar entry — the photo-scoring
-      // assessment flow lost its nav link in the V2 shell cutover.
-      { path: "/admin/lawn-assessment", icon: Leaf, label: "Lawn Assessment" },
       { path: "/admin/equipment", icon: Wrench, label: "Equipment" },
       { path: "/admin/turf-height", icon: Sprout, label: "Turf Height Review" },
       { path: "/admin/inventory", icon: Package, label: "Inventory" },
