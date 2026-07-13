@@ -118,11 +118,16 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
   // GATE_CARD_ENROLLMENT_EMAILS): the customer's copy of the authorization
   // they just granted — card-network stored-credential guidance. Fresh
   // enrollments only (already_enrolled returned above); fire-and-forget,
-  // never blocks or fails the enrollment.
-  try {
-    const { sendAutopayEnrollmentConfirmation } = require('./card-enrollment-email');
-    void sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId: target.id });
-  } catch { /* best-effort */ }
+  // never blocks or fails the enrollment. Sent ONLY when the enrolled
+  // target IS the method in charge (Codex #2698 r1): with a healthy
+  // incumbent kept in the default role, the email's "your card is
+  // charged after each completed service" would describe the WRONG card.
+  if (String(target.id) === String(inChargeMethodId)) {
+    try {
+      const { sendAutopayEnrollmentConfirmation } = require('./card-enrollment-email');
+      void sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId: target.id });
+    } catch { /* best-effort */ }
+  }
   return { enrolled: true, methodId: target.id, inChargeMethodId };
 }
 

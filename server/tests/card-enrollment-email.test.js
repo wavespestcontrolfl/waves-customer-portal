@@ -65,22 +65,36 @@ describe('autopay enrollment confirmation (gate on)', () => {
     process.env.GATE_CARD_ENROLLMENT_EMAILS = 'true';
     state.tables = {
       customers: [CUSTOMER],
-      payment_methods: [{ id: 'pm-1', card_brand: 'visa', last_four: '4242', method_type: 'card' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_stripe_1', card_brand: 'visa', last_four: '4242', method_type: 'card' }],
+      payment_method_consents: [{ consent_text_snapshot: 'SNAPSHOT: the exact text the customer agreed to (v9)' }],
     };
   });
   afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
 
-  test('sends the card consent text verbatim with the card line', async () => {
+  test('sends the STORED consent snapshot with the card line (never the deployed text — Codex r1)', async () => {
     await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
     const call = mockSendTemplate.mock.calls[0][0];
     expect(call.templateKey).toBe('autopay.enrollment_confirmation');
     expect(call.to).toBe('taylor@example.com');
     expect(call.payload.card_line).toBe('your Visa ending 4242');
-    // The customer's copy is the EXACT locked text the checkbox rendered.
-    expect(call.payload.authorization_text).toBe(getConsentText('card'));
+    // The customer's copy is what THEY agreed to — the ledger snapshot; a
+    // later consent-version wording bump must never rewrite their copy.
+    expect(call.payload.authorization_text).toBe('SNAPSHOT: the exact text the customer agreed to (v9)');
     expect(call.payload.company_email).toBe('billing@wavespestcontrol.com');
     expect(call.idempotencyKey).toBe('autopay.enrollment_confirmation:cust-1:pm-1');
+  });
+
+  test('falls back to the current card text only when no consent row exists', async () => {
+    state.tables.payment_method_consents = [];
+    await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(mockSendTemplate.mock.calls[0][0].payload.authorization_text).toBe(getConsentText('card'));
+  });
+
+  test('non-card methods are skipped — the card template must never describe a bank account (Codex r1)', async () => {
+    state.tables.payment_methods = [{ id: 'pm-1', stripe_payment_method_id: 'pm_bank_1', method_type: 'ach' }];
+    expect(await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
   test('no usable email → skip without sending', async () => {

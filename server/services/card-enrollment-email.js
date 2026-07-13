@@ -66,17 +66,37 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
     }
     const pm = await db('payment_methods')
       .where({ id: paymentMethodRowId, customer_id: customerId })
-      .first('id', 'card_brand', 'last_four', 'method_type');
+      .first('id', 'stripe_payment_method_id', 'card_brand', 'last_four', 'method_type');
+    // CARD-ONLY template (Codex #2698 r1): an ACH/bank enrollment reaching
+    // this hook (pay-page saves already support us_bank_account) would get
+    // "your card is charged" wording over the ACH debit authorization —
+    // wrong on both counts. The bank variant ships with the scoped portal
+    // ACH lane (its own owner-approved template); skip it here.
+    const methodType = clean(pm?.method_type || 'card').toLowerCase();
+    if (pm && methodType !== 'card') {
+      logger.info(`[card-enrollment-email] non-card method (${methodType}) for customer ${customerId}; autopay confirmation skipped (card template only)`);
+      return null;
+    }
+    // The customer's copy must be the EXACT text they agreed to — the
+    // STORED ledger snapshot, not whatever copy is deployed at send time
+    // (a consent-version wording bump must never rewrite history —
+    // Codex #2698 r1). getConsentText is only the fallback for a missing
+    // row (shouldn't happen: recordConsent precedes enrollment).
+    let authorizationText = null;
+    if (pm?.stripe_payment_method_id) {
+      const consentRow = await db('payment_method_consents')
+        .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
+        .orderBy('created_at', 'desc')
+        .first('consent_text_snapshot');
+      authorizationText = clean(consentRow?.consent_text_snapshot) || null;
+    }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'autopay.enrollment_confirmation',
       to: email,
       payload: {
         first_name: clean(customer.first_name) || 'there',
         card_line: cardLineFor(pm),
-        // The customer's copy of the EXACT authorization they agreed to —
-        // per method type, from the same locked module the checkbox
-        // rendered and the consent ledger snapshotted.
-        authorization_text: getConsentText(pm?.method_type || 'card'),
+        authorization_text: authorizationText || getConsentText('card'),
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: BILLING_EMAIL,
