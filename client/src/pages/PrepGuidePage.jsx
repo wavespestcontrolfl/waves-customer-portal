@@ -247,16 +247,19 @@ export default function PrepGuidePage() {
             {(() => {
               // Same contact block as the report/estimate heroes: name /
               // email / phone / address, one line each, empties dropped.
+              // Service-contact accounts get both full names (invoicee +
+              // tenant/buyer) and null email/phone from the server.
               const digits = String(data.customerPhone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
               const phone = digits.length === 10
                 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
                 : data.customerPhone;
-              const contactLines = [
+              const contactLines = [...new Set([
                 data.customerName,
+                ...(data.serviceContactNames || []),
                 data.customerEmail,
                 phone,
                 data.propertyAddress,
-              ].map((line) => String(line || '').trim()).filter(Boolean);
+              ].map((line) => String(line || '').trim()).filter(Boolean))];
               return contactLines.length ? (
                 <div style={{ margin: `${SP.sm}px 0 ${SP.xl}px`, display: 'grid', gap: SP.xxs }}>
                   {contactLines.map((line) => (

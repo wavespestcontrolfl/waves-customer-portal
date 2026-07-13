@@ -20,6 +20,18 @@ const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { getServiceContactSlots, hasDistinctServiceContact } = require('../services/customer-contact');
+
+// Full names of the configured service-contact slots — same shape as the
+// tracker's contact block (track-public.js).
+function serviceContactNamesOf(customer) {
+  return [...new Set(
+    getServiceContactSlots(customer)
+      .filter((slot) => slot.phone || slot.email)
+      .map((slot) => slot.name)
+      .filter(Boolean),
+  )];
+}
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -226,16 +238,21 @@ router.get('/:token', async (req, res) => {
       prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
     }).catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
 
+    const hasServiceContact = hasDistinctServiceContact(customer);
+
     return res.json({
       customerFirstName,
-      // Contact block (owner 2026-07-09): the prep page renders the same
-      // name / email / phone / address lines as the report heroes. Email
-      // and phone are shown in full per owner decision (2026-07-13) — the
-      // token link is the gate, matching the tracker payload
-      // (track-public.js). PrepGuidePage formats the phone for display.
+      // Contact block (owner 2026-07-13): full name / email / phone /
+      // address — the token link is the gate, matching the tracker payload
+      // (track-public.js). EXCEPT when the account has a distinct service
+      // contact (tenant / home buyer / property manager): prep guides are
+      // emailed to that third party, so the block then shows both full
+      // names (invoicee + service contact) and drops the primary's
+      // email/phone (codex P1, PR #2715). PrepGuidePage formats the phone.
       customerName: vars.customer_name,
-      customerEmail: String(customer?.email || '').trim() || null,
-      customerPhone: String(customer?.phone || '').trim() || null,
+      serviceContactNames: hasServiceContact ? serviceContactNamesOf(customer) : [],
+      customerEmail: hasServiceContact ? null : (String(customer?.email || '').trim() || null),
+      customerPhone: hasServiceContact ? null : (String(customer?.phone || '').trim() || null),
       projectTypeLabel: typeLabel,
       serviceDate,
       propertyAddress,

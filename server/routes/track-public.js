@@ -43,6 +43,11 @@ const {
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const {
+  SERVICE_CONTACT_COLUMNS,
+  getServiceContactSlots,
+  hasDistinctServiceContact,
+} = require('../services/customer-contact');
 
 // If tech_status hasn't been pinged in this long, hide coords so the
 // customer page shows its no-map reconnecting state instead of a stale dot.
@@ -86,6 +91,35 @@ function formatPhoneDisplay(raw) {
   const d = digits.length === 11 && digits[0] === '1' ? digits.slice(1) : digits;
   if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
   return String(raw).trim() || null;
+}
+
+// Full names of the configured service-contact slots, for the identity
+// block when the account has a distinct service contact.
+function serviceContactNamesOf(customerRow) {
+  return [...new Set(
+    getServiceContactSlots(customerRow)
+      .filter((slot) => slot.phone || slot.email)
+      .map((slot) => slot.name)
+      .filter(Boolean),
+  )];
+}
+
+function buildCustomerBlock(row) {
+  const name = [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null;
+  if (hasDistinctServiceContact(row)) {
+    return {
+      name,
+      serviceContactNames: serviceContactNamesOf(row),
+      email: null,
+      phone: null,
+    };
+  }
+  return {
+    name,
+    serviceContactNames: [],
+    email: String(row.cust_email || '').trim() || null,
+    phone: formatPhoneDisplay(row.cust_phone),
+  };
 }
 
 function composeWindowIso(scheduledDate, windowTime) {
@@ -330,6 +364,11 @@ router.get('/:token', async (req, res, next) => {
         'c.last_name as cust_last_name',
         'c.email as cust_email',
         'c.phone as cust_phone',
+        // Service-contact slots (unaliased — getServiceContactSlots reads
+        // the raw column names) gate the contact block below: this link is
+        // texted to service contacts too, so their presence hides the
+        // primary's email/phone.
+        ...SERVICE_CONTACT_COLUMNS.map((col) => `c.${col}`),
         db.raw('COALESCE(s.service_address_line1, c.address_line1) as address_line1'),
         db.raw(`${stampedLine2Sql('s', 'c')} as address_line2`),
         db.raw('COALESCE(s.service_address_city, c.city) as city'),
@@ -423,15 +462,14 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
-      // Client identity block for the card. Name, address, email, and phone
-      // all ride the same trusted track-token boundary — shown in full per
-      // owner decision (2026-07-13); the token link is the only gate, same
-      // as the full property address above.
-      customer: {
-        name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
-        email: String(row.cust_email || '').trim() || null,
-        phone: formatPhoneDisplay(row.cust_phone),
-      },
+      // Client identity block for the card (owner 2026-07-13): full name,
+      // address, email, and phone — the token link is the only gate, same
+      // as the full property address above. EXCEPT when the account has a
+      // distinct service contact (tenant / home buyer / property manager):
+      // the en-route SMS sends this same link to that third party, so the
+      // card then shows both full names (invoicee + service contact) and
+      // drops the primary's email/phone (codex P1, PR #2715).
+      customer: buildCustomerBlock(row),
       prepToken: null,
       meta: {
         pollIntervalSeconds: customerState === 'en_route' ? EN_ROUTE_POLL_SECONDS : 0,

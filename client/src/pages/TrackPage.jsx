@@ -362,16 +362,22 @@ function TechBlock({ tech, size = 'md' }) {
 
 // Client identity block (owner spec 2026-07-06): replaces the old
 // "Today's visit" service-description/window/address meta — the card
-// shows WHO the visit is for (name, address, email, phone).
+// shows WHO the visit is for (name, address, email, phone). Accounts with
+// a service contact (tenant / home buyer / property manager) get both full
+// names instead of email/phone — the server sends those as null then.
 function ClientMeta({ data }) {
   const c = data.customer || {};
+  const contactNames = (c.serviceContactNames || []).filter((name) => name && name !== c.name);
   const addrLines = fullAddressLines(data.property);
-  if (!c.name && addrLines.length === 0 && !c.email && !c.phone) return null;
+  if (!c.name && contactNames.length === 0 && addrLines.length === 0 && !c.email && !c.phone) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
       {c.name ? (
         <div style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{c.name}</div>
       ) : null}
+      {contactNames.map((name) => (
+        <div key={name} style={{ fontSize: 16, fontWeight: 600, color: TRACK_SURFACE.text }}>{name}</div>
+      ))}
       {addrLines.length > 0 ? (
         <div style={{ fontSize: 14, color: TRACK_SURFACE.body, marginTop: 6, lineHeight: 1.5 }}>
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
