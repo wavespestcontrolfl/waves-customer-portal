@@ -13,9 +13,10 @@
  *      (batch_id groups an event), carrying the page token and delivery
  *      state. Delivery records live here + email/sms logs.
  *   2. billing.price_change_notice email template (Email Template Library,
- *      service_operational stream — a billing-terms notice must always
- *      deliver). Short body + CTA button per owner wording; NEVER uses
- *      "renewal" language.
+ *      transactional_required stream — the only stream the library exempts
+ *      from group unsubscribes; a billing-terms notice must always deliver,
+ *      like invoice.receipt/invoice.sent). Short body + CTA button per
+ *      owner wording; NEVER uses "renewal" language.
  *   3. price_change_notice SMS template (editable in SMS Templates admin).
  *
  * Idempotent: table guarded by hasTable; the email upsert seeds this copy
@@ -79,8 +80,8 @@ function templateRow(t) {
     audience: 'customer',
     message_priority: 'normal',
     content_sensitivity: 'service',
-    send_stream: 'service_operational',
-    suppression_group_key: 'service_operational',
+    send_stream: 'transactional_required',
+    suppression_group_key: 'transactional_required',
     layout_wrapper_id: 'service_default_v1',
     from_name: 'Waves Pest Control',
     from_email: SERVICE_FROM,
@@ -158,7 +159,7 @@ exports.up = async function up(knex) {
       t.string('cadence_label', 40).notNullable().defaultTo('month');
       t.date('effective_date').notNullable();
       t.string('notice_token', 64).notNullable().unique();
-      t.string('status', 20).notNullable().defaultTo('draft'); // draft | sending | sent | viewed
+      t.string('status', 20).notNullable().defaultTo('draft'); // draft | sending | sent | viewed | unreachable
       t.boolean('email_sent').notNullable().defaultTo(false);
       t.boolean('sms_sent').notNullable().defaultTo(false);
       t.timestamp('sent_at');

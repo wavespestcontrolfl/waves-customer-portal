@@ -19,9 +19,15 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
 }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getActivelyCoveredCustomerIds: jest.fn(async () => []),
+  getPaymentPendingCustomerIds: jest.fn(async () => []),
+}));
 
+const crypto = require('crypto');
 const db = require('../models/db');
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
+const { getActivelyCoveredCustomerIds, getPaymentPendingCustomerIds } = require('../services/annual-prepay-renewals');
 const { sendTemplate } = require('../services/email-template-library');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -32,6 +38,7 @@ let noticeInserts;
 let noticeUpdates;
 let activityInserts;
 let customersUpdateCalls;
+let customersWhereNotInCalls;
 let existingNoticeRow;
 let insertConflict;
 let claimRejected;
@@ -42,6 +49,7 @@ function customersQuery() {
     where: jest.fn(() => q),
     whereRaw: jest.fn(() => q),
     whereNull: jest.fn(() => q),
+    whereNotIn: jest.fn((...args) => { customersWhereNotInCalls.push(args); return q; }),
     orWhere: jest.fn(() => q),
     select: jest.fn(() => q),
     orderBy: jest.fn(() => q),
@@ -50,6 +58,8 @@ function customersQuery() {
   };
   return q;
 }
+
+const emailKeyHash = (email) => crypto.createHash('sha256').update(email).digest('hex').slice(0, 10);
 
 function noticesQuery() {
   const q = {
@@ -96,9 +106,12 @@ beforeEach(() => {
   noticeUpdates = [];
   activityInserts = [];
   customersUpdateCalls = [];
+  customersWhereNotInCalls = [];
   existingNoticeRow = null;
   insertConflict = false;
   claimRejected = false;
+  getActivelyCoveredCustomerIds.mockResolvedValue([]);
+  getPaymentPendingCustomerIds.mockResolvedValue([]);
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'price_change_notices') return noticesQuery();
@@ -228,8 +241,10 @@ describe('createAndSendBatch delivery', () => {
 
     const emailArgs = sendTemplate.mock.calls[0][0];
     expect(emailArgs.templateKey).toBe('billing.price_change_notice');
-    // Stable across retry batches — keyed to the change event, not batch_id.
-    expect(emailArgs.idempotencyKey).toBe('price_change:c-1:2026-08-15:4900:5200');
+    // Stable across retry batches — keyed to the change event + resolved
+    // recipient (a corrected address mints a fresh key), never batch_id.
+    expect(emailArgs.idempotencyKey).toBe(`price_change:c-1:2026-08-15:4900:5200:${emailKeyHash('pat@example.com')}`);
+    expect(emailArgs.suppressionGroupKey).toBe('transactional_required');
     expect(emailArgs.payload.price_change_url).toBe(`https://portal.test/price-change/${row.notice_token}`);
     expect(emailArgs.payload).toMatchObject({ current_price: '$49', new_price: '$52' });
 
@@ -256,12 +271,51 @@ describe('createAndSendBatch delivery', () => {
     expect(sendCustomerMessage.mock.calls[0][0].hasEmailLeg).toBe(false);
   });
 
-  it('counts customers with neither leg delivered as unreachable, still keeping the notice row', async () => {
+  it('parks true no-contact customers as unreachable — claimable later, never sent', async () => {
     customerRows = [{ ...CUSTOMER, email: '', phone: '' }];
     getInvoiceEmailRecipients.mockReturnValue([]);
     const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
-    expect(out).toMatchObject({ ok: true, created: 1, emailed: 0, texted: 0, unreachable: 1 });
-    expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: false, sms_sent: false, status: 'sent' });
+    expect(out).toMatchObject({ ok: true, created: 1, emailed: 0, texted: 0, unreachable: 1, failed: 0 });
+    expect(noticeUpdates.at(-1)).toMatchObject({ status: 'unreachable' });
+    expect(noticeUpdates.some((u) => u.status === 'sent')).toBe(false);
+  });
+
+  it('parks policy-blocked legs as unreachable, not eternally-failing drafts', async () => {
+    // Phone-only customer whose SMS is policy-blocked (STOP/pref) — a rerun
+    // cannot fix it, so it must not sit in the retryable failed class.
+    customerRows = [{ ...CUSTOMER, email: '' }];
+    getInvoiceEmailRecipients.mockReturnValue([]);
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED' });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 1, unreachable: 1, failed: 0 });
+    expect(noticeUpdates.at(-1)).toMatchObject({ status: 'unreachable' });
+  });
+
+  it('parks a bounce-suppressed email-only customer as unreachable', async () => {
+    customerRows = [{ ...CUSTOMER, phone: '' }];
+    sendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'Email suppressed' });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 1, unreachable: 1, failed: 0 });
+    expect(noticeUpdates.at(-1)).toMatchObject({ status: 'unreachable' });
+  });
+
+  it('re-attempts an unreachable row once contact info exists', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-unreach', status: 'unreachable', notice_token: 'feedfacefeedfacefeedfacefeedface',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 1, texted: 1, alreadyNotified: 0 });
+    expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
+  });
+
+  it('excludes customers covered by active or pending annual-prepay terms', async () => {
+    customerRows = [CUSTOMER];
+    getActivelyCoveredCustomerIds.mockResolvedValue(['ap-1']);
+    getPaymentPendingCustomerIds.mockResolvedValue(['ap-2']);
+    await previewPriceChange({ increase: GOOD_ARGS.increase });
+    expect(customersWhereNotInCalls).toContainEqual(['id', ['ap-1', 'ap-2']]);
   });
 
   it('skips customers already notified of the same change event on retry', async () => {
@@ -334,7 +388,7 @@ describe('createAndSendBatch delivery', () => {
     expect(noticeInserts).toHaveLength(0);
     const emailArgs = sendTemplate.mock.calls[0][0];
     expect(emailArgs.payload.price_change_url).toBe('https://portal.test/price-change/feedfacefeedfacefeedfacefeedface');
-    expect(emailArgs.idempotencyKey).toBe('price_change:c-1:2026-08-15:4900:5200');
+    expect(emailArgs.idempotencyKey).toBe(`price_change:c-1:2026-08-15:4900:5200:${emailKeyHash('pat@example.com')}`);
     expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
   });
 

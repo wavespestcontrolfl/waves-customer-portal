@@ -9,7 +9,7 @@
  *              price per customer (percent or flat-dollar adjustment on
  *              monthly_rate);
  *   confirm  → per-customer notice rows (tokened page), short email
- *              (billing.price_change_notice, service_operational stream —
+ *              (billing.price_change_notice, transactional_required stream —
  *              a billing-terms notice must always deliver) + SMS, both
  *              linking to /price-change/:token; delivery flags + activity
  *              log retained.
@@ -51,7 +51,7 @@ function formatMoney(cents) {
 // both preview and send. If the cron's eligibility changes, change this too.
 // Location scoping mirrors the segment-send rules: stored office first, city
 // routing for null-location rows, Bradenton as the default bucket.
-function targetsQuery({ locationId = null } = {}) {
+function targetsQuery({ locationId = null, excludeCustomerIds = [] } = {}) {
   let q = db('customers')
     .where({ active: true })
     .where('monthly_rate', '>', 0)
@@ -63,6 +63,7 @@ function targetsQuery({ locationId = null } = {}) {
     .where(function monthlyBilledOnly() {
       this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
     });
+  if (excludeCustomerIds.length) q = q.whereNotIn('id', excludeCustomerIds);
   if (locationId) {
     q = q.where(function locationMatch() {
       this.where('nearest_location_id', locationId)
@@ -83,6 +84,19 @@ function targetsQuery({ locationId = null } = {}) {
     });
   }
   return q;
+}
+
+// The billing cron also suppresses monthly charges for customers whose
+// annual-prepay TERM is active or payment-pending, regardless of
+// billing_mode (pre-existing terms were never billing_mode-backfilled).
+// Those customers must not get a "per month" notice either.
+async function annualPrepayExcludedIds() {
+  const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+  const [covered, pending] = await Promise.all([
+    AnnualPrepayRenewals.getActivelyCoveredCustomerIds(etDateString()),
+    AnnualPrepayRenewals.getPaymentPendingCustomerIds(),
+  ]);
+  return [...new Set([...(covered || []), ...(pending || [])])];
 }
 
 function parseIncrease(increase) {
@@ -142,7 +156,8 @@ function previewDigest(rows) {
 async function previewPriceChange({ locationId = null, increase } = {}) {
   const inc = parseIncrease(increase);
   const loc = parseLocation(locationId);
-  const customers = await targetsQuery({ locationId: loc })
+  const excludeCustomerIds = await annualPrepayExcludedIds();
+  const customers = await targetsQuery({ locationId: loc, excludeCustomerIds })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'monthly_rate')
     .orderBy('last_name', 'asc')
     .orderBy('first_name', 'asc');
@@ -178,10 +193,14 @@ function validateEffectiveDate(effectiveDate) {
 
 // Returns { sent, attempted }. attempted=true means a real recipient was
 // resolved (primary OR billing contact via getInvoiceEmailRecipients) and
-// the failure was at the provider/template layer — the retryability
-// decision must be based on the recipient actually used for the send, not
-// on customers.email alone (billing-email-only customers are reachable).
-async function sendNoticeEmail({ customer, idempotencyKey, vars }) {
+// the failure was at the provider/template layer — that is the retryable
+// class. A suppression BLOCK (library refuses pre-provider: global bounce
+// / do-not-email; the library already fires the office "collect a working
+// address" alert) returns attempted=false: rerunning cannot fix it, only
+// a corrected address can — and because the idempotency key includes the
+// resolved recipient, a corrected address mints a fresh key and sends,
+// while same-address retries keep deduping against the prior attempt.
+async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
   let attempted = false;
   try {
     const EmailTemplateLibrary = require('./email-template-library');
@@ -190,15 +209,20 @@ async function sendNoticeEmail({ customer, idempotencyKey, vars }) {
     const to = String(recipient?.email || '').trim();
     if (!to || !to.includes('@')) return { sent: false, attempted: false };
     attempted = true;
+    const recipientHash = crypto.createHash('sha256').update(to.toLowerCase()).digest('hex').slice(0, 10);
     const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'billing.price_change_notice',
       to,
       recipientType: 'customer',
       recipientId: customer.id,
-      suppressionGroupKey: 'service_operational',
+      // Required billing-terms notice: transactional_required is the only
+      // stream the library exempts from group unsubscribes — an optional
+      // -stream suppression must not block a customer's advance notice
+      // (global bounce suppression still blocks, correctly).
+      suppressionGroupKey: 'transactional_required',
       categories: ['billing', 'price_change_notice'],
-      idempotencyKey,
+      idempotencyKey: `${idempotencyKeyBase}:${recipientHash}`,
       suppressProviderErrorLog: true,
       payload: {
         ...vars,
@@ -207,6 +231,7 @@ async function sendNoticeEmail({ customer, idempotencyKey, vars }) {
         company_email: SERVICE_EMAIL,
       },
     });
+    if (result?.blocked) return { sent: false, attempted: false };
     return { sent: !!result?.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] email failed for customer ${customer.id} (${err?.name || 'Error'})`);
@@ -245,6 +270,10 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg }) {
       hasEmailLeg: !!hasEmailLeg,
       metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined },
     });
+    // A policy block (sms_enabled=false, STOP suppression, billing pref)
+    // is not a provider failure — rerunning cannot deliver it, so it must
+    // not hold the notice in the retryable class forever.
+    if (res.blocked) return { sent: false, attempted: false };
     return { sent: !!res.sent, attempted };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
@@ -258,7 +287,8 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   const effective = validateEffectiveDate(effectiveDate);
   const cadence = String(cadenceLabel || 'month').slice(0, 40);
 
-  const customers = await targetsQuery({ locationId: loc })
+  const excludeCustomerIds = await annualPrepayExcludedIds();
+  const customers = await targetsQuery({ locationId: loc, excludeCustomerIds })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'monthly_rate')
     .orderBy('id', 'asc');
 
@@ -342,7 +372,10 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         const claimed = await db('price_change_notices')
           .where({ id: notice.id })
           .where(function claimable() {
-            this.where({ status: 'draft' })
+            // 'unreachable' stays claimable: if the office later adds a
+            // phone/email or clears a block, rerunning the same change
+            // re-attempts delivery instead of skipping the customer.
+            this.whereIn('status', ['draft', 'unreachable'])
               .orWhere(function staleSending() {
                 this.where({ status: 'sending' })
                   .where('updated_at', '<', new Date(Date.now() - CLAIM_STALE_MS));
@@ -364,24 +397,34 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         };
         // Keyed to the change event (stable across retry batches) so the
         // email library dedupes even if a crash left the row in 'draft'
-        // after the email went out.
-        const idempotencyKey = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
-        const email = await sendNoticeEmail({ customer, idempotencyKey, vars });
+        // after the email went out; the email leg appends a hash of the
+        // resolved recipient so a corrected address sends fresh.
+        const idempotencyKeyBase = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
+        const email = await sendNoticeEmail({ customer, idempotencyKeyBase, vars });
         const sms = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: email.sent });
         if (email.sent) summary.emailed += 1;
         if (sms.sent) summary.texted += 1;
 
-        if (!email.sent && !sms.sent && (email.attempted || sms.attempted)) {
-          // A resolvable recipient (incl. billing-contact email) with zero
-          // delivered legs is a provider or template failure, not
-          // no-contact — release the claim back to 'draft' so a retry of
-          // the same change resumes it instead of skipping a customer who
-          // never got their advance notice.
-          summary.failed += 1;
-          await db('price_change_notices').where({ id: notice.id }).update({ status: 'draft', updated_at: new Date() });
+        if (!email.sent && !sms.sent) {
+          if (email.attempted || sms.attempted) {
+            // A resolvable recipient (incl. billing-contact email) with
+            // zero delivered legs is a provider or template failure —
+            // release the claim back to 'draft' so a retry of the same
+            // change resumes it instead of skipping a customer who never
+            // got their advance notice.
+            summary.failed += 1;
+            await db('price_change_notices').where({ id: notice.id }).update({ status: 'draft', updated_at: new Date() });
+          } else {
+            // No contact at all, or every leg policy-blocked (bounce
+            // suppression, STOP). NOT 'sent' — the row stays claimable so
+            // adding contact info and rerunning the same change delivers;
+            // until then it surfaces in the unreachable count for office
+            // follow-up.
+            summary.unreachable += 1;
+            await db('price_change_notices').where({ id: notice.id }).update({ status: 'unreachable', updated_at: new Date() });
+          }
           return;
         }
-        if (!email.sent && !sms.sent) summary.unreachable += 1;
 
         await db('price_change_notices').where({ id: notice.id }).update({
           email_sent: email.sent,
