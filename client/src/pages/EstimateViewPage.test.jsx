@@ -133,7 +133,7 @@ describe('ServiceSection', () => {
       />,
     );
 
-    expect(screen.getByText('$72')).toBeInTheDocument();
+    expect(screen.getByText('$72.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
     // The "Service visits: …" cadence line was removed per owner directive.
     expect(screen.queryByText(/Service visits:/)).not.toBeInTheDocument();
@@ -182,7 +182,7 @@ describe('ServiceSection', () => {
     // Net per-application headline with the struck pre-discount anchor —
     // never a /mo rate. (The treatment row restates the price, hence AllBy.)
     expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('$79 / application')).toBeInTheDocument();
+    expect(screen.getByText('$79.00 / application')).toBeInTheDocument();
     expect(screen.queryByText('/mo')).not.toBeInTheDocument();
     expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
   });
@@ -190,8 +190,8 @@ describe('ServiceSection', () => {
   it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
     // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
     // itemizes only the pest slice as a treatment row. The card must lead with
-    // the combined recurring total ($130/mo), NOT the lone pest per-application
-    // price ($94) — accept/billing charges the bundle total.
+    // the combined recurring total ($130.00/mo), NOT the lone pest per-application
+    // price ($94.00) — accept/billing charges the bundle total.
     render(
       <ServiceSection
         section={{
@@ -226,9 +226,9 @@ describe('ServiceSection', () => {
 
     // Combined cadence total leads with a standalone "/mo" suffix. Were the
     // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) plus a "Billed $130/mo, spread across
+    // pest price ("/ application" suffix) plus a "Billed $130.00/mo, spread across
     // the year" note — so the note's absence is the real discriminator.
-    expect(screen.getByText('$130')).toBeInTheDocument();
+    expect(screen.getByText('$130.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
     expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
   });
@@ -299,7 +299,7 @@ describe('OneTimeBreakdownCard', () => {
       />,
     );
 
-    expect(screen.getByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).toBeInTheDocument();
+    expect(screen.getByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).toBeInTheDocument();
     expect(screen.getByText(/waived when you pay the year in full/i)).toBeInTheDocument();
   });
 
@@ -328,9 +328,9 @@ describe('OneTimeBreakdownCard', () => {
     );
 
     expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
-    // Both the row amount and the one-time total render plain $99 — no asterisk.
-    expect(screen.getAllByText('$99').length).toBe(2);
-    expect(screen.queryByText((_, el) => el?.textContent === '$99*' && el?.children.length === 0)).not.toBeInTheDocument();
+    // Both the row amount and the one-time total render plain $99.00 — no asterisk.
+    expect(screen.getAllByText('$99.00').length).toBe(2);
+    expect(screen.queryByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 
   it('excludes serviceless embedded rows by identity key so they never total twice', () => {
@@ -374,7 +374,7 @@ describe('OneTimeBreakdownCard', () => {
     );
     expect(screen.getByText('Flea Treatment — Detached Guest House')).toBeInTheDocument();
     expect(screen.getAllByText('Quote Required').length).toBeGreaterThan(0);
-    expect(screen.queryByText((_, el) => el?.textContent === '$250' && el?.children.length === 0)).not.toBeInTheDocument();
+    expect(screen.queryByText((_, el) => el?.textContent === '$250.00' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 });
 
@@ -706,7 +706,7 @@ describe('getServiceLabel', () => {
 });
 
 describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTED cadence', () => {
-  // The uncertain LOW dollars are fixed ($400 × 20% = ±$80) while the exact part
+  // The uncertain LOW dollars are fixed ($400.00 × 20% = ±$80.00) while the exact part
   // moves with the selection — the band must NOT grow with the displayed total.
   const combined = {
     monthlySubtotal: 500,
@@ -717,29 +717,29 @@ describe('CombinedRecurringPriceCard — low-confidence range tracks the SELECTE
   };
 
   it('bands only the LOW dollars when another cadence changes the displayed total', () => {
-    // Selected combined cadence $600/mo: ±$80 → $520–$680 (NOT the stale
-    // fraction's 600×0.8×0.2 = ±$96 → $504–$696).
+    // Selected combined cadence $600.00/mo: ±$80.00 → $520.00–$680.00 (NOT the stale
+    // fraction's 600×0.8×0.2 = ±$96.00 → $504.00–$696.00).
     render(
       <CombinedRecurringPriceCard
         combined={combined}
         selectedFrequency={{ key: 'alt', monthly: 600, annual: 7200 }}
       />,
     );
-    expect(screen.getByText(/\$520–\$680/)).toBeInTheDocument();
-    expect(screen.queryByText(/\$504–\$696/)).not.toBeInTheDocument();
+    expect(screen.getByText(/\$520.00–\$680.00/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$504.00–\$696.00/)).not.toBeInTheDocument();
   });
 
   it('default selection still bands the LOW share of the subtotal', () => {
     render(<CombinedRecurringPriceCard combined={combined} selectedFrequency={null} />);
-    // $500/mo, ±$80 → $420–$580
-    expect(screen.getByText(/\$420–\$580/)).toBeInTheDocument();
+    // $500.00/mo, ±$80.00 → $420.00–$580.00
+    expect(screen.getByText(/\$420.00–\$580.00/)).toBeInTheDocument();
   });
 
   it('falls back to the stamped fraction when raw LOW dollars are absent (older payloads)', () => {
     const { lowConfidenceMonthly, ...withoutRaw } = combined;
     render(<CombinedRecurringPriceCard combined={withoutRaw} selectedFrequency={{ key: 'alt', monthly: 600 }} />);
-    // stamped 0.8 against $600 → ±$96 → $504–$696
-    expect(screen.getByText(/\$504–\$696/)).toBeInTheDocument();
+    // stamped 0.8 against $600.00 → ±$96.00 → $504.00–$696.00
+    expect(screen.getByText(/\$504.00–\$696.00/)).toBeInTheDocument();
   });
 });
 
@@ -751,18 +751,19 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, monthlyAmount: 2.08 },
   };
 
-  it('itemizes subtotal → credit → net as the per-service-sum minus the net', () => {
-    // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82/mo →
-    // the credit shown is the exact difference ($2.08), and subtotal−credit=net.
+  it('renders the credit as the per-service-sum minus the net — and no combined totals', () => {
+    // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82.00/mo →
+    // the credit shown is the exact difference ($2.08). The combined monthly and
+    // annual totals themselves never render (owner directive 2026-07-11).
     const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
     const text = container.textContent;
-    expect(text).toContain('Plan subtotal');
-    expect(text).toContain('$84.08');
     expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
-    expect(text).toContain('Your price');
-    expect(text).toContain('$82');
-    expect(text).toContain('$984 / year');
+    expect(text).toContain('Applied to your plan when you book.');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('Your price');
+    expect(text).not.toContain('$84.08');
+    expect(text).not.toContain('/ year');
   });
 
   it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
@@ -775,18 +776,17 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('tracks the SELECTED cadence — subtotal and net both follow the selection', () => {
-    // Switched to a pricier cadence: per-service sum $112.08, net $110/mo. The
-    // credit is the difference ($2.08) and everything follows the selection.
+  it('tracks the SELECTED cadence — the credit prices from the selection, no totals shown', () => {
+    // Switched to a pricier cadence: per-service sum $112.08, net $110.00/mo. The
+    // credit is the selection's difference ($2.08); the totals themselves stay off.
     const { container } = render(
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
     );
     const text = container.textContent;
-    expect(text).toContain('$112.08');
     expect(text).toMatch(/[−-]\$2\.08/);
-    expect(text).toContain('$110');
-    expect(text).toContain('$1,320 / year');
-    expect(text).not.toContain('$82');
+    expect(text).not.toContain('$112.08');
+    expect(text).not.toContain('$110.00');
+    expect(text).not.toContain('$1,320.00 / year');
   });
 
   it('shows the ACTUAL (capped) credit by construction, not a stale default amount', () => {
@@ -798,7 +798,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     ).container.textContent;
     expect(text).toMatch(/[−-]\$0\.58/);
     expect(text).not.toMatch(/[−-]\$2\.08/);
-    expect(text).toContain('$83.50');
+    expect(text).not.toContain('$83.50');
   });
 
   it('renders nothing when the per-service sum is missing or does not exceed the net', () => {
@@ -840,9 +840,9 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('renders the summary for a fully-comped plan — subtotal → credit → Your price $0', () => {
-    // The credit covers the whole plan: net is $0 but the story (what it would
-    // have cost and why it's free) matters most here, so the block still renders.
+  it('renders the credit for a fully-comped plan (net $0,.00 corroborated)', () => {
+    // The credit covers the whole plan: net is $0.00 and the credit line still
+    // renders — but no subtotal/"Your price $0.00" restatement (owner 2026-07-11).
     const comped = {
       monthlySubtotal: 0,
       annualSubtotal: 0,
@@ -850,11 +850,10 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       manualDiscount: { label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 },
     };
     const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
-    expect(text).toContain('Plan subtotal');
-    expect(text).toContain('$84.08');
+    expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$84\.08/);
-    expect(text).toContain('Your price');
-    expect(text).toContain('$0');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('Your price');
   });
 
   it('does not treat a zeroed/missing subtotal as a full comp when the credit cannot cover it', () => {
@@ -912,11 +911,10 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={112.08}
       />,
     ).container.textContent;
-    expect(text).toContain('Plan subtotal');
-    expect(text).toContain('$112.08');
     expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$2\.08/);
-    expect(text).toContain('$110');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('$110.00');
   });
 
   it('gates in on the suppressed flag when a combo-selected credit is live (combo rows carry no discount fields)', () => {
@@ -932,10 +930,10 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={112.08}
       />,
     ).container.textContent;
-    expect(text).toContain('Plan subtotal');
     expect(text).toMatch(/[−-]\$2\.08/);
     expect(text).toContain('Discount');
-    expect(text).toContain('$110');
+    expect(text).not.toContain('Plan subtotal');
+    expect(text).not.toContain('$110.00');
   });
 
   it('uses the payload-level planDiscount for the gate and label when row fields are unavailable', () => {
@@ -950,7 +948,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     ).container.textContent;
     expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$2\.08/);
-    expect(text).toContain('$110');
+    expect(text).not.toContain('$110.00');
   });
 
   it('never conjures a discount line from reconciliation drift on a creditless plan', () => {
@@ -994,10 +992,10 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('a base-row credit capped smaller does not shadow a planDiscount that comps the combo to $0', () => {
+  it('a base-row credit capped smaller does not shadow a planDiscount that comps the combo to $0.00', () => {
     // The base row still carries a small capped object, but the selected combo
     // is fully comped by the plan credit — corroboration takes the largest
-    // candidate, so "Your price $0" renders.
+    // candidate, so "Your price $0.00" renders.
     const text = render(
       <PlanTotalSummary
         combined={{ monthlySubtotal: 82, annualSubtotal: 984 }}
@@ -1011,11 +1009,12 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
       />,
     ).container.textContent;
-    expect(text).toContain('Your price');
+    expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).not.toContain('Your price');
   });
 
-  it('corroborates a $0 net against the planDiscount when row-level objects are absent', () => {
+  it('corroborates a $0.00 net against the planDiscount when row-level objects are absent', () => {
     // Comped via a combo selection: no row-level discount object survives the
     // overlay, but the payload-level credit covers the whole subtotal.
     const text = render(
@@ -1026,8 +1025,9 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         planDiscount={{ label: 'Referral Credit', type: 'FIXED', value: 1009, amount: 1008.96, recurringAmount: 1008.96, monthlyAmount: 84.08 }}
       />,
     ).container.textContent;
-    expect(text).toContain('Your price');
+    expect(text).toContain('Referral Credit');
     expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).not.toContain('Your price');
   });
 });
 
@@ -1297,7 +1297,8 @@ describe('ServiceSection — details-packet preview parity', () => {
 
   it('links View the PDF and shows no preview caption on a live estimate', () => {
     renderRow(false);
-    const link = screen.getByText('View the PDF').closest('a');
+    // Icon-only pill (owner 2026-07-11): the action name lives in aria-label.
+    const link = screen.getByLabelText('View the PDF').closest('a');
     expect(link.getAttribute('href')).toContain('/estimates/tok-123/service-details/lawn_care/pdf');
     expect(screen.queryByText(/Preview only\./)).not.toBeInTheDocument();
   });
@@ -1307,7 +1308,7 @@ describe('ServiceSection — details-packet preview parity', () => {
     // View the PDF renders for customer-view parity but carries no href — a
     // draft has no public PDF, so the link must not be able to navigate to a
     // 404.
-    const link = screen.getByText('View the PDF').closest('a');
+    const link = screen.getByLabelText('View the PDF').closest('a');
     expect(link.getAttribute('href')).toBeNull();
     // The send buttons still render (parity) but the caption makes clear they
     // are inert until the estimate is sent.

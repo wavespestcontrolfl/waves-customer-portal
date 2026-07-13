@@ -26,6 +26,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipient } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -68,7 +69,10 @@ async function nextServiceDate(customerId, serviceKeyword) {
       .where({ customer_id: customerId })
       .whereRaw('LOWER(service_type) LIKE ?', [`%${serviceKeyword}%`])
       .whereNotIn('status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-      .where('scheduled_date', '>=', db.raw('CURRENT_DATE'))
+      // ET, not CURRENT_DATE: the DB session runs UTC, so between ~8pm and
+      // midnight ET "today's" visit would fall before the UTC date and the
+      // email would say "To be confirmed" despite a real upcoming appointment.
+      .where('scheduled_date', '>=', etDateString())
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     return row?.scheduled_date ? formatDisplayDate(row.scheduled_date, { fallback: '' }) : '';
@@ -201,11 +205,16 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', actorId = nul
 
   if (result.ok) {
     try {
+      // When the SMS went out, write the SAME marker the appointment tagger's
+      // replay guard (hasSentPrepSms) looks for — sms_outbound +
+      // "<pestType> prep info sent" — so a later replay of onServiceScheduled
+      // (e.g. regenerate-brief) doesn't re-text prep this manual click already
+      // delivered. Email-only sends keep the descriptive manual subject.
       await db('customer_interactions').insert({
         customer_id: customer.id,
-        interaction_type: result.emailSent ? 'email_outbound' : 'sms_outbound',
+        interaction_type: result.smsSent ? 'sms_outbound' : 'email_outbound',
         admin_user_id: actorId || null,
-        subject: `${config.label} prep sent (manual)`,
+        subject: result.smsSent ? `${pestType} prep info sent` : `${config.label} prep sent (manual)`,
         body: `Prep sent manually via Communications — ${[
           result.emailSent ? `email to ${recipient.email}` : null,
           result.smsSent ? `text to ${phone}` : null,

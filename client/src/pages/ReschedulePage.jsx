@@ -14,7 +14,7 @@
  * native data-glass markup restyles the cards — the inline styles below
  * remain the base non-glass rendering.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -37,7 +37,7 @@ const S = {
   border: '#E7E2D7',
   soft: '#F8FCFE',
   softBorder: '#CFE7F5',
-  text: '#1B2C5B',
+  text: '#04395E',
   body: '#3F4A65',
   muted: CUSTOMER_SURFACE.muted,
 };
@@ -49,9 +49,9 @@ const PRIMARY_CTA = {
   width: '100%',
   minHeight: 48,
   padding: '0 20px',
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
-  border: `1px solid ${COLORS.blueDeeper}`,
+  border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
   fontWeight: 800,
@@ -187,9 +187,9 @@ function SlotButton({ slot, selected, onSelect }) {
       onClick={() => onSelect(slot)}
       style={{
         textAlign: 'left',
-        background: selected ? COLORS.blueDeeper : S.surface,
+        background: selected ? COLORS.glassNavy : S.surface,
         color: selected ? COLORS.white : S.text,
-        border: `2px solid ${selected ? COLORS.blueDeeper : S.border}`,
+        border: `2px solid ${selected ? COLORS.glassNavy : S.border}`,
         borderRadius: 10,
         padding: '10px 14px',
         cursor: 'pointer',
@@ -271,25 +271,39 @@ export default function ReschedulePage() {
   // Tuesday afternoon" line must not sit above the unfiltered day list.
   const [aiSession, setAiSession] = useState(0);
 
+  // Abort the in-flight load on unmount/token change — a late response must
+  // not setState against an unmounted page (or land under a different token);
+  // superseding a still-running load also keeps responses in issue order.
+  const loadAbortRef = useRef(null);
+
   const load = useCallback(async () => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     setLoading(true);
     setNotFound(false);
     try {
-      const res = await fetch(`${API_BASE}/public/reschedule/${token}`);
+      const res = await fetch(`${API_BASE}/public/reschedule/${token}`, { signal: controller.signal });
       if (res.status === 404) {
         setNotFound(true);
         return;
       }
       if (!res.ok) throw new Error('load failed');
-      setData(await res.json());
+      const body = await res.json();
+      if (controller.signal.aborted) return;
+      setData(body);
     } catch {
+      if (controller.signal.aborted) return;
       setNotFound(true);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [token]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+    return () => loadAbortRef.current?.abort();
+  }, [load]);
 
   // Waves AI date/time search — replaces the day list with the matching
   // window's slots (same availability shape the GET returns) and hands the
@@ -407,7 +421,7 @@ export default function ReschedulePage() {
         <div style={{ display: 'grid', gap: 8, marginBottom: 16 }}>
           <WavesAIScheduleSearch
             key={aiSession}
-            theme={{ accent: COLORS.blueDeeper, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
+            theme={{ accent: COLORS.glassNavy, accentText: COLORS.white, text: S.text, muted: S.muted, border: S.softBorder, surface: S.surface, inputBg: S.soft }}
             onSearch={runAiSearch}
           />
           {aiFiltered ? (
@@ -416,7 +430,7 @@ export default function ReschedulePage() {
               onClick={showAllTimes}
               style={{
                 justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
-                color: COLORS.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
+                color: COLORS.glassNavy, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                 textDecoration: 'underline',
               }}
             >

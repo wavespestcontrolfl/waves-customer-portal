@@ -37,7 +37,7 @@ const PLATFORM_LIMITS = { instagram: 2200, facebook: 500, tiktok: 2200, gbp: 150
 // per-service GEMINI_VISION_MODEL overrides the registry default; on a miss we
 // retry the prior Gemini, then fall back to Claude VISION.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_SYSTEM = `You are the eyes of Waves Pest Control & Lawn Care, a family-owned company in Southwest Florida. A field technician just took this photo on a job. Describe ONLY what is actually visible — never invent a pest, a brand, or damage you cannot see. This description feeds a social post, so be specific and factual.
 

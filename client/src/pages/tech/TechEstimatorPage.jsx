@@ -54,7 +54,9 @@ const RODENT_OPTS = [
 const ADDONS = [
   { id: 'fire_ant', label: 'Fire Ant Treatment', price: 149 },
   { id: 'flea', label: 'Flea Treatment', price: 129 },
-  { id: 'wdo', label: 'WDO Inspection', price: 125 },
+  // $250 flat — owner decision 2026-07-12 (Q8); matches SPECIALTY.wdo +
+  // the auto-invoice default.
+  { id: 'wdo', label: 'WDO Inspection', price: 250 },
 ];
 
 function getTier(count) {

@@ -52,7 +52,7 @@ try { PhotoService = require('./photos'); } catch { PhotoService = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
-const GEMINI_VISION_FALLBACK_MODEL = process.env.GEMINI_VISION_FALLBACK_MODEL || 'gemini-2.5-flash';
+const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
 const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-health assessment tool for a professional lawn & pest company in Southwest Florida. Analyze the provided photo of shrubs, hedges, palms, trees, or landscape beds and return ONLY a JSON object with the scores below. Base your analysis strictly on what is visible.
 

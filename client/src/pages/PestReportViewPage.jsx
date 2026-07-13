@@ -15,7 +15,7 @@ const BOOK_URL = 'https://wavespestcontrol.com/book?source=pest-report';
 // Warm-brand tokens — mirror LawnReportViewPage (customer surface, not admin).
 const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
-const TEXT = '#1B2C5B';
+const TEXT = '#04395E';
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
@@ -56,16 +56,17 @@ function Page({ children }) {
           html[data-glass-theme] .glass-scene-grain { display: none !important; }
         }
       `}</style>
-      <main style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       <BrandFooter variant="light" />
     </div>
   );
 }
 
-function SectionCard({ children, style }) {
+function SectionCard({ children, style, ...rest }) {
   return (
-    <section data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" {...rest} style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
       {children}
     </section>
   );
@@ -95,17 +96,20 @@ function UrgencyPill({ urgency, notAPest }) {
 
 function NotFoundCard() {
   return (
-    <SectionCard style={{ textAlign: 'center', marginTop: 40 }}>
+    <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This pest report isn&apos;t available</SectionTitle>
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at what you&apos;re seeing.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
   );
 }
+
+// Two-decimal money (owner 2026-07-11: every price shows cents).
+const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function PricingCard({ pricing }) {
   const tiers = Array.isArray(pricing?.tiers) ? pricing.tiers : [];
@@ -115,7 +119,7 @@ function PricingCard({ pricing }) {
       <SectionTitle>{pricing.service_label || 'Your plan'}</SectionTitle>
       <div style={{ display: 'grid', gap: 10 }}>
         {tiers.map((tier, i) => (
-          <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+          <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
             <div>
               <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>{tier.label}</div>
               {/* One-time packages count TOTAL visits (flea = 2-visit package),
@@ -127,15 +131,21 @@ function PricingCard({ pricing }) {
               ) : null}
             </div>
             <div style={{ textAlign: 'right' }}>
-              {tier.monthly != null ? (
+              {/* Recurring tiers price PER APPLICATION (owner 2026-07-11:
+                  never /mo where a per-application price is derivable, no
+                  per-year totals, always two decimals). annual ÷ visits is
+                  the per-application figure; /mo only survives as the
+                  fallback when the tier has no visit count. */}
+              {tier.monthly != null && tier.one_time == null ? (
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                  ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                  {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
+                    ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
+                    : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
                 </div>
               ) : null}
-              {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
               {tier.one_time != null ? (
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                  ${tier.one_time}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
+                  ${fmtCents(tier.one_time)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
                 </div>
               ) : null}
             </div>
@@ -270,7 +280,7 @@ export default function PestReportViewPage() {
             <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 16, textDecoration: 'none' }}>
               Book now
             </a>
-            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
+            <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
               Call {WAVES_PHONE_DISPLAY}
             </a>
           </div>
@@ -281,7 +291,7 @@ export default function PestReportViewPage() {
           <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
             If different bugs show up — or this one keeps coming back in numbers — we&apos;re happy to take a look.
           </p>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
             Call {WAVES_PHONE_DISPLAY}
           </a>
         </SectionCard>

@@ -16,12 +16,15 @@ const BG = '#FAF8F3';
 const BORDER = '#E7E2D7';
 // Canonical glass ink (owner ruling 2026-07-05) — this page is glass-only
 // (useGlassSurface mounts unconditionally), so the old marketing navy
-// #1B2C5B has no remaining render path here.
+// the old marketing navy has no remaining render path here.
 const TEXT = '#04395E';
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 const CARD = COLORS.white;
 const TAN = '#F2EEE0';
+
+// Two-decimal money (owner 2026-07-11: every price shows cents).
+const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const STATUS_DOT = {
   Healthy: COLORS.green,
@@ -60,7 +63,8 @@ function Page({ children }) {
       `}</style>
       {/* Page-local header removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</main>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
       <BrandFooter variant="light" />
     </div>
@@ -97,7 +101,7 @@ function NotFoundCard() {
       <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.blueDeeper, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -148,7 +152,7 @@ function QuoteRequestForm({ token, firstName }) {
     }
   };
 
-  const inputStyle = { minHeight: 46, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 15, fontFamily: FONTS.body, color: TEXT, outline: 'none', background: COLORS.white, width: '100%', boxSizing: 'border-box' };
+  const inputStyle = { minHeight: 46, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 15, fontFamily: FONTS.body, color: TEXT, background: COLORS.white, width: '100%', boxSizing: 'border-box' };
 
   if (status === 'success') {
     return (
@@ -160,10 +164,10 @@ function QuoteRequestForm({ token, firstName }) {
 
   return (
     <form onSubmit={submit} style={{ display: 'grid', gap: 10 }}>
-      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" autoComplete="name" style={inputStyle} />
-      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" type="tel" autoComplete="tel" style={inputStyle} />
-      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
-      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" style={inputStyle} />
+      <input value={form.name} onChange={update('name')} disabled={busy} placeholder="Your name" aria-label="Your name" autoComplete="name" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" aria-label="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" aria-label="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
+      <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" aria-label="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
       <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
@@ -289,7 +293,7 @@ export default function LawnReportViewPage() {
           <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
           <div style={{ display: 'grid', gap: 10 }}>
             {report.pricing.tiers.map((tier, i) => (
-              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.blueDeeper : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
                 <div>
                   <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
                     {tier.label}{tier.recommended ? ' · Most popular' : ''}
@@ -299,12 +303,16 @@ export default function LawnReportViewPage() {
                   {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} applications per year</div> : null}
                 </div>
                 <div style={{ textAlign: 'right' }}>
+                  {/* Per-application pricing (owner 2026-07-11): annual ÷
+                      visits when derivable, /mo only as the no-visit-count
+                      fallback, never a /yr total, always two decimals. */}
                   {tier.monthly != null ? (
                     <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                      ${tier.monthly}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span>
+                      {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
+                        ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
+                        : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
                     </div>
                   ) : null}
-                  {tier.annual != null ? <div style={{ fontSize: 14, color: MUTED }}>${tier.annual}/yr</div> : null}
                 </div>
               </div>
             ))}

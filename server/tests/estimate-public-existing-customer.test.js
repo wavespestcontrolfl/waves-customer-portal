@@ -84,7 +84,7 @@ describe('existing-customer public estimate page', () => {
     // Lawn carries no WaveGuard setup fee under the unified model — nothing to
     // charge, nothing to strike through as waived.
     expect(html).not.toContain('WaveGuard Membership Setup');
-    expect(html).not.toContain('<s>$99</s> $0');
+    expect(html).not.toContain('<s>$99.00</s> $0.00');
     // Existing members stay pay-per-application only — no prepay column/button.
     // (The static page JS still carries prepay strings for other estimates, so
     // assert on the rendered elements, not the raw copy.)
@@ -139,7 +139,7 @@ describe('existing-customer public estimate page', () => {
     expect(html).not.toContain('Member pricing');
     expect(html).not.toContain('save $0.00');
     // Lawn carries no setup fee, so there is no waived-setup billing treatment.
-    expect(html).not.toContain('<s>$99</s> $0');
+    expect(html).not.toContain('<s>$99.00</s> $0.00');
     expect(html).not.toContain('WaveGuard Membership Setup');
   });
 
@@ -208,13 +208,13 @@ describe('existing-customer public estimate page', () => {
     const html = renderPage('lead-token', lawnEstimate(), lawnEstimateData(), null);
 
     // New customers still get the annual prepay option — now a prepay
-    // discount in place of the setup waiver, since lawn carries no $99
-    // setup. The $50/mo lawn program minimum protects $600 of the $753.36
+    // discount in place of the setup waiver, since lawn carries no $99.00
+    // setup. The $50.00/mo lawn program minimum protects $600.00 of the $753.36
     // base, so the effective rate is ~1%, not the configured 5%.
     expect(html).toContain('<h3>Pay the 12-month plan in full</h3>');
     expect(html).toContain('data-payment-setup="prepay_annual"');
     expect(html).toContain('Prepay discount (1%)');
-    expect(html).not.toContain('<span>WaveGuard Membership Setup</span><strong>$99</strong>');
+    expect(html).not.toContain('<span>WaveGuard Membership Setup</span><strong>$99.00</strong>');
     expect(html).not.toContain("you're already a Waves customer");
     expect(html).toContain('Add Pest Control for bundled pricing');
   });

@@ -1,0 +1,95 @@
+# First CI test run for the portal (2026-07-12 false-confidence test audit).
+# Before this workflow, tests only ran locally and via the Codex pre-push
+# hook — and the DB-gated suites never ran anywhere, because nothing set
+# DATABASE_URL.
+#
+# Two-step design (load-bearing — do not flatten into one step):
+#   1. The full jest suite runs WITHOUT DATABASE_URL. Several suites change
+#      semantics when it is set: the pricing golden masters
+#      (pricing-engine.regression, pricing-engine-v1-adapter.regression) sync
+#      live pricing_config and diff against a baseline captured from PROD's
+#      admin-edited rows — a fresh migration-seeded DB legitimately differs,
+#      so setting DATABASE_URL globally turns them red by design, not by bug.
+#   2. The self-skipping DB-gated suites then run WITH DATABASE_URL against
+#      the migrated database, serially (--runInBand: they share tables and
+#      clash under parallel workers). products-catalog-label-fields is
+#      excluded — like the golden masters it pins prod-parity data
+#      (admin-corrected EPA reg numbers), which a fresh seed cannot satisfy.
+#
+# Running every migration from an EMPTY database is itself a gate: a
+# migration that cannot build the schema from scratch fails here before it
+# can block a Railway deploy (verified locally: "Batch 1 run: 917 migrations").
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      JWT_SECRET: ci-only-test-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Migrate from an empty database
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: Server tests (no DB — golden masters keep in-memory semantics)
+        working-directory: server
+        run: npx jest --ci --silent --maxWorkers=2
+      - name: DB-gated suites (serial, against the migrated database)
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        # --forceExit: all 9 suites pass and fully report in ~2s, but a
+        # module-level handle (timer/second pool) keeps jest alive afterward —
+        # the first run hung here until the 40-min job timeout. Results are
+        # flushed before exit, so forcing it is safe. (Open-handle hunt via
+        # --detectOpenHandles is a known follow-up, not a gate.)
+        run: |
+          grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
+            | grep -v products-catalog-label-fields \
+            | tee /dev/stderr \
+            | xargs npx jest --ci --silent --runInBand --forceExit
+
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Client tests (vitest)
+        working-directory: client
+        run: npx vitest run --silent

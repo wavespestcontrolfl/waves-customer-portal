@@ -18,6 +18,19 @@ const PREP_AUTOMATION_BY_PEST_TYPE = Object.freeze({
   flea: 'prep.flea',
 });
 
+// Pest types whose FIRST-TIME booking also auto-enrolls the customer in the
+// matching Automations-tab sequence (automation_templates — the SendGrid
+// runner sends steps per their delays). Separate stack from the transactional
+// prep guide above. Wire a pest by adding its template key here; the
+// treatmentAutomationEnroll gate stays the single kill switch. german_roach
+// bookings route through pestType 'cockroach' (onServiceScheduled), so they
+// enroll the cockroach sequence too.
+const TREATMENT_AUTOMATION_BY_PEST_TYPE = Object.freeze({
+  bed_bug: 'bed_bug',
+  cockroach: 'cockroach',
+  flea: 'flea',
+});
+
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit
 // (rescheduled rows are phantom placeholders kept while staff rebooks).
@@ -216,11 +229,22 @@ class AppointmentTagger {
   async triggerPestPrep(service, pestType) {
     if (await this.hasPriorSameTypeBooking(service, pestType)) return;
 
+    // Exactly ONE guide email per first-time booking (owner directive
+    // 2026-07-11: two is overkill). For sequence-wired pests with the gate on,
+    // the Automations-tab sequence IS that email — its step-0 carries the prep
+    // guide, editable in the tab — so the transactional prep.<pest> email is
+    // skipped and the SMS legs key off the enrollment instead. Gate off (or an
+    // unwired pest) runs the transactional lane unchanged, so unsetting
+    // GATE_TREATMENT_AUTOMATION_ENROLL reverts to the proven prep email.
+    //
     // The companion SMS copy asserts "we emailed your treatment guide" — only
-    // send it when the guide email actually queued. When the email was skipped
-    // solely because there's no email on file, fall back to the self-contained
-    // prep text instead. Codex review 2026-07-06.
-    const emailResult = await this.triggerPrepEmailGuide(service, pestType);
+    // send it when the guide email actually queued (either source). When the
+    // email was skipped solely because there's no email on file, fall back to
+    // the self-contained prep text instead. Codex review 2026-07-06.
+    const sequenceWired = !!TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] && isEnabled('treatmentAutomationEnroll');
+    const emailResult = sequenceWired
+      ? await this.enrollTreatmentSequence(service, pestType)
+      : await this.triggerPrepEmailGuide(service, pestType);
     let smsVariant;
     if (emailResult.queued) {
       smsVariant = 'companion';
@@ -230,14 +254,35 @@ class AppointmentTagger {
       return;
     }
 
-    // Idempotency for the standalone path: onServiceScheduled can be replayed
-    // (e.g. regenerate-brief re-runs it), and unlike the companion — which the
-    // email automation dedupes on appointment_booked:<id> — the standalone SMS
-    // has no per-appointment guard. Skip if a prep SMS was already logged for
-    // this customer + pest. (The companion never reaches here on a replay: its
-    // email returns queued:false and we return above.)
-    if (smsVariant === 'standalone' && await this.hasSentPrepSms(service.customer_id, pestType)) return;
+    // Idempotency: onServiceScheduled can be replayed (e.g. regenerate-brief
+    // re-runs it). The email leg dedupes itself on appointment_booked:<id>,
+    // but the SMS leg's only guard is the prep-SMS marker interaction. A prior
+    // marker suppresses BOTH variants: the standalone (no per-appointment
+    // guard at all) and the companion (a customer who already got the
+    // self-contained steps — automated or via the manual Communications button
+    // — must not get a second prep text when an email lands later; the queued
+    // guide email alone is the right follow-up).
+    if (smsVariant === 'companion') {
+      if (await this.hasSentPrepSms(service.customer_id, pestType)) return;
+      await this.sendPrepSmsAndLog(service, pestType, smsVariant);
+      return;
+    }
 
+    // Standalone path: serialize concurrent runs for the same customer + pest
+    // (booking hook racing a near-simultaneous regenerate-brief) so both can't
+    // pass the marker check before either writes it. The advisory lock is
+    // released when the transaction that inserted the marker commits.
+    await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`prep_sms:${service.customer_id}:${pestType}`]);
+      if (await this.hasSentPrepSms(service.customer_id, pestType, trx)) return;
+      await this.sendPrepSmsAndLog(service, pestType, smsVariant, trx);
+    });
+  }
+
+  // Renders + sends the prep SMS and writes the prep-SMS marker interaction.
+  // `dbh` lets the standalone path write the marker inside its dedupe
+  // transaction; the companion path uses the default connection.
+  async sendPrepSmsAndLog(service, pestType, smsVariant, dbh = db) {
     const prepSMS = await this.getPrepSMS(pestType, service, smsVariant);
     if (!prepSMS) return;
 
@@ -272,13 +317,144 @@ class AppointmentTagger {
       } catch (e) { logger.error(`Beehiiv tag failed: ${e.message}`); }
     }
 
-    await db('customer_interactions').insert({
+    await dbh('customer_interactions').insert({
       customer_id: service.customer_id, interaction_type: 'sms_outbound',
       subject: `${pestType} prep info sent`,
       body: smsVariant === 'standalone'
         ? `Prep SMS sent for ${pestType} treatment (self-contained; no email on file).`
         : `Prep SMS sent for ${pestType} treatment.`,
     });
+  }
+
+  // Automations-tab sequence enrollment — for wired pests with the gate on,
+  // this REPLACES triggerPrepEmailGuide as the guide-email source (one email
+  // per booking; the sequence's step-0 carries the prep guide, editable in the
+  // tab). Returns the same { queued, reason } contract so triggerPestPrep's
+  // SMS logic (companion on queued / standalone on no_email / silence
+  // otherwise) works identically for both sources.
+  // Guards, in order:
+  //   • upcoming open visits only — regenerate-brief replays onServiceScheduled
+  //     for past/cancelled jobs too (same terminal/past rule as the
+  //     transactional path); first-time-only is checked by the caller;
+  //   • once EVER per customer+template from this hook: enrollCustomer alone
+  //     only no-ops while an enrollment is ACTIVE, so a replay after the
+  //     sequence completed would reactivate and re-send — skip when any prior
+  //     enrollment row exists. The manual Send button intentionally keeps
+  //     re-send ability (it calls the route, not this hook).
+  // Recipient routes like prep: service contact first (the on-site person),
+  // then primary. Sequences are SendGrid emails, so a phone-only customer
+  // reports 'no_email' — but only while the sequence is actually sendable
+  // (template enabled + real step content); a paused/empty sequence silences
+  // BOTH channels, same kill-switch parity the transactional path has.
+  async enrollTreatmentSequence(service, pestType) {
+    const templateKey = TREATMENT_AUTOMATION_BY_PEST_TYPE[pestType] || null;
+    if (!templateKey) return { queued: false, reason: 'no_automation' };
+    if (!isEnabled('treatmentAutomationEnroll')) return { queued: false, reason: 'gate_off' };
+    if (!service.customer_id) return { queued: false, reason: 'not_queued' };
+
+    const status = String(service.status || '').toLowerCase();
+    if (PREP_TERMINAL_STATUSES.has(status)) return { queued: false, reason: 'terminal' };
+    const serviceDateStr = dateOnlyString(service.scheduled_date);
+    if (!serviceDateStr || serviceDateStr < etDateString()) return { queued: false, reason: 'past' };
+
+    try {
+      // Read-only prechecks run BEFORE the lock transaction so the locked
+      // connection never waits on a second pooled connection (concurrent
+      // enrollments each pinning one connection while needing another can
+      // starve a saturated pool).
+      //
+      // Sendability first: enrollCustomer only requires an enabled step, but
+      // the scheduler starts at step 0 and skips empty bodies — the FIRST
+      // enabled step must carry the guide, or the companion text promises an
+      // email that isn't the guide (or nothing sends at all).
+      if (!(await this.isTreatmentSequenceSendable(templateKey))) {
+        return { queued: false, reason: 'not_queued' };
+      }
+
+      const { resolveProjectEmailRecipient } = require('./project-email');
+      const customer = await db('customers').where({ id: service.customer_id }).first();
+      const recipient = customer
+        ? resolveProjectEmailRecipient(customer)
+        : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
+      if (!recipient.email) {
+        logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
+        // Sequence confirmed sendable above — the phone-only standalone
+        // fallback may fire.
+        return { queued: false, reason: 'no_email' };
+      }
+      const nameParts = String(recipient.name || '').trim().split(/\s+/).filter(Boolean);
+
+      // Serialize per customer+template: two overlapping hooks (booking racing
+      // a regenerate-brief replay) could both pass the prior-enrollment check —
+      // enrollCustomer's onConflict-merge reports enrolled:true to BOTH, and
+      // each would send a companion SMS. Everything inside runs on the trx
+      // (enrollCustomer takes dbh), so the lock holder needs no second pooled
+      // connection.
+      return await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`treatment_enroll:${service.customer_id}:${templateKey}`]);
+
+        // Once per customer — but only rows that delivered (or still can):
+        // 'active'/'completed' (including an operator's manual tab-send),
+        // 'cancelled' (unsub/bounce — a re-enroll would be re-cancelled at
+        // send time while the companion falsely claims an email is coming),
+        // and a 'failed' row that already sent at least one step
+        // (last_sent_at set — the guide went out before a later step
+        // errored; re-enrolling would resend it). Only a failed row that
+        // never sent anything may be retried by a new first-time booking.
+        const priorEnrollment = await trx('automation_enrollments')
+          .where({ template_key: templateKey, customer_id: service.customer_id })
+          .where(function priorDelivered() {
+            this.whereNot('status', 'failed').orWhereNotNull('last_sent_at');
+          })
+          .first('id');
+        if (priorEnrollment) return { queued: false, reason: 'not_queued' };
+
+        const AutomationRunner = require('./automation-runner');
+        const result = await AutomationRunner.enrollCustomer({
+          templateKey,
+          customer: {
+            id: service.customer_id,
+            email: recipient.email,
+            first_name: nameParts[0] || service.first_name || null,
+            last_name: nameParts.slice(1).join(' ') || service.last_name || null,
+          },
+          dbh: trx,
+        });
+        if (result?.enrolled) {
+          logger.info(`[appointment-tagger] enrolled customer ${service.customer_id} in ${templateKey} sequence (service ${service.id})`);
+          return { queued: true, reason: 'queued' };
+        }
+        // disabled template / no steps / already active — no guide email is
+        // coming from this run, so the SMS stays silent too.
+        return { queued: false, reason: 'not_queued' };
+      });
+    } catch (err) {
+      logger.error(`[appointment-tagger] ${templateKey} sequence enroll failed for service ${service.id}: ${err.message}`);
+      return { queued: false, reason: 'error' };
+    }
+  }
+
+  // True only when the sequence would actually send the GUIDE: template
+  // enabled AND the FIRST enabled step has real content. hasLocalContent
+  // accepts a contentful step anywhere in the sequence, but the runner starts
+  // at step 0 — a later-step-only sequence would make the companion text
+  // promise a guide email that isn't what sends (or nothing sends soon).
+  // Mirrors isPrepAutomationActive for the transactional path — the
+  // standalone no-email SMS must respect the same pause as the email channel.
+  // Fails CLOSED.
+  async isTreatmentSequenceSendable(templateKey) {
+    try {
+      const template = await db('automation_templates').where({ key: templateKey }).first();
+      if (!template || !template.enabled) return false;
+      const firstStep = await db('automation_steps')
+        .where({ template_key: templateKey, enabled: true })
+        .orderBy('step_order', 'asc')
+        .first();
+      return !!(firstStep && (String(firstStep.html_body || '').trim() || String(firstStep.text_body || '').trim()));
+    } catch (err) {
+      logger.warn(`[appointment-tagger] sequence sendable-check failed for ${templateKey}: ${err.message}`);
+      return false;
+    }
   }
 
   // Emit the appointment.booked trigger for the matching prep automation
@@ -426,15 +602,18 @@ class AppointmentTagger {
   }
 
   // True when a prep SMS for this customer + pest was already logged — the
-  // standalone path's replay guard. Matches the interaction row written after a
-  // successful prep send below. Fails OPEN (a check hiccup must not drop a
-  // genuine first-time send); the realistic replay vector (regenerate-brief
-  // after a successful send) always has the marker, so the fail-open window is
-  // limited to the rare case where the marker write itself failed.
-  async hasSentPrepSms(customerId, pestType) {
+  // SMS leg's replay guard. Matches the marker interaction written by
+  // sendPrepSmsAndLog above AND by the manual Communications send
+  // (prep-guide-sender writes the same subject when its SMS goes out, so a
+  // manual send suppresses a later automated replay too). Fails OPEN (a check
+  // hiccup must not drop a genuine first-time send); the realistic replay
+  // vector (regenerate-brief after a successful send) always has the marker,
+  // so the fail-open window is limited to the rare case where the marker
+  // write itself failed.
+  async hasSentPrepSms(customerId, pestType, dbh = db) {
     if (!customerId) return false;
     try {
-      const row = await db('customer_interactions')
+      const row = await dbh('customer_interactions')
         .where({ customer_id: customerId, interaction_type: 'sms_outbound', subject: `${pestType} prep info sent` })
         .first('id');
       return !!row;

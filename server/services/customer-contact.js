@@ -176,9 +176,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
   }
 
   const notifyPrimary = !recipients.length || prefs.service_report_notify_primary === true;
+  // Billing-recipient copy is only meaningful when a billing_email is set —
+  // without one the billing contact IS the primary, which the notify-primary
+  // toggle already covers.
+  const notifyBilling = prefs.service_report_notify_billing === true && !!clean(prefs.billing_email);
   return uniqueByEmail([
     ...recipients,
     notifyPrimary ? primary : null,
+    notifyBilling ? getBillingContact(customer, prefs) : null,
   ].filter(Boolean));
 }
 

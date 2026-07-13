@@ -111,6 +111,35 @@ describe('sendPrepToCustomer', () => {
     );
   });
 
+  test('an SMS send writes the tagger-compatible prep marker (replay dedupe)', async () => {
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    // Must match appointment-tagger's hasSentPrepSms lookup exactly
+    // (sms_outbound + "<pestType> prep info sent") so a later automated
+    // replay doesn't re-text prep this manual click already delivered.
+    expect(interactionsInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interaction_type: 'sms_outbound',
+        subject: 'flea prep info sent',
+      }),
+    );
+  });
+
+  test('an email-only send keeps the descriptive manual subject', async () => {
+    customerRow = { ...customerRow, phone: '' };
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    expect(result.emailSent).toBe(true);
+    expect(result.smsSent).toBe(false);
+    expect(interactionsInsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interaction_type: 'email_outbound',
+        subject: 'Flea Treatment prep sent (manual)',
+      }),
+    );
+  });
+
   test('no email → sends the self-contained standalone text, no email', async () => {
     customerRow = { ...customerRow, email: '' };
 

@@ -2207,7 +2207,13 @@ function initScheduledJobs() {
 
       const parts = [`${parseInt(unread?.c || 0)} unread`];
       if (leads > 0) parts.push(`${leads} leads created`);
-      if (invoices > 0) parts.push(`${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`);
+      // Only claim a dollar figure when extraction actually produced one —
+      // "4 invoices ($0.00 logged)" was a fabricated total, not a real zero.
+      if (invoices > 0) {
+        parts.push(invoiceAmounts > 0
+          ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
+          : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
+      }
       if (spam > 0) parts.push(`${spam} spam blocked`);
 
       await db('notifications').insert({
@@ -2632,10 +2638,18 @@ function initScheduledJobs() {
       // canonical engine, so match on its date.
       step = 'step 3 (retention outreach)';
       const today = etDateString();
-      const atRisk = await db('customer_health_scores')
-        .whereRaw('scored_at::date = ?', [today])
-        .whereIn('churn_risk', ['high', 'critical'])
-        .select('customer_id');
+      // Real customers only: health scores cover leads too, and a never-
+      // paying new_lead must not consume an outreach draft or fire a churn
+      // alert (Copeman, 2026-07-11). Same predicate the engine itself guards
+      // with — this just skips the pointless per-lead calls.
+      const { CUSTOMER_STAGES } = require('./customer-stages');
+      const atRisk = await db('customer_health_scores as chs')
+        .join('customers as c', 'c.id', 'chs.customer_id')
+        .whereRaw('chs.scored_at::date = ?', [today])
+        .whereIn('chs.churn_risk', ['high', 'critical'])
+        .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
+        .whereNull('c.deleted_at')
+        .select('chs.customer_id');
 
       let outreachGenerated = 0;
       for (const c of atRisk) {

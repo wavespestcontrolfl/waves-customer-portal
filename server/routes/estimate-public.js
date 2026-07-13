@@ -918,6 +918,10 @@ function buildEstimateInvoiceModeDraft({
   recurringFirstVisitAmount = null,
   effectiveBillingCadence = null,
   selectedFrequency = null,
+  // { label, perApplication } resolved by the accept handler — same
+  // labeled-discount itemization as the standard accept leg (codex 2652 r2:
+  // invoice-mode accepts previously dropped the promised label).
+  manualDiscountItemization = null,
 } = {}) {
   if (treatAsOneTime) {
     const amount = roundInvoiceAmount(effectiveOneTimeTotal);
@@ -974,16 +978,51 @@ function buildEstimateInvoiceModeDraft({
     .replace(/^Charged after each\s+/i, '')
     || `${cadenceLabel} visit`;
 
+  // Labeled manual-discount itemization (owner 2026-07-11), same mechanism
+  // as the standard accept leg: gross the first-visit line by the resolved
+  // slice + a _kind:'discount' negative line, so create() rolls it into
+  // discount_amount/label and the TOTAL stays `amount` by construction.
+  // The slice is sized to the INVOICE BILLING INTERVAL, not blindly
+  // per-application (codex 2652 r3): a monthly-billed 4-visit tier bills a
+  // monthly amount, so its credit slice is annual/12 — for visit-billed
+  // plans the interval slice equals the per-application slice anyway.
+  const invoiceModeSlice = (() => {
+    const recurringAnnual = Number(manualDiscountItemization?.recurringAnnual) || 0;
+    const perApplication = Number(manualDiscountItemization?.perApplication) || 0;
+    if (!(recurringAnnual > 0) && !(perApplication > 0)) return 0;
+    const billingKey = String(selectedFrequency?.billingFrequencyKey || selectedFrequency?.key || '').toLowerCase();
+    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : billingKey === 'monthly' ? 1 : null;
+    if (intervalMonths != null && recurringAnnual > 0) {
+      return Math.round(((recurringAnnual * intervalMonths) / 12) * 100) / 100;
+    }
+    return perApplication > 0 ? Math.round(perApplication * 100) / 100 : 0;
+  })();
+  const recurringLineItems = invoiceModeSlice > 0
+    ? [
+      {
+        description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
+        quantity: 1,
+        unit_price: Math.round((amount + invoiceModeSlice) * 100) / 100,
+      },
+      {
+        _kind: 'discount',
+        description: String(manualDiscountItemization.label || 'Discount').trim() || 'Discount',
+        quantity: 1,
+        unit_price: -invoiceModeSlice,
+      },
+    ]
+    : [{
+      description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
+      quantity: 1,
+      unit_price: amount,
+    }];
+
   return {
     invoiceKind: 'recurring_first_visit',
     serviceLabel: svcType,
     amount,
     title: `${svcType} — first ${visitNoun}`,
-    lineItems: [{
-      description: `${svcType} (${cadenceLabel} recurring — first ${visitNoun})`,
-      quantity: 1,
-      unit_price: amount,
-    }],
+    lineItems: recurringLineItems,
     notes: `Auto-generated from accepted estimate #${estimate.id || 'unknown'} (invoice-mode recurring). Monthly equivalent: $${monthly.toFixed(2)}/mo.`,
   };
 }
@@ -1892,8 +1931,10 @@ function rawQuoteRequiredReason(item = {}) {
 }
 
 function fmtMoney(n) {
+  // Always two decimals (owner directive 2026-07-11) — mirrors the client's
+  // shared client/src/lib/money.js so both estimate twins price identically.
   const v = Math.round(Number(n || 0) * 100) / 100;
-  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 // Price label for the "Estimate viewed" admin notification. One-time-only
@@ -4083,7 +4124,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     })();
   const existingAppointment = est.existingAppointment || null;
   const prepayMembershipSummaryHtml = annualPrepayWaivesMembership
-    ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>`
+    ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>`
     : (prepayDiscountAmount > 0
       ? `<div class="payment-summary-row discount"><span>Prepay discount (${prepayDiscountPctLabel})</span><strong>−${fmtMoney(prepayDiscountAmount)}</strong></div>`
       : '');
@@ -4120,7 +4161,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <p class="payment-choice-body">${escapeHtml(standardInvoiceCopy.payAfterBody)}</p>
         <div class="payment-summary-list">
           ${showMembershipFee ? `<div class="payment-summary-row"><span>WaveGuard Membership Setup</span><strong>${fmtMoney(setupDueToday)}</strong></div>` : ''}
-          ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0</strong></div>` : ''}
+          ${membershipSetupWaivedForExistingCustomer && !locked ? `<div class="payment-summary-row discount"><span>WaveGuard Membership Setup</span><strong><s>${fmtMoney(membershipFee)}</s> $0.00</strong></div>` : ''}
           <div class="payment-summary-row"><span>First service visit</span>${firstServiceVisitTotal != null ? `<strong data-first-visit-total data-first-visit-amount="${Number(firstServiceVisitTotal || 0)}">${fmtMoney(firstServiceVisitTotal)}</strong>` : '<strong>After completion</strong>'}</div>
           ${standardInvoiceTotal > 0 ? `<div class="payment-summary-row payment-summary-total"><span>Invoice total</span><strong data-standard-invoice-total data-standard-setup-due="${Number(setupDueToday || 0)}">${fmtMoney(standardInvoiceTotal)}</strong></div>` : ''}
         </div>
@@ -5166,7 +5207,7 @@ ${shellQuestionsBar()}
   const STANDARD_INVOICE_SETUP_DUE = ${JSON.stringify(setupDueToday)};
   const STANDARD_INVOICE_HAS_FIRST_APPLICATION = ${JSON.stringify(standardInvoiceCopy.hasFirstApplication)};
   const STANDARD_NO_PAYMENT_COPY = ${JSON.stringify(pageCopy.noPaymentCopy)};
-  const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 });
+  const fmt = (n) => '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const roundMoney = (n) => Math.round(Number(n || 0) * 100) / 100;
   const intervalPrice = (monthly) => Math.round(Number(monthly || 0) * BILLING_INTERVAL_MONTHS * 100) / 100;
   const toast = (msg) => { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2800); };
@@ -7632,6 +7673,30 @@ router.put('/:token/accept', async (req, res, next) => {
     const firstApplicationInvoiceAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly && billingTerm !== 'prepay_annual'
       ? (sameDayVisitTotal || recurringFirstVisitAmount || null)
       : null;
+    // Manual-discount itemization for the accept-generated invoice (owner
+    // 2026-07-11: the labeled credit the estimate promised follows onto the
+    // invoice; totals unchanged — the parent line grosses UP by exactly the
+    // slice the pricing ladder netted OUT). Single-recurring-service accepts
+    // only: there the ladder nets the promo per application and PriceCard
+    // adds it back with this same recurringAmount/visits formula, so
+    // gross − discount reproduces the net to the cent. Multi-service plans
+    // apply the credit at PLAN level (the first-visit amount is pre-credit),
+    // and suppressed/absent row objects mean the selected cadence capped the
+    // credit away — both itemize nothing rather than invent arithmetic.
+    const acceptManualDiscountItemization = (() => {
+      if (treatAsOneTime) return null;
+      if (!Array.isArray(recurringSvcList) || recurringSvcList.length !== 1) return null;
+      const row = selectedFrequency?.manualDiscount;
+      if (!row || selectedFrequency?.manualDiscountSuppressed === true) return null;
+      const recurringAnnual = Math.round((Number(row.recurringAmount ?? row.amount) || 0) * 100) / 100;
+      if (!(recurringAnnual > 0)) return null;
+      const label = String(row.label || '').trim() || 'Discount';
+      const visits = Number(selectedFrequency?.visitsPerYear) > 0
+        ? Number(selectedFrequency.visitsPerYear)
+        : (Number(selectedFrequencyPestVisits) > 0 ? Number(selectedFrequencyPestVisits) : 0);
+      const perApplication = visits > 0 ? Math.round((recurringAnnual / visits) * 100) / 100 : 0;
+      return { label, recurringAnnual, perApplication };
+    })();
     const visitEstimatedPrice = treatAsOneTime
       ? effectiveOneTimeTotal
       : (billingTerm === 'prepay_annual' ? null : (firstApplicationInvoiceAmount || effectiveBillingCadence?.amount));
@@ -7985,6 +8050,7 @@ router.put('/:token/accept', async (req, res, next) => {
           recurringFirstVisitAmount,
           effectiveBillingCadence,
           selectedFrequency,
+          manualDiscountItemization: acceptManualDiscountItemization,
         });
         // Acceptance deposit credits this first invoice through create()'s
         // depositCredit param — create() caps the request against its own
@@ -8094,6 +8160,17 @@ router.put('/:token/accept', async (req, res, next) => {
           billingTerm,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
+          // Labeled manual-discount itemization on the prepay invoice (owner
+          // 2026-07-11) — annual slice; the converter grosses the prepay line
+          // and adds the negative labeled line, total unchanged.
+          ...(acceptManualDiscountItemization && acceptManualDiscountItemization.recurringAnnual > 0
+            ? {
+              manualDiscountItemization: {
+                label: acceptManualDiscountItemization.label,
+                annualAmount: acceptManualDiscountItemization.recurringAnnual,
+              },
+            }
+            : {}),
           prepayInvoiceAmount: annualPrepayInvoiceAmount,
           firstApplicationAmount: firstApplicationInvoiceAmount,
           allowFirstApplicationFallback: false,
@@ -8186,19 +8263,41 @@ router.put('/:token/accept', async (req, res, next) => {
               });
             }
             if (includesFirstApplicationLine) {
+              // With a resolvable manual discount, the line grosses up by the
+              // exact slice and a negative labeled line brings it back —
+              // create() rolls the negative line into discount_amount /
+              // discount_label, and the invoice TOTAL is unchanged by
+              // construction (gross := net + slice).
+              const manualSlice = acceptManualDiscountItemization?.perApplication > 0
+                ? acceptManualDiscountItemization.perApplication
+                : 0;
               lineItems.push({
                 description: 'First service application',
                 quantity: 1,
-                unit_price: standardFirstApplicationAmount,
+                unit_price: manualSlice > 0
+                  ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
+                  : standardFirstApplicationAmount,
               });
+              if (manualSlice > 0) {
+                lineItems.push({
+                  // _kind tags the row for the admin invoice editor's
+                  // discount accounting (codex 2652 r1: the editor only
+                  // counts _kind==='discount' rows toward lineDiscountAmt);
+                  // create() classifies it the same either way.
+                  _kind: 'discount',
+                  description: acceptManualDiscountItemization.label,
+                  quantity: 1,
+                  unit_price: -manualSlice,
+                });
+              }
             }
             const invoiceTitle = setupFeeApplies && includesFirstApplicationLine
               ? 'WaveGuard Membership Setup + First Application'
               : (setupFeeApplies ? 'WaveGuard Membership Setup' : 'First Service Application');
             const invoiceNotes = setupFeeApplies && includesFirstApplicationLine
-              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee plus first application.`
+              ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee plus first application.`
               : (setupFeeApplies
-                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99 setup fee only.`
+                ? `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — $99.00 setup fee only.`
                 : `Auto-generated from accepted estimate #${estimate.id}. Customer selected pay per application — first application only.`);
             const attachScheduledServiceId = EstimateConverter.shouldAttachScheduledServiceToStandardDraftInvoice({
               firstApplicationAmount: standardFirstApplicationAmount,

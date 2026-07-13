@@ -83,7 +83,7 @@ describe('EstimateViewPage review-before-booking (termite trenching)', () => {
 
     // Price stays visible — this is NOT a terminal or quote-required state.
     // (Appears in both the one-time price card and the breakdown row.)
-    expect(screen.getAllByText('$2,210').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$2,210.00').length).toBeGreaterThan(0);
     // The null-terminal fallback must not fire.
     expect(screen.queryByText('This estimate has expired.')).not.toBeInTheDocument();
     // Self-booking is gated: the call CTA replaces slot pick / payment CTAs.

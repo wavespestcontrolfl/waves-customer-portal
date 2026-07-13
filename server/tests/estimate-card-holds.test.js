@@ -31,7 +31,12 @@ const mockNotifyAdmin = jest.fn();
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u) }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: jest.fn(() => '2026-06-25'), addETDays: jest.fn() }));
+jest.mock('../utils/datetime-et', () => ({
+  etDateString: jest.fn(() => '2026-06-25'),
+  addETDays: jest.fn(),
+  formatETDate: jest.fn(() => 'July 13, 2026'),
+  formatETTime: jest.fn(() => '9:00 AM'),
+}));
 // cardHoldCancelPreview resolves the appointment start via the shared helper
 // when not supplied; the cancel-path tests pass serviceStart explicitly and
 // never hit this mock.
@@ -62,6 +67,8 @@ const {
   isWithinCancelWindow,
   handleCardHoldCancellation,
   cardHoldCancelPreview,
+  cardHoldReminderLine,
+  cardHoldReminderNote,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -190,6 +197,88 @@ describe('isWithinCancelWindow', () => {
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T10:00:00Z'), now })).toBe(false); // exactly grace boundary (start + 2h == now)
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-24T08:00:00Z'), now })).toBe(false); // same-day morning visit never delivered
     expect(isWithinCancelWindow({ hold, serviceStart: new Date('2026-06-20T12:00:00Z'), now })).toBe(false); // days-stale (churn-sweep rescheduled phantom)
+  });
+
+  // Card-on-file spec Phase 1 (owner default, spec §5 #1): the effective
+  // window is min(cancel_window_hours, time since booking) — a same-day
+  // booking is no longer instantly inside the fee window.
+  describe('inside-window booking grace (window anchored to booking age)', () => {
+    const start = new Date('2026-06-24T15:00:00Z'); // visit 3h from `now`
+    it('free cancel right after a same-day booking', () => {
+      const freshHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T11:55:00Z') }; // booked 5 min ago
+      expect(isWithinCancelWindow({ hold: freshHold, serviceStart: start, now })).toBe(false);
+    });
+    it('fee applies once the booking has aged past the time remaining', () => {
+      const agedHold = { cancel_window_hours: 24, held_at: new Date('2026-06-24T08:00:00Z') }; // booked 4h ago, visit in 3h
+      expect(isWithinCancelWindow({ hold: agedHold, serviceStart: start, now })).toBe(true);
+    });
+    it('booking age never WIDENS the disclosed window', () => {
+      const oldHold = { cancel_window_hours: 24, held_at: new Date('2026-06-20T12:00:00Z') }; // booked days ago
+      // visit 25h out — outside the 24h disclosed window regardless of age
+      expect(isWithinCancelWindow({ hold: oldHold, serviceStart: new Date('2026-06-25T13:00:00Z'), now })).toBe(false);
+    });
+    it('legacy rows without held_at keep the full disclosed window', () => {
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24 }, serviceStart: start, now })).toBe(true);
+      expect(isWithinCancelWindow({ hold: { cancel_window_hours: 24, held_at: 'not-a-date' }, serviceStart: start, now })).toBe(true);
+    });
+    it('a clock-skewed future held_at falls back to the disclosed window', () => {
+      const skewed = { cancel_window_hours: 24, held_at: new Date('2026-06-24T12:05:00Z') }; // "booked" 5 min in the future
+      expect(isWithinCancelWindow({ hold: skewed, serviceStart: start, now })).toBe(true);
+    });
+  });
+});
+
+describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Phase 1)', () => {
+  const HOUR = 3600000;
+  it("'' while the flag is off (dark-safe)", async () => {
+    delete process.env.ONE_TIME_CARD_HOLD;
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it("'' when the visit carries no held card (non-card-hold reminders stay byte-identical)", async () => {
+    stubDb(null);
+    expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+  it('states the FROZEN fee and an exact free-cancel cutoff; rescheduling stays free', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48, held_at: new Date(Date.now() - 240 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // cutoff = start − 48h, in the future
+    const line = await cardHoldReminderLine('svc1');
+    expect(line.startsWith('\n\nYour card on file holds this visit — cancel free until ')).toBe(true);
+    expect(line).toContain('a $39 fee applies only if you cancel or no one is home');
+    expect(line).toContain('Rescheduling is always free.');
+    expect(line).not.toContain('reschedule or cancel free'); // fee never attributed to reschedules
+  });
+  it('booking-age grace: a fresh same-day booking discloses the midpoint cutoff, not "already inside"', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 1 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 3 * HOUR)); // midpoint = +1h, still free NOW
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('cancel free until');
+  });
+  it('past-cutoff bookings get the generic in-window copy (no stale cutoff)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() - 10 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 1 * HOUR)); // midpoint 4.5h ago
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('A $49 fee applies only if you cancel or no one is home');
+    expect(note).not.toContain('cancel free until');
+  });
+  it('a clock-skewed FUTURE held_at falls back to the disclosed-window cutoff (matches the fee check)', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24, held_at: new Date(Date.now() + 2 * HOUR) });
+    mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // disclosed cutoff = start − 24h, future
+    const note = await cardHoldReminderNote('svc1');
+    // Must NOT use the midpoint of a future booking time — the fee check
+    // ignores future held_at and charges on the full disclosed window.
+    expect(note).toContain('cancel free until');
+  });
+  it('appointment-time resolution failure degrades to the generic copy, never throws', async () => {
+    stubDb({ id: 'h1', no_show_fee_amount: 49, cancel_window_hours: 24 });
+    mockApptTime.mockRejectedValue(new Error('appt lookup down'));
+    const note = await cardHoldReminderNote('svc1');
+    expect(note).toContain('$49 fee applies');
+    expect(note).not.toContain('cancel free until');
+  });
+  it("'' on a lookup error — a reminder must never fail on the policy clause", async () => {
+    stubDb(new Error('db down'));
+    expect(await cardHoldReminderLine('svc1')).toBe('');
   });
 });
 

@@ -35,10 +35,10 @@ export default function CalendarDatePicker({
   disableSundays = true,
 }) {
   const t = {
-    accent: '#1B2C5B',
+    accent: '#04395E',
     accentText: '#FFFFFF',
     surface: '#FFFFFF',
-    text: '#1B2C5B',
+    text: '#04395E',
     muted: '#64748B',
     border: '#E2E8F0',
     ...theme,

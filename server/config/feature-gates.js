@@ -308,6 +308,15 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
+  // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
+  // it texts ADAM_PHONE, never a customer — but the owner paused health
+  // notifications 2026-07-11, so it fails CLOSED in every environment until
+  // explicitly re-enabled with GATE_CHURN_ALERT_SMS=true. Retention outreach
+  // drafts still queue as pending_approval either way; only the owner-alert
+  // SMS is gated.
+  churnAlertSms: process.env.GATE_CHURN_ALERT_SMS === 'true',
+
   // Abandoned-booking recovery — chases /book drop-offs (booking_intents) with a
   // ~1h recovery SMS + ~24h email. A customer-facing auto-send, so it FAILS CLOSED
   // (explicit opt-in in EVERY environment) per the house rule — a preview/dev env
@@ -463,6 +472,44 @@ const gates = {
   // trigger has been verified with run history and idempotency checks.
   emailTemplateAutomations: isProd ? process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS === 'true' : true,
 
+  // Treatment Automation Enroll — for wired pests (bed_bug only for now; the
+  // per-pest map in appointment-tagger.js controls which, so flipping this
+  // gate never silently enables an unwired pest), a first-time booking
+  // enrolls the Automations-tab sequence and that sequence REPLACES the
+  // transactional prep.<pest> email as the one guide email (owner directive
+  // 2026-07-11: exactly one email per booking, editable in the tab). The
+  // prep SMS legs key off the enrollment. Explicit opt-in in EVERY
+  // environment (like universalLinks): it emails customers, and non-prod runs
+  // the same every-minute scheduler, so a dev/staging booking replay must
+  // never enroll anyone by default.
+  // Kill: unset reverts wired pests to the transactional prep lane AND stops
+  // new enrollments; toggling the automation off in the Automations tab holds
+  // in-flight enrollments (the runner only picks enabled templates).
+  treatmentAutomationEnroll: process.env.GATE_TREATMENT_AUTOMATION_ENROLL === 'true',
+
+  // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
+  // environment, same rationale as treatmentAutomationEnroll; each kill =
+  // unset the var, or toggle the sequence off in the tab to hold in-flight):
+  //
+  // Google review attributed to a customer (4-5 stars) → the matching
+  // location's Review Thank You sequence. Once per customer ever.
+  reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
+  // Autopay charge failure → payment_failed sequence, REPLACING the
+  // transactional retry-notice email (owner rule: one email; the failure SMS
+  // with the card-update link is unchanged). 14-day dedupe = one enrollment
+  // per failure episode across the retry ladder. Unset = retry-notice email
+  // returns.
+  paymentFailedEnroll: process.env.GATE_PAYMENT_FAILED_ENROLL === 'true',
+  // Renewal-window cron (30-day bucket) → service_renewal sequence. Adds an
+  // email leg to the historically SMS-only reminder; 90-day dedupe = once per
+  // renewal cycle.
+  serviceRenewalEnroll: process.env.GATE_SERVICE_RENEWAL_ENROLL === 'true',
+  // Positive-review referral invite → referral_nudge sequence, REPLACING the
+  // transactional referral.invite email (one email; the referral SMS nudge is
+  // unchanged). Once per customer ever, mirroring referral.invite's own
+  // idempotency. Unset = referral.invite email returns.
+  referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
+
   // Field Content Module — master gate for the tech capture → review →
   // publish pipeline (content_prompts, dispatches, media_uploads,
   // content_queue). Off means no routes, no cron, no UI. Sub-flags for
@@ -496,6 +543,17 @@ const gates = {
   // seo_llm_mentions tracker has several days of data and the opportunities
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
+  // Listicle brief overlay — when a supporting-blog brief's query is
+  // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
+  // citable-listicle architecture (count-in-title, numbered H2 per item,
+  // 60-word quick answer, sourced methodology note, dated line) on top of the
+  // normal supporting-blog contract. Informational lists only — the overlay's
+  // voice notes forbid vendor rankings, and transactional queries never reach
+  // the blog lane anyway (router's terminal guard). Default OFF in prod, ON in
+  // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
+  // and the Codex publish review apply untouched. Kill switch: unset.
+  listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,

@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const Sentry = require('@sentry/node');
 const Joi = require('joi');
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -236,6 +237,11 @@ router.post('/send-code', sendCodeLimiter, async (req, res, next) => {
         await TwilioService.sendVerificationCode(phone);
       } catch (smsErr) {
         logger.error(`[auth] sendVerificationCode failed for customer ${customer.id}: ${smsErr.message}`);
+        // The uniform response (anti-enumeration) swallows this from the
+        // Express error path, so report explicitly — a misconfigured or
+        // down Verify service must not be invisible to error monitoring
+        // while every customer's login quietly fails.
+        Sentry.captureException(smsErr);
       }
     } else {
       logger.info(`[auth] send-code attempted for unknown phone (ip=${req.ip})`);

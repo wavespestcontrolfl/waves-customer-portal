@@ -231,3 +231,67 @@ describe('automation runner suppression guardrails', () => {
     }));
   });
 });
+
+describe('automation runner enrollment reactivation', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('reactivating a prior enrollment refreshes the denormalized contact fields', async () => {
+    const { enrollCustomer } = require('../services/automation-runner');
+    const reactivateUpdate = chain({
+      returning: [{ id: 'enr-1', status: 'active' }],
+    });
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      automation_enrollments: [
+        // Prior COMPLETED enrollment carrying the customer's OLD email.
+        chain({ first: { id: 'enr-1', status: 'completed', email: 'old@example.com' } }),
+        reactivateUpdate,
+      ],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'NEW@Example.com', first_name: 'Megan', last_name: 'Example' },
+    });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-1' });
+    // The scheduler sends to the ROW's email — the manual re-send must go to
+    // the customer's current address, not the stale denormalized one.
+    expect(reactivateUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'active',
+      current_step: 0,
+      email: 'new@example.com',
+      first_name: 'Megan',
+      last_name: 'Example',
+    }));
+  });
+});
+
+describe('automation runner scheduler tick', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('processDueSteps only picks enrollments on ENABLED templates (tab toggle = in-flight hold)', async () => {
+    const { processDueSteps } = require('../services/automation-runner');
+    sendgrid.isConfigured.mockReturnValue(true);
+    const dueChain = chain({ result: [] });
+    dueChain.join = jest.fn(() => dueChain);
+    dueChain.select = jest.fn(() => Promise.resolve([]));
+    setDbQueues({ 'automation_enrollments as e': [dueChain] });
+
+    const result = await processDueSteps();
+
+    expect(result).toEqual({ processed: 0 });
+    // Disabled templates are excluded at pick time, so toggling an automation
+    // off in the Automations tab immediately holds its in-flight enrollments.
+    expect(dueChain.join).toHaveBeenCalledWith('automation_templates as t', 't.key', 'e.template_key');
+    expect(dueChain.where).toHaveBeenCalledWith('t.enabled', true);
+  });
+});

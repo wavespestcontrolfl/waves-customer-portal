@@ -12,7 +12,7 @@ const PAGE_BG = '#FAF8F3';
 const CARD_BORDER = '#E7E2D7';
 const INPUT_BORDER = '#CFE7F5';
 const INPUT_BG = '#F8FCFE';
-const TEXT = COLORS.blueDeeper;
+const TEXT = COLORS.glassNavy;
 const BODY = '#3F4A65';
 const MUTED = CUSTOMER_SURFACE.muted;
 
@@ -20,7 +20,7 @@ const primaryActionStyle = {
   minHeight: 46,
   border: 'none',
   borderRadius: 10,
-  background: COLORS.blueDeeper,
+  background: COLORS.glassNavy,
   color: COLORS.white,
   fontSize: 15,
   fontWeight: 800,
@@ -49,7 +49,6 @@ const inputBaseStyle = {
   background: INPUT_BG,
   fontSize: 14,
   color: TEXT,
-  outline: 'none',
   boxSizing: 'border-box',
 };
 
@@ -106,6 +105,11 @@ export default function RatePage() {
   // bounces are still captured without locking the token before corrections.
   const scoreSavePromiseRef = useRef(Promise.resolve());
   const submitPromiseRef = useRef(null);
+  // Synchronous single-flight latch for handleSubmit/handleHighlightsNext —
+  // `submitting` is React state, so a double-tap in the same frame reads the
+  // stale false twice and double-POSTs /submit. Same live-ref reasoning as
+  // submitPromiseRef above; flips before any await.
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     fetch(`${API_BASE}/rate/${token}`)
@@ -178,6 +182,8 @@ export default function RatePage() {
   };
 
   const handleSubmit = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setSubmitError('');
     try {
@@ -191,7 +197,6 @@ export default function RatePage() {
       // would trap saved feedback behind an error — it's a success.
       if (r.status === 409) {
         setScreen('success');
-        setSubmitting(false);
         return;
       }
       if (!r.ok) throw new Error(`Submit failed (${r.status})`);
@@ -206,12 +211,16 @@ export default function RatePage() {
       // Keep the feedback on screen — a false "Thank you!" here silently
       // discarded a detractor's complaint with no retry.
       setSubmitError("We couldn't send your feedback. Please check your connection and tap Send again.");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
   // Submit score, then go to AI review step
   const handleHighlightsNext = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await scoreSavePromiseRef.current;
@@ -220,6 +229,7 @@ export default function RatePage() {
         body: JSON.stringify({ score, feedback: '', highlights }),
       });
     } catch { /* proceed anyway */ }
+    submittingRef.current = false;
     setSubmitting(false);
     // Pre-select service type from data if available
     const knownServices = getKnownServices();
@@ -330,7 +340,8 @@ export default function RatePage() {
   if (loading) return (
     <Page>
       <div style={{ textAlign: 'center', padding: 48 }}>
-        <div style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.blueDeeper, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
+        <style>{`@media (prefers-reduced-motion: reduce) { [data-rate-spinner] { animation: none !important; } }`}</style>
+        <div data-rate-spinner="" style={{ width: 32, height: 32, border: `3px solid ${CARD_BORDER}`, borderTopColor: COLORS.glassNavy, borderRadius: '50%', animation: 'spin .7s linear infinite', margin: '0 auto 14px' }} />
         <span style={{ fontSize: 14, color: MUTED }}>Loading...</span>
       </div>
     </Page>
@@ -338,9 +349,9 @@ export default function RatePage() {
 
   if (error) return (
     <Page>
-      <div style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
+      <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>
-        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.blueDeeper, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
+        <p style={{ marginTop: 12 }}><a href="https://wavespestcontrol.com" style={{ color: COLORS.glassNavy, fontWeight: 800, textDecoration: 'none' }}>Visit wavespestcontrol.com</a></p>
       </div>
     </Page>
   );
@@ -359,7 +370,7 @@ export default function RatePage() {
                 style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', margin: '0 auto 12px', display: 'block', boxShadow: '0 4px 20px rgba(0,156,222,0.35)' }}
               />
             ) : (
-              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.body, boxShadow: 'none' }}>
+              <div style={{ width: 80, height: 80, borderRadius: '50%', background: INPUT_BG, border: `1px solid ${INPUT_BORDER}`, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, fontWeight: 800, color: COLORS.glassNavy, fontFamily: FONTS.body, boxShadow: 'none' }}>
                 {(techName || 'W')[0].toUpperCase()}
               </div>
             )}
@@ -448,8 +459,8 @@ export default function RatePage() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginBottom: 16 }}>
             {HIGHLIGHTS.map(h => (
               <button key={h} onClick={() => toggleHighlight(h)} style={{
-                padding: '10px 16px', minHeight: 44, border: `1px solid ${highlights.includes(h) ? COLORS.blueDeeper : CARD_BORDER}`,
-                borderRadius: 8, background: highlights.includes(h) ? COLORS.blueDeeper : COLORS.white,
+                padding: '10px 16px', minHeight: 44, border: `1px solid ${highlights.includes(h) ? COLORS.glassNavy : CARD_BORDER}`,
+                borderRadius: 8, background: highlights.includes(h) ? COLORS.glassNavy : COLORS.white,
                 color: highlights.includes(h) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}>{h}</button>
             ))}
@@ -490,8 +501,8 @@ export default function RatePage() {
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                     {SERVICE_OPTIONS.map(s => (
                       <button key={s} onClick={() => toggleService(s)} style={{
-                        padding: '9px 16px', border: `1px solid ${selectedServices.includes(s) ? COLORS.blueDeeper : CARD_BORDER}`,
-                        borderRadius: 8, background: selectedServices.includes(s) ? COLORS.blueDeeper : COLORS.white,
+                        padding: '9px 16px', border: `1px solid ${selectedServices.includes(s) ? COLORS.glassNavy : CARD_BORDER}`,
+                        borderRadius: 8, background: selectedServices.includes(s) ? COLORS.glassNavy : COLORS.white,
                         color: selectedServices.includes(s) ? COLORS.white : BODY, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                       }}>{s}</button>
                     ))}
@@ -523,6 +534,8 @@ export default function RatePage() {
                   onChange={e => setPersonalNote(e.target.value)}
                   placeholder="e.g. No more ants in the kitchen!"
                   maxLength={150}
+                  aria-label="Anything specific you loved?"
+                  className="waves-focus-ring"
                   style={inputBaseStyle}
                 />
               </div>
@@ -546,7 +559,7 @@ export default function RatePage() {
           )}
 
           {reviewError && !generating && !generatedReview && (
-            <div style={{
+            <div role="alert" style={{
               background: '#FFF8E8', border: '1px solid #F0DCA9', borderRadius: 8,
               padding: 14, color: TEXT, fontSize: 14, lineHeight: 1.5, fontWeight: 700,
             }}>
@@ -573,10 +586,12 @@ export default function RatePage() {
                 value={generatedReview}
                 onChange={(e) => setGeneratedReview(e.target.value)}
                 rows={5}
+                aria-label="Your review"
+                className="waves-focus-ring"
                 style={{
                   ...inputBaseStyle,
                   minHeight: 150, fontSize: 15, lineHeight: 1.6, marginBottom: 12,
-                  fontFamily: FONTS.body, resize: 'vertical', outline: 'none', boxSizing: 'border-box',
+                  fontFamily: FONTS.body, resize: 'vertical', boxSizing: 'border-box',
                 }}
               />
 
@@ -596,7 +611,7 @@ export default function RatePage() {
 
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 12 }}>
                 <button onClick={handleGenerateReview} disabled={generating} style={{
-                  fontSize: 14, color: COLORS.blueDeeper, background: 'none', border: 'none',
+                  fontSize: 14, color: COLORS.glassNavy, background: 'none', border: 'none',
                   cursor: 'pointer', fontWeight: 600,
                 }}>
                   {generating ? 'Rewriting…' : 'Regenerate'}
@@ -635,7 +650,7 @@ export default function RatePage() {
           <div style={{ fontSize: 15, color: BODY, lineHeight: 1.55, marginBottom: 16 }}>
             {score <= 3 ? "What went wrong? We'll personally follow up." : "What could we have done better?"}
           </div>
-          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} style={{
+          <textarea value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tell us what happened..." rows={4} aria-label="Tell us what happened" className="waves-focus-ring" style={{
             ...inputBaseStyle,
             minHeight: 100,
             padding: 14,
@@ -643,7 +658,7 @@ export default function RatePage() {
             resize: 'vertical',
           }} />
           {submitError && (
-            <div style={{ marginTop: 12, fontSize: 14, fontWeight: 700, color: COLORS.red, background: '#FEE2E2', borderRadius: 8, padding: '10px 14px' }}>
+            <div role="alert" style={{ marginTop: 12, fontSize: 14, fontWeight: 700, color: COLORS.red, background: '#FEE2E2', borderRadius: 8, padding: '10px 14px' }}>
               {submitError}
             </div>
           )}

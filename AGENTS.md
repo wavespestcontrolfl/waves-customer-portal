@@ -203,6 +203,10 @@ finding and warns on P1. Reviewers must return JSON matching
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
+- **`ops/agents/` convention violations.** Scripts in that folder must
+  declare READ-ONLY or MUTATES in their header, default to dry-run when
+  they mutate (write only under `--execute`), and contain no secrets,
+  tokens, customer names, or invoice numbers. See `ops/agents/README.md`.
 
 ### Out of scope (do not flag)
 
@@ -224,6 +228,10 @@ finding and warns on P1. Reviewers must return JSON matching
   Pages/Workers (separate repo concern).
 - **Three portal surfaces.** `/admin/*` (owner/CSR), `/` (customer PWA),
   `/tech/*` (field tech).
+- **Operator/agent tooling.** Recurring prod-ops scripts (token pulls,
+  Railway var hygiene, audit purges) live in `ops/agents/` — not imported
+  by app code, invoked manually from the repo root. Index and conventions:
+  `ops/agents/README.md`.
 - **Server timezone.** Railway runs `TZ=UTC`; the business runs in
   America/New_York. Always use `server/utils/datetime-et.js` helpers for
   ET-wall-clock fields. `node-cron` schedules pass

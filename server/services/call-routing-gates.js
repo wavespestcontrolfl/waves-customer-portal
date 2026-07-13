@@ -142,6 +142,11 @@ function buildTriageItem({
     // Hard bounce on a call-captured email → audio re-verification proposed
     // candidates for the owner's read-back confirm (email-bounce-reverify.js).
     email_bounce_reverify: 'name_review',
+    // Call-dictated email flags (call-recording-processor bridge): the card
+    // carries the as-heard address, candidates, and the read-back question —
+    // the same contact-confirm job as the two name_review flags above.
+    email_unverified: 'name_review',
+    email_invalid: 'name_review',
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',

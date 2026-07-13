@@ -54,7 +54,7 @@ const ESTIMATE_BORDER = CUSTOMER_SURFACE.border;
 const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
-const ESTIMATE_BUTTON_BG = B.blueDeeper;
+const ESTIMATE_BUTTON_BG = B.glassNavy;
 const ESTIMATE_INPUT_BORDER = '#CFE7F5';
 const ESTIMATE_INPUT_BG = '#F8FCFE';
 const SERVICE_REPORT_TIME_ZONE = 'America/New_York';
@@ -2287,7 +2287,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
             <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
               {item.customerLabel}
             </dt>
-            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#1B2C5B', lineHeight: 1.5 }}>
+            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#04395E', lineHeight: 1.5 }}>
               {item.customerValueLabel != null && item.customerValueLabel !== ''
                 ? String(item.customerValueLabel)
                 : String(item.value)}
@@ -4730,7 +4730,8 @@ function LegacyReport({ data, token, glass = false }) {
         </div>
       </header>
       ) : null}
-      <main style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div style={{ flex: 1, maxWidth: 800, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 12, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -4764,7 +4765,7 @@ function LegacyReport({ data, token, glass = false }) {
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </main>
+      </div>
       <BrandFooter />
     </div>
   );
@@ -5076,7 +5077,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.5;
           font-weight: 600;
           letter-spacing: 0;
@@ -5113,7 +5114,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           display: flex;
           align-items: center;
           justify-content: center;
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
           font-family: ${FONTS.heading};
           font-size: 18px;
@@ -5858,8 +5859,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .service-coverage-item:hover,
         .service-coverage-item:focus,
         .service-coverage-item.is-active {
-          border-color: rgba(27,44,91,.36);
-          box-shadow: 0 0 0 3px rgba(27,44,91,.08);
+          border-color: rgba(4,57,94,.36);
+          box-shadow: 0 0 0 3px rgba(4,57,94,.08);
           outline: none;
         }
         .zone-service-identity {
@@ -5872,7 +5873,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           width: 34px;
           height: 34px;
           border-radius: 999px;
-          background: var(--zone-color, ${B.blueDeeper});
+          background: var(--zone-color, ${B.glassNavy});
           color: #fff;
           display: inline-flex;
           align-items: center;
@@ -6057,6 +6058,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         @keyframes report-skeleton {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .coverage-skeleton-map,
+          .coverage-skeleton-list span,
+          .workflow-skeleton-list span { animation: none; }
         }
         .map-toggle {
           display: inline-flex;
@@ -6326,7 +6332,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-row-title { font-size: 15px; font-weight: 700; color: var(--text); }
         .sr-row-detail { margin-top: 4px; color: var(--muted); font-size: 14px; line-height: 1.5; }
-        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: ${B.blueDeeper}; background: var(--wash); white-space: nowrap; height: fit-content; }
+        .sr-pill { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: ${B.glassNavy}; background: var(--wash); white-space: nowrap; height: fit-content; }
         .sr-finding-high { border-left: 3px solid var(--red); }
         .sr-advisory { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
         .sr-advisory strong { font-size: 20px; font-weight: 500; display: block; }
@@ -6442,7 +6448,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
           color: var(--text);
           font: inherit;
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1;
           font-weight: 700;
           padding: 9px 12px;
@@ -6471,10 +6477,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: #fff;
         }
         .floating-ask-form button {
-          border: 1px solid ${B.blueDeeper};
+          border: 1px solid ${B.glassNavy};
           border-radius: 999px;
           background: ${B.yellow};
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           font: inherit;
           font-size: 14px;
           font-weight: 800;
@@ -6596,8 +6602,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .report-ask-form button {
           background: ${B.yellow};
-          color: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          color: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           font-weight: 800;
           min-width: 72px;
         }
@@ -6616,8 +6622,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 48px;
           text-align: left;
           justify-content: flex-start;
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
         }
         .report-ask-answer {
@@ -6948,22 +6954,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           min-height: 44px;
           min-width: 210px;
           padding: 12px 18px;
-          border: 1px solid ${B.blueDeeper};
+          border: 1px solid ${B.glassNavy};
           border-radius: 12px;
           background: ${B.yellow};
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           font: inherit;
           font-size: 14px;
           line-height: 1;
           font-weight: 800;
           text-decoration: none;
-          box-shadow: 3px 3px 0 ${B.blueDeeper};
+          box-shadow: 3px 3px 0 ${B.glassNavy};
           transition: ${docTransition('transform', 'box-shadow')};
         }
         .review-request-card .review-cta:hover,
         .review-request-card .review-cta:focus-visible {
           transform: translate(-1px, -1px);
-          box-shadow: 4px 4px 0 ${B.blueDeeper};
+          box-shadow: 4px 4px 0 ${B.glassNavy};
           outline: none;
         }
         .review-request-card p {
@@ -7075,12 +7081,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-self: end;
         }
         .pressure-line {
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.6;
         }
         .pressure-point {
           fill: #fff;
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.5;
         }
         .pressure-point-target {
@@ -7107,7 +7113,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 10px;
         }
         .pressure-value-label {
-          fill: ${B.blueDeeper};
+          fill: ${B.glassNavy};
           font-size: 10px;
           font-weight: 800;
           pointer-events: none;
@@ -7175,7 +7181,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border: 1px solid var(--soft-blue-border);
           border-radius: 10px;
           background: var(--soft-blue);
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           display: inline-flex;
           align-items: center;
           justify-content: center;
@@ -7297,12 +7303,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-self: end;
         }
         .lawn-health-line {
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.6;
         }
         .lawn-health-point {
           fill: #fff;
-          stroke: ${B.blueDeeper};
+          stroke: ${B.glassNavy};
           stroke-width: 1.5;
         }
         .pressure-point-hit:hover .lawn-health-point,
@@ -7521,9 +7527,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           justify-content: center;
           margin-top: 16px;
           min-height: 40px;
-          border: 1px solid ${B.blueDeeper};
+          border: 1px solid ${B.glassNavy};
           border-radius: 8px;
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
           font-size: 14px;
           line-height: 1;
@@ -7583,7 +7589,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .map-tap-prompt {
           margin: 8px 0 0;
-          color: ${B.blueDeeper};
+          color: ${B.glassNavy};
           font-size: 14px;
           font-weight: 800;
           line-height: 1.35;
@@ -7670,7 +7676,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 800;
         }
         .map-toggle button.is-active {
-          background: ${B.blueDeeper};
+          background: ${B.glassNavy};
           color: #fff;
         }
         .report-ask-box,
@@ -7684,13 +7690,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-color: var(--soft-blue-border);
         }
         .report-ask-form button {
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
         }
         .review-request-card .review-cta {
-          background: ${B.blueDeeper};
-          border-color: ${B.blueDeeper};
+          background: ${B.glassNavy};
+          border-color: ${B.glassNavy};
           color: #fff;
           box-shadow: none;
         }
@@ -7832,7 +7838,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           border-color: rgba(255, 255, 255, 0.65) !important;
         }
         /* photo-strip arrows + photo score badges carry the old marketing
-           navy #1B2C5B inline — remap to the glass navy while the theme is
+           navy inline — remap to the glass navy while the theme is
            mounted (inert in the legacy / pdf render) */
         html[data-glass-theme] .service-report-v1 .lawn-photo-arrow {
           background: rgba(4, 57, 94, 0.85) !important;
@@ -7845,7 +7851,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         html[data-glass-theme] .service-report-v1 [data-glass="chip"] * {
           color: #04395E !important;
         }
-        /* inline #1B2C5B stragglers (typed-findings dd, photo summary) — the
+        /* inline old-navy stragglers (typed-findings dd, photo summary) — the
            inline styles stay untouched for non-glass purity; .sr-ink remaps
            them to the glass navy only while the theme is mounted */
         html[data-glass-theme] .service-report-v1 .sr-ink {
@@ -7893,7 +7899,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
-      <main className="sr-shell">
+      {/* div, not <main> — WavesShell supplies the main landmark. */}
+      <div className="sr-shell">
         {mode === 'live' && (data.internalOnly
           ? <InternalReviewBar />
           : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
@@ -8162,7 +8169,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <section data-glass="card" className="sr-section" id="photos">
             <h2>Field photos</h2>
             {data.typedReport?.photoSummary && (
-              <p className="sr-ink" style={{ fontSize: 15, color: '#1B2C5B', lineHeight: 1.5, margin: '0 0 16px' }}>
+              <p className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.5, margin: '0 0 16px' }}>
                 {data.typedReport.photoSummary}
               </p>
             )}
@@ -8197,7 +8204,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
         <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
-      </main>
+      </div>
     </div>
   );
 }

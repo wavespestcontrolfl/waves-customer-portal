@@ -48,13 +48,21 @@
     "seo:pipeline:worker": "node server/scripts/run-seo-pipeline-worker.js",
     "audit:waveguard-materials": "node server/scripts/audit-waveguard-protocol-material-costs.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
-    "hooks:install": "git config core.hooksPath scripts/hooks"
+    "hooks:install": "git config core.hooksPath scripts/hooks",
+    "lint:staged": "lint-staged"
+  },
+  "lint-staged": {
+    "*.{js,jsx,cjs,mjs}": "eslint --fix --cache --cache-location node_modules/.cache/eslint --no-warn-ignored"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.9"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react": "^7.37.5",
+    "globals": "^17.7.0",
+    "lint-staged": "^15.5.2"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

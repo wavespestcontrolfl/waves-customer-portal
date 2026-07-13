@@ -55,6 +55,15 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   const selectedMethodRef = useRef("card");
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` for the submit/finalize single-flight
+  // guards — state alone lags a double-tap in the same frame (both reads see
+  // the stale false), so the ref flips before any await. Mirrors PayPageV2's
+  // ref-based tender-lock pattern; kept in lockstep via setProcessingSync.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
   const [elementError, setElementError] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [selectedMethod, setSelectedMethod] = useState("card");
@@ -81,7 +90,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
           appearance: {
             theme: "stripe",
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
@@ -111,8 +120,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
                 borderRadius: `${RADIUS.input}px`,
               },
               ".Tab--selected": {
-                borderColor: COLORS.blueDeeper,
-                backgroundColor: "rgba(27,44,91,0.08)",
+                borderColor: COLORS.glassNavy,
+                backgroundColor: "rgba(4,57,94,0.08)",
               },
             },
           },
@@ -155,8 +164,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
 
   // Card: submit → createPaymentMethod → /quote → show surcharge. ACH: confirm now.
   const handleSubmit = useCallback(async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
 
     // ACH — no surcharge; confirm the base-amount PI directly.
@@ -172,13 +181,13 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
           confirmParams: { return_url: returnUrl },
           redirect: "if_required",
         });
-        if (error) { setElementError(error.message); setProcessing(false); return; }
+        if (error) { setElementError(error.message); setProcessingSync(false); return; }
         if (pi && (pi.status === "succeeded" || pi.status === "processing")) onSuccess?.(pi);
-        else if (pi?.status === "requires_action") { setElementError("Additional verification required."); setProcessing(false); }
+        else if (pi?.status === "requires_action") { setElementError("Additional verification required."); setProcessingSync(false); }
         else onSuccess?.(pi);
       } catch (err) {
         setElementError(err.message || "Payment failed.");
-        setProcessing(false);
+        setProcessingSync(false);
       }
       return;
     }
@@ -186,10 +195,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
     // Card — Step 1: create the PaymentMethod, then quote the surcharge.
     try {
       const { error: submitError } = await elementsRef.current.submit();
-      if (submitError) { setElementError(submitError.message); setProcessing(false); return; }
+      if (submitError) { setElementError(submitError.message); setProcessingSync(false); return; }
 
       const { error: pmError, paymentMethod } = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
-      if (pmError) { setElementError(pmError.message); setProcessing(false); return; }
+      if (pmError) { setElementError(pmError.message); setProcessingSync(false); return; }
 
       const res = await fetch(`${API_BASE}/pay/statement/${token}/quote`, {
         method: "POST",
@@ -200,10 +209,10 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
       if (!res.ok) throw new Error(q.error || "Could not get a surcharge quote.");
       setQuote(q);
       setAwaitingConfirm(true);
-      setProcessing(false);
+      setProcessingSync(false);
     } catch (err) {
       setElementError(err.message || "Payment failed.");
-      setProcessing(false);
+      setProcessingSync(false);
     }
   }, [processing, token, onSuccess]);
 
@@ -217,8 +226,8 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
   // back to a fresh BASE-amount PaymentIntent (re-running /setup) before another
   // attempt. We do NOT reset on quote/ACH failures — those never mutate the PI.
   const handleFinalize = useCallback(async () => {
-    if (!quote || processing) return;
-    setProcessing(true);
+    if (!quote || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
     const fail = (message) => onFinalizeFailed?.(message || "Payment was not completed. Please try again.");
     try {
@@ -279,7 +288,7 @@ function StatementPaymentForm({ token, publishableKey, clientSecret, paymentInte
       )}
 
       {elementError && (
-        <p style={{ fontSize: FS.body, color: DOC.danger, marginTop: SP.sm }}>{elementError}</p>
+        <p role="alert" style={{ fontSize: FS.body, color: DOC.danger, marginTop: SP.sm }}>{elementError}</p>
       )}
 
       <div style={{ marginTop: SP.md }}>

@@ -412,6 +412,15 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const stripeRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` for the submit/finalize single-flight
+  // guards. State alone lags a double-tap in the same frame (both reads see
+  // the stale false) — the ref flips before any await, same reasoning as
+  // syncingAmountRef below. Kept in lockstep via setProcessingSync.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
   const [elementError, setElementError] = useState(null);
   // Shown only after an instant bank-link (Financial Connections) failure, to
   // steer the customer to the manual routing/account entry that avoids it.
@@ -558,7 +567,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
@@ -587,8 +596,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
                 borderRadius: `${RADIUS.input}px`,
               },
               '.Tab--selected': {
-                borderColor: COLORS.blueDeeper,
-                backgroundColor: 'rgba(27,44,91,0.08)',
+                borderColor: COLORS.glassNavy,
+                backgroundColor: 'rgba(4,57,94,0.08)',
               },
             },
           },
@@ -779,8 +788,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
   const pct = Number(surchargeRatePct.toFixed(2)).toString();
 
   const handleSubmit = async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
     setShowManualEntryHint(false);
 
@@ -804,19 +813,19 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         // customer retry from a settled state rather than confirm into a race.
         if (syncingAmountRef.current) {
           setElementError('Still updating your payment — please try again in a moment.');
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         const lock = await syncAmountForMethod('us_bank_account');
         if (!lock || !lock.ok) {
           // syncAmountForMethod already surfaced the error to the customer.
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (lock.replaced) {
           // A fresh PI was minted; Elements re-mount and the customer submits
           // again cleanly — don't confirm against the dead intent.
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (lock.superseded || syncingAmountRef.current || selectedMethodRef.current !== 'us_bank_account') {
@@ -824,7 +833,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           // or the tender changed mid-submit — any of these can rewrite the PI
           // before confirm. Abort and let the customer retry from a settled state.
           setElementError('Still updating your payment — please try again in a moment.');
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
       } catch (lockErr) {
@@ -834,7 +843,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: 'us_bank_account',
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
       try {
@@ -851,11 +860,11 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             methodCategory: 'us_bank_account',
             paymentIntentId,
           }));
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (pi && (pi.status === 'succeeded' || pi.status === 'processing')) onSuccess?.(pi, 'us_bank_account');
-        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessing(false); }
+        else if (pi?.status === 'requires_action') { setElementError('Additional verification required.'); setProcessingSync(false); }
         else onSuccess?.(pi, 'us_bank_account');
       } catch (err) {
         setElementError(err.message || 'Payment failed');
@@ -865,7 +874,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: 'us_bank_account',
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
       }
       return;
     }
@@ -880,7 +889,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: selectedMethodRef.current,
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
@@ -892,7 +901,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           methodCategory: selectedMethodRef.current,
           paymentIntentId,
         }));
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
@@ -911,7 +920,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       setDisplayedTotal(quote.total);
       setQuoteData({ ...quote, paymentMethodId: paymentMethod.id });
       setAwaitingConfirm(true);
-      setProcessing(false);
+      setProcessingSync(false);
     } catch (err) {
       setElementError(err.message || 'Payment failed');
       if (!err.serverReported) {
@@ -921,13 +930,13 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
-      setProcessing(false);
+      setProcessingSync(false);
     }
   };
 
   const handleFinalizePayment = async () => {
-    if (!quoteData || processing) return;
-    setProcessing(true);
+    if (!quoteData || processing || processingRef.current) return;
+    setProcessingSync(true);
     setElementError(null);
 
     try {
@@ -948,7 +957,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
             methodCategory: selectedMethodRef.current,
             paymentIntentId: result.paymentIntentId || paymentIntentId,
           }));
-          setProcessing(false);
+          setProcessingSync(false);
           return;
         }
         if (actionPI && (actionPI.status === 'succeeded' || actionPI.status === 'processing')) {
@@ -963,7 +972,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: result.paymentIntentId || paymentIntentId,
           message: `${statusMessage} Stripe status: ${actionPI?.status || 'unknown'}`,
         });
-        setProcessing(false);
+        setProcessingSync(false);
         return;
       }
 
@@ -978,7 +987,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId: result.paymentIntentId || paymentIntentId,
           message: `${statusMessage} Stripe status: ${result.status || 'unknown'}`,
         });
-        setProcessing(false);
+        setProcessingSync(false);
         setAwaitingConfirm(false);
         setQuoteData(null);
       }
@@ -991,7 +1000,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           paymentIntentId,
         }));
       }
-      setProcessing(false);
+      setProcessingSync(false);
       setAwaitingConfirm(false);
       setQuoteData(null);
     }
@@ -1207,7 +1216,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
       </div>
 
       {elementError && (
-        <div style={{
+        <div role="alert" style={{
           background: 'rgba(200,16,46,0.06)',
           border: `1px solid ${DOC.danger}`,
           borderRadius: RADIUS.input,
@@ -1279,6 +1288,13 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
   const elementsRef = useRef(null);
   const [ready, setReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  // Synchronous mirror of `processing` — same double-tap reasoning as
+  // PaymentForm's processingRef above.
+  const processingRef = useRef(false);
+  const setProcessingSync = (value) => {
+    processingRef.current = value;
+    setProcessing(value);
+  };
   const [formError, setFormError] = useState(null);
   const [methodType, setMethodType] = useState('card');
 
@@ -1295,7 +1311,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
           appearance: {
             theme: 'stripe',
             variables: {
-              colorPrimary: COLORS.blueDeeper,
+              colorPrimary: COLORS.glassNavy,
               colorBackground: COLORS.white,
               colorText: COLORS.navy,
               colorDanger: COLORS.red,
@@ -1320,8 +1336,8 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
   }, [publishableKey, clientSecret]);
 
   const submit = async () => {
-    if (!stripeRef.current || !elementsRef.current || processing) return;
-    setProcessing(true);
+    if (!stripeRef.current || !elementsRef.current || processing || processingRef.current) return;
+    setProcessingSync(true);
     setFormError(null);
     try {
       // redirect:'if_required' — a 3DS/bank-auth redirect returns to this
@@ -1358,7 +1374,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       onDone?.(body);
     } catch (err) {
       setFormError(err.message || 'Could not save the payment method');
-      setProcessing(false);
+      setProcessingSync(false);
     }
   };
 
@@ -1373,7 +1389,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
         methodType={methodType}
       />
       {formError && (
-        <div style={{
+        <div role="alert" style={{
           background: 'rgba(200,16,46,0.06)',
           border: `1px solid ${DOC.danger}`,
           borderRadius: RADIUS.input,
@@ -1457,13 +1473,17 @@ export default function PayPageV2() {
   }, [data?.invoice?.saveRequired]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/pay/${token}`)
+    // Abort on unmount/token change so a slow response can't setState against
+    // an unmounted page (or land stale data under a different token).
+    const controller = new AbortController();
+    fetch(`${API_BASE}/pay/${token}`, { signal: controller.signal })
       .then((r) => {
         if (!r.ok) throw new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
         return r.json();
       })
-      .then((d) => { setData(d); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
+      .then((d) => { if (!controller.signal.aborted) { setData(d); setLoading(false); } })
+      .catch((e) => { if (!controller.signal.aborted) { setError(e.message); setLoading(false); } });
+    return () => controller.abort();
   }, [token]);
 
   // Stripe redirect return (3DS, bank redirect).
@@ -1638,6 +1658,16 @@ export default function PayPageV2() {
 
   // Create Stripe PaymentIntent once invoice data loads
   useEffect(() => {
+    // Stripe redirect return in flight: the redirect-return effect above owns
+    // this load (setup_intent returns complete via /setup-complete; a
+    // succeeded payment return posts consent then routes to the receipt).
+    // Minting /setup underneath it races the lagging webhook — the POST 409s
+    // and fires a spurious admin reconciliation alert plus a transient error
+    // flash. Same detection as that effect; failed/processing returns fall
+    // through on purpose (/setup is their documented recovery path — see the
+    // redirect-return comment above).
+    const returnParams = new URLSearchParams(window.location.search);
+    if (returnParams.get('setup_intent') || returnParams.get('redirect_status') === 'succeeded') return;
     if (
       !data ||
       data.invoice.status === 'paid' ||
@@ -2324,7 +2354,7 @@ export default function PayPageV2() {
             </div>
 
             {paymentError && (
-              <div style={{
+              <div role="alert" style={{
                 background: 'rgba(200,16,46,0.06)',
                 border: `1px solid ${DOC.danger}`,
                 borderRadius: RADIUS.input,

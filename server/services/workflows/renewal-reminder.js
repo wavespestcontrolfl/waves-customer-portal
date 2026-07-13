@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
+const { isEnabled } = require('../../config/feature-gates');
 
 class RenewalReminder {
   /**
@@ -62,11 +63,13 @@ class RenewalReminder {
         targetDate.setDate(targetDate.getDate() + daysOut);
         const dateStr = targetDate.toISOString().split('T')[0];
 
+        // No phone requirement at the query level: the email leg (sequence
+        // enrollment below) must reach email-only customers too; the SMS
+        // branch guards on phone itself.
         const customers = await db('customers')
           .whereNotNull(field.column)
           .whereRaw(`DATE(${field.column}) = ?`, [dateStr])
-          .whereNull('deleted_at') // soft-deleted customers get no renewal SMS
-          .whereNotNull('phone')
+          .whereNull('deleted_at') // soft-deleted customers get no renewal outreach
           .select('id', 'first_name', 'phone', 'nearest_location_id as location_id', field.column);
 
         for (const customer of customers) {
@@ -78,6 +81,26 @@ class RenewalReminder {
             ) {
               continue;
             }
+
+            // Email leg (service_renewal sequence, Automations tab) at the
+            // 30-day bucket only — this lane was historically SMS-only, so
+            // the sequence ADDS the email rather than replacing anything.
+            // 90-day dedupe = once per renewal cycle (the 15/7-day buckets
+            // revisit the same customer; next year re-enrolls via
+            // reactivation). Runs BEFORE the SMS cooldown check so a recent
+            // unrelated renewal text can't starve the email.
+            if (daysOut === 30 && isEnabled('serviceRenewalEnroll')) {
+              const { enrollSequenceFromEvent } = require('../automation-enroll');
+              await enrollSequenceFromEvent({
+                templateKey: 'service_renewal',
+                customerId: customer.id,
+                dedupe: 90,
+                source: `renewal_${field.column}`,
+              });
+            }
+
+            // SMS leg needs a phone; email-only customers stop here.
+            if (!customer.phone) continue;
 
             // Check cooldown — skip if renewal SMS sent in last 35 days
             const recent = await db('sms_log')

@@ -114,7 +114,7 @@ describe('public estimate one-time breakdown', () => {
             frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
             waveGuardTier: 'Silver',
             anchorOneTimePrice: 250,
-            // Solo-pest snapshots carry the $99 WaveGuard setup — without it
+            // Solo-pest snapshots carry the $99.00 WaveGuard setup — without it
             // the missing-fee guard (codex rd2 P1) correctly forces a
             // recompute instead of fast-pathing.
             firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }],
@@ -382,9 +382,9 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('fixed discount recurring slice + one-time slice sum to the fixed value across cadences', () => {
-    // $100 fixed split into a 39.39 recurring / 60.61 one-time slice. The
-    // recurring card must show only the recurring slice (never the full $100),
-    // and recurring + one-time must keep totaling $100 on every cadence.
+    // $100.00 fixed split into a 39.39 recurring / 60.61 one-time slice. The
+    // recurring card must show only the recurring slice (never the full $100.00),
+    // and recurring + one-time must keep totaling $100.00 on every cadence.
     const saved = { type: 'FIXED', value: 100, amount: 100, recurringAmount: 39.39, oneTimeAmount: 60.61 };
 
     const base = manualDiscountForRecurringBase(saved, 468);
@@ -393,7 +393,7 @@ describe('public estimate one-time breakdown', () => {
     expect(base.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
 
     // A different cadence (larger recurring base) keeps the same recurring slice,
-    // because the one-time slice is cadence-invariant — still sums to $100.
+    // because the one-time slice is cadence-invariant — still sums to $100.00.
     const larger = manualDiscountForRecurringBase(saved, 900);
     expect(larger.recurringAmount).toBeCloseTo(39.39, 2);
     expect(larger.recurringAmount + saved.oneTimeAmount).toBeCloseTo(100, 2);
@@ -610,7 +610,7 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100/app × 6 ÷ 12 = $50/mo — a SOLD cadence at the lawn
+                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a SOLD cadence at the lawn
                     // program minimum, so this snapshot keeps the fast path
                     // (4-visit lawn rows are retired regardless of price).
                     service: 'lawn_care',
@@ -725,7 +725,7 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
+                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care (Bi-monthly)',
                     displayPrice: 100,
@@ -822,7 +822,7 @@ describe('public estimate one-time breakdown', () => {
                 annual: 840,
                 perServiceTreatments: [
                   {
-                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
+                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
                     displayPrice: 100,
@@ -980,7 +980,7 @@ describe('public estimate one-time breakdown', () => {
                     visitsPerYear: 4,
                   },
                   {
-                    // $100/app × 6 ÷ 12 = $50/mo — a sold cadence at the floor.
+                    // $100.00/app × 6 ÷ 12 = $50.00/mo — a sold cadence at the floor.
                     service: 'lawn_care',
                     label: 'Lawn Care',
                     displayPrice: 100,
@@ -1019,7 +1019,7 @@ describe('public estimate one-time breakdown', () => {
 
   test('snapshots violating the lawn program policy (retired Quarterly / below-floor lawn) are recomputed', async () => {
     // A lawn-only estimate sent BEFORE the 2026-07-09 retirement/floor: its
-    // snapshot still offers the Basic cadence at $30/mo. The snapshot matches
+    // snapshot still offers the Basic cadence at $30.00/mo. The snapshot matches
     // the stored totals, but it must NOT short-circuit — the bundle re-derives
     // through the clamped ladder builders so the retired/below-floor plan can
     // neither render nor be accepted from the old link.
@@ -1069,7 +1069,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('snapshots with an AT-FLOOR 4-visit lawn row are still recomputed (retired cadence, any price)', async () => {
-    // $135/app × 4 ÷ 12 = $45/mo passes the price check, but 4 visits/yr IS
+    // $135.00/app × 4 ÷ 12 = $45.00/mo passes the price check, but 4 visits/yr IS
     // the retired Quarterly plan — the snapshot must not short-circuit.
     const payload = await buildPricingBundle({
       id: 'estimate-public-at-floor-retired-lawn-snapshot-test',
@@ -1114,7 +1114,7 @@ describe('public estimate one-time breakdown', () => {
   test('an unitemized snapshot on a recurring-lawn estimate is recomputed (cannot be policy-checked)', async () => {
     // Legacy snapshot with bare frequency rows — no lawn serviceCategory,
     // treatment rows, sections, or combo axes. The estimate's recurring lawn
-    // is pre-floor ($34/mo), so fast-pathing the snapshot would sell below
+    // is pre-floor ($34.00/mo), so fast-pathing the snapshot would sell below
     // the program minimum without any row the policy check could catch.
     const payload = await buildPricingBundle({
       id: 'estimate-public-unitemized-lawn-snapshot-test',
@@ -1186,10 +1186,10 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('annual prepay is hidden when the lawn floor leaves no sellable discount (React /data gate)', async () => {
-    // Lawn-only plan AT the $50/mo program minimum: prepay would save $0
+    // Lawn-only plan AT the $50.00/mo program minimum: prepay would save $0.00
     // (the whole annual is floor-protected), so the bundle must not expose
     // annualPrepayEligible — PaymentPreferenceButtons renders off that
-    // boolean alone. The $87/mo case above stays eligible (real headroom).
+    // boolean alone. The $87.00/mo case above stays eligible (real headroom).
     const payload = await buildPricingBundle({
       id: 'estimate-public-lawn-at-floor-prepay-gate-test',
       monthly_total: 50,
@@ -1258,7 +1258,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('a manual discount the floor blocks on EVERY cadence is suppressed on the payload and combined card', async () => {
-    // Lawn-only plan AT the $50/mo minimum with a $10/mo manual discount:
+    // Lawn-only plan AT the $50.00/mo minimum with a $10.00/mo manual discount:
     // every frequency row suppresses the discount (zero room under the
     // floor), so the TOP-LEVEL payload.manualDiscount must be suppressed
     // too — buildCombinedRecurring prefers it over the frequency rows and
@@ -1311,7 +1311,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('no-engine fallback: a MIXED bundle with a lawn slice is quote-required even above the floor', async () => {
-    // $80/mo across lawn + tree: the fallback totals can't attribute the
+    // $80.00/mo across lawn + tree: the fallback totals can't attribute the
     // lawn slice, so floor compliance is unprovable — requote.
     const payload = await buildPricingBundle({
       id: 'estimate-public-no-engine-lawn-mixed-test',
@@ -1333,7 +1333,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('no-engine fallback: even a floor-compliant lawn-only estimate is quote-required (no provable cadence)', async () => {
-    // $55/mo satisfies the price floor, but the fallback bundle's single
+    // $55.00/mo satisfies the price floor, but the fallback bundle's single
     // frequency is keyed 'quarterly' and the sparse row carries no explicit
     // cadence — accepting could schedule the retired 4-visit program. No
     // exception: every no-engine recurring-lawn shape requotes.
@@ -1969,7 +1969,7 @@ describe('public estimate one-time breakdown', () => {
       }),
     ]));
     expect(payload.renderFlags).toEqual(expect.objectContaining({
-      // Solo recurring mosquito DOES carry the $99 WaveGuard setup (owner
+      // Solo recurring mosquito DOES carry the $99.00 WaveGuard setup (owner
       // directive 2026-07-10 evening — solo pest / solo mosquito only); the
       // pest-specific add-on gates stay off.
       showWaveGuardSetupFee: true,
@@ -2371,7 +2371,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('manual-discount-row');
     expect(html).toContain('Military Discount');
     // Typographic minus (U+2212) — fmtMoneySigned convention (estimate audit 2026-07-07).
-    expect(html).toContain('−$15 / quarter');
+    expect(html).toContain('−$15.00 / quarter');
   });
 
   test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
@@ -2508,7 +2508,7 @@ describe('public estimate one-time breakdown', () => {
     });
 
     // Termite carries no WaveGuard setup fee under the unified model, but it is
-    // still annual-prepay eligible (5% discount). A stale explicit $99 setup row
+    // still annual-prepay eligible (5% discount). A stale explicit $99.00 setup row
     // is dropped outright (owner ask 2026-07-09: non-pest estimates must never
     // show the membership setup) and its amount is stripped from the explicit
     // total, so no netting adjustment row is minted; the bait-station install
@@ -2559,7 +2559,7 @@ describe('public estimate one-time breakdown', () => {
     });
 
     // Lawn carries no WaveGuard membership setup (owner ask 2026-07-09): the
-    // stale explicit $99 row saved in oneTime.items is dropped, its amount is
+    // stale explicit $99.00 row saved in oneTime.items is dropped, its amount is
     // stripped from the explicit total, and no netting adjustment row is
     // minted — the one-time card disappears entirely.
     expect(payload.oneTimeBreakdown.items).toEqual([]);
@@ -3090,10 +3090,10 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Inspection required before final pricing.');
     expect(html).toContain('Inspection required to finish this quote');
     expect(html).not.toContain('$0.00');
-    expect(html).not.toContain('$0</span>');
-    expect(html).not.toContain('$725');
-    expect(html).not.toContain('$50');
-    expect(html).not.toContain('$775');
+    expect(html).not.toContain('$0.00</span>');
+    expect(html).not.toContain('$725.00');
+    expect(html).not.toContain('$50.00');
+    expect(html).not.toContain('$775.00');
     expect(html).not.toContain('class="cta pick-time-cta"');
     expect(html).not.toContain('id="booking-card"');
     expect(html).not.toContain('Find a date & time that works for you');
@@ -3148,7 +3148,7 @@ describe('public estimate one-time breakdown', () => {
 
     // Price stays visible (NOT quoteRequired) — this is a review-before-booking gate,
     // not a "quote required" hide-the-price hold.
-    expect(html).toContain('$2,210');
+    expect(html).toContain('$2,210.00');
     expect(html).not.toContain('Quote Required');
     // Review card renders in place of the self-book slot picker.
     expect(html).toContain('id="trenching-review-card"');
@@ -3291,7 +3291,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('a positive charge hidden in oneTime.total (normalized one_time_adjustment) blocks the trenching gate', () => {
-    // oneTime.total is $500 above the listed rows — normalizeOneTimeBreakdown emits
+    // oneTime.total is $500.00 above the listed rows — normalizeOneTimeBreakdown emits
     // that difference as a synthetic positive `one_time_adjustment` row. It is a
     // real charge for something other than trenching, so it must block the
     // trenching-only classification exactly like a listed positive row would (the
@@ -3925,7 +3925,7 @@ describe('public estimate one-time breakdown', () => {
   });
 
   test('a fixed manual one-time discount is applied once across the pest add-ons, not per category', () => {
-    // A roach-cleanout specialty + a Bora-Care add-on with a $100 one-time manual
+    // A roach-cleanout specialty + a Bora-Care add-on with a $100.00 one-time manual
     // discount slice: the slice must be distributed once across BOTH rows, never
     // applied separately to each (which would double the discount).
     const estimate = { show_one_time_option: true };
@@ -3965,7 +3965,7 @@ describe('public estimate one-time breakdown', () => {
         manualDiscount: { type: 'FIXED', amount: 100, oneTimeAmount: 100 },
       },
     };
-    // The finalized bundle: Bora-Care already net of the $100 slice ($951), the
+    // The finalized bundle: Bora-Care already net of the $100.00 slice ($951.00), the
     // synthetic pest-choice row present, and the explicit aligned marker.
     const alignedBundle = {
       oneTimeBreakdown: {
@@ -3979,7 +3979,7 @@ describe('public estimate one-time breakdown', () => {
     };
     const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, alignedBundle, 264);
     const bora = list.find((r) => r.service === 'bora_care');
-    // Stays at the already-net $951 — not re-discounted to $851.
+    // Stays at the already-net $951.00 — not re-discounted to $851.00.
     expect(bora.price).toBe(951);
   });
 
@@ -4003,7 +4003,7 @@ describe('public estimate one-time breakdown', () => {
     };
     const list = acceptedOneTimeChoiceListForEstimate(estimate, estData, null, 264);
     const bora = list.find((r) => r.service === 'bora_care');
-    // Gross $1,051 minus the $100 slice = $951 (applied exactly once).
+    // Gross $1,051.00 minus the $100.00 slice = $951.00 (applied exactly once).
     expect(bora.price).toBe(951);
   });
 
@@ -4273,7 +4273,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('<span class="num" id="onetime-display">$213</span>');
+    expect(html).toContain('<span class="num" id="onetime-display">$213.00</span>');
     expect(html).toContain('<div class="choice-treatment" data-mode-only="recurring">');
     expect(html).toContain('<div class="choice-treatment" data-mode-only="one_time" hidden>');
     expect(html).not.toContain('One-time items (billed separately)');
@@ -4353,7 +4353,7 @@ describe('public estimate one-time breakdown', () => {
     }, estimateData);
 
     expect(html).toContain('Hello Dana, your estimate is ready!');
-    expect(html).toContain('<span class="num" id="onetime-display">$202</span>');
+    expect(html).toContain('<span class="num" id="onetime-display">$202.00</span>');
     expect(html).toContain('One-Time Pest Control');
     expect(html).not.toContain('One-time items (billed separately)');
   });
@@ -4444,7 +4444,7 @@ describe('public estimate one-time breakdown', () => {
       oneTimeChoicePrice: pricing.anchorOneTimePrice,
     }, estimateData);
 
-    expect(html).toContain('<span class="num" id="onetime-display">$321</span>');
+    expect(html).toContain('<span class="num" id="onetime-display">$321.00</span>');
     expect(html).not.toContain('<td>WaveGuard setup');
   });
 
@@ -5875,8 +5875,8 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('4 applications/year');
     expect(html).not.toContain('Quarterly service &middot; 4 applications/year');
     expect(html).toContain('9 applications/year');
-    expect(html).toContain('$128 / application</span>');
-    expect(html).toContain('$116 / application</span>');
+    expect(html).toContain('$128.00 / application</span>');
+    expect(html).toContain('$116.00 / application</span>');
     expect(html).toContain('$115.20</span>');
     expect(html).toContain('$104.40</span>');
     expect(html).toContain('<div class="payment-summary-row"><span>First service visit</span><strong data-first-visit-total data-first-visit-amount="219.6">$219.60</strong></div>');
@@ -5979,12 +5979,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('WaveGuard Membership Setup');
     expect(html).not.toContain('<span>Invoice total</span>');
     expect(html).not.toContain('Invoice includes WaveGuard setup');
-    expect(html).not.toContain('we open the $99 setup invoice');
-    // Prepay is still offered, but the $50/mo lawn program minimum protects
-    // $600 of the $660 base — the 5% applies only to the $60 headroom:
-    // $660 → $657. The element carries the floor + configured rate so the
+    expect(html).not.toContain('we open the $99.00 setup invoice');
+    // Prepay is still offered, but the $50.00/mo lawn program minimum protects
+    // $600.00 of the $660.00 base — the 5% applies only to the $60.00 headroom:
+    // $660.00 → $657.00. The element carries the floor + configured rate so the
     // client-side refresh re-derives the floor-aware total for ANY annual.
-    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657');
+    expect(html).toContain('data-prepay-invoice-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657.00');
   });
 
   test('server-rendered lawn-only estimate uses lawn-specific desktop copy', () => {
@@ -6041,23 +6041,23 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('Lawn notes carried forward for future visits');
     // Lawn carries no WaveGuard setup fee — no setup line, nothing to waive.
     expect(html).not.toContain('WaveGuard Membership Setup');
-    expect(html).not.toContain('<strong><s>$99</s> $0</strong>');
+    expect(html).not.toContain('<strong><s>$99.00</s> $0.00</strong>');
     expect(html).toContain('Pay the 12-month plan in full');
     // Prepay incentive is a 5% discount off the recurring annual, not a setup waiver.
-    // The lawn floor protects $600 of the $660 base — the effective prepay
+    // The lawn floor protects $600.00 of the $660.00 base — the effective prepay
     // rate is 0.5% (one-decimal label so it never reads "save 0%").
     expect(html).toContain('Choose the 12-month plan up front and save 0.5%; we send the annual invoice automatically after confirmation.');
     expect(html).toContain('Prepay discount (0.5%)');
     expect(html).toContain('Save 0.5%');
-    expect(html).not.toContain('Net setup fee: $0');
+    expect(html).not.toContain('Net setup fee: $0.00');
     expect(html).not.toContain('Annual Pay-in-Full Waiver');
-    expect(html).not.toContain('<strong>−$99</strong>');
-    expect(html).not.toContain('The $99 setup fee is waived on the prepay invoice.');
-    // Annual plan total $660 → prepay invoice $657 (5% off only the $60
-    // slice above the $600 lawn program minimum). The refresh attrs carry
+    expect(html).not.toContain('<strong>−$99.00</strong>');
+    expect(html).not.toContain('The $99.00 setup fee is waived on the prepay invoice.');
+    // Annual plan total $660.00 → prepay invoice $657.00 (5% off only the $60.00
+    // slice above the $600.00 lawn program minimum). The refresh attrs carry
     // the floor + configured rate, never a flat effective rate.
-    expect(html).toContain('data-prepay-configured-rate="0.05">$657</strong>');
-    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657</span>');
+    expect(html).toContain('data-prepay-configured-rate="0.05">$657.00</strong>');
+    expect(html).toContain('data-prepay-copy-total data-prepay-protected-floor="600" data-prepay-configured-rate="0.05">$657.00</span>');
     expect(html).toContain("document.querySelectorAll('[data-prepay-copy-total]')");
     expect(html).toContain('const ANNUAL_PREPAY_INVOICE_TOTAL = 657;');
     expect(html).toContain('function currentAnnualPrepayInvoiceText()');
@@ -6384,12 +6384,12 @@ describe('public estimate one-time breakdown', () => {
     // Termite carries no WaveGuard setup fee; prepay earns a 5% discount instead.
     // The bait-station install stays a separate one-time charge, never discounted.
     expect(html).not.toContain('WaveGuard Membership Setup');
-    expect(html).not.toContain('<s>$99</s> $0');
+    expect(html).not.toContain('<s>$99.00</s> $0.00');
     expect(html).toContain('Save 5%');
     expect(html).toContain('Prepay discount (5%)');
     expect(html).toContain('One-time items (billed separately)');
     expect(html).toContain('Termite bait installation');
-    expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420</strong>');
+    expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420.00</strong>');
     expect(html).toContain('What your termite protection plan includes');
     expect(html).toContain('Ready to start termite protection?');
     expect(html).toContain('How does the bait work?');
@@ -6430,7 +6430,7 @@ describe('public estimate one-time breakdown', () => {
             appsPerYear: 2,
             annualAfterCredits: 660,
             monthlyAfterCredits: 55,
-            detail: '2 palms x $165 x 2/yr',
+            detail: '2 palms x $165.00 x 2/yr',
           },
           rodBaitSize: 'Medium',
         },
@@ -6443,9 +6443,9 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('class="service-price-name">Rodent Bait Stations</div>');
     expect(html).toContain('Nutrition + Insecticide &middot; 2 applications/year');
     expect(html).toContain('Quarterly monitoring &middot; 4 applications/year');
-    expect(html).toContain('$135</span>');
-    expect(html).toContain('$330</span>');
-    expect(html).toContain('$147</span>');
+    expect(html).toContain('$135.00</span>');
+    expect(html).toContain('$330.00</span>');
+    expect(html).toContain('$147.00</span>');
     expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
     expect(html).toContain('Add Lawn Care and save more');
     expect(html).toContain('Silver tier pricing (10% off qualifying services)');
@@ -6547,7 +6547,7 @@ describe('public estimate one-time breakdown', () => {
             appsPerYear: 2,
             annualAfterCredits: 660,
             monthlyAfterCredits: 55,
-            detail: '2 palms x $165 x 2/yr',
+            detail: '2 palms x $165.00 x 2/yr',
           },
           rodBaitSize: 'Medium',
           rodBaitVisitsPerYear: 4,
@@ -7024,7 +7024,7 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).not.toContain('class="service-price-list"');
-    expect(html).toContain('id="monthly-display">$285</span>');
+    expect(html).toContain('id="monthly-display">$285.00</span>');
   });
 
   test('accept success payload marks invoice payment as the next step', () => {
@@ -7141,7 +7141,7 @@ describe('public estimate one-time breakdown', () => {
       hasSetup: true,
       hasFirstApplication: true,
       totalAmount: 227,
-      payPrefCardSub: 'Invoice includes WaveGuard setup + first application ($227).',
+      payPrefCardSub: 'Invoice includes WaveGuard setup + first application ($227.00).',
     }));
 
     expect(buildStandardPayPerApplicationInvoiceCopy({
@@ -7151,7 +7151,7 @@ describe('public estimate one-time breakdown', () => {
       hasSetup: true,
       hasFirstApplication: false,
       totalAmount: 99,
-      payPrefCardSub: 'Invoice includes WaveGuard setup ($99).',
+      payPrefCardSub: 'Invoice includes WaveGuard setup ($99.00).',
     }));
 
     expect(buildStandardPayPerApplicationInvoiceCopy({
@@ -7462,7 +7462,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoicePayUrl: '/pay/gold-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89/mo. Invoice pay link sent.');
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89.00/mo. Invoice pay link sent.');
 
     expect(buildAcceptOfficeFallback({
       customerName: 'Jane Doe',
@@ -7472,7 +7472,7 @@ describe('public estimate one-time breakdown', () => {
       annualPrepayAmount: 660,
       invoiceMode: true,
       invoicePayUrl: '/pay/annual-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660. Invoice created; optional pay link available.');
+    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660.00. Invoice created; optional pay link available.');
 
     expect(buildAcceptOfficeFallback({
       customerName: null,
@@ -7481,7 +7481,7 @@ describe('public estimate one-time breakdown', () => {
       monthlyTotal: 89,
       invoiceMode: true,
       invoicePayUrl: '/pay/setup-token',
-    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89/mo. Setup + first application invoice created; optional pay link available.');
+    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89.00/mo. Setup + first application invoice created; optional pay link available.');
   });
 
   test('accept copy shows the as-proposed price when the customer selected a different plan', () => {
@@ -7517,7 +7517,7 @@ describe('public estimate one-time breakdown', () => {
       invoiceMode: true,
       invoiceLinkDelivered: true,
       invoicePayUrl: '/pay/gold-token',
-    }).adminBody).toBe('Gold WaveGuard $89/mo approved. Invoice pay link sent.');
+    }).adminBody).toBe('Gold WaveGuard $89.00/mo approved. Invoice pay link sent.');
   });
 
   test('accept notification payload avoids WaveGuard onboarding copy for one-time accepts', () => {
@@ -7555,7 +7555,7 @@ describe('public estimate one-time breakdown', () => {
       invoicePayUrl: '/pay/gold-token',
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
-      adminBody: 'Gold WaveGuard $89/mo approved. Invoice pay link sent.',
+      adminBody: 'Gold WaveGuard $89.00/mo approved. Invoice pay link sent.',
       customerBody: 'Your Gold WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.',
       customerLink: '/pay/gold-token',
     }));
@@ -7569,7 +7569,7 @@ describe('public estimate one-time breakdown', () => {
       invoicePayUrl: '/pay/annual-token',
     })).toEqual(expect.objectContaining({
       adminTitle: 'Estimate accepted: Jane Doe',
-      adminBody: 'Bronze WaveGuard annual prepay $660 approved. Invoice created; optional pay link available.',
+      adminBody: 'Bronze WaveGuard annual prepay $660.00 approved. Invoice created; optional pay link available.',
       customerBody: 'Your Bronze WaveGuard plan is approved. Use the invoice pay link if you want to pay now and save a card, or pay later.',
       customerLink: '/pay/annual-token',
     }));

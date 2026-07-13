@@ -192,6 +192,14 @@ class WavesAssistant {
         ];
       }
 
+      // If every loop turn was tool_use (e.g. a tool kept erroring and the
+      // model kept retrying it), finalReply is still empty — degrade to the
+      // canned reply instead of persisting a blank customer-visible message.
+      if (!finalReply.trim()) {
+        logger.warn(`[ai-assistant] Tool-use loop exhausted with no text reply`, { customerId, channel, conversationId: conversation.id });
+        return { reply: "I'm having trouble right now. Please try calling us at (941) 318-7612.", conversationId: conversation.id, escalated: false };
+      }
+
       // Save the assistant reply
       await db('agent_messages').insert({
         conversation_id: conversation.id,

@@ -99,7 +99,7 @@ export default function LoginPage() {
     <main
       className="portal-login-page"
       style={{
-        '--login-blue': B.blueDeeper,
+        '--login-blue': B.glassNavy,
         '--login-brand': B.wavesBlue,
         '--login-text': '#3F4A65',
         '--login-muted': CUSTOMER_SURFACE.muted,
@@ -140,6 +140,8 @@ export default function LoginPage() {
           display: inline-flex;
           align-items: center;
           gap: 10px;
+          /* 44px touch-target floor — the 42px logo mark alone fell short */
+          min-height: 44px;
           text-decoration: none;
           color: var(--login-blue);
         }
@@ -392,7 +394,7 @@ export default function LoginPage() {
           background: var(--login-soft);
           border: 1px solid var(--login-soft-border);
           color: var(--login-blue);
-          font-size: 13px;
+          font-size: 14px;
           line-height: 1.45;
           font-weight: 700;
           display: flex;
@@ -421,7 +423,7 @@ export default function LoginPage() {
           gap: 8px;
         }
         .portal-login-help a {
-          min-height: 42px;
+          min-height: 44px;
           border-radius: 10px;
           border: 1px solid var(--login-border);
           color: var(--login-blue);
@@ -667,7 +669,7 @@ export default function LoginPage() {
               <div style={{ fontSize: 12, fontWeight: 850, color: CUSTOMER_SURFACE.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
                 The Waves App
               </div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.blueDeeper, fontFamily: FONTS.heading }}>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
                 Your home team, one tap away.
               </div>
               <div style={{ marginTop: 6, fontSize: 14, color: '#3F4A65', lineHeight: 1.5, maxWidth: 420, marginLeft: 'auto', marginRight: 'auto' }}>

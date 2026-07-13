@@ -242,7 +242,9 @@ const CUSTOMER_FIELD_LABELS = {
   inspection_scope: 'Areas we checked',
   areas_treated: 'Areas we treated',
   treatment_areas: 'Areas we treated',
-  rooms_treated: 'Areas we treated',
+  // rooms_treated / entry_points_observed are defined once, later in this
+  // map — earlier duplicates were dead (last-key-wins) and tripped
+  // no-dupe-keys once this file was touched.
   harborage_locations: 'Where activity was concentrated',
   conducive_conditions: 'Conditions to address',
   treatment_performed: 'What we did',
@@ -254,7 +256,6 @@ const CUSTOMER_FIELD_LABELS = {
   followup_plan: 'Next steps',
   daily_check_plan: 'Next steps',
   entry_points_found: 'Entry points we found',
-  entry_points_observed: 'Entry points we found',
   traps_set: 'Traps in place',
   species: 'What we found',
   target_animal: 'What we found',
@@ -1242,7 +1243,7 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   return { ok: errors.length === 0 && missing.length === 0, errors, missing };
 }
 
-function validateNextStepChips(chips, projectType = null, values = null) {
+function validateNextStepChips(chips, projectType = null, values = null, context = {}) {
   if (chips == null) return { ok: true, chips: [] };
   if (!Array.isArray(chips)) return { ok: false, error: 'nextStepChips must be an array' };
   if (chips.length > MAX_NEXT_STEP_CHIPS) {
@@ -1257,6 +1258,15 @@ function validateNextStepChips(chips, projectType = null, values = null) {
       return { ok: false, error: `Next-step chip not available for this service: ${key}` };
     }
     if (!normalized.includes(key)) normalized.push(key);
+  }
+  // Two-treatment package, first visit (context set by the completion
+  // route): the included follow-up is owed regardless of findings, so "No
+  // further action is needed right now." can never land in the immutable
+  // report beside a completion response demanding the second visit (Codex
+  // r3 on the 20260712300000 cutover). The chip stays available on the
+  // included follow-up visit itself.
+  if (context.packageFollowupPending && normalized.includes('No action needed')) {
+    return { ok: false, error: 'Next-step chip "No action needed" contradicts this service\'s included follow-up visit — select a follow-up next step instead' };
   }
   // "No action needed" beside confirmed/suspected flea activity contradicts
   // the report's mandatory aftercare story — the chip sentence ("No further

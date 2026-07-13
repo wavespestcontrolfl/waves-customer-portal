@@ -29,6 +29,24 @@ function dollars(cents) {
 async function sendReferralInviteEmail({ customerId, trigger = 'positive_review' } = {}) {
   try {
     if (!customerId) return null;
+
+    // One referral email per customer (owner rule 2026-07-11): with the gate
+    // on, the Automations-tab referral_nudge sequence (editable in the tab)
+    // IS the invite — it replaces the transactional referral.invite template.
+    // Once-ever dedupe mirrors this function's own customer-scoped
+    // idempotency; both call sites (review-gate + review-request promoter
+    // hooks) flow through here unchanged. The referral SMS nudge is a
+    // separate channel and is unaffected. Known one-time overlap: a customer
+    // already invited via referral.invite pre-flip who submits another
+    // promoter rating post-flip has no enrollment row yet and gets the
+    // sequence once — accepted, noted on the PR.
+    //
+    // OPERATIONAL COUPLING (accepted trade of tab-editable copy): the
+    // sequence's reward line is static copy, unlike the transactional
+    // invite's live referral_program_settings lookup. Changing the referral
+    // reward in admin REQUIRES editing the referral_nudge step copy to
+    // match — same as any other fact baked into an editable automation.
+    // Copy verified in sync at wiring time ($25, #2621).
     const customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'first_name', 'email');
@@ -36,6 +54,45 @@ async function sendReferralInviteEmail({ customerId, trigger = 'positive_review'
     if (!email || !email.includes('@')) {
       logger.info(`[referral-invite-email] no usable email for customer ${customerId}; skipping invite`);
       return null;
+    }
+
+    const { isEnabled } = require('../config/feature-gates');
+    if (isEnabled('referralNudgeEnroll')) {
+      // Stream parity: the transactional referral.invite honors the
+      // marketing_referral suppression stream, but the referral_nudge
+      // sequence rides the newsletter ASM group — the runner would only
+      // check marketing_newsletter at send time. A customer who opted out of
+      // referral asks (but not the newsletter) must stay opted out, so the
+      // referral stream (plus global bounce/spam/do-not-email and
+      // group-less suppressions, mirroring automationSuppressionMatches) is
+      // checked here before enrolling. Fails toward suppressed.
+      try {
+        const referralSuppression = await db('email_suppressions')
+          .whereRaw('LOWER(email) = ?', [email.toLowerCase()])
+          .where({ status: 'active' })
+          .where(function referralStream() {
+            this.where('group_key', 'marketing_referral')
+              .orWhere('group_key', '')
+              .orWhereNull('group_key')
+              .orWhereIn('suppression_type', ['bounce', 'spam_complaint', 'do_not_email']);
+          })
+          .first('id');
+        if (referralSuppression) {
+          logger.info(`[referral-invite-email] referral-stream suppression active for customer ${customerId}; invite skipped`);
+          return null;
+        }
+      } catch (suppressionErr) {
+        logger.warn(`[referral-invite-email] suppression check failed for customer ${customerId}: ${suppressionErr.message} — invite skipped`);
+        return null;
+      }
+
+      const { enrollSequenceFromEvent } = require('./automation-enroll');
+      return enrollSequenceFromEvent({
+        templateKey: 'referral_nudge',
+        customerId,
+        dedupe: 'ever',
+        source: `referral_${trigger}`,
+      });
     }
 
     const { getSettings } = require('./referral-engine');

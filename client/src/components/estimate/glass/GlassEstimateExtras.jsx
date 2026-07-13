@@ -176,14 +176,16 @@ export function GlassReviewMarquee({ reviews }) {
 /**
  * Sticky mobile book bar (≤640px via CSS): one large slot-aware approve
  * button. The bar shows NO price (owner directive 2026-07-10) — the cards
- * quote per-application prices, and a competing /mo figure down here read as
- * two different totals. priceLabel still gates rendering so quote-required /
- * ranged estimates keep the bar hidden, exactly as before. Hidden entirely
- * off-mobile and without glass (display:none default; the media query only
- * flips it on under html[data-glass-theme]).
+ * quote per-application prices, and a competing figure down here read as
+ * two different totals. `show` is an explicit priced-selection gate (codex
+ * 2639 r1: the old priceLabel gate silently dropped the bar for
+ * multi-service plans once combined totals stopped being computed) —
+ * quote-required / ranged estimates keep the bar hidden, exactly as before.
+ * Hidden entirely off-mobile and without glass (display:none default; the
+ * media query only flips it on under html[data-glass-theme]).
  */
-export function GlassStickyBookBar({ priceLabel, slotMeta, onApprove }) {
-  if (!priceLabel) return null;
+export function GlassStickyBookBar({ show = false, slotMeta, onApprove }) {
+  if (!show) return null;
   return (
     <div className="gc-mbb">
       <button type="button" className="gc-mbb-btn" style={{ flex: 1, width: '100%' }} onClick={onApprove}>

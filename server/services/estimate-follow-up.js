@@ -135,15 +135,34 @@ async function releaseStage(estId, flag) {
 }
 
 function moneySummary(est = {}) {
+  // Residential estimate emails never restate a monthly or annual total
+  // (owner 2026-07-11) — the linked estimate page leads with per-application
+  // pricing, so the email defers to it. One-time totals stay (with cents).
+  // Authored commercial proposals are owner-EXEMPT (boards budget annually)
+  // and keep their totals in follow-ups too (codex 2642 r2: the drip jobs
+  // don't exclude proposal estimates).
   const monthlyTotal = parseFloat(est.monthly_total || est.monthlyTotal || 0);
   const annualTotal = parseFloat(est.annual_total || est.annualTotal || 0);
   const oneTimeTotal = parseFloat(est.onetime_total || est.oneTimeTotal || est.onetimeTotal || 0);
+  const proposalEnabled = (() => {
+    try {
+      const data = typeof est.estimate_data === "string"
+        ? JSON.parse(est.estimate_data)
+        : (est.estimate_data || est.estimateData);
+      return !!data?.proposal?.enabled;
+    } catch {
+      return false;
+    }
+  })();
   if (monthlyTotal > 0) {
-    return annualTotal > 0
-      ? `$${monthlyTotal.toFixed(0)}/mo · $${annualTotal.toLocaleString()}/yr`
-      : `$${monthlyTotal.toFixed(0)}/mo`;
+    if (proposalEnabled) {
+      return annualTotal > 0
+        ? `$${monthlyTotal.toFixed(2)}/mo · $${annualTotal.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr`
+        : `$${monthlyTotal.toFixed(2)}/mo`;
+    }
+    return "Priced per application — full breakdown inside";
   }
-  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(0)} one-time`;
+  if (oneTimeTotal > 0) return `$${oneTimeTotal.toFixed(2)} one-time`;
   return "";
 }
 

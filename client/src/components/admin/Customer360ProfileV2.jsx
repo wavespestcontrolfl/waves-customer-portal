@@ -5729,6 +5729,33 @@ export default function Customer360ProfileV2({
                 <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
                   {" "}
                   <input
+                    id="c360-service-report-notify-billing"
+                    name="serviceReportNotifyBilling"
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_billing === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyBilling: e.target.checked,
+                        service_report_notify_billing: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the billing recipient
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      Copies the billing recipient email (landlord, AP contact)
+                      on post-service reports. Requires a billing recipient
+                      email above; invoices are unaffected.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
                     id="c360-auto-flip-en-route"
                     name="autoFlipEnRoute"
                     type="checkbox"

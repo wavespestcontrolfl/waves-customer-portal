@@ -56,9 +56,9 @@ describe('PaymentPreferenceButtons', () => {
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
     expect(screen.getByText('First service visit')).toBeInTheDocument();
     expect(screen.getByText('Invoice total')).toBeInTheDocument();
-    expect(screen.getAllByText('$99').length).toBeGreaterThan(0);
-    expect(screen.getByText('$125')).toBeInTheDocument();
-    expect(screen.getByText('$224')).toBeInTheDocument();
+    expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
+    expect(screen.getByText('$125.00')).toBeInTheDocument();
+    expect(screen.getByText('$224.00')).toBeInTheDocument();
   });
 
   it('prefers discounted treatment rows for the first service visit amount', () => {
@@ -81,9 +81,9 @@ describe('PaymentPreferenceButtons', () => {
     );
 
     expect(screen.getByText('First service visit')).toBeInTheDocument();
-    expect(screen.getByText('$125')).toBeInTheDocument();
-    expect(screen.queryByText('$600')).not.toBeInTheDocument();
-    expect(screen.queryByText('$244')).not.toBeInTheDocument();
+    expect(screen.getByText('$125.00')).toBeInTheDocument();
+    expect(screen.queryByText('$600.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('$244.00')).not.toBeInTheDocument();
   });
 
   it('excludes monthly-billed service tiers from the immediate first-visit invoice', () => {
@@ -107,10 +107,10 @@ describe('PaymentPreferenceButtons', () => {
 
     expect(screen.getByText('WaveGuard Membership Setup')).toBeInTheDocument();
     expect(screen.queryByText('First service visit')).not.toBeInTheDocument();
-    expect(screen.getAllByText('$99').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$99.00').length).toBeGreaterThan(0);
     expect(screen.getByText('Choose pay per application with a setup invoice after confirmation, or annual prepay to approve the 12-month plan up front with setup included.')).toBeInTheDocument();
-    expect(screen.queryByText('$72')).not.toBeInTheDocument();
-    expect(screen.queryByText('$144')).not.toBeInTheDocument();
+    expect(screen.queryByText('$72.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('$144.00')).not.toBeInTheDocument();
   });
 
   it('invoice-mode + site-confirmation hold drops the immediate-invoice promise', () => {

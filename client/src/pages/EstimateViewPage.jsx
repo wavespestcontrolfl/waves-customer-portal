@@ -34,7 +34,6 @@ import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard from '../components/estimate/AppShowcaseCard';
-import ReportShowcaseCard from '../components/estimate/ReportShowcaseCard';
 import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -65,6 +64,7 @@ import {
 } from '../components/estimate/glass/GlassEstimateExtras';
 import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDisplay';
 import { loadStripeSdk } from '../lib/stripeLoader';
+import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { formatETDate } from '../lib/timezone';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
@@ -82,7 +82,7 @@ const ESTIMATE_MUTED = CUSTOMER_SURFACE.muted;
 const ESTIMATE_TEXT = CUSTOMER_SURFACE.text;
 const ESTIMATE_BODY = CUSTOMER_SURFACE.body;
 const ESTIMATE_CHROME = CUSTOMER_SURFACE.chrome;
-const ESTIMATE_BUTTON_BG = COLORS.blueDeeper;
+const ESTIMATE_BUTTON_BG = COLORS.glassNavy;
 
 // THE estimate primary CTA (modal pay/confirm buttons + success links) —
 // hoisted so the repeated inline copies can't drift (doc-style unify).
@@ -1151,6 +1151,11 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Abort an in-flight ask on unmount — the AI answer can take several
+  // seconds, and its late resolution must not setState (or flash the call-us
+  // fallback) against an unmounted bar.
+  const askAbortRef = useRef(null);
+  useEffect(() => () => { askAbortRef.current?.abort(); }, []);
   const prompts = Array.isArray(chips) && chips.length > 0
     ? chips.map((chip) => String(chip || '').trim()).filter(Boolean).slice(0, 6)
     : ESTIMATE_ASK_PROMPTS;
@@ -1158,6 +1163,8 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
   const ask = useCallback(async (prompt) => {
     const q = String(prompt ?? question).trim();
     if (!q || asking) return;
+    const controller = new AbortController();
+    askAbortRef.current = controller;
     setAsking(true);
     setFailed(false);
     setAnswer('Checking...');
@@ -1173,16 +1180,19 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           selectedFrequency,
           serviceMode,
         }),
+        signal: controller.signal,
       });
       const body = await response.json().catch(() => ({}));
+      if (controller.signal.aborted) return;
       if (!response.ok) throw new Error(body.error || 'question_failed');
       setAnswer(body.answer || 'I could not answer that from this estimate.');
       setQuestion('');
     } catch {
+      if (controller.signal.aborted) return;
       setFailed(true);
       setAnswer(`I could not answer that right now. Call or text Waves at ${WAVES_PHONE_DISPLAY}.`);
     } finally {
-      setAsking(false);
+      if (!controller.signal.aborted) setAsking(false);
     }
   }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
 
@@ -1605,7 +1615,9 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
               opacity: isSubmitting ? 0.72 : 1,
             }}
           >
-            <Icon name={isReceived ? 'check' : 'plus'} size={17} strokeWidth={2.4} />
+            {/* No plus glyph on the idle label (owner 2026-07-11) — only the
+                received state keeps its check. */}
+            {isReceived ? <Icon name="check" size={17} strokeWidth={2.4} /> : null}
             {isSubmitting ? 'Sending request...' : isReceived ? 'Request received' : (offer.buttonLabel || `Add ${offer.label}`)}
           </button>
           {isReceived ? (
@@ -1875,8 +1887,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
               display: 'inline-block',
               marginTop: 12,
               padding: '4px 12px',
-              background: '#EEF2FF',
-              color: ESTIMATE_TEXT,
+              ...waveGuardChipStyle(waveGuardTier),
               borderRadius: 6,
               fontSize: 14,
               fontWeight: 700,
@@ -2026,23 +2037,18 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   // Exact case needs the per-service sum to itemize against.
   if (!(creditFromDiff > 0)) return null;
   const creditMonthly = creditFromDiff;
-  const selectedAnnual = Number(selectedFrequency?.annual ?? combined.annualSubtotal);
-  const netAnnual = selectedAnnual > 0 ? selectedAnnual : round2(netMonthly * 12);
+  // Credit-only card (owner directive 2026-07-11): the plan credit stays
+  // visible, but a multi-service plan never restates a combined monthly or
+  // annual total — per-application pricing on the service cards is the only
+  // customer-facing price. The subtotal/net figures above remain solely as
+  // reconciliation inputs for the credit amount. The service cards are
+  // pre-credit, so the caption points at booking (where accept applies it),
+  // not at the card prices.
   return (
     <section style={estimateCard()}>
-      <div style={{ ...row, fontSize: 16, color: ESTIMATE_BODY }}>
-        <span>Plan subtotal</span>
-        <span style={num}>{fmtMoney(subtotalMonthly)}{per('/mo')}</span>
-      </div>
-      <div style={{ marginTop: 12 }}>{creditBox(creditMonthly)}</div>
-      <div style={{ ...row, marginTop: 14, paddingTop: 16, borderTop: `1px solid ${W.borderCool}` }}>
-        <span style={{ fontSize: 18, fontWeight: 800, color: ESTIMATE_TEXT }}>Your price</span>
-        <span style={{ ...num, fontSize: 28, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1 }}>
-          {fmtMoney(netMonthly)}<span style={{ color: ESTIMATE_MUTED, fontSize: 16, fontWeight: 500 }}> /mo</span>
-        </span>
-      </div>
-      <div style={{ ...num, textAlign: 'right', marginTop: 6, fontSize: 14, color: ESTIMATE_MUTED }}>
-        {fmtMoney(netAnnual)} / year
+      {creditBox(creditMonthly)}
+      <div style={{ marginTop: 10, fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5 }}>
+        Applied to your plan when you book.
       </div>
     </section>
   );
@@ -2095,6 +2101,7 @@ function ExistingAppointmentCard({ appointment }) {
 // requiredAmount, receivedTotal, paymentIntentId, publishableKey. The PI is
 // card-only server-side, so the Payment Element renders card fields only.
 function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first invoice' }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2170,11 +2177,12 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Reserve your appointment</div>
@@ -2211,6 +2219,7 @@ function DepositModal({ intent, onSuccess, onCancel, creditTarget = 'your first 
 // charged the final total on completion, and a flat fee only on a no-show /
 // late cancel.
 function CardHoldModal({ intent, onSuccess, onCancel }) {
+  const dialogRef = useModalFocus();
   const mountRef = useRef(null);
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
@@ -2280,11 +2289,12 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-label="Secure payment"
       onKeyDown={(e) => { if (e.key === 'Escape' && !submitting) onCancel(); }}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(27,44,91,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(4,57,94,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 }}
     >
       <div style={{ background: COLORS.white, borderRadius: 16, maxWidth: 440, width: '100%', padding: 24, boxShadow: '0 18px 50px rgba(0,0,0,0.25)', maxHeight: '90vh', overflow: 'auto' }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: COLORS.navy }}>Hold your appointment</div>
@@ -2316,7 +2326,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote }) {
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -2389,7 +2399,8 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
         <button
           type="button"
           onClick={onConfirm}
-          style={estimateCtaStyle}
+          disabled={submitting}
+          style={submitting ? { ...estimateCtaStyle, opacity: 0.65, cursor: 'wait' } : estimateCtaStyle}
         >{confirmLabel}</button>
         {confirmSub ? (
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
@@ -2727,10 +2738,11 @@ const SERVICE_CARD_HEADLINES = {
 const SERVICE_DETAILS_KEYS = new Set(['pest_control', 'mosquito', 'termite_bait', 'lawn_care', 'tree_shrub']);
 
 // Universally-recognized icons for the details-packet actions (inline SVG,
-// currentColor — same pattern as QuestionsEscapeHatch's ChatIcon).
+// currentColor — same pattern as QuestionsEscapeHatch's ChatIcon). The pills
+// are icon-ONLY (owner 2026-07-11) — the label lives in aria-label/title.
 function PdfDocIcon() {
   return (
-    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
       <path d="M14 2v6h6" />
       <path d="M8 13h8M8 17h5" />
@@ -2739,7 +2751,7 @@ function PdfDocIcon() {
 }
 function EnvelopeIcon() {
   return (
-    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <rect x="2" y="4" width="20" height="16" rx="2" />
       <path d="m22 7-10 6L2 7" />
     </svg>
@@ -2747,17 +2759,17 @@ function EnvelopeIcon() {
 }
 function ChatBubbleIcon() {
   return (
-    <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   );
 }
 
-// Details-packet action pill — the page's gold CTA treatment (gc-section-cta)
-// with an icon, shared by the view link and the send buttons.
+// Details-packet action pill — the page's gold CTA treatment (gc-section-cta),
+// icon-only: square-ish padding keeps a ≥44px tap target without a text label.
 const DETAILS_ACTION_STYLE = (disabled) => ({
-  display: 'inline-flex', alignItems: 'center', gap: 8,
-  padding: '10px 18px', fontSize: 14, fontWeight: 700,
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  padding: '12px 16px', fontSize: 14, fontWeight: 700,
   textDecoration: 'none',
   pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
 });
@@ -2791,32 +2803,35 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
     ? `Sent! Check ${customerEmail || 'your email'}.`
     : 'Sent! Check your texts for the link.';
   return (
-    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+    <div style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14, textAlign: 'center' }}>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.45, marginBottom: 10 }}>
-        Want the fine print? Get the full details PDF — how visits work, every product with its label &amp; safety sheet.
+        Want the fine print? Get the full details PDF.
       </div>
       {state.status === 'sent' ? (
         <div style={{ fontSize: 14, fontWeight: 700, color: W.green }}>
           <span aria-hidden="true" style={{ marginRight: 6 }}>&#10003;</span>{sentLabel}
         </div>
       ) : (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
           {/* Direct view — opens the same tokenized PDF the send flows
               deliver, in a new tab where the browser's own print / download
               / share (incl. the mobile share sheet) take over. Rendered
               first so customers aren't forced through a send to read it.
               All three actions wear the page's gold CTA pill
-              (gc-section-cta) with a universally recognized icon (owner
-              2026-07-11). */}
+              (gc-section-cta) as icon-only buttons (owner 2026-07-11) —
+              the intro line above supplies the context, aria-label/title
+              carry the action name. */}
           <a
             className="gc-section-cta"
             href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
             target={preview ? undefined : '_blank'}
             rel={preview ? undefined : 'noopener noreferrer'}
             onClick={preview ? (e) => e.preventDefault() : undefined}
+            aria-label="View the PDF"
+            title="View the PDF"
             style={{ ...DETAILS_ACTION_STYLE(preview ? false : disabled), ...(preview ? { cursor: 'pointer' } : null) }}
           >
-            <PdfDocIcon />View the PDF
+            <PdfDocIcon />
           </a>
           {customerEmail ? (
             <button
@@ -2824,9 +2839,11 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               className="gc-section-cta"
               disabled={!preview && (disabled || state.status === 'sending')}
               onClick={preview ? undefined : () => send('email')}
+              aria-label="Email me the PDF"
+              title="Email me the PDF"
               style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
             >
-              <EnvelopeIcon />{state.status === 'sending' && state.channel === 'email' ? 'Sending\u2026' : 'Email me the PDF'}
+              <EnvelopeIcon />
             </button>
           ) : null}
           {customerPhone ? (
@@ -2835,9 +2852,11 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               className="gc-section-cta"
               disabled={!preview && (disabled || state.status === 'sending')}
               onClick={preview ? undefined : () => send('sms')}
+              aria-label="Text me the link"
+              title="Text me the link"
               style={DETAILS_ACTION_STYLE(preview ? false : (disabled || state.status === 'sending'))}
             >
-              <ChatBubbleIcon />{state.status === 'sending' && state.channel === 'sms' ? 'Sending\u2026' : 'Text me the link'}
+              <ChatBubbleIcon />
             </button>
           ) : null}
           {preview ? (
@@ -2996,8 +3015,10 @@ export function ServiceSection({
             fontSize: 18,
             color: ESTIMATE_TEXT,
             margin: '0 0 16px',
-            // Keep clear of the absolutely-positioned corner badge.
-            paddingRight: showTierBadge ? 140 : 0,
+            // Keep clear of the absolutely-positioned corner badge — sized
+            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
+            // padding + the 16px corner inset).
+            paddingRight: showTierBadge ? 170 : 0,
             fontWeight: 800,
           }}>
             {displayServiceLabel(section.label) || 'Service'}
@@ -3009,8 +3030,10 @@ export function ServiceSection({
             (termite monitoring) get a headline too (owner 2026-07-10). */}
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
-          color: '#1B2C5B', margin: '0 0 4px',
-          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 140,
+          color: '#04395E', margin: '0 0 4px',
+          // Same corner-badge clearance as the h3 above; only needed when
+          // this headline is the first line in the card (single-service).
+          paddingRight: servicesLength > 1 || !showTierBadge ? 0 : 170,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
@@ -3029,7 +3052,7 @@ export function ServiceSection({
         {sectionSlug === 'termite_bait' && oneTimeEmbed ? (
           <>
             <SectionOneTimeBlock contribution={oneTimeEmbed} variant="lead" />
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#1B2C5B', margin: '14px 0 0' }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#04395E', margin: '14px 0 0' }}>
               Monitoring is what keeps them working:
             </div>
           </>
@@ -3204,6 +3227,11 @@ export default function EstimateViewPage() {
   // open; the succeeded SetupIntent id rides to accept via the ref.
   const [cardHoldIntent, setCardHoldIntent] = useState(null);
   const cardHoldSetupIntentIdRef = useRef(null);
+  // Live-ref accept lock (same reasoning as ctaPhaseRef): performAccept is
+  // also reached with ctaPhaseRef already 'submitting' (handleConfirm's
+  // deposit/card-hold exempt fall-through), so it carries its own synchronous
+  // single-flight latch — a double-invoke must not double-PUT /accept.
+  const acceptInFlightRef = useRef(false);
   const [slotsRefreshSignal, setSlotsRefreshSignal] = useState(0);
   const [addServiceRequestState, setAddServiceRequestState] = useState({ status: 'idle', message: '' });
 
@@ -3317,7 +3345,6 @@ export default function EstimateViewPage() {
     ),
     [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership]
   );
-  const reportShowcaseVariant = useMemo(() => reportShowcaseVariantForServices(services), [services]);
   // Download PDF / Share / Print / Portal Login at the top of every estimate
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
   // as the report/pay/receipt/contract pages. The PDF endpoint streams the
@@ -3647,6 +3674,11 @@ export default function EstimateViewPage() {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
+    // Synchronous single-flight guard: React state (`processing`-style flags)
+    // lags a double-tap in the same frame — the ref flips before any await,
+    // so a second entry can never double-PUT /accept.
+    if (acceptInFlightRef.current) return;
+    acceptInFlightRef.current = true;
     setCtaPhase('submitting');
     setError(null);
     try {
@@ -3724,6 +3756,8 @@ export default function EstimateViewPage() {
     } catch (err) {
       setError(err.message);
       setCtaPhase('review');
+    } finally {
+      acceptInFlightRef.current = false;
     }
   }, [adminDraftPreview, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
@@ -3733,6 +3767,10 @@ export default function EstimateViewPage() {
   // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
+    // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
+    // a double-tap on Confirm must not double-enter the flow — the second
+    // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
+    if (ctaPhaseRef.current === 'submitting') return;
     // One-time card-on-file hold (dark until ONE_TIME_CARD_HOLD). When a card
     // is required to book this one-time visit and none is captured yet, mint
     // the SetupIntent and open the capture modal; accept continues from the
@@ -4015,28 +4053,18 @@ export default function EstimateViewPage() {
   const isLockedMirrorSection = (section) => (
     comboModeActive && section?.isRecurring && section.key !== 'pest_control' && !comboAxisKeys.has(section.key)
   );
-  // Live price for the glass sticky book bar — it must quote exactly what
-  // the cards quote. Bundles: combinedFrequency.monthly IS the bundle's
-  // monthly total (accept charges this /mo number) — no cadence multiply.
-  // Single service: the cadence price PriceCard renders.
-  const stickyBarPrice = (() => {
-    const HIDDEN = { label: null, period: null };
-    if (services.length > 1) {
-      const monthly = combinedFrequency?.monthly;
-      if (combinedFrequency?.quoteRequired === true || monthly == null) return HIDDEN;
-      // Narrow low-confidence commercial estimates price as a $low–$high
-      // RANGE on the cards; a fixed bar quoting one exact number would
-      // contradict them mid-booking, so it stays hidden for ranged pricing.
-      if (Number(combinedFrequency?.lowConfidenceRangePct) > 0) return HIDDEN;
-      return { label: fmtMoney(Math.round(Number(monthly) * 100) / 100), period: '/mo' };
-    }
-    const src = currentFrequency;
-    if (!src || src.quoteRequired === true || src.monthly == null) return HIDDEN;
-    if (Number(src.lowConfidenceRangePct) > 0) return HIDDEN;
-    const billingKey = src.billingFrequencyKey || src.key;
-    const intervalMonths = billingKey === 'quarterly' ? 3 : billingKey === 'bi_monthly' ? 2 : 1;
-    const period = billingKey === 'quarterly' ? '/quarter' : billingKey === 'bi_monthly' ? '/bi-monthly' : '/mo';
-    return { label: fmtMoney(Math.round(Number(src.monthly) * intervalMonths * 100) / 100), period };
+  // Render gate for the glass sticky book bar. The bar displays NO price
+  // (owner 2026-07-10) — this only decides whether the selection is PRICED:
+  // quote-required and ranged (low-confidence commercial) selections keep
+  // the bar hidden, everything else keeps its approve CTA. Multi-service
+  // plans gate off the combined frequency's priced-ness WITHOUT computing a
+  // displayable total (owner 2026-07-11: no combined totals anywhere;
+  // codex 2639 r1: hiding the bar itself for multi-service was a bug).
+  const stickyBarPriced = (() => {
+    const src = services.length > 1 ? combinedFrequency : currentFrequency;
+    if (!src || src.quoteRequired === true || src.monthly == null) return false;
+    if (Number(src.lowConfidenceRangePct) > 0) return false;
+    return true;
   })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
@@ -4320,7 +4348,6 @@ export default function EstimateViewPage() {
           proposalPdfEmailed={proposalPdfEmailed}
         />
         <AppShowcaseCard />
-        <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -4388,7 +4415,6 @@ export default function EstimateViewPage() {
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
         <AppShowcaseCard />
-        <ReportShowcaseCard variant={reportShowcaseVariant} />
         <CustomerReviews />
         <GoogleProfilesCard />
       </Page>
@@ -4452,6 +4478,7 @@ export default function EstimateViewPage() {
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
+            submitting={ctaPhase === 'submitting'}
             invoiceMode={!!estimate.billByInvoice}
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
@@ -4640,12 +4667,12 @@ export default function EstimateViewPage() {
                   ? <GlassSectionCta label="This price fits my home — lock it in →" onClick={scrollToBookingSection} style={{ justifyContent: 'center' }} />
                   : null}
               />
-              {/* GBP proof directly after the review quotes; the report
-                  showcase directly after the app card it extends. This
-                  branch's approved reviews-before-app order is preserved. */}
+              {/* GBP proof directly after the review quotes. The report
+                  showcase card was removed from the estimate page entirely
+                  (owner 2026-07-11). This branch's approved reviews-before-app
+                  order is preserved. */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              <ReportShowcaseCard variant={reportShowcaseVariant} />
               {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
               <GoogleProfilesCard />
               <EstimateAskBar
@@ -4672,7 +4699,6 @@ export default function EstimateViewPage() {
       {glassContent && !(ctaPhase === 'review' && reservation) ? null : (
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
-          <ReportShowcaseCard variant={reportShowcaseVariant} />
           <CustomerReviews />
           <GoogleProfilesCard />
         </>
@@ -4682,7 +4708,7 @@ export default function EstimateViewPage() {
           would cover the confirm/cancel buttons. */}
       {glassContent && canShowSlotPicker && serviceMode === 'recurring' && !(ctaPhase === 'review' && reservation) ? (
         <GlassStickyBookBar
-          priceLabel={stickyBarPrice.label}
+          show={stickyBarPriced}
           slotMeta={selectedSlotMeta}
           onApprove={selectedSlotMeta ? scrollToPaymentSection : scrollToBookingSection}
         />

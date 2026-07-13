@@ -756,6 +756,7 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
   ['paymentConfirmationSms', 'payment_confirmation_sms'],
   ['appointmentNotifyPrimary', 'appointment_notify_primary'],
   ['serviceReportNotifyPrimary', 'service_report_notify_primary'],
+  ['serviceReportNotifyBilling', 'service_report_notify_billing'],
 ];
 
 const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'card_present', 'other']);

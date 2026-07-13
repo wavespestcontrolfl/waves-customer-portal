@@ -2070,15 +2070,13 @@ async function archiveWdoFiling({ project, buffer, source, invoiceId = null, sen
 
 // WDO inspection auto-invoice fee. The tech enters any fee on the form
 // (findings.inspection_fee) — WDO pricing varies by construction (wood frame),
-// new build, prior termite history, etc., so it's a free amount, not fixed
-// tiers. That entry always wins. If it's left blank, fall back to tiering by
-// the structure footprint they entered (≤2500 → $150 · ≤3500 → $200 · >3500 →
-// $250), and if neither is set default to the top $250 tier (conservative;
-// surfaced in the dry-run for the operator to adjust). We never tier on
+// new build, prior termite history, etc. That entry always wins. If it's
+// left blank, the fee is $250 FLAT (owner decision 2026-07-12 — Q8 of the
+// universal one-time services plan replaced the old ≤2500/$150 · ≤3500/$200
+// · >3500/$250 structure-sqft tiers so every fee source agrees). Tier shape
+// kept so resolveWdoInspectionFee is untouched; we never price on
 // customers.property_sqft (that's lawn area).
 const WDO_FEE_TIERS = [
-  { maxSqFt: 2500, price: 150 },
-  { maxSqFt: 3500, price: 200 },
   { maxSqFt: Infinity, price: 250 },
 ];
 function parseWdoFee(value) {

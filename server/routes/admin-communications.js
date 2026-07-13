@@ -565,11 +565,11 @@ router.post('/sms', async (req, res, next) => {
 });
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
-// customer picked by name ("Send flea prep" button). Smart channel: emails the
-// formatted prep guide (plus the companion text) when the customer has an email
-// on file, otherwise sends the self-contained prep text. Flea only for now —
-// the allow-list is the one place to enable another pest.
-const MANUAL_PREP_ALLOWED_TYPES = new Set(['flea']);
+// customer picked by name ("Send prep guide" button). Smart channel: emails
+// the formatted prep guide (plus the companion text) when the customer has an
+// email on file, otherwise sends the self-contained prep text. All PREP_CONFIG
+// pests are allowed — flea, bed bug, and cockroach templates all exist.
+const { isSupportedPestType } = require('../services/prep-guide-sender');
 
 function manualPrepMessage(result) {
   if (!result.ok) {
@@ -590,7 +590,7 @@ router.post('/send-prep', async (req, res, next) => {
   try {
     const { customerId, pestType = 'flea' } = req.body || {};
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
-    if (!MANUAL_PREP_ALLOWED_TYPES.has(pestType)) {
+    if (!isSupportedPestType(pestType)) {
       return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
     }
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');

@@ -22,15 +22,6 @@ const APP_STORE_URL = import.meta.env.VITE_IOS_APP_URL
 const PLAY_STORE_URL = import.meta.env.VITE_ANDROID_APP_URL
   || 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
-const APP_FEATURES = [
-  'Live tech tracking',
-  'Text your tech',
-  'Photo & video reports',
-  'Add family to alerts',
-  'Billing & autopay',
-  'Reschedule & history',
-];
-
 function AppStoreBadge() {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="132" height="40" viewBox="0 0 132 40" role="img" aria-label="Download on the App Store" style={{ display: 'block', height: 40, width: 'auto' }}>
@@ -129,25 +120,8 @@ export default function AppShowcaseCard({ onBookToday = null }) {
           <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
             {GLASS_COPY.appHouseholdLine}
           </p>
-          <div className="gc-av-chips">
-            {/* data-glass-accent renders these as the same gold pills as the
-                report-card / AI slot-search chips (owner 2026-07-07); the
-                inline styles remain the pre-hydration fallback. */}
-            {APP_FEATURES.map((label) => (
-              <span
-                key={label}
-                data-glass-accent=""
-                style={{
-                  padding: '8px 14px', borderRadius: 999,
-                  fontSize: 14, fontWeight: 700, color: W.navyDeep,
-                  background: W.white, border: '1px solid #DCEAF3',
-                  boxShadow: '0 2px 8px rgba(4,57,94,.08)',
-                }}
-              >
-                {label}
-              </span>
-            ))}
-          </div>
+          {/* The six feature chips were removed (owner 2026-07-11) — the
+              phones + household line carry the pitch. */}
           {native ? null : (
           /* Badges centered under the copy column (owner ask 07-07), always
              SIDE BY SIDE (owner 2026-07-09) — the pair is ~280px, so nowrap

@@ -31,6 +31,13 @@ const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
+const { SENTRY_OPS_TOOLS, executeSentryOpsTool } = require('../services/intelligence-bar/sentry-ops-tools');
+const { CLOUDFLARE_OPS_TOOLS, executeCloudflareOpsTool } = require('../services/intelligence-bar/cloudflare-ops-tools');
+const { TWILIO_OPS_TOOLS, executeTwilioOpsTool } = require('../services/intelligence-bar/twilio-ops-tools');
+const { STRIPE_OPS_TOOLS, executeStripeOpsTool } = require('../services/intelligence-bar/stripe-ops-tools');
+const { GITHUB_OPS_TOOLS, executeGithubOpsTool } = require('../services/intelligence-bar/github-ops-tools');
+const { STORE_OPS_TOOLS, executeStoreOpsTool } = require('../services/intelligence-bar/store-ops-tools');
+const { GROWTHBOOK_TOOLS, executeGrowthbookTool } = require('../services/intelligence-bar/growthbook-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { getBreaker } = require('../services/intelligence-bar/circuit-breaker');
@@ -76,6 +83,21 @@ const EMAIL_TOOL_NAMES = new Set(EMAIL_TOOLS.map(t => t.name));
 const BANKING_TOOL_NAMES = new Set(BANKING_TOOLS.map(t => t.name));
 const ESTIMATE_TOOL_NAMES = new Set(ESTIMATE_TOOLS.map(t => t.name));
 const OPS_TOOL_NAMES = new Set(OPS_TOOLS.map(t => t.name));
+const SENTRY_OPS_TOOL_NAMES = new Set(SENTRY_OPS_TOOLS.map(t => t.name));
+const CLOUDFLARE_OPS_TOOL_NAMES = new Set(CLOUDFLARE_OPS_TOOLS.map(t => t.name));
+const TWILIO_OPS_TOOL_NAMES = new Set(TWILIO_OPS_TOOLS.map(t => t.name));
+const STRIPE_OPS_TOOL_NAMES = new Set(STRIPE_OPS_TOOLS.map(t => t.name));
+const GITHUB_OPS_TOOL_NAMES = new Set(GITHUB_OPS_TOOLS.map(t => t.name));
+const STORE_OPS_TOOL_NAMES = new Set(STORE_OPS_TOOLS.map(t => t.name));
+const GROWTHBOOK_TOOL_NAMES = new Set(GROWTHBOOK_TOOLS.map(t => t.name));
+// Every infra module loads with the dashboard context and shares the
+// admin-only guard that OPS_TOOLS established.
+const INFRA_TOOLS = [
+  ...OPS_TOOLS, ...SENTRY_OPS_TOOLS, ...CLOUDFLARE_OPS_TOOLS,
+  ...TWILIO_OPS_TOOLS, ...STRIPE_OPS_TOOLS, ...GITHUB_OPS_TOOLS,
+  ...STORE_OPS_TOOLS, ...GROWTHBOOK_TOOLS,
+];
+const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
 
 // Base toolset for every admin context: core customer/schedule/revenue tools
@@ -107,6 +129,20 @@ const PII_TOOL_NAMES = new Set([
   // Railway runtime logs can echo customer identifiers from app logging —
   // redact like any other PII-bearing tool result.
   'get_railway_logs',
+  // Sentry reports with sendDefaultPii — issue titles, culprits, and event
+  // messages/values can embed customer emails, phones, or request data.
+  'get_sentry_top_issues',
+  'get_sentry_new_issues',
+  'get_sentry_issue_detail',
+  // Twilio results carry recipient phone numbers (and alert texts can echo
+  // them) — redact like the comms tools.
+  'get_twilio_alerts',
+  'get_twilio_failed_messages',
+  // GrowthBook feature rules expose raw targeting `condition` predicates,
+  // which are arbitrary attribute strings that can embed customer emails or
+  // user identifiers — keep them out of query telemetry.
+  'get_growthbook_features',
+  'get_growthbook_experiments',
 ]);
 
 function isNonAdminDashboardRequest(req) {
@@ -121,30 +157,26 @@ function isNonAdminDashboardRequest(req) {
 const MAX_QUERY_IMAGES = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // Anthropic per-image decoded-size cap
 const ALLOWED_IMAGE_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
-const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+// Stack-safe (sliced) validation — a whole-string regex on a multi-megabyte
+// payload is the CI-only 500 flake; see server/utils/base64-validate.js.
+const { isValidBase64 } = require('../utils/base64-validate');
 const IMAGE_TAINT_MARKER = '[Image attachment context may contain PII]';
 const IMAGE_ATTACHMENT_HISTORY_RE = /\[Operator attached \d+ image(?:s)?\]/;
-
-function isValidBase64(data) {
-  return typeof data === 'string'
-    && data.length > 0
-    && data.length % 4 === 0
-    && BASE64_RE.test(data);
-}
 
 // Validate attachments server-side — never trust the client downscaler. Drop
 // anything with an unsupported media type, non-base64 data, or a decoded size
 // over the provider's per-image cap, so a stale/malformed/direct-API payload
 // can't burn an AI request on a guaranteed provider error. Unsupported types
-// are dropped, never relabeled.
+// are dropped, never relabeled. The size cap runs before base64 validation:
+// it's plain arithmetic, and an oversized payload should never be scanned.
 function sanitizeQueryImages(images) {
   if (!Array.isArray(images)) return [];
   const out = [];
   for (const img of images) {
     if (out.length >= MAX_QUERY_IMAGES) break;
     if (!img || !ALLOWED_IMAGE_MEDIA_TYPES.has(img.mediaType)) continue;
+    if (typeof img.data !== 'string' || Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
     if (!isValidBase64(img.data)) continue;
-    if (Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) continue;
     out.push({ mediaType: img.mediaType, data: img.data });
   }
   return out;
@@ -361,11 +393,20 @@ ANALYSIS STYLE:
 - When showing revenue, always include both the dollar amount and the trend direction
 - Round to whole dollars for readability ($1,234 not $1,234.56)
 
-INFRASTRUCTURE (Railway):
-The portal runs on Railway. You have READ-ONLY infrastructure tools: get_railway_status (per-service deploy status), get_railway_deployments (recent deploys), get_railway_logs (runtime logs — filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+INFRASTRUCTURE (all READ-ONLY):
+The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice is Twilio; payments are Stripe; code lives on GitHub.
+- Railway: get_railway_status (per-service deploy status), get_railway_deployments, get_railway_logs (filter supports Railway syntax like "@level:error"), get_railway_variable_names (variable NAMES only; values are never available).
+- Sentry: get_sentry_top_issues / get_sentry_new_issues / get_sentry_issue_detail — PREFER Sentry over Railway logs for application errors (logs rotate; Sentry keeps stack traces).
+- Cloudflare: get_cloudflare_zones (domain status), get_cloudflare_pages_builds (spoke-site builds), get_cloudflare_edge_errors (edge 5xx rate for a zone).
+- Twilio: get_twilio_alerts (carrier/webhook errors), get_twilio_failed_messages (failed/undelivered SMS — metadata only, never bodies).
+- Stripe: get_stripe_webhook_endpoints (subscriptions + status), get_stripe_webhook_failures (events the app may have missed). Business revenue questions use the revenue tools, not these.
+- GitHub: get_recent_merged_prs ("what shipped?"), get_commit_info (translate a Railway deploy SHA into a PR/commit).
+- App stores: get_app_store_status (iOS version states — READY_FOR_SALE = live), get_play_store_status (Play track releases). Use during release windows.
+- GrowthBook: get_growthbook_experiments / get_growthbook_features — experiment + flag reads only; all GrowthBook CHANGES happen in its UI by the operator, never through you.
+- Chain them for health checks: deploy green (Railway) + no new issues (Sentry) + webhooks delivering (Stripe/Twilio) = healthy.
 - Combine infra with business data when useful ("did we miss calls while the server was erroring?")
-- If a tool reports Railway access is not configured, tell the operator to add the RAILWAY_TOKEN service variable in the Railway dashboard
-- You CANNOT restart, redeploy, or change configuration — never claim otherwise. Point the operator to the Railway dashboard for any change.`,
+- If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
+- You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`,
 
   seo: `
 SEO & CONTENT ENGINE CONTEXT:
@@ -755,7 +796,7 @@ function getToolsForContext(context) {
     return [...BASE_TOOLS, ...SCHEDULE_TOOLS];
   }
   if (context === 'dashboard') {
-    return [...BASE_TOOLS, ...DASHBOARD_TOOLS, ...OPS_TOOLS];
+    return [...BASE_TOOLS, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
     return [...BASE_TOOLS, ...SEO_QUERY_TOOLS];
@@ -828,6 +869,27 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (OPS_TOOL_NAMES.has(toolName)) {
     return executeOpsTool(toolName, input);
+  }
+  if (SENTRY_OPS_TOOL_NAMES.has(toolName)) {
+    return executeSentryOpsTool(toolName, input);
+  }
+  if (CLOUDFLARE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeCloudflareOpsTool(toolName, input);
+  }
+  if (TWILIO_OPS_TOOL_NAMES.has(toolName)) {
+    return executeTwilioOpsTool(toolName, input);
+  }
+  if (STRIPE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeStripeOpsTool(toolName, input);
+  }
+  if (GITHUB_OPS_TOOL_NAMES.has(toolName)) {
+    return executeGithubOpsTool(toolName, input);
+  }
+  if (STORE_OPS_TOOL_NAMES.has(toolName)) {
+    return executeStoreOpsTool(toolName, input);
+  }
+  if (GROWTHBOOK_TOOL_NAMES.has(toolName)) {
+    return executeGrowthbookTool(toolName, input);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);
@@ -1009,7 +1071,7 @@ For create_customer, the route-optimization writes, and the inventory stock writ
         let circuitOpen = false;
         let errorMessage = null;
         const toolStartedAt = Date.now();
-        if ((DASHBOARD_TOOL_NAMES.has(toolUse.name) || OPS_TOOL_NAMES.has(toolUse.name)) && isNonAdminDashboardRequest(req)) {
+        if ((DASHBOARD_TOOL_NAMES.has(toolUse.name) || INFRA_TOOL_NAMES.has(toolUse.name)) && isNonAdminDashboardRequest(req)) {
           result = { error: 'Admin access required for dashboard intelligence' };
           failed = true;
           errorMessage = result.error;
@@ -1162,7 +1224,7 @@ router.post('/execute', async (req, res, next) => {
     if (!action) {
       return res.status(400).json({ error: 'Action is required' });
     }
-    if ((DASHBOARD_TOOL_NAMES.has(action) || OPS_TOOL_NAMES.has(action)) && isNonAdminDashboardRequest(req)) {
+    if ((DASHBOARD_TOOL_NAMES.has(action) || INFRA_TOOL_NAMES.has(action)) && isNonAdminDashboardRequest(req)) {
       return res.status(403).json({ error: 'Admin access required for dashboard actions' });
     }
     if (BANKING_TOOL_NAMES.has(action) && req.techRole !== 'admin') {
@@ -1334,7 +1396,9 @@ router.get('/quick-actions', async (req, res) => {
     { id: 'churn', group: 'Metrics', label: 'Churn Check', prompt: 'Any churn this month? Who did we lose and what was the revenue impact?' },
     { id: 'lead_sources', group: 'Ops', label: 'Lead Sources', prompt: 'Where are new customers coming from? Which source converts best?' },
     { id: 'balances', group: 'Ops', label: 'Outstanding Balances', prompt: "What's outstanding? Show me the aging breakdown and top debtors" },
-    { id: 'infra_check', group: 'Ops', label: 'Infra Check', prompt: 'Check Railway: latest deploy status for each service, and any error logs in the last hour.' },
+    { id: 'infra_check', group: 'Ops', label: 'Infra Check', prompt: 'Full infrastructure health check: Railway deploy status for each service, Sentry top and new issues in the last 24 hours, Cloudflare Pages build failures, and any Stripe or Twilio webhook/delivery failures.' },
+    { id: 'error_check', group: 'Ops', label: 'Error Check', prompt: 'Check Sentry: top unresolved errors and any issues that first appeared in the last 24 hours.' },
+    { id: 'shipped_today', group: 'Ops', label: 'What Shipped', prompt: 'What shipped recently? List merged PRs from the last 48 hours and confirm the latest Railway deploy is green.' },
   ];
 
   const seoActions = [

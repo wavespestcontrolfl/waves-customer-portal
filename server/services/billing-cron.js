@@ -9,6 +9,7 @@ const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const AccountMembershipEmail = require('./account-membership-email');
 const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+const { isEnabled } = require('../config/feature-gates');
 
 /**
  * Billing Cron Service
@@ -452,13 +453,44 @@ const BillingCron = {
         }
 
         if (failedPayment) {
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: failedPayment.id,
-            retryDate: retryAt,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
-          });
+          // One email per failure (owner rule 2026-07-11): with the gate on,
+          // the Automations-tab payment_failed sequence (editable; its copy
+          // matches the Day-3 retry + portal card-update CTA) REPLACES the
+          // transactional retry-notice email. The failure SMS above, with the
+          // card-update link, is unchanged either way. 14-day dedupe = one
+          // enrollment per failure episode across the retry ladder; a repeat
+          // failure months later re-enrolls via reactivation.
+          //
+          // DUNNING NEVER GOES EMAIL-SILENT: the sequence only counts as
+          // covering the failure when it enrolled, this episode already
+          // enrolled (deduped), or no email exists anywhere (the transactional
+          // notice couldn't send either). A paused/empty sequence
+          // (not_sendable), an unsubscribe suppression the runner would
+          // cancel on (suppressed), or an error all fall back to the
+          // transactional retry notice, which has its own delivery rules.
+          let emailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              recipient: 'billing',
+              checkSuppression: true,
+              retryFailedUnsent: false,
+              source: 'autopay_failure',
+            });
+            emailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
+          }
+          if (!emailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: failedPayment.id,
+              retryDate: retryAt,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${failedPayment.id}: ${emailErr.message}`);
+            });
+          }
         }
       }
     }
@@ -1137,13 +1169,37 @@ const BillingCron = {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);
           }
 
-          await PaymentLifecycleEmail.sendPaymentRetryNotice({
-            customerId: customer.id,
-            paymentId: payment.id,
-            retryDate: nextRetry,
-          }).catch((emailErr) => {
-            logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
-          });
+          // Same gate swap as the initial-failure path: with the sequence
+          // covering this failure episode (14-day dedupe means this call is
+          // usually a no-op re-enroll, which is the point — one email per
+          // episode), the per-retry transactional notice stays quiet. The
+          // retry SMS above is unchanged. Same covered-reasons contract as
+          // the initial-failure site: paused sequence, suppression, or error
+          // fall back to the transactional notice — dunning never goes
+          // email-silent.
+          let retryEmailed = false;
+          if (isEnabled('paymentFailedEnroll')) {
+            const { enrollSequenceFromEvent } = require('./automation-enroll');
+            const enrollResult = await enrollSequenceFromEvent({
+              templateKey: 'payment_failed',
+              customerId: customer.id,
+              dedupe: 14,
+              recipient: 'billing',
+              checkSuppression: true,
+              retryFailedUnsent: false,
+              source: 'autopay_retry_failure',
+            });
+            retryEmailed = ['enrolled', 'deduped', 'no_email', 'no_customer'].includes(enrollResult.reason);
+          }
+          if (!retryEmailed) {
+            await PaymentLifecycleEmail.sendPaymentRetryNotice({
+              customerId: customer.id,
+              paymentId: payment.id,
+              retryDate: nextRetry,
+            }).catch((emailErr) => {
+              logger.warn(`[billing-cron] Retry notice email failed for payment ${payment.id}: ${emailErr.message}`);
+            });
+          }
         }
         continue;
       }

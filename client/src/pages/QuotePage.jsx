@@ -900,10 +900,12 @@ export default function QuotePage({ serviceSlug = '' }) {
       // the plan the customer just confirmed, not the pre-upsell snapshot.
       // The add-on was never priced into the original calculation, so the
       // single-service per_application caption no longer describes the full
-      // plan — drop it and let the caption fall back to the annual line.
+      // plan — drop it AND mark the result multi-recurring (codex 2642 r4:
+      // without the flag the headline fell back to the pre-upsell combined
+      // monthly total, exactly what the display rules ban).
       if (d.service_interest) {
         setResult(prev => prev
-          ? { ...prev, service_interest: d.service_interest, per_application: null, visits_per_year: null }
+          ? { ...prev, service_interest: d.service_interest, per_application: null, visits_per_year: null, multi_recurring: true }
           : prev);
       }
       setStage('result');
@@ -944,7 +946,7 @@ export default function QuotePage({ serviceSlug = '' }) {
 
   const sCard = { background: COLORS.white, borderRadius: 16, padding: 'clamp(24px, 3vw, 40px)', boxShadow: SHADOWS.goldRing, minHeight: 420 };
   const sLabel = { display: 'block', fontFamily: FONTS.ui, fontSize: 15, fontWeight: 600, color: COLORS.navy, marginBottom: 8 };
-  const sInput = { width: '100%', padding: '14px 16px', border: `1.5px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 16, fontFamily: FONTS.body, color: COLORS.navy, boxSizing: 'border-box', background: COLORS.white, outline: 'none', minHeight: 52 };
+  const sInput = { width: '100%', padding: '14px 16px', border: `1.5px solid ${COLORS.grayLight}`, borderRadius: 12, fontSize: 16, fontFamily: FONTS.body, color: COLORS.navy, boxSizing: 'border-box', background: COLORS.white, minHeight: 52 };
   const sChip = (on) => ({
     padding: '14px 18px', borderRadius: 12,
     border: `2px solid ${on ? COLORS.wavesBlue : COLORS.slate200}`,
@@ -1101,7 +1103,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="Your first and last name"
                       autoComplete="name"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1119,7 +1121,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="you@example.com"
                       autoComplete="email"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1140,7 +1142,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="(941) 555-0100"
                       autoComplete="tel"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
@@ -1160,7 +1162,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                       }}
                       onSelect={applyAddressParts}
                       placeholder="Start typing your address..."
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                     <label style={{ ...sLabel, marginTop: 12 }}>Apt / Unit # (optional)</label>
                     {/* Hand-typed units flow through the same address.line2 the
@@ -1171,12 +1173,12 @@ export default function QuotePage({ serviceSlug = '' }) {
                       onChange={(e) => setAddress(a => ({ ...a, line2: e.target.value }))}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); advance(); } }}
                       placeholder="Apt 4B"
-                      style={sInput}
+                      className="waves-focus-ring" style={sInput}
                     />
                   </>
                 )}
 
-                {error && <div style={sError}>{error}</div>}
+                {error && <div role="alert" style={sError}>{error}</div>}
 
                 {/* Off-screen honeypot: bots that fill every field trip the
                     server-side fax_number drop on /api/leads; real users never
@@ -1290,11 +1292,11 @@ export default function QuotePage({ serviceSlug = '' }) {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
                   <div>
                     <label style={sLabel}>Home square footage</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => { setHomeSqFt(e.target.value); setHomeSqFtConfirmed(true); }} placeholder="2000" />
+                    <input className="waves-focus-ring" style={sInput} type="number" inputMode="numeric" value={homeSqFt} onChange={(e) => { setHomeSqFt(e.target.value); setHomeSqFtConfirmed(true); }} placeholder="2000" />
                   </div>
                   <div>
                     <label style={sLabel}>Lot size (sq ft)</label>
-                    <input style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => { setLotSqFt(e.target.value); setLotSqFtConfirmed(true); }} placeholder="8000" />
+                    <input className="waves-focus-ring" style={sInput} type="number" inputMode="numeric" value={lotSqFt} onChange={(e) => { setLotSqFt(e.target.value); setLotSqFtConfirmed(true); }} placeholder="8000" />
                   </div>
                 </div>
 
@@ -1327,13 +1329,13 @@ export default function QuotePage({ serviceSlug = '' }) {
                 {svcLawn && (
                   <div style={{ marginBottom: 18 }}>
                     <label style={sLabel}>Grass type</label>
-                    <select style={sInput} value={grassType} onChange={(e) => setGrassType(e.target.value)}>
+                    <select className="waves-focus-ring" style={sInput} value={grassType} onChange={(e) => setGrassType(e.target.value)}>
                       {GRASS_TYPES.map(g => <option key={g.id} value={g.id}>{g.label}</option>)}
                     </select>
                   </div>
                 )}
 
-                {error && <div style={sError}>{error}</div>}
+                {error && <div role="alert" style={sError}>{error}</div>}
 
                 <div style={{ marginTop: 24, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
                   <Button variant="secondary" onClick={resetAll} disabled={loading} style={{ fontSize: 16, textTransform: 'none' }}>Start Over</Button>
@@ -1372,7 +1374,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                   })}
                 </div>
 
-                {upsellError && <div style={sError}>{upsellError}</div>}
+                {upsellError && <div role="alert" style={sError}>{upsellError}</div>}
 
                 <div style={{ marginTop: 8, display: 'grid', gap: 10 }}>
                   <Button variant="primary" onClick={submitUpsell} disabled={upsellLoading} style={{ fontSize: 16, textTransform: 'none' }}>
@@ -1409,32 +1411,67 @@ export default function QuotePage({ serviceSlug = '' }) {
                   </>
                 ) : (
                   <>
-                    <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
-                      <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
-                        ${Number(result.monthly_total).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>/mo</span>
-                      </div>
-                      <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${Number(result.variance_low).toLocaleString()} – ${Number(result.variance_high).toLocaleString()}</strong> per month</div>
-                      {result.confidence === 'low' && (
-                        <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
-                      )}
-                      <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
-                        {Number(result.per_application) > 0
-                          ? `$${Number(result.per_application).toLocaleString()} per application · ${result.service_interest}`
-                          : `$${Number(result.annual_total).toLocaleString()}/yr · ${result.service_interest}`}
-                      </div>
-                      {result.estimated_pricing && result.disclaimer && (
-                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, padding: '10px 14px', background: '#FEF3C7', borderRadius: 8, lineHeight: 1.5 }}>
-                          {result.disclaimer}
+                    {(() => {
+                      // Per-application headline (owner directive 2026-07-11):
+                      // every recurring price leads with the per-application
+                      // figure; the monthly rate is only the fallback when the
+                      // engine sent no per-application price. No per-year
+                      // totals anywhere. All amounts render with cents.
+                      const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                      const perApp = Number(result.per_application) || 0;
+                      const monthly = Number(result.monthly_total) || 0;
+                      // Multi-service recurring quotes have no single
+                      // per-application price and must not fall back to the
+                      // combined monthly total (codex 2642 r3) — they get a
+                      // neutral per-visit headline; the estimate itself
+                      // carries the per-service breakdown.
+                      const multiRecurring = perApp <= 0 && result.multi_recurring === true;
+                      // The variance band is computed on the monthly rate —
+                      // scale it onto the per-application figure so the range
+                      // brackets the number the customer is actually reading.
+                      const scale = perApp > 0 && monthly > 0 ? perApp / monthly : 0;
+                      const rangeLow = perApp > 0 ? Number(result.variance_low) * scale : Number(result.variance_low);
+                      const rangeHigh = perApp > 0 ? Number(result.variance_high) * scale : Number(result.variance_high);
+                      const visits = perApp > 0 && Number(result.annual_total) > 0
+                        ? Math.round(Number(result.annual_total) / perApp)
+                        : 0;
+                      return (
+                        <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
+                          <div style={{ fontSize: 14, color: COLORS.textCaption, fontWeight: 600 }}>Your Waves Price</div>
+                          {multiRecurring ? (
+                            <div style={{ fontSize: 34, fontWeight: 800, color: COLORS.blueDeeper, marginTop: 8, lineHeight: 1.15 }}>
+                              Priced per application
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 56, fontWeight: 800, color: COLORS.blueDeeper, fontFamily: FONTS.mono, marginTop: 8, lineHeight: 1 }}>
+                              ${money(perApp > 0 ? perApp : monthly)}
+                              <span style={{ fontSize: 22, fontWeight: 600, color: COLORS.textCaption }}>{perApp > 0 ? '/application' : '/mo'}</span>
+                            </div>
+                          )}
+                          {multiRecurring ? (
+                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>Each service bills per application — your estimate breaks down every price.</div>
+                          ) : (
+                            <div style={{ fontSize: 16, color: COLORS.textBody, marginTop: 12 }}>{result.confidence === 'low' ? 'Estimated range' : 'Typical range'}: <strong>${money(rangeLow)} – ${money(rangeHigh)}</strong> {perApp > 0 ? 'per application' : 'per month'}</div>
+                          )}
+                          {result.confidence === 'low' && (
+                            <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4, fontStyle: 'italic' }}>We didn't have full satellite data for your property — we'll confirm on-site.</div>
+                          )}
+                          <div style={{ fontSize: 14, color: COLORS.textCaption, marginTop: 4 }}>
+                            {visits > 0 ? `${visits} applications/year · ${result.service_interest}` : result.service_interest}
+                          </div>
+                          {result.estimated_pricing && result.disclaimer && (
+                            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 12, padding: '10px 14px', background: '#FEF3C7', borderRadius: 8, lineHeight: 1.5 }}>
+                              {result.disclaimer}
+                            </div>
+                          )}
+                          {result.has_setup_fee && (
+                            <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
+                              + $99.00 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
+                            </div>
+                          )}
                         </div>
-                      )}
-                      {result.has_setup_fee && (
-                        <div style={{ fontSize: 14, color: COLORS.textBody, marginTop: 10, padding: '8px 12px', background: '#FEF3C7', borderRadius: 8, display: 'inline-block' }}>
-                          + $99 one-time setup <em style={{ color: COLORS.textCaption }}>(waived with annual prepay)</em>
-                        </div>
-                      )}
-                    </div>
+                      );
+                    })()}
 
                     <div style={{ padding: 16, background: '#DCFCE7', borderRadius: 12, color: COLORS.navy, fontSize: 15, lineHeight: 1.55 }}>
                       We already texted your local Waves team. <strong>They'll confirm the final number and book your first visit</strong> — usually within the hour.
@@ -1526,7 +1563,7 @@ export default function QuotePage({ serviceSlug = '' }) {
                             {subscribeStatus === 'loading' ? 'Subscribing…' : 'Subscribe →'}
                           </button>
                           {subscribeStatus === 'error' && (
-                            <div style={{ fontSize: 12, color: COLORS.red, marginTop: 6 }}>
+                            <div role="alert" style={{ fontSize: 12, color: COLORS.red, marginTop: 6 }}>
                               Couldn't subscribe — try again or email contact@wavespestcontrol.com
                             </div>
                           )}

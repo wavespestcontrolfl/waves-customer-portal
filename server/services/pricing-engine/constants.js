@@ -1619,10 +1619,13 @@ const SPECIALTY = {
     rodentGuarantee: r(199), // legacy reference; new gating in RODENT.guarantee
   },
   wdo: {
+    // Owner decision 2026-07-12 (universal one-time services Q8): WDO
+    // inspection is $250 FLAT — replaces the stale lawn-sqft brackets
+    // ($175/$200/$225), the invoice structure-sqft tiers ($150/$200/$250),
+    // and the tech estimator's $125, which all disagreed. Kept as a single
+    // terminal bracket so priceWDO and the bridge validation shape hold.
     brackets: [
-      { maxSqFt: 2500, price: r(175) },
-      { maxSqFt: 3500, price: r(200) },
-      { maxSqFt: Infinity, price: r(225) },
+      { maxSqFt: Infinity, price: r(250) },
     ],
   },
 };

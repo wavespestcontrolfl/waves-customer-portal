@@ -18,6 +18,7 @@ const { getProjectType } = require('../services/project-types');
 const { loadTemplateByKey } = require('../services/email-template-library');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
 // Display masks for the prep contact block — same shapes as the tracker's
@@ -47,6 +48,92 @@ router.use(rateLimit({
 const TOKEN_RE = /^[a-f0-9]{32}$/i;
 
 const EMAIL_ONLY_BLOCK_TYPES = new Set(['cta', 'signature', 'small_note']);
+
+// Upcoming-visits band (owner 2026-07-12): the page shows the customer's
+// next 1-2 OPEN visits of the SAME service family as this prep guide —
+// nothing else from their schedule. service_type keyword filter per
+// project_type, the same family matching prep-guide-sender.js uses.
+// Types with no clean scheduled-service family simply render no band.
+const VISIT_FAMILY_KEYWORDS = {
+  flea: ['flea'],
+  cockroach: ['roach'],
+  german_roach_knockdown: ['roach'],
+  palmetto_roach_knockdown: ['roach'],
+  bed_bug: ['bed bug'],
+  rodent_exclusion: ['rodent'],
+  rodent_sanitation: ['rodent'],
+  rodent_inspection: ['rodent'],
+  rodent_trapping: ['rodent'],
+  rodent_bait_station: ['rodent'],
+  wildlife_trapping: ['wildlife', 'trapping'],
+  termite_inspection: ['termite'],
+  termite_treatment: ['termite'],
+  termite_bait_station: ['termite'],
+  pre_treatment_termite_certificate: ['termite'],
+  wdo_inspection: ['wdo', 'wood destroying'],
+  mosquito_event: ['mosquito'],
+  one_time_lawn_treatment: ['lawn'],
+  palm_injection: ['palm'],
+  tree_shrub: ['tree', 'shrub'],
+  pest_inspection: ['pest'],
+  one_time_pest_treatment: ['pest'],
+};
+
+// Same statuses the prep senders treat as "no longer an upcoming visit".
+const CLOSED_VISIT_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
+
+// Customer-facing arrival window: 2 HOURS from window_start, display-only
+// (house rule — window_end drives scheduling and is never shown).
+function formatArrivalWindow(windowStart) {
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
+  if (!match) return null;
+  const startMinutes = (Number(match[1]) * 60) + Number(match[2]);
+  const fmt = (totalMinutes) => {
+    const dayMinutes = ((totalMinutes % 1440) + 1440) % 1440;
+    const h24 = Math.floor(dayMinutes / 60);
+    const minutes = dayMinutes % 60;
+    const meridiem = h24 >= 12 ? 'PM' : 'AM';
+    const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+    return { text: `${h12}:${String(minutes).padStart(2, '0')}`, meridiem };
+  };
+  const start = fmt(startMinutes);
+  const end = fmt(startMinutes + 120);
+  return start.meridiem === end.meridiem
+    ? `${start.text}–${end.text} ${end.meridiem}`
+    : `${start.text} ${start.meridiem}–${end.text} ${end.meridiem}`;
+}
+
+// Next 1-2 open same-family visits — dates + window + service label only,
+// no ids and no PII beyond what the page already carries. Never throws: a
+// lookup hiccup renders the guide without the band, not a 500.
+async function fetchUpcomingFamilyVisits(customerId, projectType) {
+  const keywords = VISIT_FAMILY_KEYWORDS[projectType];
+  if (!customerId || !keywords || !keywords.length) return [];
+  try {
+    const rows = await db('scheduled_services')
+      .where({ customer_id: customerId })
+      .whereNotIn('status', CLOSED_VISIT_STATUSES)
+      .where('scheduled_date', '>=', etDateString())
+      .where(function familyMatch() {
+        keywords.forEach((keyword, i) => {
+          if (i === 0) this.whereRaw('LOWER(service_type) LIKE ?', [`%${keyword}%`]);
+          else this.orWhereRaw('LOWER(service_type) LIKE ?', [`%${keyword}%`]);
+        });
+      })
+      .orderBy('scheduled_date', 'asc')
+      .orderBy('window_start', 'asc')
+      .limit(2)
+      .select('scheduled_date', 'window_start', 'service_type');
+    return rows.map((row) => ({
+      dateLabel: formatDisplayDate(row.scheduled_date, { fallback: '' }),
+      windowLabel: formatArrivalWindow(row.window_start),
+      serviceLabel: String(row.service_type || '').trim() || null,
+    })).filter((visit) => visit.dateLabel);
+  } catch (err) {
+    logger.warn(`[prep-public] upcoming-visits lookup failed: ${err.message}`);
+    return [];
+  }
+}
 
 function interpolate(text, vars) {
   return String(text || '').replace(/\{\{(\w+)\}\}/g, (_, key) => vars[key] || '');
@@ -140,6 +227,7 @@ router.get('/:token', async (req, res) => {
     };
 
     const renderedBlocks = filteredBlocks.map((b) => interpolateBlock(b, vars));
+    const upcomingVisits = await fetchUpcomingFamilyVisits(project.customer_id, project.project_type);
 
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
@@ -169,6 +257,7 @@ router.get('/:token', async (req, res) => {
       propertyAddress,
       technicianName: techName,
       supportPhone: WAVES_SUPPORT_PHONE_DISPLAY,
+      upcomingVisits,
       blocks: renderedBlocks,
     });
   } catch (err) {
