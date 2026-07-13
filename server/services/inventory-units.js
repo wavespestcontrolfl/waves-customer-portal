@@ -2,6 +2,14 @@ function normalizeInventoryUnit(unit) {
   return String(unit || '').trim().toLowerCase().replace(/\s+/g, '_').replace(/s$/, '');
 }
 
+// A "/gal" unit (oz/gal, fl_oz/gal, g/gal) is a mix concentration, not a
+// quantity — an amount recorded against it is the amount of concentrate.
+// Strip the dilution suffix so inventory math runs on the base unit.
+function baseQuantityUnit(unit) {
+  const raw = String(unit || '').trim();
+  return raw.toLowerCase().endsWith('/gal') ? raw.slice(0, -'/gal'.length) : unit;
+}
+
 const INVENTORY_UNITS = {
   fl_oz: { dimension: 'volume', factor: 1 },
   floz: { dimension: 'volume', factor: 1 },
@@ -82,6 +90,7 @@ function describeInventoryConversion(amount, fromUnit, toUnit) {
 
 module.exports = {
   INVENTORY_UNITS,
+  baseQuantityUnit,
   convertInventoryQuantity,
   describeInventoryConversion,
   normalizeInventoryUnit,

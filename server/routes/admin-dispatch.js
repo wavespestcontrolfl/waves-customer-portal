@@ -88,6 +88,7 @@ const {
 } = require('../utils/service-duration-capture');
 const {
   INVENTORY_UNITS,
+  baseQuantityUnit,
   convertInventoryQuantity,
   normalizeInventoryUnit,
 } = require('../services/inventory-units');
@@ -649,7 +650,7 @@ async function actualProductInventoryBlocks(submittedProducts = []) {
     const amount = submitted.totalAmount != null && submitted.totalAmount !== ''
       ? Number(submitted.totalAmount)
       : null;
-    const amountUnit = submitted.amountUnit || submitted.rateUnit || null;
+    const amountUnit = baseQuantityUnit(submitted.amountUnit || submitted.rateUnit || null);
     if (!amount || !Number.isFinite(amount) || amount <= 0 || !amountUnit) continue;
     const inventoryUnit = product.inventory_unit || amountUnit;
     const required = convertInventoryQuantity(amount, amountUnit, inventoryUnit);
@@ -777,7 +778,7 @@ async function deductProductInventory(trx, {
   const amount = productInput.totalAmount != null && productInput.totalAmount !== ''
     ? Number(productInput.totalAmount)
     : null;
-  const amountUnit = productInput.amountUnit || productInput.rateUnit || null;
+  const amountUnit = baseQuantityUnit(productInput.amountUnit || productInput.rateUnit || null);
   const snapshot = {
     productId: inventoryProduct.id,
     productName: inventoryProduct.name,
@@ -3757,14 +3758,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const appliedAmount = p.totalAmount != null && p.totalAmount !== ''
               ? parseFloat(p.totalAmount)
               : null;
-            const appliedAmountUnitRaw = p.amountUnit || p.rateUnit || null;
             // A "/gal" unit is a mix concentration: a total recorded against
             // it is the amount of concentrate, so store the base quantity
             // unit — inventory deduction and the FDACS ledger can't use a
             // dilution as a quantity unit.
-            const appliedAmountUnit = appliedAmountUnitRaw && String(appliedAmountUnitRaw).toLowerCase().endsWith('/gal')
-              ? String(appliedAmountUnitRaw).slice(0, -'/gal'.length)
-              : appliedAmountUnitRaw;
+            const appliedAmountUnit = baseQuantityUnit(p.amountUnit || p.rateUnit || null);
             if (appliedAmount != null && (!Number.isFinite(appliedAmount) || appliedAmount <= 0)) {
               const err = new Error(`Invalid product total amount for ${product.name}`);
               err.isOperational = true; err.statusCode = 400;
