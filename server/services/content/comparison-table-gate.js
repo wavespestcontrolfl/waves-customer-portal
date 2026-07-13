@@ -182,7 +182,7 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // as the own-brand arm). Standalone appear counts as a copula too —
   // "companies appear dishonest" (Codex r16). Post-verb gap words are
   // negator-excluded too ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged|known)\\s+to\\s+be|known\\s+as|(?:is|are|was|were)\\s+(?:called|described\\s+as|labell?ed(?:\\s+as)?|considered))\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged|known)\\s+to\\s+be|known\\s+as|(?:is|are|was|were|has\\s+been|have\\s+been)\\s+(?:(?:widely|often|repeatedly|frequently|commonly)\\s+)?(?:called|described\\s+as|labell?ed(?:\\s+as)?|considered))\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   // Reputation forms count — "providers known for hidden fees", "accused
@@ -273,7 +273,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // stays clean ("our lanais are shady and humid") (Codex r14 on #2633).
   // "service" is deliberately absent: "our service area is shady" is
   // educational geography, and NOUN_VERB_GAP would bridge "area".
-  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was)\\s+(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was|has\\s+been|have\\s+been)\\s+(?:(?:widely|often|repeatedly|frequently|commonly)\\s+)?(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
@@ -421,7 +421,7 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
 // lowercase common-noun "waves" a subject ("summer heat waves can be lousy
 // for turf" hard-blocked; Codex r18 on #2633).
 const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
-  `^(?!\\s+service\\s+areas?\\b)${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was)\\s+(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+  `^(?!\\s+service\\s+areas?\\b)${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was|has\\s+been|have\\s+been)\\s+(?:(?:widely|often|repeatedly|frequently|commonly)\\s+)?(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
 );
 // Reverse form ("…dishonest Waves"): the vocabulary needs 'i' but the brand
 // token must be case-VERIFIED in code (capture group checked against
@@ -993,7 +993,7 @@ function scopedSelfRankingMatch(text) {
   // initial only (optional leading article), so "gel bait is the best
   // option for pest control" stays advice.
   {
-    const hl = new RegExp(`\\b(?:best|top[-\\s]?rated)\\b[^.!?\\n]{0,50}?\\b(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|mosquito\\s+control|termite\\s+control|exterminators?)\\b(?!\\s+(?:methods?|tips?|tricks?|mistakes?|advice|strateg(?:y|ies)|techniques?|practices?|habits?|myths?))`, 'gi');
+    const hl = new RegExp(`\\b(?:best|top[-\\s]?rated|highest[-\\s]?rated|best[-\\s]?rated|top[-\\s]?ranked)\\b(?!\\s+(?:tips?|advice|tricks?|ways?|practices?|methods?|ideas?|strateg(?:y|ies)|guides?)\\b)[^.!?\\n]{0,50}?\\b(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|mosquito\\s+control|termite\\s+control|exterminators?)\\b(?!\\s+(?:methods?|tips?|tricks?|mistakes?|advice|strateg(?:y|ies)|techniques?|practices?|habits?|myths?))`, 'gi');
     let hm;
     while ((hm = hl.exec(text)) !== null) {
       const sentStart = Math.max(
@@ -1002,7 +1002,9 @@ function scopedSelfRankingMatch(text) {
         text.lastIndexOf('?', hm.index),
         text.lastIndexOf('\n', hm.index),
       ) + 1;
-      const prefix = text.slice(sentStart, hm.index).trim().toLowerCase();
+      // Markdown heading markers count as sentence starts — "# Top-rated
+      // pest control in Venice" (Codex r50).
+      const prefix = text.slice(sentStart, hm.index).replace(/^[#>*\-\s]+/, '').trim().toLowerCase();
       if (prefix !== '' && prefix !== 'the') continue;
       if (sentenceHasNegator(text, hm.index, hm[0].length)) continue;
       return hm;
@@ -1479,7 +1481,8 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // Span-guarded like the table path: "Acme Pest Solutions isn't
     // dishonest" is a denial (Codex r19).
     let disparaged = Boolean(spanUnnegated(nameScanText.match(directedP0)))
-      || activeP0.test(nameScanText) || possessionP0.test(nameScanText);
+      || Boolean(firstUnnegatedMatch(nameScanText, activeP0))
+      || Boolean(firstUnnegatedMatch(nameScanText, possessionP0));
     if (!disparaged) {
       // Association shapes take the sentence-level denial guard, same as
       // the table path (Codex r18). Name-confident names also get the
@@ -1796,8 +1799,8 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       // that, X is dishonest" keeps text before the name out of the check
       // (Codex r19 on #2633).
       let dm = spanUnnegated(proseNameText.match(directedP0))
-        || proseNameText.match(activeP0)
-        || proseNameText.match(possessionP0);
+        || firstUnnegatedMatch(proseNameText, activeP0)
+        || firstUnnegatedMatch(proseNameText, possessionP0);
       if (!dm && sepP0) {
         const sm = proseNameText.match(sepP0);
         if (sm && !trailingDenial(proseNameText, sm.index, sm[0].length)) dm = sm;
@@ -2084,7 +2087,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
         const cellStart = Math.max(block.lastIndexOf('"', bm.index), block.lastIndexOf("'", bm.index)) + 1;
         // Denial scope is the comma-segment holding the match — "No
         // warranty, hidden fees" still accuses (Codex r49).
-        const cellSeg = block.slice(cellStart, bm.index + bm[0].length).split(',').pop();
+        const cellSeg = block.slice(cellStart, bm.index + bm[0].length).split(/,|;|—|–|\.|\b(?:but|yet)\b/i).pop();
         if (SENTENCE_NEGATOR_RE.test(cellSeg)) continue;
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
           `Comparison table contains disparaging language about an option ("${bm[0].trim()}"). State attributes, never insults.`));

@@ -1114,6 +1114,26 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-50 findings (#2633) ──
+
+  test('Codex r50: markdown headings, rated variants, passive auxiliaries, and clause cells block', () => {
+    for (const body of ['# Top-rated pest control in Venice\n\nCall today.', 'Highest-rated pest control in Venice.', `Waves has been called a scam by a few reviewers.\n\n${CATEGORY_TABLE}`, `Waves is widely described as dishonest.\n\n${CATEGORY_TABLE}`]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    for (const cellVal of ['No hidden fees but shady billing', 'No warranty; hidden fees']) {
+      const r = gate.evaluate({ body: CATEGORY_TABLE.replace('"Usually"', `"${cellVal}"`) }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  test('Codex r50: advice headlines and denied active claims stay clean', () => {
+    for (const body of ['Best tips for pest control in Venice.', 'No one says Acme Pest Solutions scams customers.', 'There are no reports that Acme Pest Solutions charges hidden fees.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-49 findings (#2633) ──
 
   test('Codex r49: contrastive denials, mixed cells, passive reputation, object-position, pronoun antecedents, and headlines block', () => {
