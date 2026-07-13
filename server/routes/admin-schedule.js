@@ -1192,6 +1192,35 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// Compact, client-safe summary of an attached invoice's line items for the
+// schedule payloads. An invoice attached to a scheduled service is what the
+// visit actually collects — completion billing and Charge-now both reuse it
+// as-is — so the sheets need its breakdown to explain a first visit whose
+// accept-minted invoice carries the WaveGuard setup fee on top of the
+// per-application price. Amounts fall back to quantity * unit_price when a
+// line has no amount (InvoiceService.create computes subtotals that way too).
+function compactCheckoutInvoiceLines(rawLines) {
+  let lines = rawLines;
+  if (typeof lines === 'string') {
+    try { lines = JSON.parse(lines); } catch { return []; }
+  }
+  if (!Array.isArray(lines)) return [];
+  return lines
+    .map((li) => {
+      const quantity = Number(li?.quantity) || 1;
+      const unitPrice = Number(li?.unit_price) || 0;
+      const amount = li?.amount != null && Number.isFinite(Number(li.amount))
+        ? Number(li.amount)
+        : Math.round(quantity * unitPrice * 100) / 100;
+      return {
+        description: String(li?.description || '').slice(0, 160),
+        amount,
+      };
+    })
+    .filter((li) => li.description && Number.isFinite(li.amount))
+    .slice(0, 8);
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -1272,7 +1301,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token');
+          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items');
       } catch { /* scheduled_service_id may be absent before migration */ }
 
       const alerts = [];
@@ -1336,6 +1365,8 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+        checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
         completionProfile: projectCompletionContext.completionProfile || null,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -1516,7 +1547,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'token');
+            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items');
         } catch { /* scheduled_service_id may be absent before migration */ }
         const autopayActive = await customerOnAutopay({
           id: s.customer_id,
@@ -1557,6 +1588,8 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+          checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
           completionProfile: projectCompletionContext.completionProfile || null,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -6896,6 +6929,7 @@ router.get('/next-visit', async (req, res, next) => {
 router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
+  compactCheckoutInvoiceLines,
   formatAssignedVehicleLocation,
   calculateAssignedScheduleEta,
   normalizeAssignmentScope,

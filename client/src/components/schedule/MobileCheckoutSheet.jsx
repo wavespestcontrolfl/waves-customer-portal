@@ -34,6 +34,7 @@ import {
   cardOnFileTitle,
   isCardExpired,
 } from '../../hooks/useCustomerCards';
+import { attachedVisitInvoice } from './visitInvoice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -112,7 +113,17 @@ export default function MobileCheckoutSheet({
 
   const servicesSubtotal = price + extraServicesTotal;
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
-  const totalBeforePrepaid = Math.max(0, servicesSubtotal + extraDiscountsTotal);
+  // An open invoice already attached to this visit (accept-minted setup +
+  // first-application invoice, or an earlier Charge-now mint) is what the
+  // charge actually collects — the mint endpoint reuses it AS-IS and ignores
+  // extraLineItems. Preview its total instead of the per-application price
+  // (e.g. a $214 first-visit invoice on a $115/application plan), and drop
+  // the add-service/discount affordances that would silently do nothing.
+  const inv = attachedVisitInvoice(service);
+  const openVisitInvoice = inv && inv.open && inv.total > 0 ? inv : null;
+  const totalBeforePrepaid = openVisitInvoice
+    ? openVisitInvoice.total
+    : Math.max(0, servicesSubtotal + extraDiscountsTotal);
   const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
   // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
@@ -302,6 +313,42 @@ export default function MobileCheckoutSheet({
         )}
         {/* Service line items */}
         <div className="mt-6">
+          {openVisitInvoice ? (
+            <>
+              {/* The attached invoice is collected as-is — its lines ARE the
+                  charge preview. No edit affordance: line edits on the
+                  appointment don't change an already-minted invoice. */}
+              <div className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200">
+                <div className="flex-1 min-w-0 pr-2">
+                  <div className="font-medium text-zinc-900 truncate" style={{ fontSize: 15 }}>
+                    {baseServiceLabel}
+                  </div>
+                  <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
+                    Invoice on file{openVisitInvoice.number ? ` · ${openVisitInvoice.number}` : ''}
+                  </div>
+                  {timeSubtitle && (
+                    <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
+                      {timeSubtitle}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {openVisitInvoice.lines.map((line, i) => (
+                <div
+                  key={`${line.description}-${i}`}
+                  className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200"
+                >
+                  <div className="flex-1 min-w-0 pr-2 text-zinc-900" style={{ fontSize: 15 }}>
+                    {line.description}
+                  </div>
+                  <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
+                    {line.amount < 0 ? '−' : ''}${Math.abs(line.amount).toFixed(2)}
+                  </div>
+                </div>
+              ))}
+            </>
+          ) : (
+          <>
           {/* Base appointment service */}
           <button
             type="button"
@@ -384,6 +431,8 @@ export default function MobileCheckoutSheet({
               </div>
             );
           })}
+          </>
+          )}
           {prepaidCredit > 0 && (
             <div className="flex items-center justify-between py-4 border-b border-hairline border-zinc-200">
               <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
@@ -403,7 +452,17 @@ export default function MobileCheckoutSheet({
           </div>
         </div>
 
-        {/* Add Service / Add Item or Discount */}
+        {/* Add Service / Add Item or Discount. Hidden when an invoice is
+            already attached: the mint endpoint reuses that invoice as-is and
+            ignores extraLineItems, so offering the pickers would silently
+            drop whatever the tech added. */}
+        {openVisitInvoice ? (
+          <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
+            Charging collects this invoice as-is. To change the amounts, edit{' '}
+            {openVisitInvoice.number ? `invoice ${openVisitInvoice.number}` : 'the invoice'} from
+            the Invoices page before charging.
+          </div>
+        ) : (
         <div className="mt-4 space-y-3">
           <button
             type="button"
@@ -422,6 +481,7 @@ export default function MobileCheckoutSheet({
             Add Item or Discount
           </button>
         </div>
+        )}
       </div>
 
       {showServicePicker && (

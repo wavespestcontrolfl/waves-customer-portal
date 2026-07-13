@@ -22,6 +22,7 @@ import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
 import { useCustomerCards } from '../../hooks/useCustomerCards';
+import { attachedVisitInvoice, visitInvoiceStatusNote } from './visitInvoice';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -180,6 +181,12 @@ export default function MobileAppointmentDetailSheet({
   // (prepaidAmt < total) keep the real figures and the checkout path.
   const displayBasePrice = prepaidCovered ? 0 : baseServicePrice;
   const displayTotal = prepaidCovered ? 0 : total;
+  // Invoice already attached to this visit (accept-minted first-visit
+  // setup+application invoice, or a tech pre-mint). It's what completion /
+  // Charge-now actually collects, so surface its breakdown — the per-visit
+  // Total above can legitimately differ (e.g. $115 per application while the
+  // first-visit invoice is $214 with the WaveGuard setup fee).
+  const visitInvoice = attachedVisitInvoice(service);
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required
@@ -468,6 +475,28 @@ export default function MobileAppointmentDetailSheet({
               )}
             </span>
           </div>
+
+          {visitInvoice && (
+            <div className="rounded-xs border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 12px', marginTop: 2 }}>
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-zinc-900 font-medium" style={{ fontSize: 13 }}>
+                  Invoice on file{visitInvoice.number ? ` · ${visitInvoice.number}` : ''}
+                </span>
+                <span className="u-nums text-zinc-900 font-medium" style={{ fontSize: 13 }}>
+                  ${visitInvoice.total.toFixed(2)}
+                </span>
+              </div>
+              {visitInvoice.lines.map((line, i) => (
+                <div key={`${line.description}-${i}`} className="flex items-baseline justify-between gap-3" style={{ marginTop: 4 }}>
+                  <span className="text-ink-secondary" style={{ fontSize: 13 }}>{line.description}</span>
+                  <span className="u-nums text-ink-secondary" style={{ fontSize: 13 }}>${line.amount.toFixed(2)}</span>
+                </div>
+              ))}
+              <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 6 }}>
+                {visitInvoiceStatusNote(visitInvoice)}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Estimate provenance — quoted vs current, plus the exact payment
