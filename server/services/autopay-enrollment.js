@@ -114,6 +114,15 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     logger.warn(`[autopay-enrollment] log failed for customer ${customerId}: ${logErr.message}`);
   }
   logger.info(`[autopay-enrollment] customer ${customerId} enrolled (source=${source}, method=${inChargeMethodId})`);
+  // Enrollment-confirmation email (owner 2026-07-13; GATED OFF until
+  // GATE_CARD_ENROLLMENT_EMAILS): the customer's copy of the authorization
+  // they just granted — card-network stored-credential guidance. Fresh
+  // enrollments only (already_enrolled returned above); fire-and-forget,
+  // never blocks or fails the enrollment.
+  try {
+    const { sendAutopayEnrollmentConfirmation } = require('./card-enrollment-email');
+    void sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId: target.id });
+  } catch { /* best-effort */ }
   return { enrolled: true, methodId: target.id, inChargeMethodId };
 }
 
