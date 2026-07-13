@@ -468,6 +468,46 @@ function evaluateProjectReadiness({
       },
     );
   }
+  // Termite Phase-3 compliance content — mirrors the server's
+  // evaluateProjectSendReadiness (Codex P2 r3 on #2703) so the readiness
+  // panel names the missing statutory fields instead of showing "ready"
+  // and then failing with a generic 422 on send. Method lists mirror
+  // TERMITE_PERIMETER_METHODS / TERMITE_LIQUID_DILUTION_METHODS in
+  // project-types.js.
+  if (project?.project_type === "termite_inspection") {
+    required.push(
+      {
+        label: 'Areas not inspected / why ("None" if all visible areas were inspected)',
+        ok: hasMeaningfulValue(findings?.areas_not_inspected),
+      },
+      {
+        label: 'Inspection notice affixed ("Yes" required)',
+        ok: String(findings?.inspection_notice_affixed || "") === "Yes",
+      },
+    );
+  }
+  if (project?.project_type === "termite_treatment") {
+    const method = String(findings?.treatment_method || "");
+    const isPerimeter = ["Liquid perimeter", "Trenching"].includes(method);
+    required.push(
+      { label: "Treatment method", ok: hasMeaningfulValue(method) },
+      { label: "EPA reg. no.", ok: hasMeaningfulValue(findings?.epa_registration) },
+      {
+        label: isPerimeter
+          ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
+          : "Posted notice placed",
+        ok: isPerimeter
+          ? String(findings?.posted_notice || "") === "Yes"
+          : hasMeaningfulValue(findings?.posted_notice),
+      },
+    );
+    if (["Spot treatment", "Liquid perimeter", "Trenching", "Wood treatment"].includes(method)) {
+      required.push({
+        label: "% solution",
+        ok: hasMeaningfulValue(findings?.percent_solution),
+      });
+    }
+  }
   if (isCertificate) {
     required.push(
       {

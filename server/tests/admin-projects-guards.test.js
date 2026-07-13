@@ -247,6 +247,21 @@ describe('admin project route guards', () => {
       inspection_notice_affixed: 'No',
     });
     expect(noticeNo.missing.map((item) => item.key)).toContain('ti_inspection_notice_affixed');
+    // Compliance blockers are hard — the send routes 422 on hardMissing
+    // BEFORE the override_reason escape is even consulted (Codex P1 r3).
+    expect(noticeNo.hardMissing.map((item) => item.key)).toContain('ti_inspection_notice_affixed');
+
+    // A blank treatment method must not silently skip the method-derived
+    // rules (Codex P1 r3) — it is itself a hard blocker.
+    const methodBlank = evaluate('termite_treatment', {
+      target_termite: 'Subterranean termites',
+      products_used: 'Termidor SC',
+      linear_feet_or_stations: '180 linear ft',
+      gallons_or_amount: '72 gal',
+      epa_registration: '7969-210',
+      posted_notice: 'Not applicable',
+    });
+    expect(methodBlank.hardMissing.map((item) => item.key)).toContain('tt_treatment_method');
 
     // Treatment: perimeter methods demand a 'Yes' posted notice and the
     // dilution; bait work needs neither the dilution nor a posted notice
@@ -264,6 +279,8 @@ describe('admin project route guards', () => {
       posted_notice: 'Not applicable',
     });
     expect(perimeterBlank.missing.map((item) => item.key))
+      .toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
+    expect(perimeterBlank.hardMissing.map((item) => item.key))
       .toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
 
     const perimeterComplete = evaluate('termite_treatment', {

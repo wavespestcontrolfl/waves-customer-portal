@@ -5090,6 +5090,36 @@ export function typedActivityScoreConflict(schemaType, values, score) {
   return null;
 }
 
+// Termite Phase-3 attestation contradictions, mirrored pre-submit so the
+// tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
+// #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
+// project-types.js; the messages mirror validateTypedFindings.
+export function typedFieldValueConflicts(schemaType, values) {
+  const conflicts = [];
+  if (schemaType === "termite_treatment") {
+    const method = String(values?.treatment_method ?? "").trim();
+    const notice = String(values?.posted_notice ?? "").trim();
+    if (
+      ["Liquid perimeter", "Trenching"].includes(method) &&
+      notice &&
+      notice !== "Yes"
+    ) {
+      conflicts.push(
+        `Posted notice "${notice}" conflicts with the ${method} application — exterior/perimeter treatments require the posted notice: place it and select "Yes"`,
+      );
+    }
+  }
+  if (
+    schemaType === "termite_inspection" &&
+    String(values?.inspection_notice_affixed ?? "").trim() === "No"
+  ) {
+    conflicts.push(
+      'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
+    );
+  }
+  return conflicts;
+}
+
 // Prune draft-restored findings values to the CURRENT schema fields (shared
 // by the primary and companion restores). Drafts saved before a schema
 // cutover carry values the schema no longer accepts; submit sends the whole
@@ -9314,6 +9344,19 @@ export function CompletionPanel({
         alert(`Fix the activity score before submitting: ${scoreConflict}.`);
         return;
       }
+      // Mirror the server's field-value contradiction rejections (termite
+      // attestations) pre-submit — same rationale as the chip mirror.
+      const fieldConflicts = typedFieldValueConflicts(
+        typedFindingsSchema.type,
+        findingsValues,
+      );
+      if (fieldConflicts.length) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          `Fix the findings before submitting: ${fieldConflicts.join("; ")}.`,
+        );
+        return;
+      }
     }
     // Companion sections mirror every primary typed pre-submit gate PER
     // COMPANION (server-side conditional checks without client mirrors are
@@ -9371,6 +9414,17 @@ export function CompletionPanel({
           completionTelemetryRef.current.requiredFieldErrorCount += 1;
           alert(
             `${label}: fix the activity score before submitting: ${companionScoreConflict}.`,
+          );
+          return;
+        }
+        const companionFieldConflicts = typedFieldValueConflicts(
+          schema.type,
+          entry.values,
+        );
+        if (companionFieldConflicts.length) {
+          completionTelemetryRef.current.requiredFieldErrorCount += 1;
+          alert(
+            `${label}: fix the findings before submitting: ${companionFieldConflicts.join("; ")}.`,
           );
           return;
         }
