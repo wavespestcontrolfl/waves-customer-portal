@@ -21,7 +21,15 @@ const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType } = require('../services/project-types');
+const {
+  PROJECT_TYPES,
+  PROJECT_TYPE_KEYS,
+  WDO_CONSTRUCTION_OPTIONS,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+  isValidProjectType,
+  getProjectType,
+} = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
@@ -558,6 +566,40 @@ function evaluateProjectSendReadiness({ project, customer }) {
       // requirement when paired with the typed name + FDACS ID + date.
       { key: 'cert_applicator_attestation', label: 'Applicator attestation (electronic signature)', ok: hasMeaningfulValue(findings.applicator_attestation) },
     );
+  }
+
+  // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
+  // lanes still route through this project flow (project_required in the
+  // completion-lane registry), which never runs validateTypedFindings — so
+  // the send gate must enforce the same FS 482.226 / FAC 5E-14 content the
+  // typed path enforces, or the project path stays a bypass. Method lists
+  // are shared with the typed validator (project-types.js).
+  if (project?.project_type === 'termite_inspection') {
+    required.push(
+      { key: 'ti_areas_not_inspected', label: 'Areas not inspected / why ("None" if all visible areas were inspected)', ok: hasMeaningfulValue(findings.areas_not_inspected) },
+      // FS 482.226 wants the report to state the notice WAS affixed — 'No'
+      // blocks the send just like the typed path.
+      { key: 'ti_inspection_notice_affixed', label: 'Inspection notice affixed ("Yes" required)', ok: String(findings.inspection_notice_affixed || '') === 'Yes' },
+    );
+  }
+
+  if (project?.project_type === 'termite_treatment') {
+    const method = String(findings.treatment_method || '');
+    required.push(
+      { key: 'tt_epa_registration', label: 'EPA reg. no.', ok: hasMeaningfulValue(findings.epa_registration) },
+      {
+        key: 'tt_posted_notice',
+        label: TERMITE_PERIMETER_METHODS.includes(method)
+          ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
+          : 'Posted notice placed',
+        ok: TERMITE_PERIMETER_METHODS.includes(method)
+          ? String(findings.posted_notice || '') === 'Yes'
+          : hasMeaningfulValue(findings.posted_notice),
+      },
+    );
+    if (TERMITE_LIQUID_DILUTION_METHODS.includes(method)) {
+      required.push({ key: 'tt_percent_solution', label: '% solution', ok: hasMeaningfulValue(findings.percent_solution) });
+    }
   }
 
   return {

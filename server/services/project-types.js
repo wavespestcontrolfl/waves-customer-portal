@@ -9,6 +9,20 @@
  * client/src/pages/ReportViewPage.jsx. No schema change required.
  */
 
+// Termite treatment method groupings for the Phase-3 compliance rules
+// (Codex r2 on #2703). Single source of truth — the typed validator, the
+// schema requiredUnless metadata, and the project send-readiness gate all
+// derive from these, so the three enforcement points can't drift.
+// - Liquid-dilution methods carry a finished-solution strength (% solution
+//   is FAC 5E-14 application detail); bait/cartridge work has no dilution
+//   to report and 'Other' is unknowable.
+// - Perimeter methods are the exterior applications carrying the
+//   FS 482.2265 posted-notice duty — 'Not applicable' is a contradiction
+//   there, not an answer.
+const TERMITE_LIQUID_DILUTION_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Wood treatment'];
+const TERMITE_NON_DILUTION_METHODS = ['Bait station setup', 'Cartridge replacement', 'Other'];
+const TERMITE_PERIMETER_METHODS = ['Liquid perimeter', 'Trenching'];
+
 const WDO_TARGET_OPTIONS = [
   'Subterranean termites',
   'Formosan subterranean termites',
@@ -805,7 +819,11 @@ const PROJECT_TYPES = {
       // authority; these make the customer-facing report self-contained.
       // Keys deliberately avoid product_name/concentration_pct so the
       // pre-construction chemistry auto-fill never engages here.
-      { key: 'percent_solution', label: '% solution', type: 'text', placeholder: 'e.g. 0.06%' },
+      // requiredUnless (values form) is served in the schema slice so the
+      // tech form shows the required marker + pre-submit prompt instead of
+      // a post-submit 422 (Codex P2 r2): required exactly when the method
+      // is a liquid-dilution one.
+      { key: 'percent_solution', label: '% solution', type: 'text', placeholder: 'e.g. 0.06%', requiredUnless: { field: 'treatment_method', values: TERMITE_NON_DILUTION_METHODS } },
       { key: 'epa_registration', label: 'EPA reg. no.', type: 'text', placeholder: 'e.g. 100-1503' },
       { key: 'linear_feet_or_stations', label: 'Linear feet / stations', type: 'textarea' },
       { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea' },
@@ -986,4 +1004,13 @@ function isValidProjectType(key) {
   return Object.prototype.hasOwnProperty.call(PROJECT_TYPES, key);
 }
 
-module.exports = { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, getProjectType, isValidProjectType };
+module.exports = {
+  PROJECT_TYPES,
+  PROJECT_TYPE_KEYS,
+  WDO_CONSTRUCTION_OPTIONS,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_NON_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+  getProjectType,
+  isValidProjectType,
+};

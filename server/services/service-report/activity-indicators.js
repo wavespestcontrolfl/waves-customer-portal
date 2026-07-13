@@ -16,7 +16,12 @@
  * Contract: docs/design/specialty-service-completion-contract.md
  */
 
-const { PROJECT_TYPES, isValidProjectType } = require('../project-types');
+const {
+  PROJECT_TYPES,
+  isValidProjectType,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+} = require('../project-types');
 
 // v2: rodent_trapping sectioned checklist fields (chips/count types,
 // owner spec 2026-06-12). Snapshots are immutable — v1 snapshots keep
@@ -1252,12 +1257,33 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
   // liquid-dilution work, so it is required exactly when the recorded
   // method is one — bait station and cartridge visits have no dilution to
   // report, and 'Other' is unknowable (Codex P1 on the Phase-3 fields).
-  if (type === 'termite_treatment' && enforceRequired) {
-    const LIQUID_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Wood treatment'];
-    if (LIQUID_METHODS.includes(String(values.treatment_method || ''))
+  // The method lists are shared with the schema requiredUnless metadata
+  // and the project send-readiness gate (project-types.js).
+  if (type === 'termite_treatment') {
+    const method = String(values.treatment_method || '');
+    if (enforceRequired && TERMITE_LIQUID_DILUTION_METHODS.includes(method)
       && String(values.percent_solution ?? '').trim() === '') {
       missing.push('percent_solution');
     }
+    // FS 482.2265: perimeter/exterior applications carry the posted-notice
+    // duty, so 'Not applicable'/'No' beside a perimeter method is a
+    // contradiction the immutable report must not record (Codex P2 r2).
+    // Gated on enforceRequired: a mid-visit draft may truthfully hold the
+    // pre-posting state; the completion cannot.
+    const postedNotice = String(values.posted_notice || '');
+    if (enforceRequired && TERMITE_PERIMETER_METHODS.includes(method)
+      && postedNotice && postedNotice !== 'Yes') {
+      errors.push(`Posted notice "${postedNotice}" contradicts the ${method} application — exterior/perimeter treatments require the posted notice: place it and select "Yes"`);
+    }
+  }
+  // FS 482.226: the Phase-3 field exists so the report states the
+  // inspection notice WAS affixed — 'No' is a blocking exception, not a
+  // sendable answer (Codex P2 r2). Same enforceRequired gating as above:
+  // affixing is in the tech's control at visit time, so completion demands
+  // it done, while a draft may record the not-yet state.
+  if (type === 'termite_inspection' && enforceRequired
+    && String(values.inspection_notice_affixed || '') === 'No') {
+    errors.push('The inspection notice must be affixed before the report can be completed — affix the notice and select "Yes"');
   }
 
   if (enforceRequired) {
@@ -2211,11 +2237,11 @@ function findingsSchemaForType(projectType, { serviceKey = null } = {}) {
         options: f.options || null,
         placeholder: f.placeholder || null,
         required: (REQUIRED_FINDINGS_FIELDS[projectType] || []).includes(f.key),
-        // Conditional requirement ({ field, value }): required exactly when
-        // the named sibling field holds a non-empty value other than
-        // `value`. Served so the client pre-submit gate mirrors the server
-        // enforcement instead of discovering it as a post-submit 422
-        // (Codex P2).
+        // Conditional requirement ({ field, value } or { field, values }):
+        // required exactly when the named sibling field holds a non-empty
+        // value other than `value` / outside `values`. Served so the client
+        // pre-submit gate mirrors the server enforcement instead of
+        // discovering it as a post-submit 422 (Codex P2).
         requiredUnless: f.requiredUnless || null,
         // internal fields are tech-facing compliance entries — validated and
         // stored, but excluded from the customer-facing snapshot findings.

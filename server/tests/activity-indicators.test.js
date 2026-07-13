@@ -166,6 +166,30 @@ describe('validateTypedFindings', () => {
       enforceRequired: true,
     });
     expect(full).toEqual({ ok: true, errors: [], missing: [] });
+
+    // 'No' is a blocking exception, not a sendable answer (Codex P2 r2) —
+    // but a mid-visit draft (enforceRequired false) may hold it truthfully.
+    const noticeNo = validateTypedFindings({
+      type: 'termite_inspection',
+      values: {
+        termite_type: 'None observed',
+        activity_status: 'No activity',
+        areas_not_inspected: 'None',
+        inspection_notice_affixed: 'No',
+      },
+      expectedType: 'termite_inspection',
+      enforceRequired: true,
+    });
+    expect(noticeNo.ok).toBe(false);
+    expect(noticeNo.errors.join(' ')).toContain('affix the notice');
+
+    const draftNo = validateTypedFindings({
+      type: 'termite_inspection',
+      values: { inspection_notice_affixed: 'No' },
+      expectedType: 'termite_inspection',
+      enforceRequired: false,
+    });
+    expect(draftNo.ok).toBe(true);
   });
 
   test('termite treatment application detail: EPA reg + posted notice always; % solution for liquid methods only (FAC 5E-14, Codex P1)', () => {
@@ -213,6 +237,50 @@ describe('validateTypedFindings', () => {
       enforceRequired: true,
     });
     expect(liquidFull).toEqual({ ok: true, errors: [], missing: [] });
+
+    // FS 482.2265: a perimeter application cannot record a non-'Yes'
+    // posted notice — the posting duty applies exactly there (Codex P2 r2).
+    for (const badNotice of ['Not applicable', 'No']) {
+      const perimeterBad = validateTypedFindings({
+        type: 'termite_treatment',
+        values: {
+          ...base,
+          treatment_method: 'Trenching',
+          percent_solution: '0.06%',
+          epa_registration: '7969-210',
+          posted_notice: badNotice,
+        },
+        expectedType: 'termite_treatment',
+        enforceRequired: true,
+      });
+      expect(perimeterBad.ok).toBe(false);
+      expect(perimeterBad.errors.join(' ')).toContain('exterior/perimeter');
+    }
+
+    // Interior spot work legitimately answers 'Not applicable'.
+    const spotNa = validateTypedFindings({
+      type: 'termite_treatment',
+      values: {
+        ...base,
+        treatment_method: 'Spot treatment',
+        percent_solution: '0.06%',
+        epa_registration: '7969-210',
+        posted_notice: 'Not applicable',
+      },
+      expectedType: 'termite_treatment',
+      enforceRequired: true,
+    });
+    expect(spotNa).toEqual({ ok: true, errors: [], missing: [] });
+  });
+
+  test('percent_solution serves requiredUnless (values form) in the schema slice so the form mirrors the conditional rule (Codex P2 r2)', () => {
+    const slice = findingsSchemaForType('termite_treatment');
+    const solution = slice.fields.find((f) => f.key === 'percent_solution');
+    expect(solution.required).toBe(false);
+    expect(solution.requiredUnless).toEqual({
+      field: 'treatment_method',
+      values: ['Bait station setup', 'Cartridge replacement', 'Other'],
+    });
   });
 });
 

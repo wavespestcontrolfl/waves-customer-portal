@@ -5007,16 +5007,19 @@ function CPChip({ selected, onClick, children, dot }) {
 
 // Whether a typed findings field is required for the CURRENT values —
 // static `required` plus the schema's conditional `requiredUnless`
-// metadata ({ field, value }: required exactly when the named sibling
-// field holds a non-empty value other than `value`). Mirrors the server's
-// conditional enforcement so the tech gets the normal pre-submit prompt
-// instead of a post-submit 422 (Codex P2).
+// metadata ({ field, value } or { field, values }: required exactly when
+// the named sibling field holds a non-empty value other than `value` /
+// outside `values`). Mirrors the server's conditional enforcement so the
+// tech gets the normal pre-submit prompt instead of a post-submit 422
+// (Codex P2).
 export function typedFieldRequiredNow(field, values) {
   if (field?.required) return true;
   const rule = field?.requiredUnless;
   if (!rule?.field) return false;
   const driver = String(values?.[rule.field] ?? "").trim();
-  return !!driver && driver !== rule.value;
+  if (!driver) return false;
+  const excluded = Array.isArray(rule.values) ? rule.values : [rule.value];
+  return !excluded.includes(driver);
 }
 
 // Mirrors the server's chips-vs-values rules (validateNextStepChips) so a
