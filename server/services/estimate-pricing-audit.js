@@ -453,10 +453,12 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       annualTotal: money(estimate.annual_total),
       onetimeTotal: money(estimate.onetime_total),
       waveguardTier: estimate.waveguard_tier,
-      // engineVersion carries the mechanism token that actually priced the
-      // estimate (e.g. LAWN_PRICING_V2_DENSE_35_FLOOR); the bare
-      // pricingVersion fields are the hardcoded engine constant.
-      pricingVersion: result.engineVersion || result.pricingVersion || data.pricingVersion || null,
+      // The persisted column is authority-gated at save time (SERVER writes
+      // stamp the mechanism token, non-SERVER writes reset to the default),
+      // so it outranks the blob: a CLIENT_FALLBACK row's estimate_data can
+      // still carry a stale engineVersion the server never recomputed. Blob
+      // fields are fallbacks for shapes without the column.
+      pricingVersion: estimate.pricing_version || result.engineVersion || result.pricingVersion || data.pricingVersion || null,
     },
     dimensions,
     totals: {
