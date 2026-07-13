@@ -442,6 +442,28 @@ describe('scrubPans — round 12 hardening', () => {
   });
 });
 
+describe('scrubPans — round 13 hardening', () => {
+  it('masks a second card whose last group fused with its CVV (split-shaped, not full-Luhn)', () => {
+    expect(scrubPansDetailed('4111 1111 1111 1111 4242 4242 4242 4242123'))
+      .toEqual({ text: '[card ending 1111] [card ending 4242] [code removed]', count: 2 });
+  });
+
+  it('splits fused PAN+MMYY and PAN+MMYY+CVV tokens past the old 19 cap', () => {
+    expect(scrubPansDetailed('42424242424242421228')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+    expect(scrubPansDetailed('42424242424242421228123')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('scans long double readbacks instead of bailing at 40 digits', () => {
+    expect(scrubPansDetailed('4111 1111 1111 1111 12 28 123 4242 4242 4242 4242 12 28 123'))
+      .toEqual({ text: '[card ending 1111] [code removed] [card ending 4242] [code removed]', count: 2 });
+  });
+
+  it('unseparated phone pairs and reference numbers still survive the widened splits', () => {
+    expect(scrubPans('9415551234 2395559876')).toBe('9415551234 2395559876');
+    expect(scrubPans('ref number 4242424242424241 on file')).toBe('ref number 4242424242424241 on file');
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

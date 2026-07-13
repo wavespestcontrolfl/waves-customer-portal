@@ -312,9 +312,24 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
       const legacyText = panScrubMod.scrubPansDetailed(call.transcription ?? null);
       const legacyStructured = CallProc.scrubStructuredTranscript(call.transcript_structured ?? null);
       if (legacyText.count + legacyStructured.count > 0) {
+        // Stamp detection in the SAME update that scrubs the text
+        // (round-13 P1, mirrors the backfill/fallback heals): a crash
+        // before the quarantine below must leave the durable signal that
+        // the audio still needs deleting.
+        let priorMeta = {};
+        try {
+          const metaRow = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+          const rawMeta = metaRow?.transcription_metadata;
+          priorMeta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+        } catch { priorMeta = {}; }
         await db('call_log').where({ id: call.id }).update({
           ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
           ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
+          transcription_metadata: JSON.stringify({
+            ...priorMeta,
+            pan_detected: true,
+            quarantine_source: priorMeta.quarantine_source || 'bounce_reverify_legacy_pending',
+          }),
           updated_at: db.fn.now(),
         });
         // Quarantine FIRST (round-11 P1): the message sync derives media

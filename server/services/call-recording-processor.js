@@ -224,14 +224,23 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     try {
       meta = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
     } catch { meta = {}; }
-    alreadyQuarantined = meta.pan_detected === true;
+    // pan_detected can now be stamped BEFORE the first quarantine call
+    // (same-write stamps in the webhook/fallback paths), so it no longer
+    // implies the office was alerted — pan_notified is the notify guard;
+    // a completed pre-marker quarantine counts as notified (round-13 P2).
+    alreadyQuarantined = meta.pan_notified === true || meta.recording_quarantined === true;
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify({
         ...meta,
         pan_detected: true,
+        pan_notified: true,
         recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
         quarantine_source: meta.quarantine_source || source,
+        // A failed Twilio delete must not lose the only SID a later retry
+        // needs — recovery's incomplete-quarantine retry reads it back
+        // (round-13 P1). Cleared-URL rows otherwise have nothing to retry.
+        ...(sid && !twilioDeleted ? { quarantine_recording_sid: sid } : {}),
       }),
       updated_at: new Date(),
     });
@@ -7502,6 +7511,15 @@ const CallRecordingProcessor = {
                 .orWhere(function () {
                   this.where('processing_status', 'processing')
                     .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                })
+                // A transient extraction failure on a quarantined row must
+                // keep its normal retry budget (round-13 P1): the outer
+                // extraction_failed branch requires recording_url, which
+                // quarantine keeps null by design.
+                .orWhere(function () {
+                  this.where('processing_status', 'extraction_failed')
+                    .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                    .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
                 });
             })
             .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
@@ -7582,9 +7600,10 @@ const CallRecordingProcessor = {
         // recording_quarantined false): this sweep is the durable place to
         // RETRY the delete — skipping forever would leave the card audio
         // at Twilio (round-12 P1). Complete quarantines just skip.
-        if (meta.recording_quarantined !== true && (call.recording_sid || call.recording_url)) {
+        const retrySid = call.recording_sid || meta.quarantine_recording_sid || null;
+        if (meta.recording_quarantined !== true && (retrySid || call.recording_url)) {
           try {
-            await quarantineCardRecording(call, { source: 'recovery_quarantine_retry' });
+            await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
           } catch (qErr) {
             logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
           }

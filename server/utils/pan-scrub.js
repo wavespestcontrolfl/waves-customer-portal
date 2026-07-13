@@ -102,7 +102,11 @@ const NUMERIC_RUN_RE = new RegExp(
   'gi'
 );
 const LABEL_TOKEN_RE = new RegExp('(?:speaker\\s*\\d+|agent|caller)\\s*:', 'gi');
-const MAX_RUN_DIGITS = 40;
+// Two full readbacks (card + expiry + CVV, twice) run ~46 digits — the old
+// 40-digit bail left BOTH cards raw (round-13 P1). The group-span walk is
+// phone-locked and Luhn/IIN-gated, so long runs are safe to scan; only true
+// bulk dumps (CSV pastes, ID lists) bail.
+const MAX_RUN_DIGITS = 120;
 
 // Real-world PAN length priority: 16 (Visa/MC dominant), 15 (Amex), 19
 // (extended Visa/JCB), 14 (Diners), 13 (legacy Visa), then the rare tail.
@@ -212,11 +216,26 @@ function scrubNumericRun(run) {
       // of ordinary Luhn-invalid 16-digit tokens (order/tracking/reference
       // numbers — a pinned round-1 contract), and 13-digit Visas are
       // legacy-extinct while 16-digit non-card tokens are everywhere.
-      if (digits.length < 17 || digits.length > 19) return null;
+      // Totals up to 27 cover a fused MMYY + CVV4 tail
+      // ("42424242424242421228123" — round-13 P1); tails of 5-8 must be
+      // genuinely code-shaped, and totals ABOVE 19 additionally require a
+      // STRONG card IIN — an unseparated pair of 10-digit phone numbers
+      // must keep losing (same documented residual as the spoken guard:
+      // a 4xx-area-code pair with a Luhn-colliding 16-prefix and an
+      // MMYY-shaped tail can still mask, accepted over persisting a PAN).
+      if (digits.length < 17 || digits.length > 27) return null;
       for (const plen of panLengthPriority(digits.slice(0, 2))) {
         const tailLen = digits.length - plen;
-        if (tailLen < 1 || tailLen > 4) continue;
+        if (tailLen < 1 || tailLen > 8) continue;
+        const tail = digits.slice(plen);
+        // ≤19 totals keep the loose 1–4 tail (round-12 contract); ABOVE 19
+        // every tail must be genuinely code-shaped (valid MMYY / CVV) —
+        // "tracking 42424242424242424242" has a Luhn-colliding 16-prefix
+        // but its '4242' tail is no expiry (mm=42), so it survives
+        // (round-1 pinned contract).
+        if ((tailLen > 4 || digits.length > 19) && !isValidCodeTail(tail)) continue;
         const prefix = digits.slice(0, plen);
+        if (digits.length > 19 && !strongCardIin(prefix)) continue;
         if (panCandidateValid(prefix)) return prefix;
       }
       return null;
@@ -237,7 +256,7 @@ function scrubNumericRun(run) {
       let spanSum = 0;
       for (let j = i; j < groups.length && !locked[j]; j += 1) {
         spanSum += groups[j].digits.length;
-        if (spanSum > 19) break;
+        if (spanSum > 27) break;
         if (spanSum >= 17) {
           const spanDigits = groups.slice(i, j + 1).map((grp) => grp.digits).join('');
           const prefix = trySplitUnseparated(spanDigits);
@@ -271,12 +290,17 @@ function scrubNumericRun(run) {
         for (let j = from; j < groups.length && !locked[j]; j += 1) {
           sum += groups[j].digits.length;
           if (head.length < 2) head = (head + groups[j].digits).slice(0, 2);
-          if (sum > 19) break;
+          if (sum > 27) break;
           if (sum >= 13) {
             const spanDigits2 = groups.slice(from, j + 1).map((grp) => grp.digits).join('');
             for (const len of panLengthPriority(head)) {
               if (len === spanDigits2.length && panCandidateValid(spanDigits2)) return true;
             }
+            // A second card whose LAST group fused with its CVV
+            // ("…1111 4242 4242 4242 4242123") is split-shaped, not
+            // full-Luhn-shaped — recognize it too or the absorb eats its
+            // opening groups (round-13 P1).
+            if (sum >= 17 && trySplitUnseparated(spanDigits2)) return true;
           }
         }
         return false;
