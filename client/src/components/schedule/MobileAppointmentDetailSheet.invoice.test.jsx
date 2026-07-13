@@ -34,14 +34,14 @@ const BASE_SERVICE = {
   windowStart: '11:00:00',
   windowEnd: '12:00:00',
   estimatedDuration: 60,
-  customerName: 'Dasha Suri',
+  customerName: 'Pat Sample',
 };
 
 const ATTACHED_INVOICE_FIELDS = {
   checkoutInvoiceId: 'inv-1',
   checkoutInvoiceStatus: 'draft',
   checkoutInvoiceTotal: 214,
-  checkoutInvoiceNumber: 'WPC-2026-0262',
+  checkoutInvoiceNumber: 'WPC-2099-0001',
   checkoutInvoiceLines: [
     { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
     { description: 'First service application', amount: 115 },
@@ -56,7 +56,7 @@ describe('MobileAppointmentDetailSheet invoice-on-file block', () => {
         onClose={() => {}}
       />,
     );
-    expect(screen.getByText(/Invoice on file · WPC-2026-0262/)).toBeInTheDocument();
+    expect(screen.getByText(/Invoice on file · WPC-2099-0001/)).toBeInTheDocument();
     expect(screen.getByText('$214.00')).toBeInTheDocument();
     expect(screen.getByText('WaveGuard Membership — one-time setup fee')).toBeInTheDocument();
     expect(screen.getByText('$99.00')).toBeInTheDocument();

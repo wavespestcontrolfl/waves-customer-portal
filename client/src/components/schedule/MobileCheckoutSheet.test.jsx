@@ -31,7 +31,7 @@ const ATTACHED_INVOICE_FIELDS = {
   checkoutInvoiceId: 'inv-1',
   checkoutInvoiceStatus: 'draft',
   checkoutInvoiceTotal: 214,
-  checkoutInvoiceNumber: 'WPC-2026-0262',
+  checkoutInvoiceNumber: 'WPC-2099-0001',
   checkoutInvoiceLines: [
     { description: 'WaveGuard Membership — one-time setup fee', amount: 99 },
     { description: 'First service application', amount: 115 },
@@ -51,7 +51,7 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.getByText('$99.00')).toBeInTheDocument();
     expect(screen.getByText('First service application')).toBeInTheDocument();
     expect(screen.getByText('$115.00')).toBeInTheDocument();
-    expect(screen.getByText(/Invoice on file · WPC-2026-0262/)).toBeInTheDocument();
+    expect(screen.getByText(/Invoice on file · WPC-2099-0001/)).toBeInTheDocument();
     // The mint endpoint reuses the invoice and ignores extras — the pickers
     // must not be offered.
     expect(screen.queryByRole('button', { name: 'Add Service' })).not.toBeInTheDocument();
