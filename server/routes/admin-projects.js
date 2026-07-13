@@ -3782,7 +3782,10 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
       ? await buildCompletionCommsContext({
         customerId: project.customer_id,
         scheduledServiceId: project.scheduled_service_id || null,
-        originDate: project.project_date || project.created_at || null,
+        // created_at is when the JOB opened; project_date is the
+        // inspection date and would drop the pre-visit booking comms this
+        // feature summarizes (Codex r3 — same rule as the preview above).
+        originDate: project.created_at || null,
       }).catch(() => ({ text: '', promptHint: '' }))
       : { text: '', promptHint: '' };
     // Thread the relevance hint with the block (Codex P2) — the window

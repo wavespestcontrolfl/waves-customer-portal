@@ -79,7 +79,7 @@ async function resolveContextWindow({
   if (scheduledServiceId) {
     svc = await knex('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'service_type', 'service_id', 'recurring_parent_id', 'source_estimate_id', 'created_at', 'scheduled_date')
+      .first('id', 'customer_id', 'service_type', 'service_id', 'recurring_parent_id', 'is_recurring', 'source_estimate_id', 'created_at', 'scheduled_date')
       .catch(() => null);
   }
   const serviceLine = svc ? detectServiceLine(svc.service_type) : null;
@@ -90,7 +90,10 @@ async function resolveContextWindow({
   // origin still beats the old unbounded behavior).
   let isRecurring = false;
   if (svc) {
-    if (svc.recurring_parent_id) {
+    // Parent rows of a recurring series carry is_recurring with a null
+    // recurring_parent_id (Codex r3) — both shapes are recurring by
+    // construction before the profile is even consulted.
+    if (svc.recurring_parent_id || svc.is_recurring === true) {
       isRecurring = true;
     } else {
       try {

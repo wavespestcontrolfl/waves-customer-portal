@@ -146,6 +146,19 @@ describe('resolveContextWindow', () => {
     expect(win.floor.getTime()).toBe(completedThatEvening.getTime());
   });
 
+  test('a recurring PARENT row (is_recurring, null parent id) gets the recurring window', async () => {
+    const lastVisit = new Date(NOW - 30 * DAY);
+    const knex = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Quarterly Pest Control Service', is_recurring: true, recurring_parent_id: null, scheduled_date: new Date(NOW), created_at: new Date(NOW - 300 * DAY) },
+        { id: 'svc-2', service_type: 'Quarterly Pest Control Service', scheduled_date: lastVisit },
+      ],
+    });
+    const win = await resolveContextWindow({ customerId: 'c1', scheduledServiceId: 'svc-1', knex });
+    expect(win.isRecurring).toBe(true);
+    expect(win.floor.getTime()).toBe(lastVisit.getTime());
+  });
+
   test('estimate without accepted_at falls through to the booking created_at', async () => {
     const booked = new Date(NOW - 15 * DAY);
     const knex = stubKnex({
