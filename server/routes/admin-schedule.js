@@ -532,6 +532,10 @@ async function registerSpawnedVisitReminder({ scheduledServiceId, customerId, sc
     );
   } catch (e) {
     logger.error(`[schedule] Reminder registration failed for spawned visit ${scheduledServiceId}: ${e.message}`);
+    try {
+      const AppointmentReminders = require('../services/appointment-reminders');
+      await AppointmentReminders.alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage: e.message });
+    } catch { /* best-effort — never fail the caller */ }
   }
 }
 
