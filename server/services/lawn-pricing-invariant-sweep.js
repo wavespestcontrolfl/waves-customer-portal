@@ -212,11 +212,26 @@ async function checkBudgetDrift() {
       }],
     };
   }
-  // status 'ok' with a zero total: costLineFromUsage accepts zero-valued
-  // cost_per_unit/best_price as a priced line, so an all-$0 rotation is
-  // zero-PRICED catalog data, not a genuinely free rotation — it cannot
-  // verify the budget (or resolve an open alert) any more than missing data
-  // can.
+  // Per-line guard: costLineFromUsage accepts an explicit zero
+  // cost_per_unit/best_price as a priced line WITHOUT a warning, so a mixed
+  // rotation (some rows $0, some positive) returns status 'ok' with a
+  // positive-but-UNDERSTATED total. Any $0 line means the lower bound can't
+  // vouch for the budget.
+  const zeroPricedLines = (cogs.lines || []).filter((line) => !(Number(line.cost) > 0));
+  if (zeroPricedLines.length) {
+    const names = zeroPricedLines.map((line) => line.productName || line.productId || 'unknown product').join(', ');
+    return {
+      status: 'unverified',
+      reason: `zero-priced COGS lines: ${names}`,
+      violations: [{
+        check: 'material_budget_unverified',
+        cell: 'inventory_cogs',
+        detail: `mapped Lawn Care rows priced at $0 (${names}) — the live annual lower bound is understated; budget drift cannot be verified until every mapped product carries real positive cost`,
+      }],
+    };
+  }
+  // Aggregate fallback for shapes without per-line data: an all-$0 rotation
+  // is zero-PRICED catalog data, not a genuinely free rotation.
   if (!Number(cogs.totalPerVisit)) {
     return {
       status: 'unverified',

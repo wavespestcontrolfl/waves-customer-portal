@@ -340,6 +340,30 @@ describe('sweep red paths — failures become alert violations, never silent gre
     expect(new Set(violations.map((v) => v.check))).toEqual(new Set(['malformed_cost_floor']));
   });
 
+  test('a PARTIALLY zero-priced ok-status rotation is unverified — the positive total is understated', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => ({ available: true }),
+      // Explicit $0 cost_per_unit is a "priced" line with no warning, so the
+      // aggregate is ok-status and positive while missing Prodiamine's cost.
+      inventoryCostFromRows: () => ({
+        status: 'ok',
+        totalPerVisit: 38.2,
+        warnings: [],
+        lines: [
+          { productId: 'p1', productName: 'Celsius WG', cost: 38.2, source: 'cost_per_unit', warning: null },
+          { productId: 'p2', productName: 'Prodiamine 65 WDG', cost: 0, source: 'cost_per_unit', warning: null },
+        ],
+      }),
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('unverified');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['material_budget_unverified']);
+    expect(result.violationDetails[0].detail).toContain('Prodiamine 65 WDG');
+    expect(result.violationDetails[0].detail).not.toContain('Celsius');
+    expect(calls.updates).toHaveLength(0);
+  });
+
   test('an ok-status $0-priced rotation is unverified — zero catalog prices verify nothing', async () => {
     const { sweep, calls } = loadSweep({
       priceLawnCare: cleanTiers,
