@@ -1170,23 +1170,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return;
     }
     const apEmail = newPayer.apEmail.trim().toLowerCase();
-    // Soft dedupe: re-typing a known payer's AP email selects the existing
-    // Bill-To instead of minting a duplicate (AR would split across rows).
-    if (apEmail) {
-      const existing = payers.find(
-        (p) => (p.ap_email || "").toLowerCase() === apEmail,
-      );
-      if (existing) {
-        setForm((f) => ({ ...f, payerId: String(existing.id), selfPayOverride: false }));
-        setShowNewPayer(false);
-        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
-        setNewPayerNotice(`Matched existing payer "${existing.display_name}" by AP email — selected it instead.`);
-        return;
-      }
-    }
     setNewPayerSaving(true);
     setNewPayerError("");
     try {
+      // dedupeByEmail: the SERVER checks the AP email against every payer
+      // (the loaded list is capped) and returns the existing active payer
+      // with deduped:true instead of minting a duplicate — AR must not split
+      // across payer rows.
       const r = await adminFetch("/admin/payers", {
         method: "POST",
         body: JSON.stringify({
@@ -1194,19 +1184,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           companyName: newPayer.companyName.trim() || undefined,
           apEmail: apEmail || undefined,
           apPhone: newPayer.apPhone.trim() || undefined,
+          dedupeByEmail: true,
         }),
       });
       const created = r?.payer;
       if (created?.id) {
         setPayers((list) =>
-          [...list, created].sort((a, b) =>
+          (list.some((p) => String(p.id) === String(created.id))
+            ? list
+            : [...list, created]
+          ).sort((a, b) =>
             String(a.display_name || "").localeCompare(String(b.display_name || "")),
           ),
         );
         setForm((f) => ({ ...f, payerId: String(created.id), selfPayOverride: false }));
         setShowNewPayer(false);
         setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
-        setNewPayerNotice("");
+        setNewPayerNotice(
+          r?.deduped
+            ? `Matched existing payer "${created.display_name}" by AP email — selected it instead.`
+            : "",
+        );
       } else {
         setNewPayerError("Unexpected response — payer not created");
       }
@@ -7272,28 +7270,34 @@ export function CompletionPanel({
   // else the account default unless the visit is pinned to self-pay), the
   // invoice routes to the payer's AP inbox and the tech must NOT collect on
   // site (the server blocks in-person collection for payer-billed visits).
-  // The payer name lookup is best-effort — techs get a generic banner when the
-  // admin-only payers endpoint 403s.
+  // The banner and the self-pay UI suppression only engage once the payer is
+  // CONFIRMED live and ACTIVE — server resolution ignores missing/inactive
+  // payers (falls back to self-pay), so a stale link must not tell the tech
+  // "don't collect" on a visit that will actually mint a self-pay invoice.
+  // A failed lookup (403/offline) therefore shows nothing: the server-side
+  // guards still prevent real mis-collection either way.
   const effectivePayerId =
     service.payerId ||
     (service.selfPayOverride === true ? null : customerDefaultPayerId) ||
     null;
-  const [payerBillToName, setPayerBillToName] = useState("");
+  const [payerBillTo, setPayerBillTo] = useState(null);
   useEffect(() => {
     let live = true;
-    setPayerBillToName("");
+    setPayerBillTo(null);
     if (!effectivePayerId) return undefined;
     adminFetch(`/admin/payers/${effectivePayerId}`)
       .then((d) => {
         if (!live) return;
-        const p = d?.payer || d;
-        setPayerBillToName(p?.display_name || p?.company_name || "");
+        const p = d?.payer;
+        if (p && p.active !== false) {
+          setPayerBillTo({ name: p.display_name || p.company_name || "a third-party payer" });
+        }
       })
-      .catch(() => { /* generic banner */ });
+      .catch(() => { /* unconfirmed — keep self-pay UI */ });
     return () => { live = false; };
   }, [effectivePayerId]);
-  const payerBanner = effectivePayerId
-    ? `Billed to ${payerBillToName || "a third-party payer"} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
+  const payerBanner = payerBillTo
+    ? `Billed to ${payerBillTo.name} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
     : null;
   // Measured lawn sqft from the turf profile: seeds the Sq ft field (and the
   // derived Total) when a broadcast/granular lawn product is added. No
@@ -7758,8 +7762,10 @@ export function CompletionPanel({
   // operator hasn't opted to send the report on its own (e.g. paid in person).
   // Payer-billed visits never text the homeowner a pay link (the server
   // suppresses it — the invoice routes to the payer's AP inbox), so the
-  // toggle is hidden and the preview drops the marker.
-  const willSendPayLink = willInvoice && includePayLink && !effectivePayerId;
+  // toggle is hidden and the preview drops the marker. Keyed on the
+  // CONFIRMED-active payer (payerBanner), matching server resolution — an
+  // inactive/stale link resolves self-pay and keeps the normal pay-link UI.
+  const willSendPayLink = willInvoice && includePayLink && !payerBanner;
   const completionSmsTemplateName = willSendPayLink
     ? "Service Complete + Invoice"
     : "Service Complete";

@@ -136,7 +136,7 @@ async function findOrCreatePayerByEmail(body = {}) {
         .whereRaw('LOWER(ap_email) = ?', [apEmail])
         .orderBy('id', 'asc');
       const active = matches.find((p) => p.active !== false);
-      if (active) return { payer: active };
+      if (active) return { payer: active, created: false };
       // An INACTIVE payer with this email means an operator deliberately
       // disabled that Bill-To — do NOT silently recreate it (that would defeat
       // the fail-closed deactivation and route a new invoice to a disabled AP
@@ -153,7 +153,7 @@ async function findOrCreatePayerByEmail(body = {}) {
       );
       if (error) return { error };
       const [row] = await trx('payers').insert(dbUpdates).returning('*');
-      return { payer: row };
+      return { payer: row, created: true };
     });
   } catch (err) {
     logger.warn(`[payer] findOrCreatePayerByEmail failed: ${err.message}`);

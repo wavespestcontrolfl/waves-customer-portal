@@ -84,9 +84,32 @@ router.get('/:id/ar', async (req, res, next) => {
 });
 
 // POST /api/admin/payers
+// With dedupeByEmail=true (the inline quick-adds), an AP email already held by
+// an ACTIVE payer returns that payer (deduped: true) instead of minting a
+// duplicate — the client's loaded list is capped (listPayers limit), so only a
+// server-side lookup sees every payer. Reuses the call pipeline's atomic
+// find-or-create (advisory-locked), so concurrent quick-adds of the same email
+// can't race in a duplicate. An INACTIVE payer holding the email is a
+// deliberate deactivation: 409 for operator review, never silently recreated.
 router.post('/', async (req, res, next) => {
   try {
-    const { payer, error } = await PayerService.createPayer(req.body || {});
+    const body = req.body || {};
+    if (body.dedupeByEmail === true && (body.apEmail || body.ap_email)) {
+      const { payer, error, inactive, created } = await PayerService.findOrCreatePayerByEmail(body);
+      if (inactive) {
+        return res.status(409).json({
+          error: 'A deactivated payer already uses this AP email — reactivate or edit it in Finance → Payers.',
+        });
+      }
+      if (error) return res.status(400).json({ error });
+      if (payer) {
+        if (created) logger.info(`[payers] created payer ${payer.id}`);
+        return res.status(created ? 201 : 200).json({ payer, deduped: !created });
+      }
+      // Unusable email (findOrCreate requires a valid AP email) — fall through
+      // to the plain create, which applies full validation and 400s clearly.
+    }
+    const { payer, error } = await PayerService.createPayer(body);
     if (error) return res.status(400).json({ error });
     logger.info(`[payers] created payer ${payer.id}`);
     res.status(201).json({ payer });

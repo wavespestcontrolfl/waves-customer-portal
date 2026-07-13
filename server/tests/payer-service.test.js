@@ -314,14 +314,14 @@ describe('PayerService.findOrCreatePayerByEmail', () => {
     const existing = { id: 7, ap_email: 'jim@example.com', active: true };
     withTx({ matches: [existing] });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'JIM@Example.com' });
-    expect(out).toEqual({ payer: existing });
+    expect(out).toEqual({ payer: existing, created: false });
   });
 
   test('prefers the ACTIVE row when both active and inactive share the email', async () => {
     const active = { id: 8, ap_email: 'jim@example.com', active: true };
     withTx({ matches: [{ id: 3, ap_email: 'jim@example.com', active: false }, active] });
     const out = await PayerService.findOrCreatePayerByEmail({ apEmail: 'jim@example.com' });
-    expect(out).toEqual({ payer: active });
+    expect(out).toEqual({ payer: active, created: false });
   });
 
   test('does NOT recreate a DEACTIVATED payer for the same email (fail closed)', async () => {

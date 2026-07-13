@@ -3917,23 +3917,13 @@ export default function Customer360ProfileV2({
       return;
     }
     const apEmail = newPayer.apEmail.trim().toLowerCase();
-    // Soft dedupe: re-typing a known payer's AP email selects the existing
-    // Bill-To instead of minting a duplicate (AR would split across rows).
-    if (apEmail) {
-      const existing = payers.find(
-        (p) => (p.ap_email || "").toLowerCase() === apEmail,
-      );
-      if (existing) {
-        setShowNewPayer(false);
-        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
-        setNewPayerNotice(`Matched existing payer "${existing.display_name}" by AP email — selected it instead.`);
-        await savePayer(String(existing.id));
-        return;
-      }
-    }
     setNewPayerSaving(true);
     setNewPayerError("");
     try {
+      // dedupeByEmail: the SERVER checks the AP email against every payer
+      // (the loaded list is capped) and returns the existing active payer
+      // with deduped:true instead of minting a duplicate — AR must not split
+      // across payer rows.
       const r = await adminFetch("/admin/payers", {
         method: "POST",
         body: JSON.stringify({
@@ -3941,18 +3931,26 @@ export default function Customer360ProfileV2({
           companyName: newPayer.companyName.trim() || undefined,
           apEmail: apEmail || undefined,
           apPhone: newPayer.apPhone.trim() || undefined,
+          dedupeByEmail: true,
         }),
       });
       const created = r?.payer;
       if (created?.id) {
         setPayers((list) =>
-          [...list, created].sort((a, b) =>
+          (list.some((p) => String(p.id) === String(created.id))
+            ? list
+            : [...list, created]
+          ).sort((a, b) =>
             String(a.display_name || "").localeCompare(String(b.display_name || "")),
           ),
         );
         setShowNewPayer(false);
         setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
-        setNewPayerNotice("");
+        setNewPayerNotice(
+          r?.deduped
+            ? `Matched existing payer "${created.display_name}" by AP email — selected it instead.`
+            : "",
+        );
         await savePayer(String(created.id));
       } else {
         setNewPayerError("Unexpected response — payer not created");
@@ -5630,13 +5628,13 @@ export default function Customer360ProfileV2({
                             : ""}
                         </option>
                       ))}
-                      <option value="__new__">＋ New payer…</option>
+                      {isAdmin && <option value="__new__">＋ New payer…</option>}
                     </select>
                     {payerSaving && (
                       <span className="text-12 text-ink-tertiary">Saving…</span>
                     )}
                   </div>
-                  {showNewPayer && (
+                  {showNewPayer && isAdmin && (
                     <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
                       <div className="text-12 font-medium text-zinc-900 mb-2">
                         New payer
