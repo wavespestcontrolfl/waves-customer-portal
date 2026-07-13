@@ -689,13 +689,28 @@ const REQUIRED_FINDINGS_FIELDS = {
   ],
   wildlife_trapping: ['target_animal'],
   bed_bug: ['evidence_level', 'treatment_method'],
-  termite_inspection: ['termite_type', 'activity_status'],
+  // FS 482.226 report content (Codex P1 on the Phase-3 fields): the two
+  // compliance answers are required, not optional — a blank field is
+  // silently skipped from the immutable customer report, which is exactly
+  // the omission the statute forbids. "None" is a truthful
+  // areas_not_inspected answer when everything visible was inspected.
+  termite_inspection: [
+    'termite_type', 'activity_status',
+    'areas_not_inspected', 'inspection_notice_affixed',
+  ],
   termite_treatment: [
     'target_termite',
     'treatment_method',
     'products_used',
     'linear_feet_or_stations',
     'gallons_or_amount',
+    // FAC 5E-14 / FS 482.2265 (Codex P1): every product has an EPA reg.
+    // no., and posted_notice carries its own 'Not applicable' option, so
+    // both are always answerable. percent_solution is conditionally
+    // required (liquid-dilution methods only) in validateTypedFindings —
+    // "% solution" does not describe bait or cartridge work.
+    'epa_registration',
+    'posted_notice',
   ],
   termite_bait_station: ['stations_checked', 'termite_activity', 'bait_consumption'],
   rodent_bait_station: ['stations_checked', 'bait_consumption'],
@@ -1230,6 +1245,18 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
     if (enforceRequired && String(values.activity_level || '').trim()
       && String(values.activity_level) !== 'None observed' && !locations.length) {
       missing.push('activity_locations');
+    }
+  }
+
+  // Termite treatment: % solution is FAC 5E-14 application detail for
+  // liquid-dilution work, so it is required exactly when the recorded
+  // method is one — bait station and cartridge visits have no dilution to
+  // report, and 'Other' is unknowable (Codex P1 on the Phase-3 fields).
+  if (type === 'termite_treatment' && enforceRequired) {
+    const LIQUID_METHODS = ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Wood treatment'];
+    if (LIQUID_METHODS.includes(String(values.treatment_method || ''))
+      && String(values.percent_solution ?? '').trim() === '') {
+      missing.push('percent_solution');
     }
   }
 

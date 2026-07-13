@@ -75,7 +75,7 @@ const PROJECT_TYPES = {
       // accessible areas not inspected (and why) and that the inspection
       // notice was affixed. The routine-maintenance clause covers the FORM,
       // not the content.
-      { key: 'areas_not_inspected', label: 'Areas not inspected / why', type: 'textarea', placeholder: 'Visible accessible areas not inspected and why; inaccessible areas (e.g. attic decked over, locked shed)' },
+      { key: 'areas_not_inspected', label: 'Areas not inspected / why', type: 'textarea', placeholder: 'Visible accessible areas not inspected and why; inaccessible areas (e.g. attic decked over, locked shed). Write "None" if everything visible was inspected.' },
       { key: 'termite_type', label: 'Termite species (if found)', type: 'select', options: ['None observed', 'Eastern subterranean', 'Formosan', 'Drywood', 'Dampwood', 'Unknown — sample collected'] },
       { key: 'activity_status', label: 'Activity status', type: 'select', options: ['No activity', 'Old / inactive damage', 'Active infestation'] },
       { key: 'infestation_extent', label: 'Infestation extent', type: 'textarea' },

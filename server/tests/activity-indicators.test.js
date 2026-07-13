@@ -142,6 +142,78 @@ describe('validateTypedFindings', () => {
     });
     expect(result).toEqual({ ok: true, errors: [], missing: [] });
   });
+
+  test('termite inspection compliance answers are required (FS 482.226, Codex P1)', () => {
+    const blank = validateTypedFindings({
+      type: 'termite_inspection',
+      values: { termite_type: 'None observed', activity_status: 'No activity' },
+      expectedType: 'termite_inspection',
+      enforceRequired: true,
+    });
+    expect(blank.ok).toBe(false);
+    expect(blank.missing).toEqual(expect.arrayContaining(['areas_not_inspected', 'inspection_notice_affixed']));
+
+    // "None" is the truthful answer when everything visible was inspected.
+    const full = validateTypedFindings({
+      type: 'termite_inspection',
+      values: {
+        termite_type: 'None observed',
+        activity_status: 'No activity',
+        areas_not_inspected: 'None',
+        inspection_notice_affixed: 'Yes',
+      },
+      expectedType: 'termite_inspection',
+      enforceRequired: true,
+    });
+    expect(full).toEqual({ ok: true, errors: [], missing: [] });
+  });
+
+  test('termite treatment application detail: EPA reg + posted notice always; % solution for liquid methods only (FAC 5E-14, Codex P1)', () => {
+    const base = {
+      target_termite: 'Subterranean termites',
+      areas_treated: 'Exterior perimeter',
+      products_used: 'Termidor SC',
+      linear_feet_or_stations: '180 linear ft',
+      gallons_or_amount: '72 gal',
+    };
+
+    const liquidBlank = validateTypedFindings({
+      type: 'termite_treatment',
+      values: { ...base, treatment_method: 'Liquid perimeter' },
+      expectedType: 'termite_treatment',
+      enforceRequired: true,
+    });
+    expect(liquidBlank.ok).toBe(false);
+    expect(liquidBlank.missing).toEqual(expect.arrayContaining(['epa_registration', 'posted_notice', 'percent_solution']));
+
+    // Bait work has no dilution to report — % solution stays optional there.
+    const baitVisit = validateTypedFindings({
+      type: 'termite_treatment',
+      values: {
+        ...base,
+        treatment_method: 'Bait station setup',
+        epa_registration: '100-1503',
+        posted_notice: 'Not applicable',
+      },
+      expectedType: 'termite_treatment',
+      enforceRequired: true,
+    });
+    expect(baitVisit).toEqual({ ok: true, errors: [], missing: [] });
+
+    const liquidFull = validateTypedFindings({
+      type: 'termite_treatment',
+      values: {
+        ...base,
+        treatment_method: 'Liquid perimeter',
+        percent_solution: '0.06%',
+        epa_registration: '7969-210',
+        posted_notice: 'Yes',
+      },
+      expectedType: 'termite_treatment',
+      enforceRequired: true,
+    });
+    expect(liquidFull).toEqual({ ok: true, errors: [], missing: [] });
+  });
 });
 
 describe('validateNextStepChips', () => {
