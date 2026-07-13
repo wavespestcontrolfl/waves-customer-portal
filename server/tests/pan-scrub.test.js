@@ -360,6 +360,35 @@ describe('scrubPans — round 9 hardening', () => {
   });
 });
 
+describe('scrubPans — round 10 hardening', () => {
+  const W10 = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const say10 = (digits) => digits.split('').map((d) => W10[Number(d)]).join(' ');
+
+  it('splits an unseparated PAN+CVV token whose combination ALSO passes Luhn', () => {
+    expect(scrubPansDetailed('4242424242424242006')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('splits an unseparated PAN+CVV token whose combination FAILS Luhn', () => {
+    expect(scrubPansDetailed('4242424242424242426')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('masks a spoken readback with a spoken "slash" expiry separator (round-10)', () => {
+    const r = scrubPansDetailed(`${say10('4242424242424242')} one two slash two eight one two three`);
+    expect(r.count).toBe(1);
+    expect(r.text).toBe('[card ending 4242] [code removed]');
+  });
+
+  it('matches "number is" CVV phrasing, numeric and spoken (round-10)', () => {
+    expect(scrubPans('CVV number is 123')).toBe('CVV number is [code removed]');
+    expect(scrubPans('C, V, V number is one two three')).toBe('C, V, V number is [code removed]');
+  });
+
+  it('still leaves dictated phone numbers untouched after the split logic', () => {
+    const s = 'call me at 9415551234 or 2395551234';
+    expect(scrubPans(s)).toBe(s);
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

@@ -7711,5 +7711,7 @@ CallRecordingProcessor.transcribeRecording = transcribeRecording;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
 CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
+CallRecordingProcessor.withPanStamps = withPanStamps;
+CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 
 module.exports = CallRecordingProcessor;

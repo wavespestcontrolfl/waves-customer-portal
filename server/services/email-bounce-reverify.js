@@ -186,7 +186,10 @@ async function findSourceCall({ bouncedEmail, customerId = null }) {
     // path: without the call SID, quarantineCardRecording can strip
     // call_log.recording_url but cannot clear the recording media already
     // synced onto the unified voice message (Codex #2676 round-7/8 P1).
-    .select('id', 'recording_url', 'recording_sid', 'twilio_call_sid', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction')
+    // transcription + transcript_structured ride along for the legacy-heal
+    // pass (round-10 P1): a processed legacy call's STORED artifacts can
+    // carry the same card readback this re-listen detects.
+    .select('id', 'recording_url', 'recording_sid', 'twilio_call_sid', 'recording_duration_seconds', 'duration_seconds', 'created_at', 'customer_id', 'ai_extraction', 'transcription', 'transcript_structured')
     .modify((qb) => {
       if (customerId) qb.orderByRaw('(customer_id = ?) DESC, created_at DESC', [customerId]);
       else qb.orderBy('created_at', 'desc');
@@ -298,6 +301,35 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
     // the recording like the live pipeline would (Codex #2676 round-5 P1) —
     // this path mutates contact data anyway, so it is a mutating caller.
     const result = await CallProc.transcribeRecording(call.recording_url, { call, forceContactPass: true, quarantine: true });
+    // Heal the PERSISTED artifacts too (Codex #2676 round-10 P1): the
+    // quarantine above strips the audio, but a legacy call's stored
+    // transcription / transcript_structured / admin-thread body still carry
+    // the raw readback — scrub-and-persist them exactly like the backfill
+    // and live-fallback paths do. Best-effort: a heal failure never blocks
+    // the bounce-reverify decode this job exists for.
+    try {
+      const panScrubMod = require('../utils/pan-scrub');
+      const legacyText = panScrubMod.scrubPansDetailed(call.transcription ?? null);
+      const legacyStructured = CallProc.scrubStructuredTranscript(call.transcript_structured ?? null);
+      if (legacyText.count + legacyStructured.count > 0) {
+        await db('call_log').where({ id: call.id }).update({
+          ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
+          ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
+          updated_at: db.fn.now(),
+        });
+        if (legacyText.count > 0) {
+          call.transcription = legacyText.text;
+          // The synced voice message shows the transcript as its body —
+          // heal it in the same touch (media was cleared by the quarantine).
+          await CallProc.updateUnifiedVoiceMessage(call, { body: legacyText.text }).catch(() => {});
+        }
+        if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
+        await CallProc.quarantineCardRecording(call, { source: 'bounce_reverify_legacy' }).catch(() => {});
+        call.recording_url = null;
+      }
+    } catch (healErr) {
+      logger.warn(`[bounce-reverify] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);
+    }
     // Same hallucination guard the live pipeline applies before trusting a
     // transcript — a near-silent recording can yield a long invented one,
     // and candidates decoded from it would be confidently wrong.

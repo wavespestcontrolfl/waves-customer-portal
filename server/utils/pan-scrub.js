@@ -189,8 +189,39 @@ function scrubNumericRun(run) {
         break;
       }
     }
+    // Unseparated PAN+CVV token (round-10 P1), two shapes:
+    //  (a) the combined 19 digits ALSO pass Luhn — masking as a 19 would
+    //      leak CVV digits into the displayed last4;
+    //  (b) the combined 17–19 digits FAIL Luhn — no span matches and the
+    //      raw PAN would survive verbatim.
+    // Either way, when the 16-digit (or Amex 15-digit) prefix is a valid
+    // PAN in its own right and the remainder is code-sized (1–4), mask the
+    // prefix and absorb the tail. A genuine 19-digit PAN whose 16-prefix
+    // Luhn-collides splits too — documented bias toward never displaying
+    // CVV digits. Separator-grouped readbacks never reach this: the span
+    // search matches their 16 first and the group absorb takes the tail.
+    const trySplitUnseparated = (digits) => {
+      if (digits.length < 17 || digits.length > 19) return null;
+      for (const plen of [16, 15]) {
+        const tailLen = digits.length - plen;
+        if (tailLen < 1 || tailLen > 4) continue;
+        if (plen === 15 && !/^3[47]/.test(digits)) continue;
+        const prefix = digits.slice(0, plen);
+        if (panCandidateValid(prefix)) return prefix;
+      }
+      return null;
+    };
+    if (matched && matched.digits.length === 19) {
+      const prefix = trySplitUnseparated(matched.digits);
+      if (prefix) matched = { ...matched, prefixMask: prefix };
+    }
+    if (!matched && !locked[i] && groups[i].digits.length >= 17 && groups[i].digits.length <= 19) {
+      const prefix = trySplitUnseparated(groups[i].digits);
+      if (prefix) matched = { endGroup: i, digits: groups[i].digits, prefixMask: prefix };
+    }
     if (matched) {
-      out += run.slice(cursor, groups[i].start) + maskFor(matched.digits);
+      const maskDigits = matched.prefixMask || matched.digits;
+      out += run.slice(cursor, groups[i].start) + maskFor(maskDigits) + (matched.prefixMask ? ' [code removed]' : '');
       cursor = groups[matched.endGroup].end;
       i = matched.endGroup + 1;
       count += 1;
@@ -226,7 +257,10 @@ const DIGIT_WORD_ALT = Object.keys(DIGIT_WORDS).join('|');
 // and so do a couple of FILLER tokens or a mid-readback diarization label
 // (round-5): the transcription prompt preserves "um"/"uh" verbatim, so
 // "four two um four two…" is exactly how a real readback lands.
-const SPOKEN_FILLER = '(?:um+|uh+|erm|ah|hm+)';
+// 'slash'/'dash' are SPOKEN separators ("one two slash two eight"), not
+// content — they must not end a run or the expiry/CVV after them survives
+// beside the mask (Codex #2676 round-10 P1).
+const SPOKEN_FILLER = '(?:um+|uh+|erm|ah|hm+|slash|dash)';
 const SPOKEN_SEP = `(?:[\\s,.]+(?:(?:${SPOKEN_FILLER}|(?:speaker\\s*\\d+|agent|caller)\\s*:)[\\s,.]+){0,2})`;
 const WORD_RUN_RE = new RegExp(
   `\\b(?:(?:${DIGIT_WORD_ALT})${SPOKEN_SEP}){12,}(?:${DIGIT_WORD_ALT})\\b`,
@@ -444,10 +478,10 @@ const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|lock\s*box|community|entry|acce
 // Digit separators mirror the PAN path — providers punctuate pauses, so
 // "cvv is 1, 2, 3" must match as readily as "cvv 123" (round-3 P1).
 const CVV_TAIL_NUMERIC = '((?:\\d[\\s,.-]{0,2}){2,3}\\d)(?![\\d])';
-const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
-const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
-const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
-const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:is\\s+|was\\s+|number\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+const CVV_NUMERIC_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
+const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
+const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
+const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
 
 function bareSecurityCodeIsCardCvv(full, offset) {
   const windowText = full.slice(Math.max(0, offset - 80), offset + 20);

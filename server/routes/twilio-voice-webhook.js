@@ -1150,30 +1150,40 @@ router.post('/transcription', async (req, res) => {
       // a blurted card number must be masked here too.
       const panScrub = require('../utils/pan-scrub').scrubPansDetailed(TranscriptionText);
       const scrubbedTranscription = panScrub.text;
-      const update = {
-        transcription: scrubbedTranscription,
-        transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
-        transcription_provider: 'twilio_builtin',
-        transcription_model: null,
-        transcription_metadata: JSON.stringify({
-          provider: 'twilio_builtin',
-          source: 'twilio_transcription_webhook',
-          transcription_status: TranscriptionStatus || null,
-          transcript_chars: scrubbedTranscription.length,
-          recording_sid_present: !!RecordingSid,
-        }),
-        updated_at: new Date(),
-      };
-
+      // Resolve the target row FIRST (parent preferred, child fallback) so
+      // the metadata write can MERGE an existing PAN-quarantine stamp — a
+      // fresh metadata object here would drop pan_detected when this
+      // webhook lands after a provider/backfill quarantine whose card
+      // readback Twilio's own transcript happened to omit, and the
+      // recording-status/recovery guards key on that stamp
+      // (Codex #2676 round-10 P1).
+      let targetRow = null;
+      if (ParentCallSid) {
+        targetRow = await db('call_log').where('twilio_call_sid', ParentCallSid).first('id', 'twilio_call_sid');
+      }
+      if (!targetRow) {
+        targetRow = await db('call_log').where('twilio_call_sid', CallSid).first('id', 'twilio_call_sid');
+      }
       let updated = 0;
       let matchedSid = null;
-      if (ParentCallSid) {
-        updated = await db('call_log').where('twilio_call_sid', ParentCallSid).update(update);
-        if (updated > 0) matchedSid = ParentCallSid;
-      }
-      if (updated === 0) {
-        updated = await db('call_log').where('twilio_call_sid', CallSid).update(update);
-        if (updated > 0) matchedSid = CallSid;
+      if (targetRow) {
+        const CallProc = require('../services/call-recording-processor');
+        const update = {
+          transcription: scrubbedTranscription,
+          transcription_status: TranscriptionStatus === 'completed' ? 'completed' : 'failed',
+          transcription_provider: 'twilio_builtin',
+          transcription_model: null,
+          transcription_metadata: JSON.stringify(await CallProc.withPanStamps(targetRow.id, {
+            provider: 'twilio_builtin',
+            source: 'twilio_transcription_webhook',
+            transcription_status: TranscriptionStatus || null,
+            transcript_chars: scrubbedTranscription.length,
+            recording_sid_present: !!RecordingSid,
+          })),
+          updated_at: new Date(),
+        };
+        updated = await db('call_log').where({ id: targetRow.id }).update(update);
+        if (updated > 0) matchedSid = targetRow.twilio_call_sid;
       }
 
       if (updated > 0) {
