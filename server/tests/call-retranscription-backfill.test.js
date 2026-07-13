@@ -143,6 +143,28 @@ describe('runRetranscriptionBackfill — verdict vs retry discipline', () => {
     expect(dbi.__updates[0].retranscribed_at).toBeUndefined();
   });
 
+  test('legacy PAN artifacts heal BEFORE a throwing re-listen, and the audio quarantines from the catch (Codex r7 P1)', async () => {
+    const processor = require('../services/call-recording-processor');
+    const qSpy = jest.spyOn(processor, 'quarantineCardRecording').mockResolvedValue({ quarantined: true });
+    try {
+      const dbi = makeFakeDbi([{ ...CALL, transcription: 'card 4242424242424242' }]);
+      const out = await runRetranscriptionBackfill({
+        dbi,
+        transcribe: async () => { throw new Error('provider down'); },
+        implausible: notImplausible,
+      });
+      expect(out).toMatchObject({ attempted: 1, retried: 1, upgraded: 0 });
+      // The heal persisted the masked text even though the re-listen threw —
+      // an exhausted row can never strand a raw card number again.
+      const healPatch = dbi.__updates.find((u) => typeof u.transcription === 'string' && u.transcription.includes('[card ending 4242]'));
+      expect(healPatch).toBeTruthy();
+      // And the recording itself was quarantined from the catch path.
+      expect(qSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      qSpy.mockRestore();
+    }
+  });
+
   test('the attempts cap converts repeated failures into a permanent stamp', async () => {
     const dbi = makeFakeDbi([CALL], { attemptsAfterFailure: MAX_ATTEMPTS });
     const out = await runRetranscriptionBackfill({ dbi, transcribe: async () => { throw new Error('still down'); } });

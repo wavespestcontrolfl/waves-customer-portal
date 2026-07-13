@@ -33,6 +33,7 @@ const { normalizeCallExtraction, applyContactNormalization } = require('../utils
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
+const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
@@ -131,6 +132,192 @@ const GEMINI_EXTRACTION_V1_MODEL = process.env.GEMINI_EXTRACTION_V1_MODEL || 'ge
 const MAX_TRANSCRIPT_CHARS_PER_SECOND = Number(process.env.CALL_MAX_TRANSCRIPT_CHARS_PER_SEC || 25);
 const MIN_TRANSCRIPT_CHARS_FOR_GUARD = 120;
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+
+// PAN redaction guard (card-on-file spec Phase 0). One transcription pass
+// yields up to three artifacts carrying the same audio — the labeled
+// transcript string, the diarized segment array, and the dictation-focused
+// contact-pass string — so a blurted card number must be scrubbed from all
+// three together or it survives in transcript_structured / the dictation
+// decoder prompt. Returns new values plus the total mask count (for a
+// PAN-free log line); never throws (scrubPansDetailed passes non-strings
+// through untouched).
+function scrubTranscriptArtifacts({ transcription, contactPassTranscript, segments } = {}) {
+  let count = 0;
+  const main = scrubPansDetailed(transcription);
+  count += main.count;
+  const contactPass = scrubPansDetailed(contactPassTranscript);
+  count += contactPass.count;
+  const segScrub = scrubSegments(segments);
+  count += segScrub.count;
+  return {
+    transcription: main.text,
+    contactPassTranscript: contactPass.text,
+    segments: segScrub.segments,
+    count,
+  };
+}
+
+// Scrub a persisted transcript_structured JSON blob (segments +
+// contact_pass_transcript) — the fallback-heal path touches legacy rows
+// whose structured artifact may predate the PAN guard, and healing only
+// call_log.transcription would leave the raw card number stored in the
+// sibling column (Codex #2676 round-2 P1). Returns { json, count }; a
+// null/unparseable blob passes through untouched.
+function scrubStructuredTranscript(json) {
+  if (!json) return { json, count: 0 };
+  let parsed;
+  try {
+    parsed = typeof json === 'string' ? JSON.parse(json) : json;
+  } catch {
+    return { json, count: 0 };
+  }
+  if (!parsed || typeof parsed !== 'object') return { json, count: 0 };
+  let count = 0;
+  if (Array.isArray(parsed.segments)) {
+    const segScrub = scrubSegments(parsed.segments);
+    parsed.segments = segScrub.segments;
+    count += segScrub.count;
+  }
+  if (typeof parsed.contact_pass_transcript === 'string') {
+    const s = scrubPansDetailed(parsed.contact_pass_transcript);
+    count += s.count;
+    if (s.count) parsed.contact_pass_transcript = s.text;
+  }
+  return { json: count ? JSON.stringify(parsed) : json, count };
+}
+
+// ── PAN quarantine ── Spec invariant #1: card data may not persist in ANY
+// medium, including audio. When the scrub masks card data from a call's
+// transcript, the RECORDING still carries it and stays replayable from the
+// message thread — so the Twilio recording is deleted, our references are
+// stripped (call_log.recording_url + the voice message's media), and the
+// detection is stamped into transcription_metadata. Best-effort and
+// idempotent: a failed Twilio delete still strips local references, and the
+// office gets a heads-up either way (a quarantined recording is an
+// exception a human should know about, never a silent event).
+async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {}) {
+  if (!call?.id) return { quarantined: false };
+  const recordingUrl = call.recording_url || null;
+  const sid = call.recording_sid
+    || (recordingUrl && (recordingUrl.match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
+    || null;
+  let twilioDeleted = false;
+  if (sid) {
+    try {
+      const client = twilioClient();
+      if (client) {
+        await client.recordings(sid).remove();
+        twilioDeleted = true;
+      }
+    } catch (err) {
+      logger.error(`[call-proc] PAN quarantine: Twilio recording delete failed for ${maskSid(sid)}: ${err.message}`);
+    }
+  }
+  let alreadyQuarantined = false;
+  try {
+    const row = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+    // jsonb columns come back as OBJECTS from Postgres, strings from mocks/
+    // sqlite — handle both or a quarantine would clobber the provider/source
+    // metadata instead of merging (Codex #2676 round-4 P2).
+    const raw = row?.transcription_metadata;
+    let meta = {};
+    try {
+      meta = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { meta = {}; }
+    // pan_detected can now be stamped BEFORE the first quarantine call
+    // (same-write stamps in the webhook/fallback paths), so it no longer
+    // implies the office was alerted — pan_notified is the notify guard,
+    // and it is stamped ONLY AFTER the alert actually sends (round-17 P2:
+    // stamping it in this update meant a failed/interrupted notifyAdmin
+    // was never retried and the office never heard about the quarantine).
+    alreadyQuarantined = meta.pan_notified === true;
+    await db('call_log').where({ id: call.id }).update({
+      recording_url: null,
+      transcription_metadata: JSON.stringify({
+        ...meta,
+        pan_detected: true,
+        recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
+        quarantine_source: meta.quarantine_source || source,
+        // A failed Twilio delete must not lose the only SID a later retry
+        // needs — recovery's incomplete-quarantine retry reads it back
+        // (round-13 P1). Cleared-URL rows otherwise have nothing to retry.
+        ...(sid && !twilioDeleted ? { quarantine_recording_sid: sid } : {}),
+      }),
+      updated_at: new Date(),
+    });
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine: call_log strip failed for call ${call.id}: ${err.message}`);
+  }
+  // Clear the recording media already synced onto the unified voice message
+  // — recording_url null keeps the helper from re-adding it, and the
+  // explicit media:null patch removes what an earlier sync attached.
+  try {
+    await updateUnifiedVoiceMessage({ ...call, recording_url: null }, { media: null });
+  } catch { /* best-effort */ }
+  // One office heads-up per call, however many detection points re-run the
+  // quarantine (wrapper + choke + backfill are all idempotent on the strip).
+  if (!alreadyQuarantined) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Card number heard on a recorded call',
+        'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
+        { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+      );
+      // Alert DELIVERED — only now mark it, so a failed/interrupted send
+      // retries on the next quarantine/recovery touch (round-17 P2).
+      try {
+        const fresh = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+        const rawFresh = fresh?.transcription_metadata;
+        let freshMeta = {};
+        try { freshMeta = typeof rawFresh === 'string' ? JSON.parse(rawFresh) : (rawFresh && typeof rawFresh === 'object' ? rawFresh : {}); } catch { freshMeta = {}; }
+        await db('call_log').where({ id: call.id }).update({
+          transcription_metadata: JSON.stringify({ ...freshMeta, pan_notified: true }),
+          updated_at: new Date(),
+        });
+      } catch (stampErr) {
+        logger.warn(`[call-proc] pan_notified stamp failed (a duplicate alert may follow): ${stampErr.message}`);
+      }
+    } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
+  }
+  return { quarantined: true, twilioDeleted, alreadyQuarantined };
+}
+
+// PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1): the recovery
+// sweep and the recording-status webhook key off
+// transcription_metadata.pan_detected, so any later metadata overwrite
+// (fallback provenance, the implausible-rejection sentinel) must carry the
+// stamps forward — a provider-return quarantine followed by a Twilio
+// fallback write would otherwise erase the stamp and let a delayed
+// callback reattach the card audio. Read-merge just before the write; on a
+// read failure the metadata is written as-is (quarantine re-runs are
+// idempotent and re-stamp on the next touch).
+async function withPanStamps(callId, metadata) {
+  const out = { ...(metadata || {}) };
+  try {
+    const row = await db('call_log').where({ id: callId }).first('transcription_metadata');
+    const raw = row?.transcription_metadata;
+    let prior = {};
+    try {
+      prior = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { prior = {}; }
+    if (prior.pan_detected === true) {
+      out.pan_detected = true;
+      if (prior.recording_quarantined === true) out.recording_quarantined = true;
+      if (prior.quarantine_source && !out.quarantine_source) out.quarantine_source = prior.quarantine_source;
+      if (prior.pan_count && !out.pan_count) out.pan_count = prior.pan_count;
+      // The retry SID and the notify marker are load-bearing (round-14 P1):
+      // dropping quarantine_recording_sid on a later provenance write
+      // leaves recovery with nothing to retry a failed Twilio delete
+      // against, and dropping pan_notified re-fires the office alert.
+      if (prior.quarantine_recording_sid && !out.quarantine_recording_sid) out.quarantine_recording_sid = prior.quarantine_recording_sid;
+      if (prior.pan_notified === true) out.pan_notified = true;
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
+  }
+  return out;
+}
 
 // Spoken-content length only: strip diarization speaker labels and collapse
 // whitespace so a valid short diarized call's formatting overhead ("Agent:",
@@ -2516,12 +2703,33 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
     if (!text) return null;
+    // PAN redaction guard — applied at the PROVIDER RETURN, before any other
+    // LLM sees the text: the labeling pass (labelTranscriptWithOpenAI)
+    // consumes this raw transcript, so scrubbing only at persistence would
+    // still embed a blurted card number in the labeling prompt (Codex #2676
+    // round-1 P1). The dictation contact-pass rides this same function, so
+    // it is covered here too.
+    const panScrub = scrubPansDetailed(text);
+    // scrubSegments bridges adjacent-segment splits — a readback the
+    // provider divided across two segments must not hide below the
+    // 13-digit floor on either side (Codex #2676 round-5 P1).
+    const segScrub = scrubSegments(normalizeOpenAISegments(data));
+    const segments = segScrub.segments;
+    const segScrubCount = segScrub.count;
+    if (panScrub.count + segScrubCount > 0) {
+      logger.warn(`[call-proc] PAN scrub masked ${panScrub.count + segScrubCount} card artifact(s) at OpenAI provider return`);
+    }
     return {
-      text,
-      segments: normalizeOpenAISegments(data),
+      text: panScrub.text,
+      segments,
       provider: 'openai',
       model,
       responseFormat: diarized ? 'diarized_json' : 'json',
+      // Carried up to processRecording's quarantine trigger — the provider
+      // scrub masks the text, so the later choke-point scrub sees a clean
+      // transcript and would otherwise never learn the AUDIO carries a card
+      // (Codex #2676 round-3 P1).
+      panCount: panScrub.count + segScrubCount,
     };
   } catch (err) {
     logger.error(`[call-proc] OpenAI transcription error: ${err.message}`);
@@ -2575,7 +2783,11 @@ Rules:
     // Gemini 2.5 may return thinking parts — skip those
     const parts = data.candidates?.[0]?.content?.parts || [];
     const textPart = parts.find(p => p.text && !p.thought);
-    return (textPart?.text || parts[0]?.text || '').trim() || null;
+    const raw = (textPart?.text || parts[0]?.text || '').trim() || null;
+    if (!raw) return null;
+    // PAN redaction guard at the provider return (see the OpenAI twin above).
+    const panScrub = scrubPansDetailed(raw);
+    return { text: panScrub.text, panCount: panScrub.count };
   } catch (err) {
     logger.error(`[call-proc] Gemini fallback transcription error: ${err.message}`);
     return null;
@@ -2611,12 +2823,57 @@ async function transcribeRecording(mp3Url, opts = {}) {
         if (result.metadata) {
           result.metadata.contact_pass_model = second.model;
           result.metadata.contact_pass_chars = second.text.length;
+          // Same audio as the primary — max(), not sum, so one blurted card
+          // heard by both passes still counts once for the quarantine trigger.
+          result.metadata.pan_count = Math.max(result.metadata.pan_count || 0, second.panCount || 0);
         }
         logger.info(`[call-proc] contact-dictation pass complete: ${second.text.length} chars (${contactModel})`);
       }
     }
   } catch (err) {
     logger.warn(`[call-proc] contact-dictation pass skipped: ${err.message}`);
+  }
+  // Quarantine at the WRAPPER so every caller is covered — processRecording,
+  // the re-transcription backfill, and direct consumers like the bounce
+  // reverify's forceContactPass re-listen all flow through here, and the
+  // provider-return scrub means the detection only surfaces as
+  // metadata.pan_count (Codex #2676 round-4 P1). The quarantine stamps ride
+  // result.metadata so the caller's transcript write persists them instead
+  // of clobbering the flags with fresh provenance (round-4 P2).
+  try {
+    const panCount = Number(result?.metadata?.pan_count || 0);
+    // Quarantine is EXPLICITLY opt-in (opts.quarantine) — inferring it from
+    // opts.call flipped read-only callers into mutators (the extraction
+    // replay script) while silently skipping callers that pass no row (the
+    // bounce reverify) — Codex #2676 round-5 P1. Mutating pipelines
+    // (processRecording, the retranscription backfill, bounce reverify)
+    // pass quarantine: true; diagnostic/replay callers stay pure reads.
+    if (panCount > 0 && opts.quarantine === true && opts.call?.id) {
+      // Persist the MASKED transcript before the audio is stripped
+      // (round-18 P2): a crash between this quarantine and the caller's
+      // transcript write would otherwise leave pan_detected + no audio +
+      // no transcription — unrecoverable (the text existed only in
+      // memory) and invisible to the quarantined backstop. The caller's
+      // later provenance write overwrites this with the same content.
+      if (typeof result?.transcription === 'string' && result.transcription.length) {
+        try {
+          await db('call_log').where({ id: opts.call.id }).update({
+            transcription: result.transcription,
+            updated_at: new Date(),
+          });
+        } catch (preErr) {
+          logger.warn(`[call-proc] pre-quarantine transcript persist failed: ${preErr.message}`);
+        }
+      }
+      const q = await quarantineCardRecording(opts.call, { source: 'transcription' });
+      if (result.metadata) {
+        result.metadata.pan_detected = true;
+        result.metadata.recording_quarantined = q.twilioDeleted === true;
+      }
+      opts.call.recording_url = null;
+    }
+  } catch (err) {
+    logger.error(`[call-proc] PAN quarantine at transcribe wrapper failed: ${err.message}`);
   }
   return result;
 }
@@ -2656,16 +2913,17 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             label_provider: 'openai',
             label_model: OPENAI_TRANSCRIPT_LABEL_MODEL,
             fallback_attempted: false,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
       logger.warn('[call-proc] OpenAI transcript missing usable Agent/Caller labels; trying Gemini fallback');
     }
 
-    const geminiTranscript = await transcribeWithGemini(audioBuffer, opts);
-    if (geminiTranscript) {
+    const gemini = await transcribeWithGemini(audioBuffer, opts);
+    if (gemini?.text) {
       return {
-        transcription: geminiTranscript,
+        transcription: gemini.text,
         provider: 'gemini_fallback',
         model: GEMINI_TRANSCRIPTION_MODEL,
         structuredSegments: null,
@@ -2673,6 +2931,9 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           audio_bytes: audioBuffer.length,
           fallback_reason: openaiTranscript ? 'openai_labeling_or_completeness' : 'openai_unavailable',
           openai_model: OPENAI_TRANSCRIPTION_MODEL,
+          // Same audio — the discarded OpenAI pass and the Gemini pass both
+          // detect the same card; max() avoids double-counting it.
+          pan_count: Math.max(openai?.panCount || 0, gemini.panCount || 0),
         },
       };
     }
@@ -2693,6 +2954,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
             fallback_attempted: true,
             fallback_provider: 'gemini',
             fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+            pan_count: openai?.panCount || 0,
           },
         };
       }
@@ -2709,6 +2971,7 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
           fallback_attempted: true,
           fallback_provider: 'gemini',
           fallback_model: GEMINI_TRANSCRIPTION_MODEL,
+          pan_count: openai?.panCount || 0,
         },
       };
     }
@@ -3644,9 +3907,38 @@ const CallRecordingProcessor = {
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
 
     if (call.recording_url) {
-      const result = await transcribeRecording(call.recording_url, { call, contactPhone });
+      const result = await transcribeRecording(call.recording_url, { call, contactPhone, quarantine: true });
       transcription = result.transcription;
       contactPassTranscript = result.contactPassTranscript || null;
+      // PAN redaction guard (card-on-file spec Phase 0): a card number
+      // blurted on the recorded line must become a non-event — scrubbed
+      // BEFORE the plausibility gate, BEFORE persistence, and therefore
+      // before every LLM consumer (extraction, CSR coach, dictation decode
+      // read this variable; everything else re-reads the row written from
+      // it). Segments and the contact-pass stream carry the same audio, so
+      // all three artifacts are scrubbed together.
+      const scrubbed = scrubTranscriptArtifacts({
+        transcription,
+        contactPassTranscript,
+        segments: result.structuredSegments,
+      });
+      transcription = scrubbed.transcription;
+      contactPassTranscript = scrubbed.contactPassTranscript;
+      result.structuredSegments = scrubbed.segments;
+      // Provider-detected PANs are already quarantined inside
+      // transcribeRecording (which also nulled call.recording_url — same
+      // object). This branch covers CHOKE-NOVEL detections only: text some
+      // future/side path delivered unscrubbed. The flags ride
+      // result.metadata so the transcript write below persists them.
+      if (scrubbed.count > 0) {
+        logger.warn(`[call-proc] PAN scrub masked ${scrubbed.count} card number(s) at the choke point for ${maskSid(callSid)}`);
+        await quarantineCardRecording(call, { source: 'primary_transcription' });
+        call.recording_url = null;
+        if (result?.metadata) {
+          result.metadata.pan_detected = true;
+          result.metadata.pan_count = Number(result.metadata.pan_count || 0) + scrubbed.count;
+        }
+      }
       // recordingSeconds is hoisted so the primary gate here and the terminal
       // rejection below share one value.
       const recordingSecondsForGate = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
@@ -3674,7 +3966,7 @@ const CallRecordingProcessor = {
           transcription_status: 'completed',
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: transcriptionProvenance.model,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         };
         if (result.structuredSegments || contactPassTranscript) {
@@ -3702,9 +3994,16 @@ const CallRecordingProcessor = {
     // call_log.transcription, so treat it (and cached copies of it) as no fallback.
     const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
-      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription').first();
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured').first();
       if (isUsableFallback(freshCall?.transcription)) {
-        transcription = freshCall.transcription;
+        // Rows written before the PAN guard deployed (or by an unscrubbed
+        // legacy path) re-enter the live pipeline here — scrub on read so
+        // the LLM consumers downstream never see a stored PAN, and heal the
+        // sibling transcript_structured artifact in the same touch (its
+        // segments/contact-pass may carry the same pre-guard PAN).
+        const fallbackScrub = scrubPansDetailed(freshCall.transcription);
+        const structuredScrub = scrubStructuredTranscript(freshCall.transcript_structured);
+        transcription = fallbackScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -3716,14 +4015,33 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          // Persist the scrubbed text, not just the local copy — a legacy
+          // PAN-bearing row would otherwise stay exposed to every
+          // persisted-row consumer (Codex #2676 round-1 P1). Detection is
+          // stamped in this SAME update (round-12 P1): a crash before the
+          // quarantine below must not leave a masked transcript with no
+          // durable signal that the audio still needs deleting.
+          transcription,
+          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(fallbackScrub.count + structuredScrub.count > 0
+              ? { pan_detected: true, pan_count: fallbackScrub.count + structuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
+        if (fallbackScrub.count + structuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
       } else if (isUsableFallback(call.transcription)) {
-        transcription = call.transcription;
+        const cachedScrub = scrubPansDetailed(call.transcription);
+        const cachedStructuredScrub = scrubStructuredTranscript(call.transcript_structured);
+        transcription = cachedScrub.text;
         transcriptionProvenance = {
           provider: 'twilio_builtin',
           model: null,
@@ -3735,11 +4053,22 @@ const CallRecordingProcessor = {
           },
         };
         await db('call_log').where({ id: call.id }).update({
+          transcription, // scrubbed — see the fresh-row twin above
+          ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(cachedScrub.count + cachedStructuredScrub.count > 0
+              ? { pan_detected: true, pan_count: cachedScrub.count + cachedStructuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
+        if (cachedScrub.count + cachedStructuredScrub.count > 0) {
+          await quarantineCardRecording(call, { source: 'fallback_heal' });
+          call.recording_url = null;
+        }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - using cached Twilio transcription: ${transcription.length} chars`);
       }
     }
@@ -3765,7 +4094,10 @@ const CallRecordingProcessor = {
         : null;
       logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
-      try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
+      try {
+        const rawPrior = call.transcription_metadata;
+        priorMeta = typeof rawPrior === 'string' ? JSON.parse(rawPrior) : (rawPrior && typeof rawPrior === 'object' ? rawPrior : {});
+      } catch { priorMeta = {}; }
       // Fence on processing_token like the finalization write: if a peer
       // reclaimed the stale lock, this matches 0 rows and we bail without
       // overwriting the peer's state. Clear disposition + enriched extraction
@@ -3779,7 +4111,7 @@ const CallRecordingProcessor = {
           answered_by: 'voicemail',
           call_outcome: 'voicemail',
           transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps })),
           ai_extraction: null,
           ai_extraction_enriched: null,
           v2_extraction_status: null,
@@ -7195,8 +7527,41 @@ const CallRecordingProcessor = {
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
-      .where('recording_url', '!=', '')
-      .whereNotNull('recording_url')
+      .where(function () {
+        this.where(function () {
+          this.where('recording_url', '!=', '').whereNotNull('recording_url');
+        })
+        // PAN-quarantined rows keep recording_url NULL by design, but their
+        // MASKED transcript still needs extraction/lead/appointment
+        // processing — the webhook processes them immediately, and this
+        // branch is the restart-safe backstop (Codex #2676 round-11 P1).
+        // 10-min age gate lets the immediate path win.
+        .orWhere(function () {
+          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+            .whereNotNull('transcription')
+            .where(function () {
+              this.whereNull('processing_status')
+                .orWhere('processing_status', 'pending')
+                // The immediate webhook processing can claim the row and
+                // die — a stale 'processing' quarantined row must re-enter
+                // the backstop too (round-12 P1).
+                .orWhere(function () {
+                  this.where('processing_status', 'processing')
+                    .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                })
+                // A transient extraction failure on a quarantined row must
+                // keep its normal retry budget (round-13 P1): the outer
+                // extraction_failed branch requires recording_url, which
+                // quarantine keeps null by design.
+                .orWhere(function () {
+                  this.where('processing_status', 'extraction_failed')
+                    .andWhereRaw('COALESCE(extraction_attempts, 0) < ?', [CALL_EXTRACTION_MAX_ATTEMPTS])
+                    .andWhere('created_at', '>', db.raw("NOW() - INTERVAL '7 days'"));
+                });
+            })
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        });
+      })
       .where(function () {
         this.where(function () {
           // Fresh / waiting branches — only after the 10-min CDN-settle window.
@@ -7225,7 +7590,12 @@ const CallRecordingProcessor = {
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         });
       })
-      .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+      .where(function () {
+        this.where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+          // Quarantined rows already proved they carry real content (a card
+          // readback was heard) — never duration-filter them out.
+          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+      })
       .orderBy('created_at', 'desc')
       .limit(20);
 
@@ -7253,6 +7623,41 @@ const CallRecordingProcessor = {
 
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) return { success: false, reason: 'call_not_found' };
+    // PAN quarantine guard (Codex #2676 round-7 P1) — checked BEFORE the
+    // recording-url short-circuit (round-14 P1): a same-write stamp can
+    // land while recording_url is still populated (crash before the
+    // quarantine nulled it), and 'already_has_recording' would leave that
+    // replayable card audio untouched forever. Stamped rows are
+    // quarantine work whatever the URL state; the stamp is the durable
+    // guard, and every recovery entry point flows through here.
+    try {
+      const rawMeta = call.transcription_metadata;
+      const meta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      if (meta.pan_detected === true) {
+        // Incomplete quarantine (transient Twilio delete failure, or a
+        // crash between stamp and quarantine): this sweep is the durable
+        // place to RETRY — skipping forever would leave the card audio at
+        // Twilio (round-12 P1). The saved quarantine SID is the audio
+        // whose delete actually FAILED — prefer it over the row's possibly
+        // older recording_sid (round-14 P1: the two-recording flow deleted
+        // the old audio and never retried the fresh one). Complete
+        // quarantines just skip.
+        const retrySid = meta.quarantine_recording_sid || call.recording_sid || null;
+        // Retry when the DELETE is incomplete — or when the delete finished
+        // but the office ALERT never delivered (pan_notified missing,
+        // round-18 P2): quarantineCardRecording is idempotent on the strip
+        // and re-sends the alert via the pan_notified guard.
+        if ((meta.recording_quarantined !== true && (retrySid || call.recording_url))
+          || meta.pan_notified !== true) {
+          try {
+            await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
+          } catch (qErr) {
+            logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
+          }
+        }
+        return { success: true, skipped: true, reason: 'pan_quarantined' };
+      }
+    } catch { /* unparseable metadata -> treat as unstamped */ }
     if (call.recording_url) return { success: true, skipped: true, reason: 'already_has_recording' };
 
     let recordings;
@@ -7303,8 +7708,35 @@ const CallRecordingProcessor = {
       .orderBy('created_at', 'desc')
       .limit(25);
 
+    // Incomplete PAN quarantines (round-15 P1): pan_detected without
+    // recording_quarantined means a Twilio delete is still owed. These rows
+    // fall outside the missing-recording filters above — the backfill feeds
+    // calls OLDER than the 7-day window, and the stamped-before-quarantine
+    // crash window leaves recording_url POPULATED — so they get their own
+    // candidate set; recoverRecordingForCall's pan guard runs the retry.
+    let quarantineRetries = [];
+    try {
+      quarantineRetries = await db('call_log')
+        .select('twilio_call_sid')
+        .whereNotNull('twilio_call_sid')
+        .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+        // Incomplete delete OR undelivered office alert (round-18 P2) —
+        // both are quarantine work the retry path finishes.
+        .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true')")
+        .orderBy('created_at', 'desc')
+        .limit(10);
+    } catch (qErr) {
+      logger.warn(`[call-proc] incomplete-quarantine sweep query failed: ${qErr.message}`);
+    }
+    const seenSids = new Set();
+    const sweepRows = [...rows, ...quarantineRetries].filter((row) => {
+      if (!row.twilio_call_sid || seenSids.has(row.twilio_call_sid)) return false;
+      seenSids.add(row.twilio_call_sid);
+      return true;
+    });
+
     const results = [];
-    for (const row of rows) {
+    for (const row of sweepRows) {
       try {
         results.push({ callSid: row.twilio_call_sid, ...(await this.recoverRecordingForCall(row.twilio_call_sid)) });
       } catch (err) {
@@ -7314,7 +7746,7 @@ const CallRecordingProcessor = {
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
-    return { checked: rows.length, recovered, results };
+    return { checked: sweepRows.length, recovered, results };
   },
 
   /**
@@ -7371,6 +7803,8 @@ const CallRecordingProcessor = {
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
+  scrubTranscriptArtifacts,
+  scrubStructuredTranscript,
   canonicalWavesService,
   referrerNameFromExtracted,
   resolveDefaultCallBookingTechnician,
@@ -7422,5 +7856,9 @@ CallRecordingProcessor._test = {
 // backfilled transcript can never be lower-integrity than a live one.
 CallRecordingProcessor.transcribeRecording = transcribeRecording;
 CallRecordingProcessor.isImplausibleTranscript = isImplausibleTranscript;
+CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
+CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
+CallRecordingProcessor.withPanStamps = withPanStamps;
+CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 
 module.exports = CallRecordingProcessor;
