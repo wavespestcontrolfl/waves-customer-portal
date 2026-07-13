@@ -204,17 +204,26 @@ function scrubNumericRun(run) {
     // CVV digits. Separator-grouped readbacks never reach this: the span
     // search matches their 16 first and the group absorb takes the tail.
     const trySplitUnseparated = (digits) => {
+      // All supported PAN lengths, IIN-aware order (round-12 P1): an
+      // Amex + CVV must prefer its native 15 so the displayed last4 never
+      // includes a CVV digit, and 13/14-digit PANs with 3-4 digit codes
+      // (17+ totals) split too. The floor stays at 17 TOTAL digits by
+      // design: allowing 14-16 totals would split the 13-digit prefix out
+      // of ordinary Luhn-invalid 16-digit tokens (order/tracking/reference
+      // numbers — a pinned round-1 contract), and 13-digit Visas are
+      // legacy-extinct while 16-digit non-card tokens are everywhere.
       if (digits.length < 17 || digits.length > 19) return null;
-      for (const plen of [16, 15]) {
+      for (const plen of panLengthPriority(digits.slice(0, 2))) {
         const tailLen = digits.length - plen;
         if (tailLen < 1 || tailLen > 4) continue;
-        if (plen === 15 && !/^3[47]/.test(digits)) continue;
         const prefix = digits.slice(0, plen);
         if (panCandidateValid(prefix)) return prefix;
       }
       return null;
     };
-    if (matched && matched.digits.length === 19) {
+    if (matched && matched.digits.length >= 17) {
+      // A Luhn-valid 17/18/19 "PAN" is far more likely a shorter real PAN
+      // with its code fused on — same split, any over-16 match.
       const prefix = trySplitUnseparated(matched.digits);
       if (prefix) matched = { ...matched, prefixMask: prefix };
     }
@@ -251,10 +260,32 @@ function scrubNumericRun(run) {
       // groups and a hard group cap left its tail beside the mask
       // (round-11 P1). Never absorbs into a phone-locked block — a
       // dictated callback number after the card survives intact.
+      // A SECOND card read back-to-back must not lose its head to the
+      // absorb ("…1111 4242 4242 4242 4242" — the first two 4242s are a
+      // new PAN's opening groups, not an expiry): before each absorb step,
+      // check whether a valid PAN span STARTS here and stop if so — the
+      // outer loop masks it as its own card (round-12 P1).
+      const startsValidPanSpan = (from) => {
+        let sum = 0;
+        let head = '';
+        for (let j = from; j < groups.length && !locked[j]; j += 1) {
+          sum += groups[j].digits.length;
+          if (head.length < 2) head = (head + groups[j].digits).slice(0, 2);
+          if (sum > 19) break;
+          if (sum >= 13) {
+            const spanDigits2 = groups.slice(from, j + 1).map((grp) => grp.digits).join('');
+            for (const len of panLengthPriority(head)) {
+              if (len === spanDigits2.length && panCandidateValid(spanDigits2)) return true;
+            }
+          }
+        }
+        return false;
+      };
       let absorbedDigits = 0;
       let absorbedGroups = 0;
       while (i < groups.length && !locked[i] && groups[i].digits.length <= 4
-        && absorbedDigits + groups[i].digits.length <= 8) {
+        && absorbedDigits + groups[i].digits.length <= 8
+        && !startsValidPanSpan(i)) {
         absorbedDigits += groups[i].digits.length;
         cursor = groups[i].end;
         i += 1;
@@ -507,8 +538,10 @@ const CVV_SPOKEN_RE = new RegExp(`(${CVV_KEYWORD}\\b[\\s:,.-]*(?:(?:number|code)
 const SEC_NUMERIC_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)${CVV_TAIL_NUMERIC}`, 'gi');
 const SEC_SPOKEN_RE = new RegExp(`(${BARE_SECURITY_CODE}\\b[\\s:,.-]*(?:(?:number|code)\\s+)?(?:is\\s+|was\\s+)?)((?:(?:${DIGIT_WORD_ALT})[ ,.]+){2,3}(?:${DIGIT_WORD_ALT}))\\b`, 'gi');
 
-function bareSecurityCodeIsCardCvv(full, offset) {
-  const windowText = full.slice(Math.max(0, offset - 80), offset + 20);
+function bareSecurityCodeIsCardCvv(full, offset, matchLength = 0) {
+  // The forward window reaches PAST the matched code so trailing card
+  // wording counts ("security code is 123 for the card" — round-12 P1).
+  const windowText = full.slice(Math.max(0, offset - 80), offset + matchLength + 40);
   if (ACCESS_CONTEXT_RE.test(windowText)) return false;
   return CARD_CONTEXT_RE.test(windowText);
 }
@@ -518,12 +551,12 @@ function scrubCvvContext(text) {
   let out = text.replace(CVV_NUMERIC_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
   out = out.replace(CVV_SPOKEN_RE, (m, kw) => { count += 1; return `${kw}[code removed]`; });
   out = out.replace(SEC_NUMERIC_RE, (m, kw, code, offset, full) => {
-    if (!bareSecurityCodeIsCardCvv(full, offset)) return m;
+    if (!bareSecurityCodeIsCardCvv(full, offset, m.length)) return m;
     count += 1;
     return `${kw}[code removed]`;
   });
   out = out.replace(SEC_SPOKEN_RE, (m, kw, code, offset, full) => {
-    if (!bareSecurityCodeIsCardCvv(full, offset)) return m;
+    if (!bareSecurityCodeIsCardCvv(full, offset, m.length)) return m;
     count += 1;
     return `${kw}[code removed]`;
   });

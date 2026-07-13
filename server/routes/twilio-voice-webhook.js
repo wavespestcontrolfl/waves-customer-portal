@@ -1191,6 +1191,11 @@ router.post('/transcription', async (req, res) => {
             transcription_status: TranscriptionStatus || null,
             transcript_chars: scrubbedTranscription.length,
             recording_sid_present: !!RecordingSid,
+            // Detection stamped in the SAME write that persists the scrubbed
+            // text (round-12 P1): a crash before the best-effort quarantine
+            // below — or a concurrent /recording-status callback — must
+            // still see a durable pan_detected on the row.
+            ...(panScrub.count > 0 ? { pan_detected: true, pan_count: panScrub.count, quarantine_source: 'twilio_transcription_webhook_pending' } : {}),
           })),
           updated_at: new Date(),
         };
@@ -1213,7 +1218,11 @@ router.post('/transcription', async (req, res) => {
               // /recording-status guard covers the reverse ordering.
               await require('../services/call-recording-processor')
                 .quarantineCardRecording(
-                  { ...callRow, recording_sid: callRow.recording_sid || RecordingSid || null },
+                  // The audio that produced THIS PAN transcript is the
+                  // callback's RecordingSid — prefer it over a stale row SID
+                  // so a second recording is the one deleted immediately
+                  // (round-12 P1; mirrors the recording-status path).
+                  { ...callRow, recording_sid: RecordingSid || callRow.recording_sid || null },
                   { source: 'twilio_transcription_webhook' },
                 );
             }

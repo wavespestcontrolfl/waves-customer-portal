@@ -410,6 +410,38 @@ describe('scrubPans — round 11 hardening', () => {
   });
 });
 
+describe('scrubPans — round 12 hardening', () => {
+  it('masks BOTH cards when two PANs are read back-to-back (absorb never eats the second head)', () => {
+    expect(scrubPansDetailed('4111 1111 1111 1111 4242 4242 4242 4242'))
+      .toEqual({ text: '[card ending 1111] [card ending 4242]', count: 2 });
+  });
+
+  it('splits a 13-digit Visa fused with a 4-digit code at 17 total digits (IIN-aware lengths)', () => {
+    expect(scrubPansDetailed('42222222222221234')).toEqual({ text: '[card ending 2222] [code removed]', count: 1 });
+  });
+
+  it('a 16-digit Luhn-invalid token still never splits (order/reference numbers stay intact)', () => {
+    const s = 'ref number 4242424242424241 on file';
+    expect(scrubPans(s)).toBe(s);
+  });
+
+  it('splits an Amex fused with its 4-digit CVV on the native 15 (last4 never a CVV digit)', () => {
+    expect(scrubPansDetailed('3714496353984311234')).toEqual({ text: '[card ending 8431] [code removed]', count: 1 });
+  });
+
+  it('card wording AFTER the code satisfies the bare security-code context', () => {
+    expect(scrubPans('security code is 123 for the card')).toBe('security code is [code removed] for the card');
+    const gate = 'the gate security code is 1234';
+    expect(scrubPans(gate)).toBe(gate);
+  });
+
+  it('expiry+CVV absorbs still work and phones still survive', () => {
+    expect(scrubPansDetailed('4242 4242 4242 4242 12 28 123')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+    const phones = 'call me at 941 555 1234 or 239 555 9876';
+    expect(scrubPans(phones)).toBe(phones);
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

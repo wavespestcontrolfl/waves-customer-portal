@@ -3971,12 +3971,20 @@ const CallRecordingProcessor = {
         await db('call_log').where({ id: call.id }).update({
           // Persist the scrubbed text, not just the local copy — a legacy
           // PAN-bearing row would otherwise stay exposed to every
-          // persisted-row consumer (Codex #2676 round-1 P1).
+          // persisted-row consumer (Codex #2676 round-1 P1). Detection is
+          // stamped in this SAME update (round-12 P1): a crash before the
+          // quarantine below must not leave a masked transcript with no
+          // durable signal that the audio still needs deleting.
           transcription,
           ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(fallbackScrub.count + structuredScrub.count > 0
+              ? { pan_detected: true, pan_count: fallbackScrub.count + structuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
         if (fallbackScrub.count + structuredScrub.count > 0) {
@@ -4003,7 +4011,12 @@ const CallRecordingProcessor = {
           ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, {
+            ...transcriptionProvenance.metadata,
+            ...(cachedScrub.count + cachedStructuredScrub.count > 0
+              ? { pan_detected: true, pan_count: cachedScrub.count + cachedStructuredScrub.count, quarantine_source: 'fallback_heal_pending' }
+              : {}),
+          })),
           updated_at: new Date(),
         });
         if (cachedScrub.count + cachedStructuredScrub.count > 0) {
@@ -7481,7 +7494,15 @@ const CallRecordingProcessor = {
           this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
             .whereNotNull('transcription')
             .where(function () {
-              this.whereNull('processing_status').orWhere('processing_status', 'pending');
+              this.whereNull('processing_status')
+                .orWhere('processing_status', 'pending')
+                // The immediate webhook processing can claim the row and
+                // die — a stale 'processing' quarantined row must re-enter
+                // the backstop too (round-12 P1).
+                .orWhere(function () {
+                  this.where('processing_status', 'processing')
+                    .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
+                });
             })
             .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
         });
@@ -7557,6 +7578,17 @@ const CallRecordingProcessor = {
       const rawMeta = call.transcription_metadata;
       const meta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
       if (meta.pan_detected === true) {
+        // Incomplete quarantine (transient Twilio delete failure left
+        // recording_quarantined false): this sweep is the durable place to
+        // RETRY the delete — skipping forever would leave the card audio
+        // at Twilio (round-12 P1). Complete quarantines just skip.
+        if (meta.recording_quarantined !== true && (call.recording_sid || call.recording_url)) {
+          try {
+            await quarantineCardRecording(call, { source: 'recovery_quarantine_retry' });
+          } catch (qErr) {
+            logger.warn(`[call-proc] recovery quarantine retry failed for ${maskSid(callSid)}: ${qErr.message}`);
+          }
+        }
         return { success: true, skipped: true, reason: 'pan_quarantined' };
       }
     } catch { /* unparseable metadata -> treat as unstamped */ }
