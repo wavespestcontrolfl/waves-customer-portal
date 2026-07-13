@@ -1114,6 +1114,22 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-51 findings (#2633) ──
+
+  test('Codex r51: contrastive accusations, rankings, and reliability claims block', () => {
+    for (const [body, code] of [[`Waves is not cheap, but charges hidden fees.\n\n${CATEGORY_TABLE}`, 'COMPARISON_DISPARAGEMENT'], ['Acme Pest Solutions is not cheap, but is the #1 choice.', 'COMPARISON_RIGGED_RANKING'], ['Acme Pest Solutions is not cheap, but is the best choice.', 'COMPARISON_RIGGED_RANKING'], ['Acme Pest Solutions is not cheap, but never answers the phone.', 'COMPARISON_NEGATIVE_RELIABILITY']]) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === code)).toBe(true);
+    }
+  });
+
+  test('Codex r51: myth denials, dependency headlines, and dependency cells stay clean', () => {
+    for (const body of [`Waves' hidden fees are not real — that rumor started elsewhere.\n\n${CATEGORY_TABLE}`, 'The best option for pest control depends on the pest.', gate ? CATEGORY_TABLE.replace('"Usually"', '"Best option depends on your home"') : '']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-50 findings (#2633) ──
 
   test('Codex r50: markdown headings, rated variants, passive auxiliaries, and clause cells block', () => {

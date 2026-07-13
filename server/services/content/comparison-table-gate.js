@@ -281,6 +281,11 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // "We seem sketchy" (Codex r27); hyphen-guarded so "we are the
   // worst-kept secret" marketing idiom stays clean.
   `\\bwe\\b(?:['’]re)?\\s+(?:are|is|were|was|remains?|stays?|seems?|seemed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be)?\\s*(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  // Contrastive bridge — "Waves is not cheap, but charges hidden fees"
+  // (Codex r51): the clause-gap stops at "not", so the post-but predicate
+  // gets its own connector; the sentence guard's bare-but reset keeps the
+  // match live.
+  `${OWN_BRAND_SUBJECT}[^.!?\\n]{0,60}?\\b(?:but|yet)\\s+(?:also\\s+)?(?:${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})|(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC})`,
   // (The reverse "…dishonest Waves" arm lives outside this joined regex —
   // it needs a case-VERIFIED brand token so "Lousy heat waves stress St.
   // Augustinegrass" stays clean; see OWN_BRAND_REVERSE_RE / Codex r19.)
@@ -705,7 +710,7 @@ function finding(severity, code, message) {
 // "No. 1" ordinal abbreviation is never a negator.
 const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention|surprisingly|unexpectedly|coincidentally|for\s+nothing)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t|hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|couldn['’]?t|shouldn['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?|disclos(?:e|es|ing|ures?)|reveal(?:s|ing)?|itemiz(?:e|es|ing))\b)/i;
 // Accusation vocabulary used by the conjunction-reset scope check.
-const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b|${NUMERIC_ONE_ALT}|\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top[-\\s]?rated|unbeatable|unmatched)\\b`, 'i');
+const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b|${NUMERIC_ONE_ALT}|\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top[-\\s]?rated|unbeatable|unmatched)\\b|${PROVIDER_NEGATIVE_RE.source}`, 'i');
 function sentenceHasNegator(text, index, length) {
   // Clause boundaries count: "No hidden fees here; Waves charges hidden
   // fees." must not let the first clause deny the second (Codex r31).
@@ -830,7 +835,8 @@ function scanOwnBrandDisparagementArms(scanText) {
     let tm = OWN_BRAND_LINKING_TAIL_RE.exec(tailText);
     if (!tm) {
       const am2 = OWN_BRAND_ASSOC_TAIL_RE.exec(tailText);
-      if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])) tm = am2;
+      if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])
+        && !trailingDenial(tailText, am2.index, am2[0].length)) tm = am2;
     }
     if (tm) return [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
   }
@@ -941,8 +947,14 @@ function scanNameRankingArms(text, names) {
         const topRated = new RegExp(
           `${escaped}\\b(?:['’]s?)?${NOUN_VERB_GAP}(?:is|are|was|were|remains?)\\s+(?:the\\s+)?(?:${TOP_RATED_SRC})\\b|\\b(?:${TOP_RATED_SRC})\\s+${escaped}\\b`, 'i',
         );
+        // Contrastive ranking — "Acme Pest Solutions is not cheap, but is
+        // the #1 choice" (Codex r51).
+        const contrastRank = new RegExp(
+          `${escaped}\\b(?:['’]s?)?[^.!?\\n]{0,60}?\\b(?:but|yet)\\s+(?:is|are|was|were|remains?)\\s+(?:(?:the|your|a|an)\\s+)?(?:${NUMERIC_ONE_ALT}|clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top\\s+(?:choice|pick))\\b`, 'i',
+        );
         const rm = text.match(selfRank)
           || text.match(supRank)
+          || firstUnnegatedMatch(text, contrastRank)
           || firstUnnegatedMatch(text, topRated)
           || firstUnnegatedMatch(text, calledRank)
           || text.match(marketingRank)
@@ -993,7 +1005,7 @@ function scopedSelfRankingMatch(text) {
   // initial only (optional leading article), so "gel bait is the best
   // option for pest control" stays advice.
   {
-    const hl = new RegExp(`\\b(?:best|top[-\\s]?rated|highest[-\\s]?rated|best[-\\s]?rated|top[-\\s]?ranked)\\b(?!\\s+(?:tips?|advice|tricks?|ways?|practices?|methods?|ideas?|strateg(?:y|ies)|guides?)\\b)[^.!?\\n]{0,50}?\\b(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|mosquito\\s+control|termite\\s+control|exterminators?)\\b(?!\\s+(?:methods?|tips?|tricks?|mistakes?|advice|strateg(?:y|ies)|techniques?|practices?|habits?|myths?))`, 'gi');
+    const hl = new RegExp(`\\b(?:best|top[-\\s]?rated|highest[-\\s]?rated|best[-\\s]?rated|top[-\\s]?ranked)\\b(?!\\s+(?:tips?|advice|tricks?|ways?|practices?|methods?|ideas?|strateg(?:y|ies)|guides?)\\b)(?!\\s+(?:options?|choices?|picks?)\\s+for\\b)[^.!?\\n]{0,50}?\\b(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|mosquito\\s+control|termite\\s+control|exterminators?)\\b(?!\\s+(?:methods?|tips?|tricks?|mistakes?|advice|strateg(?:y|ies)|techniques?|practices?|habits?|myths?))(?![^.!?\\n]{0,30}\\b(?:depends?|varies|vary|differs?)\\b)`, 'gi');
     let hm;
     while ((hm = hl.exec(text)) !== null) {
       const sentStart = Math.max(
@@ -1521,10 +1533,10 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
     // Control Guide: Why DIY Sprays Are Unreliable" aims the negative at DIY
     // sprays, not the business-shaped phrase, and must pass.
     const directedReliability = new RegExp(
-      `${escaped}\\b(?:['’]s?)?(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?)(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+      `${escaped}\\b(?:['’]s?)?(?:[^.!?\\n]{0,60}?\\b(?:but|yet)\\s+|(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?))(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
     );
     const relMatch = nameScanText.match(directedReliability);
-    if (relMatch && !SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail)) {
+    if (relMatch && !(relMatch.groups.rtail && SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail))) {
       findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
         `Draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
       break;
@@ -1842,14 +1854,14 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     for (const name of extraProseNames) {
       const escaped = escapeForNameRe(name);
       const directedReliability = new RegExp(
-        `${escaped}\\b(?:['’]s?)?(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?)(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
+        `${escaped}\\b(?:['’]s?)?(?:[^.!?\\n]{0,60}?\\b(?:but|yet)\\s+|(?<rtail>(?:\\s+(?!(?:not|never|no)\\b)\\w+){0,2}\\s+(?:(?:${SUBJECT_VERBS})\\b[^.!?\\n]{0,60})?))(?:${PROVIDER_NEGATIVE_RE.source})`, 'i',
       );
       // The pre-negative tail (named group) is negator-guarded: "is not
       // unreliable" is a denial, while "never answers the phone" keeps its
       // negator INSIDE PROVIDER_NEGATIVE where it IS the accusation
       // (Codex r30 on #2633).
       const relMatch = proseNameText.match(directedReliability);
-      if (relMatch && !SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail)) {
+      if (relMatch && !(relMatch.groups.rtail && SENTENCE_NEGATOR_RE.test(relMatch.groups.rtail))) {
         findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
           `Comparison draft makes a negative service-reliability claim about "${name}". Routed to human review — state neutral, verifiable attributes only.`));
         break;
@@ -1869,7 +1881,12 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // (Codex r37). In-block #1 stays unconditional: cells are comparison
   // context by construction.
   let rank = scopedSelfRankingMatch(scanText)
-    || blocks.map((b) => b.match(NUMERIC_ONE_RE) || b.match(SELF_RANKING_RE) || b.match(WINNER_CELL_RE)).find(Boolean);
+    || blocks.map((b) => {
+      const wm = b.match(NUMERIC_ONE_RE) || b.match(SELF_RANKING_RE) || b.match(WINNER_CELL_RE);
+      // "Best option depends on your home" is a caption, not a declared
+      // winner (Codex r51).
+      return wm && !/\b(?:depends?|varies|vary|differs?)\b/i.test(b.slice(wm.index, wm.index + 60)) ? wm : null;
+    }).find(Boolean);
   if (!rank) {
     // Sentence-guarded and iterated — "No one rated us #1" is a denial
     // (Codex r28 on #2633).
