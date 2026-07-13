@@ -1114,6 +1114,26 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-47 findings (#2633) ──
+
+  test('Codex r47: negated-disclosure claims, by-sourced accusations, and shared being-forms block', () => {
+    for (const prose of ['Coastline Pest Defense does not disclose hidden fees.', 'Hidden fees by pest control companies are common.', 'Rumors about Waves being overpriced keep spreading.', 'Our program is the best choice.', 'The #1 lawn service in Venice.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const cell = gate.evaluate({ body: CATEGORY_TABLE.replace('"Usually"', '"Does not disclose hidden fees"') }, {});
+    expect(cell.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+    const cellDenial = gate.evaluate({ body: CATEGORY_TABLE.replace('"Usually"', '"No hidden fees"') }, {});
+    expect(cellDenial.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    const beingProse = gate.evaluate({ body: 'Rumors about Acme Pest Solutions being overpriced keep spreading.' }, {});
+    expect(beingProse.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r47: product #1 appositives stay educational', () => {
+    const r = gate.evaluate({ body: `Waves uses Advion, rated #1 by researchers, for German roaches.\n\n${CATEGORY_TABLE}` }, {});
+    expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+  });
+
   // ── Codex round-46 findings (#2633) ──
 
   test('Codex r46: reputation, rumor, being-form, and discourse-not accusations block', () => {

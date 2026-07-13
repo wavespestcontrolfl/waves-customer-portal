@@ -200,6 +200,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
   // pest control companies look cheap; they are dishonest." (Codex r40).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  // Accusation-phrase SOURCED at a provider class — "Hidden fees by pest
+  // control companies are common" (Codex r47); the iterate-with-guard loop
+  // keeps "No hidden fees by companies" a denial.
+  `(?:${POSSESSION_ACCUSATION_SRC})\\s+(?:from|at|by)\\s+(?:\\w+\\s+){0,2}?\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}`,
   // Pronoun-subject ACTIVE accusations after a provider antecedent —
   // "companies look cheap; they scam customers" (Codex r41).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})`,
@@ -323,7 +327,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // "Our technicians are the #1 choice" (Codex r27 on #2633).
   // Achievement verbs count for possessive own-brand subjects too — "Our
   // team earned #1", "Our technicians won the #1 spot" (Codex r36).
-  `\\bour\\s+(?:teams?|company|technicians?|techs?|staff|crews?|services?|business)\\b${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
+  `\\bour\\s+(?:teams?|company|technicians?|techs?|staff|crews?|services?|business|plans?|programs?|packages?|treatments?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|remains?|ranks?|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
   // Achievement verbs — "We earned the #1 spot in Venice", "we've won #1"
   // (Codex r21 on #2633).
   `\\bwe(?:['’]ve)?\\s+(?:have\\s+|just\\s+|finally\\s+)?(?:earns?|earned|wins?|won|claims?|claimed|secures?|secured|clinch(?:es)?|clinched|grabs?|grabbed|takes?|took|holds?|held)\\s+(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`,
@@ -444,7 +448,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if|uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installing|carries|stocks?)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -688,7 +692,7 @@ function finding(severity, code, message) {
 // Emphatic idioms are not denials — "Without a doubt, hidden fees from X
 // are common" asserts the claim (Codex r27 on #2633). "no(?!\.)": the
 // "No. 1" ordinal abbreviation is never a negator.
-const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention|surprisingly|unexpectedly|coincidentally|for\s+nothing)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t|hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|couldn['’]?t|shouldn['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?)\b)/i;
+const SENTENCE_NEGATOR_RE = /\b(?:no(?!\.)(?!\s+(?:doubt|question|wonder|surprise)\b)|not(?!\s+(?:only|just|to\s+mention|surprisingly|unexpectedly|coincidentally|for\s+nothing)\b)|never|without(?!\s+(?:a\s+|any\s+)?(?:doubt|question)\b)|zero|don['’]?t|doesn['’]?t|didn['’]?t|do\s+not|does\s+not|did\s+not|aren['’]?t|isn['’]?t|wasn['’]?t|weren['’]?t|hasn['’]?t|haven['’]?t|hadn['’]?t|won['’]?t|wouldn['’]?t|can['’]?t|cannot|couldn['’]?t|shouldn['’]?t)\b(?!\s+(?:[\w'’]+\s+){0,2}(?:choos(?:e|ing)|pick(?:ing)?|hir(?:e|ing)|book(?:ing)?|select(?:ing)?|recommend(?:ing)?|us(?:e|ing)(?!\s+(?:shady|sketchy|dishonest|deceptive|predatory|scam|rip|overpriced|inflated|hidden|bait))|go(?:ing)?\s+with|ignor(?:e|es|ing)|overlook(?:s|ing)?|forget(?:s|ting)?|dismiss(?:es|ing)?|underestimat(?:e|es|ing)|miss(?:es|ing)?|disclos(?:e|es|ing|ures?)|reveal(?:s|ing)?|itemiz(?:e|es|ing))\b)/i;
 // Accusation vocabulary used by the conjunction-reset scope check.
 const ACCUSATION_VOCAB_RE = new RegExp(`${DISPARAGEMENT_RE.source}|${POSSESSION_ACCUSATION_SRC}|\\b(?:${NEG_ADJ})\\b|${NUMERIC_ONE_ALT}|\\b(?:clear\\s+winner|winner|best\\s+(?:choice|option|pick)|top[-\\s]?rated|unbeatable|unmatched)\\b`, 'i');
 function sentenceHasNegator(text, index, length) {
@@ -819,6 +823,15 @@ function scanOwnBrandDisparagementArms(scanText) {
     }
     if (tm) return [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
   }
+  // Being-form self-accusations — "Rumors about Waves being overpriced"
+  // (Codex r47); case-verified.
+  const beingRe = new RegExp(`\\b(?<brandTok>waves)\\b(?:['’]s?)?\\s+being\\s+(?:(?:really|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`, 'gi');
+  let bg;
+  while ((bg = beingRe.exec(scanText)) !== null) {
+    if (!OWN_BRAND_CASE_RE.test(bg.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, bg.index, bg[0].length)) continue;
+    return [bg[0]];
+  }
   // Reverse arm with the case-verified brand token (Codex r19).
   const revRe = new RegExp(OWN_BRAND_REVERSE_SRC, 'gi');
   let rv;
@@ -928,7 +941,7 @@ function scanNameRankingArms(text, names) {
 // Numeric #1 with adjacent provider syntax — shared by both paths
 // (Codex r45): "The #1 pest control company in Venice" declares a winner
 // with or without a table.
-const NUM_ADJACENT_PROVIDER_RE_SRC = `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest[\\s-]+control(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|lawn[\\s-]+care(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`;
+const NUM_ADJACENT_PROVIDER_RE_SRC = `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`;
 function scanAdjacentProviderNumeric(text) {
   const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
   const adjRe = new RegExp(NUM_ADJACENT_PROVIDER_RE_SRC, 'i');
@@ -989,7 +1002,7 @@ function scopedSelfRankingMatch(text) {
     // German roaches: gel bait is the best option" (Codex r40); "our"
     // counts only with a business/people noun.
     if (/\b(?:we|us|itself|ourselves)\b/i.test(subjLead)
-      || /\bour\s+(?:billing|pricing|team|teams|company|technicians?|techs?|staff|crews?|services?|business)\b/i.test(subjLead)
+      || /\bour\s+(?:billing|pricing|team|teams|company|technicians?|techs?|staff|crews?|services?|business|plans?|programs?|packages?|treatments?)\b/i.test(subjLead)
       || /\bW(?:aves|AVES)\b/.test(subjLead)
       // A reported it/they subject keeps its brand antecedent — "Waves
       // says it is the best choice" (Codex r41).
@@ -1423,7 +1436,11 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
           `${escaped}[^.!?\\n]{0,80}?(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})`,
           `(?<!\\bno\\s)(?<!\\bwithout\\s)(?<!\\bzero\\s)(?:${ASSOC_ACCUSATION_SRC})[^.!?\\n]{0,80}?${escaped}`,
         ].join('|'), 'i');
+      const beingP0g = new RegExp(
+        `${escaped}\\b(?:['’]s?)?\\s+being\\s+(?:(?:really|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`, 'i',
+      );
       const am = firstUnnegatedMatch(nameScanText, negBeforeName)
+        || firstUnnegatedMatch(nameScanText, beingP0g)
         || firstUnnegatedMatch(nameScanText, fromP0)
         || (objAssocP0 && firstUnnegatedMatch(nameScanText, objAssocP0));
       // Trailing verb-anchored denials clear these too — "Bug Busters:
@@ -1832,7 +1849,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // Hyphenated service phrases count too — "#1-rated pest-control
     // company" (Codex r20 on #2633).
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:pest[\\s-]+control(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|lawn[\\s-]+care(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
     );
     // Title/meta #1 takes the same winner-syntax requirement (Codex r37):
     // "The #1 hidden breeding site in SWFL homes" is an educational title;
