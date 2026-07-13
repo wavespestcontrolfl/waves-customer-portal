@@ -169,12 +169,31 @@ router.post('/cards/setup-intent', async (req, res, next) => {
     });
 
     const { paymentMethodType } = await schema.validateAsync(req.body);
-    const result = await StripeService.createSetupIntent(req.customerId, paymentMethodType);
+    // Portal bank saves are gated (GATE_PORTAL_ACH_AUTOPAY): with the gate
+    // off, a bank-inclusive request downgrades to card-only rather than
+    // erroring — the Payment Element simply doesn't offer the bank tab.
+    // Server-authoritative: this also closes the pre-existing leak where
+    // the AutopayCard minted card_or_bank unconditionally while the
+    // customer saw the CARD consent copy. The response echoes the
+    // effective types so the client renders bank affordances (ACH consent
+    // variant, no-surcharge line) only when the bank tab can actually
+    // appear.
+    const featureGates = require('../config/feature-gates');
+    const achAllowed = featureGates.isEnabled('portalAchAutopay');
+    const effectiveType = !achAllowed && paymentMethodType !== 'card' ? 'card' : paymentMethodType;
+    const result = await StripeService.createSetupIntent(req.customerId, effectiveType, {
+      // Routes setup_intent.succeeded completion for the micro-deposit
+      // deferred save (see POST /cards + the stripe-webhook
+      // portal_add_method branch). Card intents carry it too — the webhook
+      // branch is idempotent alongside the synchronous save below.
+      metadata: { purpose: 'portal_add_method' },
+    });
 
     res.json({
       clientSecret: result.clientSecret,
       setupIntentId: result.setupIntentId,
       publishableKey: stripeConfig.publishableKey,
+      paymentMethodTypes: result.paymentMethodTypes,
     });
   } catch (err) {
     next(err);
@@ -198,6 +217,65 @@ router.post('/cards', async (req, res, next) => {
       ? setupIntent.payment_method
       : setupIntent?.payment_method?.id;
     const resolvedPaymentMethodId = paymentMethodId || setupPaymentMethodId;
+
+    // Micro-deposit deferred save (portal ACH lane): a bank SetupIntent
+    // that fell back from Financial Connections stays requires_action for
+    // 1–2 business days while Stripe sends the deposits. The method is
+    // saved PENDING — never default, never enrolled — and the ACH consent
+    // is recorded NOW (the customer authorized at signup; the first debit
+    // only ever happens post-verification). Enrollment completes in the
+    // setup_intent.succeeded webhook (portal_add_method branch). Gated:
+    // with the gate off the mint above was card-only, so this state is
+    // unreachable through our own client.
+    const awaitingMicrodeposits = setupIntent?.status === 'requires_action'
+      && setupIntent?.next_action?.type === 'verify_with_microdeposits'
+      && !!resolvedPaymentMethodId
+      && setupPaymentMethodId === resolvedPaymentMethodId;
+    const featureGates = require('../config/feature-gates');
+    if (awaitingMicrodeposits && featureGates.isEnabled('portalAchAutopay')) {
+      let pendingRow = await db('payment_methods')
+        .where({ stripe_payment_method_id: resolvedPaymentMethodId })
+        .first();
+      if (pendingRow && pendingRow.customer_id !== req.customerId) {
+        logger.warn(`[billing-v2] add-bank pm ownership mismatch: pm ${resolvedPaymentMethodId} belongs to ${pendingRow.customer_id}, caller ${req.customerId}`);
+        return res.status(409).json({ error: 'Payment method belongs to another account' });
+      }
+      if (!pendingRow) {
+        pendingRow = await StripeService.savePaymentMethod(req.customerId, resolvedPaymentMethodId, {
+          enableAutopay: false,
+          makeDefault: false,
+          achStatus: 'pending_verification',
+        });
+      }
+      const ConsentService = require('../services/payment-method-consents');
+      if (!(await ConsentService.hasConsentFor(req.customerId, resolvedPaymentMethodId))) {
+        await ConsentService.recordConsent({
+          customerId: req.customerId,
+          paymentMethodId: pendingRow.id,
+          stripePaymentMethodId: resolvedPaymentMethodId,
+          source: 'portal_add_bank',
+          methodType: pendingRow.method_type || 'ach',
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+        });
+      }
+      return res.json({
+        success: true,
+        pendingVerification: true,
+        card: {
+          id: pendingRow.id,
+          processor: 'stripe',
+          methodType: pendingRow.method_type || 'ach',
+          brand: null,
+          lastFour: pendingRow.last_four,
+          isDefault: pendingRow.is_default,
+          bankName: pendingRow.bank_name || null,
+          bankLastFour: pendingRow.bank_last_four || null,
+          achStatus: pendingRow.ach_status || 'pending_verification',
+        },
+      });
+    }
+
     if (!setupIntent || setupIntent.status !== 'succeeded' || !resolvedPaymentMethodId || setupPaymentMethodId !== resolvedPaymentMethodId) {
       return res.status(409).json({
         error: 'Payment method setup is not complete. Finish verification before enabling Auto Pay.',
@@ -256,7 +334,9 @@ router.post('/cards', async (req, res, next) => {
       customerId: req.customerId,
       paymentMethodId: card.id,
       stripePaymentMethodId: resolvedPaymentMethodId,
-      source: 'portal_add_card',
+      // Distinct audit source for bank saves (portal ACH lane) — the
+      // snapshot itself is already method-correct via methodType.
+      source: card.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
       methodType: card.method_type || 'card',
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
@@ -471,6 +551,13 @@ router.put('/cards/:id/default', async (req, res, next) => {
       .first();
 
     if (!card) return res.status(404).json({ error: 'Payment method not found' });
+
+    // A micro-deposit bank account that hasn't verified can't take the
+    // default role (portal ACH lane): this route CARRIES autopay onto the
+    // new default, which would point collection at an unverified account.
+    if (card.method_type === 'ach' && card.ach_status === 'pending_verification') {
+      return res.status(400).json({ error: 'This bank account is still being verified. You can make it your default as soon as verification clears.' });
+    }
 
     // Auto Pay eligibility requires the DEFAULT method to carry
     // autopay_enabled, so a bare default swap silently stopped charging

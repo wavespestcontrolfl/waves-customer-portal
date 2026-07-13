@@ -87,6 +87,7 @@ router.get('/', async (req, res, next) => {
         db.raw('card_brand as brand'),
         db.raw('last_four as last4'),
         'exp_month', 'exp_year', 'is_default', 'autopay_enabled', 'method_type',
+        'bank_name', 'ach_status',
       )
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
@@ -193,20 +194,20 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     if (autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
       if (!selectedPaymentMethod) return res.status(400).json({ error: 'Payment method not found' });
     } else if (autopay_payment_method_id === null || autopay_payment_method_id === '') {
       selectedPaymentMethod = null;
     } else if (current.autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: current.autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
     } else if (willBeEnabled) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
     }
 
     if (
@@ -218,7 +219,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
     }
 
     const methodCanChargeAutopay = selectedPaymentMethod?.processor === 'stripe'
@@ -226,6 +227,18 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     if (willBeEnabled && !methodCanChargeAutopay) {
       return res.status(400).json({ error: 'Add a payment method before enabling Auto Pay.' });
+    }
+
+    // A micro-deposit bank account that hasn't verified yet must not be
+    // put in charge of Auto Pay (portal ACH lane): collection would debit
+    // an unverified account and Stripe's rejection would escalate through
+    // handleAchFailure. The setup_intent.succeeded webhook flips the row
+    // to 'verified' and enrolls it; until then the portal shows it as
+    // pending.
+    if (willBeEnabled
+      && selectedPaymentMethod?.method_type === 'ach'
+      && selectedPaymentMethod?.ach_status === 'pending_verification') {
+      return res.status(400).json({ error: 'This bank account is still being verified. You can use it for Auto Pay as soon as verification clears.' });
     }
 
     if (typeof autopay_enabled === 'boolean' && autopay_enabled !== current.autopay_enabled) {

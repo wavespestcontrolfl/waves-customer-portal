@@ -251,6 +251,19 @@ const StripeService = {
       const setupIntent = await stripe.setupIntents.create({
         customer: stripeCustomerId,
         payment_method_types: paymentMethodTypes,
+        // Bank verification policy, stated explicitly (portal ACH lane):
+        // Financial Connections first (instant verification inside the
+        // Payment Element), micro-deposit fallback allowed — 'automatic'
+        // is Stripe's default, pinned here so a Stripe default change
+        // can't silently alter how bank accounts verify.
+        ...(paymentMethodTypes.includes('us_bank_account') ? {
+          payment_method_options: {
+            us_bank_account: {
+              financial_connections: { permissions: ['payment_method'] },
+              verification_method: 'automatic',
+            },
+          },
+        } : {}),
         // Callers may tag a purpose (e.g. 'covered_capture') so the
         // setup_intent.succeeded webhook can route completion; the
         // waves_customer_id key always wins over caller metadata.
@@ -264,6 +277,7 @@ const StripeService = {
       return {
         clientSecret: setupIntent.client_secret,
         setupIntentId: setupIntent.id,
+        paymentMethodTypes,
       };
     } catch (err) {
       logger.error(`[stripe] SetupIntent creation failed: ${err.message}`);
@@ -340,7 +354,11 @@ const StripeService = {
         record.bank_name = pm.us_bank_account.bank_name;
         record.bank_last_four = pm.us_bank_account.last4;
         record.last_four = pm.us_bank_account.last4;
-        record.ach_status = pm.us_bank_account.status || 'verified';
+        // achStatus override (portal ACH lane): the micro-deposit deferred
+        // save mirrors the row BEFORE verification, and the PM object
+        // carries no reliable pending marker — without the override that
+        // save would stamp an unverified account 'verified'.
+        record.ach_status = options.achStatus || pm.us_bank_account.status || 'verified';
       }
 
       const saved = await db.transaction(async trx => {

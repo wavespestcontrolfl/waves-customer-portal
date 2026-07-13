@@ -2471,6 +2471,78 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Portal add-method completion (portal ACH lane): for the micro-deposit
+  // deferred save this webhook is the ONLY place enrollment can finish —
+  // the customer's session ended days before verification cleared. For a
+  // synchronously-completed save (card, or bank via Financial Connections)
+  // it's a no-op re-run: every step is idempotent (lookup-first save,
+  // hasConsentFor-guarded consent, already_enrolled enrollment).
+  if (setupIntent.metadata?.purpose === 'portal_add_method'
+    && setupIntent.metadata?.waves_customer_id
+    && setupIntent.payment_method) {
+    const wavesCustomerId = setupIntent.metadata.waves_customer_id;
+    const stripePmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method.id;
+    try {
+      const StripeService = require('../services/stripe');
+      const ConsentService = require('../services/payment-method-consents');
+      let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+      if (saved && saved.customer_id !== wavesCustomerId) {
+        logger.warn(`[stripe-webhook] portal-add-method pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
+        return;
+      }
+      if (!saved) {
+        // Browser died between confirmSetup and POST /cards. The portal
+        // add modal always renders the locked consent copy before confirm,
+        // so a confirmed SI means the customer saw it — same rationale as
+        // the covered_capture backstop above.
+        saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+          enableAutopay: false,
+          makeDefault: false,
+        });
+      }
+      // Verification cleared — a pending bank row becomes chargeable.
+      if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {
+        await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
+      }
+      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        await ConsentService.recordConsent({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: stripePmId,
+          source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+          methodType: saved.method_type || 'card',
+        });
+      }
+      await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      // Consent-gated enrollment (Codex #2507 P1: the consent row is the
+      // authority, never PI/SI metadata alone) — enrollment-SCOPED, so a
+      // hold-scoped row can't satisfy it.
+      if (await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId)) {
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        const enrollment = await enrollConsentedMethod({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+          details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
+        });
+        if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+          // No rethrow: a webhook retry can't change a refused bank state
+          // (ach_blocked); the method stays saved and the customer can
+          // enable Auto Pay from the portal once the state clears.
+          logger.warn(`[stripe-webhook] portal-add-method enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId}`);
+        }
+      }
+      logger.info(`[stripe-webhook] portal-add-method completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
+    } catch (err) {
+      // Re-throw so Stripe retries: for the micro-deposit flow this event
+      // is the only completion path, and every step above is idempotent.
+      logger.error(`[stripe-webhook] portal-add-method completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      throw err;
+    }
+    return;
+  }
   const customerId = setupIntent.metadata?.waves_customer_id || 'unknown';
   logger.info(`[stripe-webhook] SetupIntent succeeded for customer ${customerId}: ${setupIntent.id}`);
 }
@@ -3630,3 +3702,4 @@ module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
+module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;

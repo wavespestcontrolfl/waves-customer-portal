@@ -46,6 +46,17 @@ const gates = {
   // — i.e. everyone today — are unaffected at any setting.
   payerStatements: process.env.GATE_PAYER_STATEMENTS === 'true',
 
+  // Portal ACH Auto Pay (2026-07-13): existing customers add a bank account
+  // in the portal (Financial Connections first, micro-deposit fallback) and
+  // put Auto Pay on it. Opt-in in EVERY environment — it's a customer-facing
+  // money surface. OFF also closes a pre-existing leak: the AutopayCard
+  // Payment Element minted card_or_bank unconditionally, letting a bank
+  // account be saved while the customer saw the CARD consent copy; with the
+  // gate off the portal setup-intent route now mints card-only. Kill
+  // switch: unset or any non-'true' value. Booking/estimate flows stay
+  // card-only regardless (owner ruling 2026-07-13).
+  portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
