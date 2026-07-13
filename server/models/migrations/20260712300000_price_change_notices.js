@@ -158,7 +158,7 @@ exports.up = async function up(knex) {
       t.string('cadence_label', 40).notNullable().defaultTo('month');
       t.date('effective_date').notNullable();
       t.string('notice_token', 64).notNullable().unique();
-      t.string('status', 20).notNullable().defaultTo('draft'); // draft | sent | viewed
+      t.string('status', 20).notNullable().defaultTo('draft'); // draft | sending | sent | viewed
       t.boolean('email_sent').notNullable().defaultTo(false);
       t.boolean('sms_sent').notNullable().defaultTo(false);
       t.timestamp('sent_at');

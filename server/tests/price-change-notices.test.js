@@ -1,6 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/customer-stages', () => ({ whereLiveCustomer: jest.fn() }));
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(),
 }));
@@ -35,6 +34,7 @@ let activityInserts;
 let customersUpdateCalls;
 let existingNoticeRow;
 let insertConflict;
+let claimRejected;
 
 function customersQuery() {
   const q = {
@@ -62,7 +62,12 @@ function noticesQuery() {
     where: jest.fn(() => q),
     orderBy: jest.fn(() => q),
     first: jest.fn(async () => existingNoticeRow),
-    update: jest.fn(async (patch) => { noticeUpdates.push(patch); return 1; }),
+    update: jest.fn(async (patch) => {
+      noticeUpdates.push(patch);
+      // The draft→sending claim reports affected rows; 0 = claim lost.
+      if (patch.status === 'sending' && claimRejected) return 0;
+      return 1;
+    }),
   };
   return q;
 }
@@ -93,6 +98,7 @@ beforeEach(() => {
   customersUpdateCalls = [];
   existingNoticeRow = null;
   insertConflict = false;
+  claimRejected = false;
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'price_change_notices') return noticesQuery();
@@ -230,7 +236,9 @@ describe('createAndSendBatch delivery', () => {
     const smsArgs = sendCustomerMessage.mock.calls[0][0];
     expect(smsArgs).toMatchObject({ purpose: 'billing', customerId: 'c-1', hasEmailLeg: true });
 
-    expect(noticeUpdates[0]).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
+    // claim (draft→sending) then final state
+    expect(noticeUpdates[0]).toMatchObject({ status: 'sending' });
+    expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
     expect(activityInserts).toHaveLength(1);
     expect(activityInserts[0].action).toBe('price_change_batch_sent');
   });
@@ -253,7 +261,7 @@ describe('createAndSendBatch delivery', () => {
     getInvoiceEmailRecipients.mockReturnValue([]);
     const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
     expect(out).toMatchObject({ ok: true, created: 1, emailed: 0, texted: 0, unreachable: 1 });
-    expect(noticeUpdates[0]).toMatchObject({ email_sent: false, sms_sent: false, status: 'sent' });
+    expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: false, sms_sent: false, status: 'sent' });
   });
 
   it('skips customers already notified of the same change event on retry', async () => {
@@ -286,9 +294,33 @@ describe('createAndSendBatch delivery', () => {
     sendCustomerMessage.mockResolvedValue({ sent: false });
     const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
     expect(out).toMatchObject({ ok: false, created: 1, emailed: 0, texted: 0, unreachable: 0, failed: 1 });
-    // The row must NOT flip to 'sent' — a retry of the same change resumes it.
-    expect(noticeUpdates).toHaveLength(1);
-    expect(noticeUpdates[0].status).toBeUndefined();
+    // Claim, then release back to 'draft' — never 'sent'. A retry resumes it.
+    expect(noticeUpdates.at(-1)).toMatchObject({ status: 'draft' });
+    expect(noticeUpdates.some((u) => u.status === 'sent')).toBe(false);
+  });
+
+  it('treats a billing-contact-only customer as reachable when the provider fails', async () => {
+    // No primary email/phone, but getInvoiceEmailRecipients resolves a
+    // billing address — a failed send must stay retryable, not unreachable.
+    customerRows = [{ ...CUSTOMER, email: '', phone: '' }];
+    getInvoiceEmailRecipients.mockReturnValue([{ email: 'billing@example.com', name: 'Pat' }]);
+    sendTemplate.mockResolvedValue({ sent: false });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: false, created: 1, unreachable: 0, failed: 1 });
+    expect(noticeUpdates.at(-1)).toMatchObject({ status: 'draft' });
+  });
+
+  it('skips when another retry holds the draft claim', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-draft', status: 'draft', notice_token: 'feedfacefeedfacefeedfacefeedface',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    claimRejected = true;
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 0, texted: 0, alreadyNotified: 1, failed: 0 });
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   it('resumes a draft row from a crashed attempt, reusing its token instead of inserting', async () => {
@@ -303,7 +335,7 @@ describe('createAndSendBatch delivery', () => {
     const emailArgs = sendTemplate.mock.calls[0][0];
     expect(emailArgs.payload.price_change_url).toBe('https://portal.test/price-change/feedfacefeedfacefeedfacefeedface');
     expect(emailArgs.idempotencyKey).toBe('price_change:c-1:2026-08-15:4900:5200');
-    expect(noticeUpdates[0]).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
+    expect(noticeUpdates.at(-1)).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
   });
 
   it('reports ok:false when a send throws, without losing the rest of the batch', async () => {

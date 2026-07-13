@@ -34,7 +34,10 @@ const PRIVACY_HEADERS = {
 router.get('/:token', async (req, res) => {
   res.set(PRIVACY_HEADERS);
 
-  const { token } = req.params;
+  // TOKEN_RE accepts uppercased hex (copy/intermediary casing), but stored
+  // tokens are lowercase and the DB equality check is case-sensitive —
+  // normalize before lookup so a valid-but-uppercased link doesn't 404.
+  const token = String(req.params.token || '').toLowerCase();
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
