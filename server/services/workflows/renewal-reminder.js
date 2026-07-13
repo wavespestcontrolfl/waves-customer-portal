@@ -2,7 +2,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const { renderSmsTemplate } = require('../sms-template-renderer');
-const { isEnabled } = require('../../config/feature-gates');
 
 class RenewalReminder {
   /**
@@ -49,10 +48,13 @@ class RenewalReminder {
       logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
     }
 
+    // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
+    // bonds — the one service with a real fixed term. WaveGuard and mosquito
+    // are no-term recurring services, so their reminder legs are removed
+    // (their date columns remain for admin/reporting use). Price changes on
+    // no-term services use the price-change notice workflow instead.
     const renewalFields = [
       { column: 'termite_renewal_date', label: 'Termite Bond Renewal' },
-      { column: 'mosquito_season_start', label: 'Mosquito Season' },
-      { column: 'waveguard_renewal_date', label: 'WaveGuard Plan Renewal' },
     ];
 
     let totalSent = annualPrepaySent;
@@ -74,31 +76,6 @@ class RenewalReminder {
 
         for (const customer of customers) {
           try {
-            if (
-              field.column === 'waveguard_renewal_date'
-              && annualPrepay?.hasAnnualPrepayRenewal
-              && await annualPrepay.hasAnnualPrepayRenewal(customer.id, dateStr)
-            ) {
-              continue;
-            }
-
-            // Email leg (service_renewal sequence, Automations tab) at the
-            // 30-day bucket only — this lane was historically SMS-only, so
-            // the sequence ADDS the email rather than replacing anything.
-            // 90-day dedupe = once per renewal cycle (the 15/7-day buckets
-            // revisit the same customer; next year re-enrolls via
-            // reactivation). Runs BEFORE the SMS cooldown check so a recent
-            // unrelated renewal text can't starve the email.
-            if (daysOut === 30 && isEnabled('serviceRenewalEnroll')) {
-              const { enrollSequenceFromEvent } = require('../automation-enroll');
-              await enrollSequenceFromEvent({
-                templateKey: 'service_renewal',
-                customerId: customer.id,
-                dedupe: 90,
-                source: `renewal_${field.column}`,
-              });
-            }
-
             // SMS leg needs a phone; email-only customers stop here.
             if (!customer.phone) continue;
 

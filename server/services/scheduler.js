@@ -3660,7 +3660,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM — Renewal reminders (termite bond, mosquito season, WaveGuard)
+  // DAILY 10AM — Renewal reminders (termite bond ONLY — owner ruling
+  // 2026-07-13: no-term services never get "renewal" language) + the
+  // annual-prepay payment reminders/sweeps that ride the same run.
   // =========================================================================
   cron.schedule('0 10 * * *', async () => {
     logger.info('Running: renewal reminders');
