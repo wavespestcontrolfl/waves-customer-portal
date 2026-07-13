@@ -129,13 +129,34 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
       const legacyText = require('../utils/pan-scrub').scrubPansDetailed(call.transcription ?? null);
       const legacyStructured = processor().scrubStructuredTranscript(call.transcript_structured ?? null);
       legacyPanCount = legacyText.count + legacyStructured.count;
-      if (legacyPanCount > 0) {
+      // A PRIOR run's stamp counts too (round-11 P1): the heal below
+      // scrubs the text, so after a crash mid-re-listen the next run's
+      // recompute finds ZERO — without the durable stamp the PAN-bearing
+      // audio would never be quarantined. pan_detected without
+      // recording_quarantined means exactly "quarantine still owed".
+      let priorMeta = {};
+      try {
+        const metaRow = await dbi('call_log').where({ id: call.id }).first('transcription_metadata');
+        const rawMeta = metaRow?.transcription_metadata;
+        priorMeta = typeof rawMeta === 'string' ? JSON.parse(rawMeta) : (rawMeta && typeof rawMeta === 'object' ? rawMeta : {});
+      } catch { priorMeta = {}; }
+      if (priorMeta.pan_detected === true && priorMeta.recording_quarantined !== true) {
+        legacyPanCount = Math.max(legacyPanCount, 1);
+      }
+      if (legacyText.count + legacyStructured.count > 0) {
         await dbi('call_log')
           .where({ id: call.id })
           .whereNull('retranscribed_at')
           .update({
             ...(legacyText.count > 0 ? { transcription: legacyText.text } : {}),
             ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
+            // Stamp pan_detected IN THE SAME TOUCH that scrubs the text —
+            // the durable signal the recompute above keys on after a crash.
+            transcription_metadata: JSON.stringify({
+              ...priorMeta,
+              pan_detected: true,
+              quarantine_source: priorMeta.quarantine_source || 'retranscription_backfill_legacy_pending',
+            }),
             updated_at: dbi.fn.now(),
           });
         if (legacyText.count > 0) call.transcription = legacyText.text;

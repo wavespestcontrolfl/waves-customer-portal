@@ -1006,19 +1006,31 @@ router.post('/recording-status', async (req, res) => {
         await require('../services/call-recording-processor').quarantineCardRecording(
           {
             ...quarantinedMatch,
-            recording_sid: quarantinedMatch.recording_sid || RecordingSid,
+            // The recording that JUST arrived is RecordingSid — preferring
+            // the row's stale recording_sid would re-delete the old audio
+            // and leave the newly delivered PAN-bearing recording at Twilio
+            // (Codex #2676 round-11 P1).
+            recording_sid: RecordingSid || quarantinedMatch.recording_sid,
             recording_url: RecordingUrl ? `${RecordingUrl}.mp3` : quarantinedMatch.recording_url,
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
         // The masked transcript is still a REAL transcript — extraction /
         // lead / appointment processing must run for this call (Codex #2676
-        // round-9 P1). The auto-process block below keys on matchedSid, and
-        // the 5-minute sweep skips null-recording_url rows, so without this
-        // the quarantined call would never be processed at all.
-        // processRecording handles the null recording_url by falling back to
-        // the stored (masked) transcription.
-        matchedSid = quarantinedMatch.twilio_call_sid;
+        // round-9 P1). Processed IMMEDIATELY (round-11 P1): there is no CDN
+        // propagation to wait out (the transcript is already stored and the
+        // audio is gone), and the 10-minute in-memory timer would strand the
+        // row on a restart. processAllPending's quarantined branch is the
+        // durable backstop. processRecording handles the null recording_url
+        // by falling back to the stored (masked) transcription.
+        try {
+          const qProcessor = require('../services/call-recording-processor');
+          void qProcessor.processRecording(quarantinedMatch.twilio_call_sid)
+            .catch((e) => logger.error(`[recording-status] quarantined-transcript processing failed: ${e.message}`));
+          queueVoiceMessageSync(quarantinedMatch.twilio_call_sid);
+        } catch (e) {
+          logger.error(`[recording-status] quarantined-transcript processing setup failed: ${e.message}`);
+        }
       } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {

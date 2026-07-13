@@ -317,15 +317,19 @@ async function reverifyBouncedEmailFromCall({ bouncedEmail, customerId = null, s
           ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
           updated_at: db.fn.now(),
         });
+        // Quarantine FIRST (round-11 P1): the message sync derives media
+        // from call.recording_url, so syncing while it is still populated
+        // could write/reattach the PAN-bearing audio to the admin thread
+        // moments before a best-effort quarantine that might fail.
+        await CallProc.quarantineCardRecording(call, { source: 'bounce_reverify_legacy' }).catch(() => {});
+        call.recording_url = null;
         if (legacyText.count > 0) {
           call.transcription = legacyText.text;
           // The synced voice message shows the transcript as its body —
-          // heal it in the same touch (media was cleared by the quarantine).
-          await CallProc.updateUnifiedVoiceMessage(call, { body: legacyText.text }).catch(() => {});
+          // heal it with the recording reference already stripped.
+          await CallProc.updateUnifiedVoiceMessage(call, { body: legacyText.text, media: null }).catch(() => {});
         }
         if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
-        await CallProc.quarantineCardRecording(call, { source: 'bounce_reverify_legacy' }).catch(() => {});
-        call.recording_url = null;
       }
     } catch (healErr) {
       logger.warn(`[bounce-reverify] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);

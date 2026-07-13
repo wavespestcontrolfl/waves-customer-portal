@@ -389,6 +389,27 @@ describe('scrubPans — round 10 hardening', () => {
   });
 });
 
+describe('scrubPans — round 11 hardening', () => {
+  it('splits a grouped span whose LAST group merged with the CVV', () => {
+    expect(scrubPansDetailed('4242 4242 4242 4242123')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('joins groups across wide whitespace', () => {
+    expect(scrubPansDetailed('4242    4242    4242    4242')).toEqual({ text: '[card ending 4242]', count: 1 });
+  });
+
+  it('absorbs a digit-by-digit CVV after the expiry (digit budget, not group cap)', () => {
+    expect(scrubPansDetailed('4242 4242 4242 4242 12 28 1 2 3')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('grouped phones still survive the span split and wide-whitespace joins', () => {
+    const s1 = 'call me at 941 555 1234 or 239 555 9876';
+    expect(scrubPans(s1)).toBe(s1);
+    const s2 = '9415551234 2395559876';
+    expect(scrubPans(s2)).toBe(s2);
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

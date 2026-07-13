@@ -7468,8 +7468,24 @@ const CallRecordingProcessor = {
     // with duration_seconds fallback, since the call-status webhook may not have populated
     // the latter yet — earlier filter on duration_seconds alone excluded fresh recordings.
     const pending = await db('call_log')
-      .where('recording_url', '!=', '')
-      .whereNotNull('recording_url')
+      .where(function () {
+        this.where(function () {
+          this.where('recording_url', '!=', '').whereNotNull('recording_url');
+        })
+        // PAN-quarantined rows keep recording_url NULL by design, but their
+        // MASKED transcript still needs extraction/lead/appointment
+        // processing — the webhook processes them immediately, and this
+        // branch is the restart-safe backstop (Codex #2676 round-11 P1).
+        // 10-min age gate lets the immediate path win.
+        .orWhere(function () {
+          this.whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+            .whereNotNull('transcription')
+            .where(function () {
+              this.whereNull('processing_status').orWhere('processing_status', 'pending');
+            })
+            .andWhere('updated_at', '<', db.raw("NOW() - INTERVAL '10 minutes'"));
+        });
+      })
       .where(function () {
         this.where(function () {
           // Fresh / waiting branches — only after the 10-min CDN-settle window.
@@ -7498,7 +7514,12 @@ const CallRecordingProcessor = {
             .andWhereRaw("COALESCE(processing_started_at, updated_at) < NOW() - INTERVAL '10 minutes'");
         });
       })
-      .where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+      .where(function () {
+        this.where(db.raw('COALESCE(recording_duration_seconds, duration_seconds, 0) > ?', [10]))
+          // Quarantined rows already proved they carry real content (a card
+          // readback was heard) — never duration-filter them out.
+          .orWhereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'");
+      })
       .orderBy('created_at', 'desc')
       .limit(20);
 

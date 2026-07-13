@@ -78,7 +78,10 @@ function maskFor(digits) {
 // providers punctuate pauses, so a card readback commonly lands as
 // "4242, 4242, 4242, 4242" or period/newline-separated groups — commas,
 // periods, and whitespace must join a run or each group is an unmatchable
-// <13-digit island (Codex #2676 round-2 P1). Slashes join too: a trailing
+// <13-digit island (Codex #2676 round-2 P1). Pure WHITESPACE joins at any
+// width up to 40 chars (round-11: diarized text can indent or hold wide
+// pauses — "4242    4242" must not split into sub-13 islands); punctuation
+// mixes stay tight at 1-3. Slashes join too: a trailing
 // "12/28 123" expiry/CVV must ride the same run so the absorb step can
 // swallow it — stopping at the slash left "/28 123" (raw CVV) beside the
 // mask (round-7 P1). Slash-joined non-card runs (dates, phones) stay under
@@ -95,7 +98,7 @@ const LABEL_SEP = '(?:(?:speaker\\s*\\d+|agent|caller)\\s*:[\\s,.-]{1,3})';
 // so "Speaker 1:" mid-readback can never poison the Luhn stream (Codex
 // #2676 round-6 P1).
 const NUMERIC_RUN_RE = new RegExp(
-  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:[\\s,./-]{1,3}${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
+  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:(?:\\s{1,40}|[\\s,./-]{1,3})${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
   'gi'
 );
 const LABEL_TOKEN_RE = new RegExp('(?:speaker\\s*\\d+|agent|caller)\\s*:', 'gi');
@@ -215,9 +218,26 @@ function scrubNumericRun(run) {
       const prefix = trySplitUnseparated(matched.digits);
       if (prefix) matched = { ...matched, prefixMask: prefix };
     }
-    if (!matched && !locked[i] && groups[i].digits.length >= 17 && groups[i].digits.length <= 19) {
-      const prefix = trySplitUnseparated(groups[i].digits);
-      if (prefix) matched = { endGroup: i, digits: groups[i].digits, prefixMask: prefix };
+    if (!matched && !locked[i]) {
+      // Span-level split (round-11 P1): the provider can merge only the
+      // LAST group with the CVV ("4242 4242 4242 4242123") — the 19-digit
+      // span fails Luhn, no byLen candidate matches, and a single-group
+      // fallback never sees it. Walk the span from i to a 17–19 digit
+      // total (never crossing a phone-locked group) and try the same
+      // 16/15-prefix + code-tail split.
+      let spanSum = 0;
+      for (let j = i; j < groups.length && !locked[j]; j += 1) {
+        spanSum += groups[j].digits.length;
+        if (spanSum > 19) break;
+        if (spanSum >= 17) {
+          const spanDigits = groups.slice(i, j + 1).map((grp) => grp.digits).join('');
+          const prefix = trySplitUnseparated(spanDigits);
+          if (prefix) {
+            matched = { endGroup: j, digits: spanDigits, prefixMask: prefix };
+            break;
+          }
+        }
+      }
     }
     if (matched) {
       const maskDigits = matched.prefixMask || matched.digits;
@@ -225,18 +245,22 @@ function scrubNumericRun(run) {
       cursor = groups[matched.endGroup].end;
       i = matched.endGroup + 1;
       count += 1;
-      // Absorb trailing expiry/CVV-shaped groups (≤4 digits, up to 3 of
-      // them) from the same run: "…4242 12 28 123" must not leave a CVV
-      // sitting next to the mask it belongs to. Never absorbs into a
-      // phone-locked block — a dictated callback number after the card
-      // survives intact.
-      let absorbed = 0;
-      while (i < groups.length && !locked[i] && groups[i].digits.length <= 4 && absorbed < 3) {
+      // Absorb trailing expiry/CVV-shaped groups (≤4 digits each) from the
+      // same run, budgeted by TOTAL DIGITS (≤8 — MMYY + a 4-digit CVV) not
+      // by group count: a CVV read digit-by-digit ("12 28 1 2 3") is five
+      // groups and a hard group cap left its tail beside the mask
+      // (round-11 P1). Never absorbs into a phone-locked block — a
+      // dictated callback number after the card survives intact.
+      let absorbedDigits = 0;
+      let absorbedGroups = 0;
+      while (i < groups.length && !locked[i] && groups[i].digits.length <= 4
+        && absorbedDigits + groups[i].digits.length <= 8) {
+        absorbedDigits += groups[i].digits.length;
         cursor = groups[i].end;
         i += 1;
-        absorbed += 1;
+        absorbedGroups += 1;
       }
-      if (absorbed > 0) out += ' [code removed]';
+      if (absorbedGroups > 0) out += ' [code removed]';
     } else {
       i += 1;
     }
