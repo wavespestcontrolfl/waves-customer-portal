@@ -27,6 +27,11 @@ import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '..
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
+// Bank rows arrive under BOTH aliases — the server guards handle 'ach'
+// and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
+// too or alias rows lose the pending/failed affordances.
+const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+
 // Portal glass state, readable from any tab component. Warm #FAF8F3
 // sub-panels turn whisper-white under glass (the report-glass idiom) so
 // solid beige tiles never sit on top of translucent cards.
@@ -4100,7 +4105,7 @@ function BillingTab({ customer }) {
   const methodLabel = (method) => {
     if (!method) return 'No method on file';
     const last4 = methodLast4(method);
-    if (method.methodType === 'ach') return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
+    if (isBankMethod(method.methodType)) return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
     return `${method.brand || 'Card'}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
@@ -4625,13 +4630,13 @@ function BillingTab({ customer }) {
                 background: B.glassNavy,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
-              }}>{(c.brand || (c.methodType === 'ach' ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
+              }}>{(c.brand || (isBankMethod(c.methodType) ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
             )}
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{methodLabel(c)}</div>
               {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
-              {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
-              {c.methodType === 'ach' && c.achStatus === 'pending_verification' && (
+              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
+              {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
                 <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
                   Verification pending — watch for two small deposits.
                   {' '}
@@ -4644,7 +4649,7 @@ function BillingTab({ customer }) {
                   </button>
                 </div>
               )}
-              {c.methodType === 'ach' && c.achStatus === 'verification_failed' && (
+              {isBankMethod(c.methodType) && c.achStatus === 'verification_failed' && (
                 <div style={{ fontSize: 12, fontWeight: 850, color: B.red, marginTop: 2 }}>
                   Verification failed — remove this account and add it again
                 </div>
@@ -4653,7 +4658,7 @@ function BillingTab({ customer }) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
                 <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
-              ) : (c.methodType === 'ach' && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
+              ) : (isBankMethod(c.methodType) && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
                 // Server refuses a pending/failed bank as default
                 // (set-default carries Auto Pay) — don't offer the
                 // dead-end button.

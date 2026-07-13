@@ -61,6 +61,11 @@ import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 
+// Bank rows arrive under BOTH aliases — the server guards handle 'ach'
+// and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
+// too or alias rows lose the pending/failed affordances.
+const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+
 // Local alias kept for the many call sites below; values come from the
 // shared customer palette (this used to be a hand-copied hex block).
 const PORTAL_BILLING = CUSTOMER_SURFACE;
@@ -481,7 +486,7 @@ export default function AutopayCard({ onStateChange }) {
           )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {activeCard.method_type === 'ach' ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
+              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>
@@ -568,7 +573,7 @@ export default function AutopayCard({ onStateChange }) {
                   // Auto Pay until verification clears (the server refuses
                   // it too) — shown, but not selectable. Same for a failed
                   // verification.
-                  const pendingBank = pm.method_type === 'ach' && ['pending_verification', 'verification_failed'].includes(pm.ach_status);
+                  const pendingBank = isBankMethod(pm.method_type) && ['pending_verification', 'verification_failed'].includes(pm.ach_status);
                   return (
                     <label key={pm.id} style={{
                       display: 'flex', alignItems: 'center', gap: 10, padding: 12,
@@ -581,7 +586,7 @@ export default function AutopayCard({ onStateChange }) {
                         disabled={pendingBank}
                         onChange={() => setSelectedCard(pm.id)} />
                       <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
-                        {pm.method_type === 'ach'
+                        {isBankMethod(pm.method_type)
                           ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pm.ach_status === 'verification_failed' ? ' - verification failed' : (pendingBank ? ' - verification pending' : '')}`
                           : `${pm.brand || 'Card'} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
                       </span>

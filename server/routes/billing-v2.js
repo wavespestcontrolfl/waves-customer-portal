@@ -409,13 +409,17 @@ router.post('/cards', async (req, res, next) => {
     // VERIFIED — the customer beat the setup_intent.succeeded webhook back
     // to the portal. Without this mirror of the webhook's update, the
     // enrollment below runs against a row the autopay routes still refuse.
-    // Same mirror for the customer-level needs_verification block (r3) —
-    // enrollConsentedMethod refuses ACH targets while it's non-active, so
-    // clearing only the row still 409'd this return path. 'suspended'
-    // deliberately stays (see the webhook branch).
-    if (isBankMethodType(card.method_type) && card.ach_status !== 'verified') {
-      await db('payment_methods').where({ id: card.id }).update({ ach_status: 'verified' });
-      card.ach_status = 'verified';
+    if (isBankMethodType(card.method_type)) {
+      if (card.ach_status !== 'verified') {
+        await db('payment_methods').where({ id: card.id }).update({ ach_status: 'verified' });
+        card.ach_status = 'verified';
+      }
+      // ANY successful bank SetupIntent is verification proof, so the
+      // customer-level needs_verification block clears for every bank save
+      // (Codex r6) — an FC-instant save arrives already 'verified' and the
+      // old pending-only conditional left the block set, 409ing the
+      // enrollment below. 'suspended' deliberately stays (see the webhook
+      // branch).
       await db('customers')
         .where({ id: req.customerId, ach_status: 'needs_verification' })
         .update({ ach_status: 'active' });

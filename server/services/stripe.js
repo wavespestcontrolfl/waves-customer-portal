@@ -824,11 +824,21 @@ const StripeService = {
 
     let paymentIntent;
     try {
+      // Saved-method charges support BOTH tender families (mirrors
+      // chargeInvoiceWithSavedCard's documented lock — Codex #2706 r6 P1):
+      // a PI without payment_method_types defaults to ['card'] and Stripe
+      // refuses to confirm it against a us_bank_account pm, so the monthly
+      // cron would fail every ACH Auto Pay account on its next run. An ACH
+      // confirm lands 'processing' (not 'succeeded'); the paid/processing
+      // status mapping below already handles that lifecycle, and
+      // computeChargeAmount already priced ACH surcharge-free.
+      const savedMethodIsBank = require('./autopay-eligibility').isBankMethodType(card.method_type);
       const piParams = {
         amount: totalCents,
         currency: 'usd',
         customer: stripeCustomerId,
         payment_method: card.stripe_payment_method_id,
+        payment_method_types: [savedMethodIsBank ? 'us_bank_account' : 'card'],
         off_session: true,
         confirm: true,
         expand: ['latest_charge'],

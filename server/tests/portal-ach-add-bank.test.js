@@ -230,6 +230,25 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     expect(mockEnroll).toHaveBeenCalled();
   });
 
+  test('FC-instant save (row already verified) STILL clears the customer needs_verification block (Codex r6)', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    mockRetrieveSetupIntent.mockResolvedValue({
+      id: 'si_fc',
+      status: 'succeeded',
+      payment_method: 'pm_bank_1',
+    });
+    // Financial Connections verifies instantly — the row never passes
+    // through pending, so a pending-only conditional left the customer
+    // block set and enrollment 409'd the add the customer just completed.
+    state.tables.payment_methods = [{ ...pendingRow, ach_status: 'verified' }];
+    const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_fc' } });
+    expect(statusCode).toBe(200);
+    expect(state.updates).toContainEqual({ table: 'customers', patch: { ach_status: 'active' } });
+    // No pm-row rewrite needed — it was already verified.
+    expect(state.updates.filter((u) => u.table === 'payment_methods')).toHaveLength(0);
+    expect(mockEnroll).toHaveBeenCalled();
+  });
+
   test('gate OFF: an in-flight SUCCEEDED bank SetupIntent is refused before any mirror (kill-switch integrity, Codex r3)', async () => {
     mockIsEnabled.mockReturnValue(false);
     mockRetrieveSetupIntent.mockResolvedValue({
