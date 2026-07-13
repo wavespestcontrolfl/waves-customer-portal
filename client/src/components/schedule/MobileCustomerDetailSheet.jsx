@@ -167,6 +167,18 @@ export default function MobileCustomerDetailSheet({ customerId, onClose }) {
               <StatCell label="First visit" value={firstVisitAt ? fmtMonthYear(firstVisitAt) : '—'} />
             </section>
 
+            {/* View full profile — the sheet is a quick in-context card; the
+                full Customer 360 (health, tier, history, intelligence) lives
+                on /admin/customers, opened via the customerId param. */}
+            <button
+              type="button"
+              onClick={() => navigate(`/admin/customers?customerId=${encodeURIComponent(c.id)}`)}
+              className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-ink-primary font-medium u-focus-ring"
+              style={{ padding: '13px 20px', fontSize: 15, marginBottom: 24 }}
+            >
+              View full profile
+            </button>
+
             {/* Phone */}
             {c.phone && (
               <ContactRow label="Phone number">
