@@ -476,6 +476,32 @@ export default function TechHomePage() {
               {nextStop.time || nextStop.scheduled_time || 'Pending'}
             </span>
           </div>
+          {/* Property alerts — the server compiles gate codes, pets, chemical
+              sensitivities, access/parking notes, and the appointment note
+              into propertyAlerts (admin-schedule.js day view). Same data the
+              dispatch board chips show; without this the tech had to ask the
+              Intelligence Bar for the gate code. Objects here ({type, text});
+              tolerate plain strings for the dispatch-shaped payload. */}
+          {Array.isArray(nextStop.propertyAlerts) && nextStop.propertyAlerts.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {nextStop.propertyAlerts.map((a, i) => {
+                const text = typeof a === 'string' ? a : a?.text;
+                if (!text) return null;
+                const isChemical = a?.type === 'chemical';
+                return (
+                  <div key={i} style={{
+                    fontSize: 12,
+                    color: isChemical ? '#ef4444' : DARK.text,
+                    marginBottom: 3,
+                    paddingLeft: 8,
+                    borderLeft: `2px solid ${isChemical ? '#ef4444' : DARK.teal}`,
+                  }}>
+                    {text}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8 }}>
             <ActionBtn label="Navigate" icon="🗺️" onClick={() => {
               const addr = nextStop.address;
