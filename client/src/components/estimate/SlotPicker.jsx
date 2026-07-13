@@ -110,6 +110,7 @@ export default function SlotPicker({
   selectedFrequency = null,
   onFirstSlotDate = null,
   cityLabel = null,
+  quickPick = false,
 }) {
   const [data, setData] = useState(null);
   // Report the first open slot date up (hero {date} token).
@@ -192,7 +193,6 @@ export default function SlotPicker({
     // window is still bookable — reserve/accept revalidate server-side.
     if (!heldSelection || glassSlotIsStale(heldSelection)) selectSlot(null);
     // freshnessTick re-runs the check each minute while the page sits open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [glass, selectedSlotId, selectedSlot, heldSelection, freshnessTick, loading, data]);
 
   useEffect(() => {
@@ -352,7 +352,7 @@ export default function SlotPicker({
           type="button"
           onClick={clearFinder}
           style={{
-            justifySelf: 'start', background: 'transparent', border: 'none', padding: 0,
+            justifySelf: 'start', background: 'transparent', border: 'none',
             color: W.blueDeeper, fontSize: 14, fontWeight: 700, cursor: 'pointer',
             textDecoration: 'underline', textUnderlineOffset: 3,
             padding: '12px 8px', minHeight: 44, // touch audit 2026-07-06
@@ -504,6 +504,43 @@ export default function SlotPicker({
       ) : glass && heldSelection && !glassSlotIsStale(heldSelection) ? (
         <GlassTechChip slotMeta={heldSelection} licenseNumber={licenseNumber} />
       ) : null}
+      {/* Quick-pick (seamless booking, owner 2026-07-12): the earliest
+          bookable window as a one-tap card — the slot lists are ordered
+          soonest-first, so the first non-stale slot IS the next available.
+          Hidden while the finder/date-picker results own the list. */}
+      {quickPick && !(searchData || pickedData || pickedLoading) ? (() => {
+        const next = (glass ? allSlots.find((s) => !glassSlotIsStale(s)) : allSlots[0]) || null;
+        if (!next) return null;
+        const meta = glassSlotMeta(next);
+        const isSelected = selectedSlotId === next.slotId;
+        const dateLabel = new Date(`${next.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
+        return (
+          <div
+            data-glass="card"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+              border: `1.5px solid ${W.blueDeeper}`, borderRadius: 12, padding: '14px 16px', marginBottom: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption, textTransform: 'uppercase', letterSpacing: '0.12em' }}>
+                Next available
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 600, color: W.blueDeeper, marginTop: 2 }}>
+                {dateLabel}{meta.time ? ` · ${meta.time}` : ''}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => selectSlot(next)}
+              style={{
+                padding: '10px 18px', minHeight: 44, borderRadius: 12, border: 'none', cursor: 'pointer',
+                background: W.blueDeeper, color: '#fff', fontSize: 14, fontWeight: 600, flex: 'none',
+              }}
+            >{isSelected ? 'Selected ✓' : 'Take it'}</button>
+          </div>
+        );
+      })() : null}
       {finder}
       {glass && !(searchData || pickedData || pickedLoading) ? (
         <GlassScarcityBadge info={glassScarcityInfo(allSlots, data?.metadata?.firstDayAvailability)} />

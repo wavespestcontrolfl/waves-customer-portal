@@ -216,18 +216,25 @@ async function verifyCardHoldIntent({ estimate, setupIntentId }) {
 // attached to the customer separately (post-commit, retryable) via
 // attachCardHoldPaymentMethod; the pm id is stored here either way so charges
 // can resolve it.
-async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, trx = db }) {
+async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId = null, setupIntentId, paymentMethodId, frozenTerms = null, trx = db }) {
   // Preserve the terms the customer was SHOWN — frozen on the pending row when
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
-  // never moves the fee the customer consented to.
+  // never moves the fee the customer consented to. Saved-method holds have NO
+  // pending row (no SetupIntent was minted) — the accept gate passes the terms
+  // it RESOLVED as frozenTerms so a config change mid-request can't move them
+  // either (Codex #2681 r6 P2).
   const existing = setupIntentId
     ? await trx('estimate_card_holds')
       .where({ stripe_setup_intent_id: setupIntentId })
       .first('no_show_fee_amount', 'cancel_window_hours')
     : null;
-  const noShowFee = existing?.no_show_fee_amount != null ? Number(existing.no_show_fee_amount) : cardHoldNoShowFee();
-  const windowHours = existing?.cancel_window_hours != null ? Number(existing.cancel_window_hours) : cardHoldCancelWindowHours();
+  const noShowFee = existing?.no_show_fee_amount != null
+    ? Number(existing.no_show_fee_amount)
+    : (frozenTerms?.noShowFeeAmount != null ? Number(frozenTerms.noShowFeeAmount) : cardHoldNoShowFee());
+  const windowHours = existing?.cancel_window_hours != null
+    ? Number(existing.cancel_window_hours)
+    : (frozenTerms?.cancelWindowHours != null ? Number(frozenTerms.cancelWindowHours) : cardHoldCancelWindowHours());
   const fields = {
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId || null,

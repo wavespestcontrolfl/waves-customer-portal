@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import {
   isPublicFunnelPath,
+  isTokenizedEstimatePath,
   hasConsent,
   grantConsent,
   bootPostHog,
@@ -31,6 +32,13 @@ export default function PublicFunnelTracking() {
       // A consented visitor may have navigated from /book into /admin or the
       // authed portal within the same SPA session — stop recording them.
       setFunnelActive(false);
+      // Tokenized customer estimate pages: COOKIELESS boot, no banner —
+      // persistence:'memory', explicit funnel events only, token redacted
+      // from every URL-ish property, replay/pageview dropped in before_send
+      // (Codex #2681 r2: the seamless accept funnel events were silently
+      // no-oping on the only page that emits them). Nothing is persisted,
+      // so the cookie-consent banner contract doesn't attach here.
+      if (isTokenizedEstimatePath(location.pathname)) bootPostHog();
       return;
     }
     if (hasConsent()) {

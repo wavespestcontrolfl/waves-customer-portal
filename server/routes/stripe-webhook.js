@@ -2332,9 +2332,28 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     if (prepayLane) return;
     const PayerService = require('../services/payer');
-    const appt = await findLinkedUpcomingAppointment(estimate).catch((err) => {
+    let appt = await findLinkedUpcomingAppointment(estimate).catch((err) => {
       throw new Error(`recurring-cof backstop: linked-appointment lookup failed (${err.message}) — retry`);
     });
+    if (!appt?.id) {
+      // This durable backstop can fire AFTER the accepted visit left the
+      // upcoming pending/confirmed set (completed, rescheduled) — its row
+      // can still carry the per-job payer_id that must scope the payer
+      // check, or the homeowner's captured card could enroll on a
+      // payer-billed job (Codex #2681 r5, parent-code finding). Newest
+      // COMMITTED row for this estimate, any status; a lookup failure
+      // rethrows so Stripe retries (fail closed, same as above).
+      try {
+        appt = await db('scheduled_services')
+          .where({ source_estimate_id: estimate.id })
+          .whereNotNull('customer_id')
+          .whereNull('reservation_expires_at')
+          .orderBy('scheduled_date', 'desc')
+          .first('id');
+      } catch (err) {
+        throw new Error(`recurring-cof backstop: accepted-service lookup failed (${err.message}) — retry`);
+      }
+    }
     const payer = await PayerService.resolveForInvoice({
       customerId: estimate.customer_id,
       scheduledServiceId: appt?.id ? String(appt.id) : null,
