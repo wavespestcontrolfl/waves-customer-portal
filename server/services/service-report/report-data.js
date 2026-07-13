@@ -18,7 +18,7 @@ const { fetchServiceWeekWeather } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
-const { loadActivityCustomerView } = require('./activity-scores-store');
+const { loadActivityCustomerView, buildTypedVisitTimeline } = require('./activity-scores-store');
 const {
   loadServiceCoverageConfig,
   normalizeServiceCoverage,
@@ -2086,6 +2086,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const activity = typedSnapshot
     ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)
     : null;
+  // D2: visit timeline for typed trend programs — derived from the same
+  // bounded history as the gauge, so it inherits the trend-type gate
+  // (activity exists only for ACTIVITY_INDICATORS types) and the
+  // same-day-sibling trim. Null for one-shot types and first visits.
+  const typedVisitTimeline = activity
+    ? await buildTypedVisitTimeline(knex, { activityView: activity, snapshot: typedSnapshot, service }).catch(() => null)
+    : null;
 
   // Companion typed sections (combined-service-completions.md): each stored
   // snapshot froze its own delivery posture at completion. Server-side
@@ -2102,20 +2109,26 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const companionReports = await Promise.all(
     companionSnapshots
       .filter((snapshot) => staffViewer || snapshot.delivery === 'auto_send')
-      .map(async (snapshot) => ({
-        type: snapshot.type,
-        typeLabel: snapshot.typeLabel || null,
-        reportTypeLabel: snapshot.reportTypeLabel || null,
-        visitSequence: snapshot.visitSequence || 1,
-        isProgressVisit: (snapshot.visitSequence || 1) > 1,
-        todaysResult: snapshot.todaysResult || null,
-        findings: Array.isArray(snapshot.findings) ? snapshot.findings : [],
-        nextStepChips: Array.isArray(snapshot.nextStepChips) ? snapshot.nextStepChips : [],
-        photoSummary: snapshot.photoSummary || null,
-        schemaVersion: snapshot.schemaVersion || null,
-        internalOnly: snapshot.delivery !== 'auto_send',
-        activity: await loadActivityCustomerView(knex, { snapshot, service }).catch(() => null),
-      })),
+      .map(async (snapshot) => {
+        const companionActivity = await loadActivityCustomerView(knex, { snapshot, service }).catch(() => null);
+        return {
+          type: snapshot.type,
+          typeLabel: snapshot.typeLabel || null,
+          reportTypeLabel: snapshot.reportTypeLabel || null,
+          visitSequence: snapshot.visitSequence || 1,
+          isProgressVisit: (snapshot.visitSequence || 1) > 1,
+          todaysResult: snapshot.todaysResult || null,
+          findings: Array.isArray(snapshot.findings) ? snapshot.findings : [],
+          nextStepChips: Array.isArray(snapshot.nextStepChips) ? snapshot.nextStepChips : [],
+          photoSummary: snapshot.photoSummary || null,
+          schemaVersion: snapshot.schemaVersion || null,
+          internalOnly: snapshot.delivery !== 'auto_send',
+          activity: companionActivity,
+          visitTimeline: companionActivity
+            ? await buildTypedVisitTimeline(knex, { activityView: companionActivity, snapshot, service }).catch(() => null)
+            : null,
+        };
+      }),
   );
 
   // buildPestPressureCustomerView returns null ONLY when Pest Pressure is
@@ -2789,6 +2802,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         schemaVersion: typedSnapshot.schemaVersion || null,
       }
       : null,
+    typedVisitTimeline,
     // Companion sections, ordered as stored (declared profile order),
     // already viewer-filtered above — customers never receive
     // internal_only entries.

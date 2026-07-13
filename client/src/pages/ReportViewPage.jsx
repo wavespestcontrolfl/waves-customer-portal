@@ -2385,6 +2385,96 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   );
 }
 
+// Timeline rows want a compact date ("Jul 10, 2026") — same robust
+// date-only parse + report time zone as formatDate, different verbosity.
+function formatTimelineDate(value) {
+  if (!value) return '';
+  const dateOnly = calendarDateFromDateOnlyValue(value);
+  const date = dateOnly || new Date(String(value));
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleDateString('en-US', {
+    timeZone: SERVICE_REPORT_TIME_ZONE,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/**
+ * D2: cross-visit timeline for typed trend programs (trap checks, bait
+ * stations, roach knockdowns). The server derives it from the same bounded
+ * history series as the activity gauge and freezes each row's headline from
+ * that visit's own snapshot — one-shot types and first visits ship no
+ * timeline (visits < 2 renders nothing).
+ */
+function TypedVisitTimelineCard({ timeline, sectionId = 'typed-visit-timeline' }) {
+  const visits = Array.isArray(timeline?.visits) ? timeline.visits.filter(Boolean) : [];
+  if (visits.length < 2) return null;
+  return (
+    <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-visit-timeline">
+      <h2>Visit history</h2>
+      <ol style={{ listStyle: 'none', margin: 0, padding: 0, position: 'relative' }}>
+        {visits.map((visit, i) => {
+          const isLast = i === visits.length - 1;
+          return (
+            <li
+              key={visit.serviceRecordId || `${visit.serviceDate}-${i}`}
+              style={{ display: 'flex', gap: 14, position: 'relative', paddingBottom: isLast ? 0 : 18 }}
+            >
+              {!isLast && (
+                <span
+                  aria-hidden="true"
+                  style={{ position: 'absolute', left: 6, top: 18, bottom: 0, width: 2, background: 'var(--line)' }}
+                />
+              )}
+              <span
+                aria-hidden="true"
+                style={{
+                  flex: 'none',
+                  width: 14,
+                  height: 14,
+                  marginTop: 4,
+                  borderRadius: 999,
+                  border: '2px solid #04395E',
+                  background: visit.isCurrent ? '#04395E' : 'var(--paper)',
+                  zIndex: 1,
+                }}
+              />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 14, color: 'var(--muted)' }}>
+                    {formatTimelineDate(visit.serviceDate)}
+                  </span>
+                  {visit.isCurrent && (
+                    <span
+                      style={{
+                        fontSize: 14,
+                        color: '#04395E',
+                        background: 'var(--wash)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 999,
+                        padding: '1px 8px',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      This visit
+                    </span>
+                  )}
+                </div>
+                {visit.headline && (
+                  <div className="sr-ink" style={{ fontSize: 15, color: '#04395E', lineHeight: 1.45, marginTop: 2 }}>
+                    {visit.headline}
+                  </div>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 /**
  * Heading for a companion typed section (combined-service-completions.md) —
  * combined services complete once and render the primary content first,
@@ -8133,6 +8223,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
 
+        {/* D2: cross-visit timeline right under the gauge — the same trend
+            neighborhood. Server ships it only for typed trend programs with
+            2+ visits, so this renders nothing everywhere else. */}
+        <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />
+
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
             findings, and the activity gauge, all rendered from the
@@ -8161,6 +8256,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 sectionId={`companion-${companion.type}-activity`}
               />
             )}
+            <TypedVisitTimelineCard
+              timeline={companion.visitTimeline}
+              sectionId={`companion-${companion.type}-visit-timeline`}
+            />
           </div>
         ))}
 

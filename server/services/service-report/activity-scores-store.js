@@ -86,4 +86,59 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
   };
 }
 
-module.exports = { loadActivityCustomerView, HISTORY_LIMIT };
+/**
+ * D2 — cross-visit timeline for typed trend programs (trap checks, bait
+ * stations, roach knockdowns…). Reuses the activity view's already-bounded
+ * history series (same customer+indicator scoping, same same-day-sibling
+ * trim) and enriches each prior visit with that visit's own frozen
+ * Today's Result headline from its typedReportSnapshot. Returns null when
+ * there is nothing to narrate (fewer than 2 visits — a one-visit timeline
+ * is noise) so one-shot types and first visits render no timeline.
+ */
+async function buildTypedVisitTimeline(knex = db, { activityView = null, snapshot = null, service = {} } = {}) {
+  const history = Array.isArray(activityView?.history) ? activityView.history : [];
+  if (history.length < 2) return null;
+
+  const priorIds = history
+    .filter((point) => !point.isCurrent && point.serviceRecordId)
+    .map((point) => point.serviceRecordId);
+  const headlines = new Map();
+  if (priorIds.length) {
+    try {
+      const rows = await knex('service_records')
+        .whereIn('id', priorIds)
+        .select('id', 'service_data');
+      for (const row of rows) {
+        let data = row.service_data;
+        if (typeof data === 'string') {
+          try { data = JSON.parse(data); } catch { data = null; }
+        }
+        const headline = data?.typedReportSnapshot?.todaysResult?.headline;
+        if (headline) headlines.set(row.id, String(headline));
+      }
+    } catch {
+      // Missing headlines degrade to the level word below — never fatal.
+    }
+  }
+
+  const fallbackFor = (point) => (point.levelWord
+    ? `${activityView.label}: ${point.levelWord}`
+    : null);
+  const visits = history.map((point) => ({
+    serviceRecordId: point.serviceRecordId,
+    serviceDate: point.serviceDate,
+    headline: (point.isCurrent
+      ? snapshot?.todaysResult?.headline
+      : headlines.get(point.serviceRecordId)) || fallbackFor(point),
+    levelWord: point.levelWord || null,
+    isCurrent: point.isCurrent === true,
+  }));
+
+  return {
+    indicatorKey: activityView.indicatorKey,
+    label: activityView.label,
+    visits,
+  };
+}
+
+module.exports = { loadActivityCustomerView, buildTypedVisitTimeline, HISTORY_LIMIT };
