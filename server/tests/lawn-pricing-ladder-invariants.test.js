@@ -340,6 +340,20 @@ describe('sweep red paths — failures become alert violations, never silent gre
     expect(new Set(violations.map((v) => v.check))).toEqual(new Set(['malformed_cost_floor']));
   });
 
+  test('an ok-status $0-priced rotation is unverified — zero catalog prices verify nothing', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => ({ available: true }),
+      // costLineFromUsage accepts zero-valued cost_per_unit as a priced line,
+      // so this shape is reachable with all-$0 catalog rows.
+      inventoryCostFromRows: () => ({ status: 'ok', totalPerVisit: 0, warnings: [] }),
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('unverified');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['material_budget_unverified']);
+    expect(calls.updates).toHaveLength(0);
+  });
+
   test('missing Lawn COGS mappings are unverified — prod carries the rotation, absence is an anomaly', async () => {
     const { sweep, calls } = loadSweep({
       priceLawnCare: cleanTiers,

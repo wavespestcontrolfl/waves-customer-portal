@@ -212,11 +212,21 @@ async function checkBudgetDrift() {
       }],
     };
   }
-  // status 'ok' with a zero total = every mapped row genuinely costs $0 —
-  // nothing to compare (distinct from the warning path above, where $0 means
-  // MISSING cost data).
+  // status 'ok' with a zero total: costLineFromUsage accepts zero-valued
+  // cost_per_unit/best_price as a priced line, so an all-$0 rotation is
+  // zero-PRICED catalog data, not a genuinely free rotation — it cannot
+  // verify the budget (or resolve an open alert) any more than missing data
+  // can.
   if (!Number(cogs.totalPerVisit)) {
-    return { status: 'skipped', reason: 'mapped Lawn Care rotation has zero live cost', violations: [] };
+    return {
+      status: 'unverified',
+      reason: 'mapped Lawn Care rotation prices at $0 live',
+      violations: [{
+        check: 'material_budget_unverified',
+        cell: 'inventory_cogs',
+        detail: 'every mapped Lawn Care row carries a $0 catalog price — budget drift cannot be verified until the rows have real positive cost data',
+      }],
+    };
   }
   const annualLowerBound = Math.round(Number(cogs.totalPerVisit) * 100) / 100;
 
