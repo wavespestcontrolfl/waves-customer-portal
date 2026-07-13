@@ -500,10 +500,10 @@ const gates = {
   // per failure episode across the retry ladder. Unset = retry-notice email
   // returns.
   paymentFailedEnroll: process.env.GATE_PAYMENT_FAILED_ENROLL === 'true',
-  // Renewal-window cron (30-day bucket) → service_renewal sequence. Adds an
-  // email leg to the historically SMS-only reminder; 90-day dedupe = once per
-  // renewal cycle.
-  serviceRenewalEnroll: process.env.GATE_SERVICE_RENEWAL_ENROLL === 'true',
+  // GATE_SERVICE_RENEWAL_ENROLL removed 2026-07-13: the renewal announcement
+  // lane was scrapped (owner: no-term services never get "renewal" language;
+  // termite-bond SMS reminders remain in workflows/renewal-reminder.js, and
+  // price changes use the price-change notice workflow).
   // Positive-review referral invite → referral_nudge sequence, REPLACING the
   // transactional referral.invite email (one email; the referral SMS nudge is
   // unchanged). Once per customer ever, mirroring referral.invite's own
