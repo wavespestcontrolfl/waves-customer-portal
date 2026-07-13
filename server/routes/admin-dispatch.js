@@ -6094,64 +6094,11 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
 // 4xx/5xx the client surfaces inline and ignores.
 const MODELS = require('../config/models');
 
-// Compact recent-comms context (last few calls/texts/emails), modeled on
-// admin-projects' ai-write communication loader. Each source is
-// best-effort — a missing table never fails the draft.
-async function loadFindingsRecapCommsContext(customerId) {
-  if (!customerId) return '';
-  const compact = (value, max = 280) => {
-    const text = String(value || '').replace(/\s+/g, ' ').trim();
-    if (!text) return '';
-    return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
-  };
-  const dateOf = (value) => {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-  };
-  const tsOf = (value) => {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-  };
-  const [calls, sms, emails] = await Promise.all([
-    db('call_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
-      .orderBy('created_at', 'desc')
-      .limit(3)
-      .catch(() => []),
-    db('sms_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'message_body')
-      .orderBy('created_at', 'desc')
-      .limit(4)
-      .catch(() => []),
-    db('emails')
-      .where({ customer_id: customerId })
-      .select('received_at', 'subject', 'snippet', 'body_text')
-      .orderBy('received_at', 'desc')
-      .limit(3)
-      .catch(() => []),
-  ]);
-  const entries = [];
-  for (const call of calls) {
-    const summary = compact(call.lead_synopsis || call.notes || call.transcription);
-    if (summary) entries.push({ ts: tsOf(call.created_at), line: `Call ${dateOf(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}` });
-  }
-  for (const msg of sms) {
-    const summary = compact(msg.message_body);
-    if (summary) entries.push({ ts: tsOf(msg.created_at), line: `Text ${dateOf(msg.created_at)} (${msg.direction || 'unknown'}): ${summary}` });
-  }
-  for (const email of emails) {
-    const summary = compact(email.snippet || email.body_text);
-    const subject = compact(email.subject, 120);
-    if (summary || subject) entries.push({ ts: tsOf(email.received_at), line: `Email ${dateOf(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}` });
-  }
-  return entries
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, 6)
-    .map((entry) => entry.line)
-    .join('\n');
-}
+// F1 (universal one-time services, ratified Q13): the comms context comes
+// from the shared WINDOWED builder (recurring = since last completed visit
+// of the line, cap 120d; one-time = since job origin, cap 180d). The local
+// unbounded builder is retired.
+const { buildCompletionCommsContext } = require('../services/completion-comms-context');
 
 function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext }) {
   const fieldLines = (schema.fields || [])
@@ -6423,8 +6370,16 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
       nextStepChips, draftProfile.findingsType, structuredFindings?.values || {},
     );
     const chips = chipsValidation.ok ? chipsValidation.chips : [];
-    const commsContext = includeCustomerComms === true
-      ? await loadFindingsRecapCommsContext(svc.customer_id).catch(() => '')
+    // Windowed comms context (F1): scoped by this scheduled service so the
+    // recurring/one-time window and service-line hint resolve correctly.
+    const commsContextResult = includeCustomerComms === true
+      ? await buildCompletionCommsContext({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+      }).catch(() => ({ text: '', promptHint: '' }))
+      : { text: '', promptHint: '' };
+    const commsContext = commsContextResult.text
+      ? `${commsContextResult.promptHint}\n${commsContextResult.text}`
       : '';
     const Anthropic = require('@anthropic-ai/sdk');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
