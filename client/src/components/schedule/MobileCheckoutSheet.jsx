@@ -28,6 +28,12 @@ import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
 import MobileItemDiscountPickerSheet from './MobileItemDiscountPickerSheet';
+import {
+  useCustomerCards,
+  chargeableCardOnFile,
+  cardOnFileTitle,
+  isCardExpired,
+} from '../../hooks/useCustomerCards';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -66,6 +72,11 @@ export default function MobileCheckoutSheet({
   //   _kind is 'service' | 'discount' (UI label only — server treats uniformly)
   const [showServicePicker, setShowServicePicker] = useState(false);
   const [showItemPicker, setShowItemPicker] = useState(false);
+  // Saved payment methods — shown under the Charge button so the tech knows
+  // whether a card is on file before picking a tender. null = unknown
+  // (loading / fetch failed) and renders nothing: a false "No card on file"
+  // would send the tech chasing cash from an autopay customer.
+  const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
 
   if (!service) return null;
 
@@ -111,6 +122,22 @@ export default function MobileCheckoutSheet({
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
   const nothingToCharge = totalBeforePrepaid <= 0;
+
+  // One-line card-on-file note for the tech. Shows the first non-expired
+  // method (server orders default first); if every method is expired, says
+  // so rather than claiming there's no card.
+  let cardOnFileNote = null;
+  if (Array.isArray(cardsOnFile)) {
+    const card = chargeableCardOnFile(cardsOnFile);
+    if (!card) {
+      cardOnFileNote = 'No card on file';
+    } else {
+      const kind = card.method_type === 'ach' ? 'Bank' : 'Card';
+      const expired = isCardExpired(card) ? ` (expired ${card.exp_month}/${card.exp_year})` : '';
+      const more = cardsOnFile.length > 1 ? ` · +${cardsOnFile.length - 1} more` : '';
+      cardOnFileNote = `${kind} on file: ${cardOnFileTitle(card)}${expired}${more}`;
+    }
+  }
 
   const startTime = formatTime(service.windowStart);
   const duration = service.estimatedDuration ? `${service.estimatedDuration} mins` : '';
@@ -191,7 +218,7 @@ export default function MobileCheckoutSheet({
     setMintError(null);
     try {
       const body = {
-        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest), // eslint-disable-line no-unused-vars
+        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest),  
       };
       const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
         method: 'POST',
@@ -263,6 +290,11 @@ export default function MobileCheckoutSheet({
               ? 'No charge — complete from job'
               : `Charge $${total.toFixed(2)}`}
         </button>
+        {cardOnFileNote && (
+          <div className="text-center text-ink-tertiary" style={{ fontSize: 13, marginTop: 8 }}>
+            {cardOnFileNote}
+          </div>
+        )}
         {mintError && (
           <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
             {mintError}

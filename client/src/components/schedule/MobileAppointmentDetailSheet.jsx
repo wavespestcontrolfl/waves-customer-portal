@@ -21,6 +21,7 @@ import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import EstimateProvenanceCard from './EstimateProvenanceCard';
+import { useCustomerCards } from '../../hooks/useCustomerCards';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -122,6 +123,9 @@ export default function MobileAppointmentDetailSheet({
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
   const [estimateSource, setEstimateSource] = useState(null);
+  // Saved payment methods, shown inside the estimate provenance card so the
+  // tech knows a card is on file before choosing how to collect.
+  const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
 
   useEffect(() => {
     setNote(service?.notes || '');
@@ -466,6 +470,7 @@ export default function MobileAppointmentDetailSheet({
             payment={estimateSource.payment}
             lines={estimateSource.lines}
             estimateRef={estimateSource.estimateSlug}
+            cardsOnFile={cardsOnFile}
             style={{ marginTop: 16 }}
           />
         )}

@@ -38,7 +38,17 @@
 //                          can be referenced without opening it. Same number
 //                          the customer sees on the public quote page.
 //                          Optional; omitted/null → header shows no number.
+//   cardsOnFile  array   — useCustomerCards() rows (saved payment methods,
+//                          default first) so the tech knows a card is on
+//                          file before choosing how to collect. null /
+//                          undefined = unknown (loading, fetch failed, or
+//                          host doesn't fetch) → row hidden entirely; [] =
+//                          confirmed none → "None" row. The distinction
+//                          matters: a false "None" would send the tech
+//                          chasing cash from an autopay customer.
 //   style        object  — optional outer wrapper style (margins, etc.)
+
+import { cardOnFileTitle, chargeableCardOnFile, isCardExpired } from '../../hooks/useCustomerCards';
 
 const BLUE = { bg: '#F0F9FF', border: '#BAE6FD', ink: '#0369A1' };
 // Amber caution used for the "billed to a third party — don't collect from the
@@ -290,7 +300,30 @@ function depositRow(deposit) {
   return null;
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, style }) {
+// Card-on-file row: which saved payment method (if any) a charge would use.
+// Only renders on a RESOLVED cards array — null (unknown) shows nothing so a
+// failed fetch can't masquerade as "no card". Shows the first non-expired
+// method; if every method is expired, says so instead of claiming "None".
+function cardOnFileRow(cardsOnFile) {
+  if (!Array.isArray(cardsOnFile)) return null;
+  const card = chargeableCardOnFile(cardsOnFile);
+  if (!card) {
+    return { label: 'Card on file', value: 'None', sub: 'no saved payment method', tone: 'muted' };
+  }
+  const subParts = [];
+  if (isCardExpired(card)) subParts.push(`expired ${card.exp_month}/${card.exp_year}`);
+  if (card.is_default) subParts.push('default');
+  const others = cardsOnFile.length - 1;
+  if (others > 0) subParts.push(`+${others} more on file`);
+  return {
+    label: card.method_type === 'ach' ? 'Bank on file' : 'Card on file',
+    value: cardOnFileTitle(card),
+    sub: subParts.join(' · ') || null,
+    tone: 'muted',
+  };
+}
+
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
   const quoted = Number(quotedTotal) || 0;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
@@ -305,6 +338,8 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
   if (dep) rows.push(dep);
+  const cardRow = cardOnFileRow(cardsOnFile);
+  if (cardRow) rows.push(cardRow);
   // Whole-visit third-party billing: surfaced as its own prominent banner so a
   // tech scanning on a phone can't miss it and ask the homeowner for money.
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
