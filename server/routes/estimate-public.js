@@ -8700,6 +8700,28 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
     let invoiceMode = txResult.invoiceMode === true || (recurringCardPayerFallback && txResult.standardInvoiceMinted === true);
+    // The in-transaction lane stamp promised "completion auto-charges the
+    // anchor invoice" — but the post-commit payer re-check can SKIP
+    // enrollment and reopen normal delivery (recurringCardPayerFallback),
+    // including the fail-closed throw path for a customer who is actually
+    // self-pay. Clear the stamp so the already-accepted retry keeps the
+    // pay link that fallback delivery just sent (Codex #2680 r6).
+    if (recurringCardPayerFallback && txResult.standardInvoiceMinted === true) {
+      try {
+        const freshRow = await db('estimates').where({ id: estimate.id }).first('estimate_data');
+        let base = freshRow?.estimate_data;
+        if (typeof base === 'string') {
+          try { base = JSON.parse(base); } catch { base = null; }
+        }
+        if (base && typeof base === 'object' && base.recurringCardLaneAccepted === true) {
+          await db('estimates').where({ id: estimate.id }).update({
+            estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
+          });
+        }
+      } catch (stampErr) {
+        logger.warn(`[estimate-public] lane-stamp clear failed for estimate ${estimate.id} (retry may hide the payer pay step): ${stampErr.message}`);
+      }
+    }
     let invoiceId = txResult.invoiceId || null;
     let invoiceAmount = txResult.invoiceAmount || null;
     let invoicePayUrl = txResult.invoicePayUrl || null;

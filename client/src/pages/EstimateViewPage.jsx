@@ -35,6 +35,7 @@ import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../componen
 import { CARD_CONSENT_TEXT } from '../lib/paymentMethodConsentText';
 import CustomerReviews from '../components/estimate/CustomerReviews';
 import AppShowcaseCard, { AppStoreBadge, GooglePlayBadge, StoreBadge, APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
+import { isNativeApp } from '../native/platform';
 import DocumentActionBar from '../components/DocumentActionBar';
 import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
@@ -2683,7 +2684,10 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
           This estimate was already accepted — you're all set.
         </div>
       ) : null}
-      {recurring ? (
+      {recurring && !isNativeApp() ? (
+        // Hidden inside the native WebView (Codex #2680 r6, mirrors
+        // AppShowcaseCard's guard): outbound store links from within the
+        // installed app are dead weight and an App Store review risk.
         <>
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginTop: 14, lineHeight: 1.5 }}>
             Download the Waves app to track visits, reschedule, and manage your

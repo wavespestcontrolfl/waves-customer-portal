@@ -267,7 +267,12 @@ async function completeRecurringCardEnrollment({
       });
     }
     const ConsentService = require('./payment-method-consents');
-    if (!(await ConsentService.hasConsentFor(customerId, stripePaymentMethodId))) {
+    // ENROLLMENT-scoped check (Codex #2680 r6 P1): a hold-only
+    // estimate_card_hold row on this pm passes the plain version check but
+    // only ever authorized that visit's charges — the estimate_accept row
+    // IS the audit artifact for recurring Auto Pay, so it must be recorded
+    // unless a real save-and-charge consent already exists.
+    if (!(await ConsentService.hasEnrollmentScopedConsent(customerId, stripePaymentMethodId))) {
       // The capture modal rendered the locked v8 card consent verbatim
       // (checkbox-gated) before confirmSetup — this row is the faithful
       // record of what the customer agreed to.

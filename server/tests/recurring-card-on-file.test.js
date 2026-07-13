@@ -43,11 +43,15 @@ jest.mock('../services/autopay-eligibility', () => ({
   customerOnAutopay: (...a) => mockCustomerOnAutopay(...a),
 }));
 const mockHasConsentFor = jest.fn(async () => false);
+// Enrollment-scoped twin (r6 P1): the enrollment path now consults THIS —
+// a hold-only consent must not suppress the estimate_accept record.
+const mockHasEnrollmentScopedConsent = jest.fn(async () => false);
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent1' }));
 const mockLinkPaymentMethodId = jest.fn(async () => {});
 const mockFindConsentedChargeableCard = jest.fn(async () => null);
 jest.mock('../services/payment-method-consents', () => ({
   hasConsentFor: (...a) => mockHasConsentFor(...a),
+  hasEnrollmentScopedConsent: (...a) => mockHasEnrollmentScopedConsent(...a),
   recordConsent: (...a) => mockRecordConsent(...a),
   linkPaymentMethodId: (...a) => mockLinkPaymentMethodId(...a),
   findConsentedChargeableCard: (...a) => mockFindConsentedChargeableCard(...a),
@@ -89,6 +93,7 @@ beforeEach(() => {
   mockResolveForInvoice.mockResolvedValue(null);
   mockCustomerOnAutopay.mockResolvedValue(false);
   mockHasConsentFor.mockResolvedValue(false);
+  mockHasEnrollmentScopedConsent.mockResolvedValue(false);
   mockFindConsentedChargeableCard.mockResolvedValue(null);
 });
 afterAll(() => { delete process.env.RECURRING_CARD_ON_FILE; });
@@ -312,12 +317,24 @@ describe('completeRecurringCardEnrollment (save → consent → enroll)', () => 
 
   it('is idempotent: reuses an existing pm row and skips a duplicate consent', async () => {
     mockDbFixtures.payment_methods = { id: 'pmrow-1', customer_id: 'cust-1', method_type: 'card' };
-    mockHasConsentFor.mockResolvedValue(true);
+    mockHasEnrollmentScopedConsent.mockResolvedValue(true);
     const r = await completeRecurringCardEnrollment(ARGS);
     expect(r.enrolled).toBe(true);
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
     expect(mockRecordConsent).not.toHaveBeenCalled();
     expect(mockEnrollConsentedMethod).toHaveBeenCalled();
+  });
+
+  it('a hold-only consent does NOT suppress the estimate_accept consent record (Codex r6 P1)', async () => {
+    // Version check would pass (a v8 hold row exists) but the enrollment-
+    // scoped check refuses it — the estimate_accept audit artifact must be
+    // written before Auto Pay enrollment.
+    mockHasConsentFor.mockResolvedValue(true);
+    mockHasEnrollmentScopedConsent.mockResolvedValue(false);
+    const r = await completeRecurringCardEnrollment(ARGS);
+    expect(r.enrolled).toBe(true);
+    expect(mockRecordConsent).toHaveBeenCalledTimes(1);
+    expect(mockRecordConsent.mock.calls[0][0]).toMatchObject({ source: 'estimate_accept' });
   });
 
   it('treats already_enrolled as success (webhook/consent race)', async () => {
