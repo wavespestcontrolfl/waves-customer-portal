@@ -1363,10 +1363,14 @@ router.post('/', async (req, res, next) => {
       });
     }
     // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
-    // scheduled visit, so ad-hoc/unlinked creation closes. The visit-linked
-    // path (the same linked-profile bypass as above) is the only door in —
-    // the completion machinery (FDACS signature/PDF/filing) is unchanged.
-    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type) && !linkedProjectTypeMatches) {
+    // scheduled visit, so ad-hoc/unlinked creation closes. The requirement is
+    // the LINK itself (validateProjectCreateScope pins it to the customer),
+    // not a resolved profile pointer — legacy scheduled WDO rows without a
+    // service_id resolve no project-backed profile by name and must not be
+    // rejected (Codex P2). Typed visits still cannot side-door in: they were
+    // already 422'd above as scheduled_service_appointment_managed. The
+    // completion machinery (FDACS signature/PDF/filing) is unchanged.
+    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type) && !linkedScheduledServiceId) {
       return res.status(422).json({
         error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
         code: 'project_type_linked_only',

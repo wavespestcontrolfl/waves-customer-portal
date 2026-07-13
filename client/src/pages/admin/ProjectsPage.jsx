@@ -1300,12 +1300,17 @@ export default function ProjectsPage() {
           defaultProjectType=""
           allowedProjectTypes={
             /* linkedCreationOnly (WDO, pre-treat cert — owner ruling
-               2026-07-13) create from their scheduled visit, never ad hoc. */
-            GENERAL_PROJECT_TYPES.filter(
-              (key) =>
-                !typesRegistry?.[key]?.appointmentManaged &&
-                !typesRegistry?.[key]?.linkedCreationOnly,
-            )
+               2026-07-13) create from their scheduled visit, never ad hoc.
+               FAIL CLOSED while the registry is loading/unavailable (Codex
+               P2): an unfiltered list here would override the modal's own
+               registry filtering and resurrect the linked-only lanes. */
+            typesRegistry
+              ? GENERAL_PROJECT_TYPES.filter(
+                  (key) =>
+                    !typesRegistry?.[key]?.appointmentManaged &&
+                    !typesRegistry?.[key]?.linkedCreationOnly,
+                )
+              : []
           }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
@@ -2779,7 +2784,11 @@ export function ProjectDetail({
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
-      {canAdminActions && project.project_type === WDO_TYPE && project.status !== "closed" && (
+      {/* Signature capture is a FIELD action — the licensee signs at the
+          inspection, and POST /:id/wdo-signature is requireTechOrAdmin — so
+          it is deliberately NOT behind canAdminActions (Codex P2 on the
+          tech in-place embed). Send/PDF/close stay admin-gated. */}
+      {project.project_type === WDO_TYPE && project.status !== "closed" && (
         <div style={{ padding: "0 16px" }}>
           <WdoSignaturePad
             projectId={project.id}

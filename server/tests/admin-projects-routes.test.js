@@ -570,6 +570,47 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('linked-only gate accepts a legacy WDO visit that resolves no project-backed profile', async () => {
+    // Legacy scheduled WDO rows (service_type text, no service_id) resolve
+    // the DEFAULT generic profile — the gate requires the LINK, not a
+    // resolved pointer, or real dispatched visits 422 (Codex P2).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-4', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-legacy', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      if (table === 'projects') return chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-legacy' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-4');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('wdo intelligence uses selected customer address and returns field suggestions', async () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     lookupPropertyFromAITrio.mockResolvedValue({

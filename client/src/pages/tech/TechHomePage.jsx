@@ -41,6 +41,7 @@
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
@@ -366,6 +367,11 @@ export default function TechHomePage() {
       .catch(() => setProjectTypesRegistry({}));
   }, [continueProjectId, projectTypesRegistry]);
   const openProjectOrContinue = useCallback((service) => {
+    // Terminal guard (Codex P1, mirrors DispatchPageV2's
+    // projectCompletionIsClosed): a completed visit / closed report is a
+    // customer-facing compliance record — the field portal must not reopen
+    // it for editing. Admin corrections go through the Jobs page.
+    if (service?.linkedProject?.status === 'closed' || service?.status === 'completed') return;
     if (service?.linkedProject?.id) {
       setContinueProjectId(service.linkedProject.id);
       return;
@@ -640,9 +646,15 @@ export default function TechHomePage() {
         />
       )}
 
-      {continueProjectId && (
+      {continueProjectId && createPortal(
         <div
-          style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          /* Portaled to document.body at zIndex 50 so the stack lands right
+             (Codex P2): the overlay mounts AFTER #root, so it paints above
+             the TechLayout bottom nav (also z-50, inside #root) — and
+             ProjectDetail's confirmations use the shared Dialog portal
+             (z-50), which mounts LATER at body-end and therefore paints
+             above this scrim. A higher z here would bury the dialogs. */
+          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
           onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
         >
           {/* The report editor is a customer-document surface — it renders
@@ -665,7 +677,8 @@ export default function TechHomePage() {
               />
             </Suspense>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {showProjectPicker && (
@@ -1000,8 +1013,11 @@ function ServiceRow({ service, onPhotos, onProject }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           {/* A visit with an existing linked report continues it (in-place
-              editor) instead of creating a duplicate. */}
-          {service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
+              editor) instead of creating a duplicate; a closed report /
+              completed visit is terminal (openProjectOrContinue no-ops). */}
+          {service.linkedProject?.status === 'closed' || service.status === 'completed'
+            ? '🗂️ Completed'
+            : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
         </button>
         <button onClick={onPhotos} style={{
           padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
