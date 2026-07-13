@@ -562,7 +562,7 @@ export default function MobileAppointmentDetailSheet({
             type="button"
             onClick={cancelAppointment}
             disabled={!!actionBusy}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
             style={{ padding: '14px 20px', fontSize: 16 }}
           >
             {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
@@ -571,7 +571,7 @@ export default function MobileAppointmentDetailSheet({
             type="button"
             onClick={markNoShow}
             disabled={!!actionBusy}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-alert-fg font-medium u-focus-ring disabled:opacity-50"
+            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
             style={{ padding: '14px 20px', fontSize: 16 }}
           >
             {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
