@@ -2407,8 +2407,28 @@ function ProjectDetail({
           />
         )}
         {/* Type-specific findings */}
-        {typeCfg?.findingsFields?.map((field) => (
+        {typeCfg?.findingsFields?.map((field, fieldIndex) => (
           <div key={field.key}>
+            {/* Sectioned schemas (WDO, pre-treat cert): header above the
+                first field of each section — same scan-in-groups pattern as
+                the typed CompletionPanel and CreateProjectModal. */}
+            {field.section &&
+              field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 500,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    color: "#27272A",
+                    margin: "20px 0 10px",
+                    paddingBottom: 6,
+                    borderBottom: "1px solid #E4E4E7",
+                  }}
+                >
+                  {field.section}
+                </div>
+              )}
             {" "}
             <div
               style={{
@@ -2419,12 +2439,14 @@ function ProjectDetail({
                 marginBottom: 6,
               }}
             >
-              <Label
-                htmlFor={fieldInputId(field.key)}
-                style={{ marginBottom: 0 }}
-              >
-                {field.label}
-              </Label>
+              {field.label !== field.section && (
+                <Label
+                  htmlFor={fieldInputId(field.key)}
+                  style={{ marginBottom: 0 }}
+                >
+                  {field.label}
+                </Label>
+              )}
               {project.project_type === WDO_TYPE &&
                 field.key === "property_address" &&
                 formatProjectCustomerAddress(project) && (

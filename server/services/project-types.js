@@ -49,30 +49,34 @@ const PROJECT_TYPES = {
     defaultTitle: 'WDO Inspection Service',
     requiresFollowup: false,
     photoCategories: ['exterior', 'living_area', 'kitchen', 'bathroom', 'garage', 'attic', 'crawlspace', 'previous_treatment', 'other'],
+    // `section` groups the form into scannable blocks (rendered as inline
+    // headers by CreateProjectModal, same pattern as the typed completion's
+    // sectioned findings). Presentation-only: field order is unchanged, the
+    // FDACS-13645 PDF and report renderers read keys, never sections.
     findingsFields: [
-      { key: 'property_address', label: 'Property inspected', type: 'text', placeholder: 'Street address, city, state, ZIP' },
-      { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', placeholder: 'Main home, attached garage, detached garage, shed, addition…' },
-      { key: 'structure_type', label: 'Structure type', type: 'select', options: WDO_CONSTRUCTION_OPTIONS },
-      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
-      { key: 'inspection_fee', label: 'Inspection fee ($)', type: 'text', placeholder: 'Any amount, e.g. 175 — varies by construction (wood frame), new build, prior termite history' },
-      { key: 'requested_by', label: 'Inspection requested by', type: 'customer_search', customerValue: 'contact_summary', placeholder: 'Search customer database or type name and contact information' },
-      { key: 'report_sent_to', label: 'Report sent to', type: 'customer_search', customerValue: 'contact_summary', placeholder: 'Search customer database or type name and contact information if different' },
-      { key: 'inspection_scope', label: 'Visible / accessible areas inspected', type: 'textarea', placeholder: 'Interior, attic access, garage, exterior perimeter, crawlspace…' },
-      { key: 'wdo_finding', label: 'FDACS Section 2 finding', type: 'select', options: ['No visible signs of WDO observed', 'Visible evidence of WDO observed'] },
-      { key: 'live_wdo', label: 'Live WDO(s)', type: 'textarea', placeholder: 'Common name of organism and location, if any' },
-      { key: 'wdo_evidence', label: 'Evidence of WDO(s)', type: 'textarea', placeholder: 'Dead insects/parts, frass, shelter tubes, exit holes, description and location' },
-      { key: 'wdo_damage', label: 'Damage caused by WDO(s)', type: 'textarea', placeholder: 'Common name, description, and location of visible damage' },
-      { key: 'inaccessible_areas', label: 'Obstructions / inaccessible areas', type: 'textarea', placeholder: 'Attic, interior, exterior, crawlspace, other: specific areas and reasons' },
-      { key: 'previous_treatment_evidence', label: 'Evidence of previous treatment', type: 'select', options: ['No', 'Yes'] },
-      { key: 'previous_treatment_notes', label: 'Previous treatment observations', type: 'textarea', placeholder: 'Visible evidence suggesting possible previous treatment' },
-      { key: 'notice_location', label: 'Notice of Inspection location', type: 'text', defaultValue: 'Electrical Panel', placeholder: 'Where the notice was affixed to the structure' },
-      { key: 'treated_at_inspection', label: 'Treated at time of inspection', type: 'select', options: ['No', 'Yes'] },
-      { key: 'organism_treated', label: 'Organism treated', type: 'multi_select', options: WDO_TARGET_OPTIONS },
-      { key: 'pesticide_used', label: 'Pesticide used', type: 'product_search', placeholder: 'Search product catalog or type product name' },
-      { key: 'treatment_terms', label: 'Treatment terms and conditions', type: 'textarea' },
-      { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Whole structure', 'Spot treatment', 'Not applicable'] },
-      { key: 'treatment_notice_location', label: 'Treatment notice location', type: 'text' },
-      { key: 'comments', label: 'Comments / financial disclosure notes', type: 'textarea', placeholder: 'Additional FDACS Section 5 comments' },
+      { key: 'property_address', label: 'Property inspected', type: 'text', section: 'Property & scope', placeholder: 'Street address, city, state, ZIP' },
+      { key: 'structures_inspected', label: 'Structure(s) inspected', type: 'textarea', section: 'Property & scope', placeholder: 'Main home, attached garage, detached garage, shed, addition…' },
+      { key: 'structure_type', label: 'Structure type', type: 'select', section: 'Property & scope', options: WDO_CONSTRUCTION_OPTIONS },
+      { key: 'structure_sqft', label: 'Structure footprint (approx. sq ft)', type: 'text', section: 'Property & scope', placeholder: 'Under-roof area, e.g. 2200 — used for the fee tier if no fee is picked' },
+      { key: 'inspection_fee', label: 'Inspection fee ($)', type: 'text', section: 'Property & scope', placeholder: 'Any amount, e.g. 175 — varies by construction (wood frame), new build, prior termite history' },
+      { key: 'requested_by', label: 'Inspection requested by', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information' },
+      { key: 'report_sent_to', label: 'Report sent to', type: 'customer_search', customerValue: 'contact_summary', section: 'Property & scope', placeholder: 'Search customer database or type name and contact information if different' },
+      { key: 'inspection_scope', label: 'Visible / accessible areas inspected', type: 'textarea', section: 'Property & scope', placeholder: 'Interior, attic access, garage, exterior perimeter, crawlspace…' },
+      { key: 'wdo_finding', label: 'FDACS Section 2 finding', type: 'select', section: 'Findings (FDACS Section 2)', options: ['No visible signs of WDO observed', 'Visible evidence of WDO observed'] },
+      { key: 'live_wdo', label: 'Live WDO(s)', type: 'textarea', section: 'Findings (FDACS Section 2)', placeholder: 'Common name of organism and location, if any' },
+      { key: 'wdo_evidence', label: 'Evidence of WDO(s)', type: 'textarea', section: 'Findings (FDACS Section 2)', placeholder: 'Dead insects/parts, frass, shelter tubes, exit holes, description and location' },
+      { key: 'wdo_damage', label: 'Damage caused by WDO(s)', type: 'textarea', section: 'Findings (FDACS Section 2)', placeholder: 'Common name, description, and location of visible damage' },
+      { key: 'inaccessible_areas', label: 'Obstructions / inaccessible areas', type: 'textarea', section: 'Findings (FDACS Section 2)', placeholder: 'Attic, interior, exterior, crawlspace, other: specific areas and reasons' },
+      { key: 'previous_treatment_evidence', label: 'Evidence of previous treatment', type: 'select', section: 'Previous treatment', options: ['No', 'Yes'] },
+      { key: 'previous_treatment_notes', label: 'Previous treatment observations', type: 'textarea', section: 'Previous treatment', placeholder: 'Visible evidence suggesting possible previous treatment' },
+      { key: 'notice_location', label: 'Notice of Inspection location', type: 'text', section: 'Notice & treatment at inspection', defaultValue: 'Electrical Panel', placeholder: 'Where the notice was affixed to the structure' },
+      { key: 'treated_at_inspection', label: 'Treated at time of inspection', type: 'select', section: 'Notice & treatment at inspection', options: ['No', 'Yes'] },
+      { key: 'organism_treated', label: 'Organism treated', type: 'multi_select', section: 'Notice & treatment at inspection', options: WDO_TARGET_OPTIONS },
+      { key: 'pesticide_used', label: 'Pesticide used', type: 'product_search', section: 'Notice & treatment at inspection', placeholder: 'Search product catalog or type product name' },
+      { key: 'treatment_terms', label: 'Treatment terms and conditions', type: 'textarea', section: 'Notice & treatment at inspection' },
+      { key: 'treatment_method', label: 'Treatment method', type: 'select', section: 'Notice & treatment at inspection', options: ['Whole structure', 'Spot treatment', 'Not applicable'] },
+      { key: 'treatment_notice_location', label: 'Treatment notice location', type: 'text', section: 'Notice & treatment at inspection' },
+      { key: 'comments', label: 'Comments / financial disclosure notes', type: 'textarea', section: 'Comments', placeholder: 'Additional FDACS Section 5 comments' },
     ],
   },
 
@@ -929,29 +933,34 @@ const PROJECT_TYPES = {
     description: 'Florida Building Code 1816.1.7 Certificate of Compliance for pre-construction subterranean termite soil treatment. Doubles as the FDACS Rule 5E-14.106 treatment record.',
     requiresFollowup: false,
     photoCategories: ['slab_prep', 'soil_treatment', 'perimeter', 'equipment', 'before', 'after', 'other'],
+    // `section` groups the form into scannable blocks (rendered as inline
+    // headers by CreateProjectModal). Presentation-only: field order is
+    // unchanged and the certificate PDF reads keys, never sections. The
+    // repeater's nested sub-fields deliberately carry no sections — they
+    // render inside their own per-application rows.
     findingsFields: [
-      { key: 'treatment_address', label: 'Treatment address', type: 'address', placeholder: 'Start typing the treatment address' },
-      { key: 'lot_block', label: 'Lot / Block', type: 'text', placeholder: 'Lot 12, Block C (pre-construction lots)' },
-      { key: 'subdivision', label: 'Subdivision / Community', type: 'text', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
-      { key: 'permit_number', label: 'Building permit #', type: 'text', placeholder: 'Issued by the building department' },
-      { key: 'builder_contractor', label: 'Builder / General contractor', type: 'customer_search', placeholder: 'Search customer database or type contractor name' },
+      { key: 'treatment_address', label: 'Treatment address', type: 'address', section: 'Site & permit', placeholder: 'Start typing the treatment address' },
+      { key: 'lot_block', label: 'Lot / Block', type: 'text', section: 'Site & permit', placeholder: 'Lot 12, Block C (pre-construction lots)' },
+      { key: 'subdivision', label: 'Subdivision / Community', type: 'text', section: 'Site & permit', placeholder: 'e.g. Lakewood Ranch — Star Farms' },
+      { key: 'permit_number', label: 'Building permit #', type: 'text', section: 'Site & permit', placeholder: 'Issued by the building department' },
+      { key: 'builder_contractor', label: 'Builder / General contractor', type: 'customer_search', section: 'Site & permit', placeholder: 'Search customer database or type contractor name' },
       // No treatment_date field: the project-level date IS the treatment date
       // (the forms label it that way for this type, and the certificate prints
       // it). Legacy findings.treatment_date still renders and satisfies the
       // send gate.
-      { key: 'treatment_time', label: 'Time of treatment', type: 'time' },
-      { key: 'treatment_method', label: 'Method of treatment', type: 'select', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
-      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text' },
-      { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'multi_select', options: WDO_TARGET_OPTIONS },
-      { key: 'product_name', label: 'Product used', type: 'product_search', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
-      { key: 'product_name_other', label: 'Product (if Other)', type: 'text' },
-      { key: 'epa_registration', label: 'EPA registration #', type: 'text', placeholder: 'e.g. 7969-210' },
-      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', placeholder: 'e.g. fipronil' },
-      { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', placeholder: 'e.g. 0.060' },
-      { key: 'square_footage', label: 'Square footage treated', type: 'text' },
-      { key: 'linear_feet', label: 'Linear feet treated', type: 'text', placeholder: 'For trenching / perimeter applications' },
-      { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
-      { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
+      { key: 'treatment_time', label: 'Time of treatment', type: 'time', section: 'Application 1 — product & chemistry' },
+      { key: 'treatment_method', label: 'Method of treatment', type: 'select', section: 'Application 1 — product & chemistry', options: ['Soil barrier (chemical)', 'Wood treatment (borate)', 'Bait system', 'Other'] },
+      { key: 'treatment_method_other', label: 'Method description (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'wdo_target', label: 'Wood-destroying organism treated for', type: 'multi_select', section: 'Application 1 — product & chemistry', options: WDO_TARGET_OPTIONS },
+      { key: 'product_name', label: 'Product used', type: 'product_search', section: 'Application 1 — product & chemistry', placeholder: 'Search product catalog or type product name', options: ['Termidor SC', 'Talstar P', 'Premise 2', 'Trelona ATBB', 'Bora-Care', 'Other'] },
+      { key: 'product_name_other', label: 'Product (if Other)', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'epa_registration', label: 'EPA registration #', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 7969-210' },
+      { key: 'active_ingredient', label: 'Active ingredient', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. fipronil' },
+      { key: 'concentration_pct', label: 'Concentration (%)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'e.g. 0.060' },
+      { key: 'square_footage', label: 'Square footage treated', type: 'text', section: 'Application 1 — product & chemistry' },
+      { key: 'linear_feet', label: 'Linear feet treated', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'For trenching / perimeter applications' },
+      { key: 'trench_depth_ft', label: 'Trench / rod depth (ft)', type: 'text', section: 'Application 1 — product & chemistry', placeholder: 'Vertical barrier depth, e.g. 0.5 (label rate is per ft of depth)' },
+      { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text', section: 'Application 1 — product & chemistry' },
       // Jobs that combine methods (e.g. a Bora-Care wood treatment plus a
       // Termidor soil barrier) record each product as its own application so
       // the certificate carries a per-product FDACS 5E-14.106 record instead
@@ -961,6 +970,7 @@ const PROJECT_TYPES = {
       {
         key: 'additional_applications',
         label: 'Additional applications',
+        section: 'Additional applications',
         type: 'applications',
         itemLabel: 'Application',
         // Row headers continue the numbering after the primary application.
@@ -980,16 +990,16 @@ const PROJECT_TYPES = {
           { key: 'gallons_applied', label: 'Gallons of finished solution applied', type: 'text' },
         ],
       },
-      { key: 'applicator_name', label: "Applicator's printed name", type: 'text' },
-      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text' },
+      { key: 'applicator_name', label: "Applicator's printed name", type: 'text', section: 'Applicator certification' },
+      { key: 'applicator_fdacs_id', label: 'Applicator FDACS ID #', type: 'text', section: 'Applicator certification' },
       // FBC 1816.1.7 requires an "authorized signature of the licensed
       // applicator." A typed attestation paired with the printed name +
       // FDACS ID + treatment date is the standard pattern for portal-
       // generated certificates accepted by Florida building departments.
-      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
-      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
-      { key: 'renewal_due', label: 'Renewal due by', type: 'text', placeholder: 'YYYY-MM-DD' },
-      { key: 'comments', label: 'Additional notes', type: 'textarea', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
+      { key: 'applicator_attestation', label: 'Applicator attestation', type: 'select', section: 'Applicator certification', options: ['I am the licensed Florida applicator who performed the treatment described above, and I certify the information is true and complete (FBC 1816.1.7 / FDACS Rule 5E-14.106).'] },
+      { key: 'warranty_type', label: 'Warranty / retreatment bond', type: 'select', section: 'Warranty & notes', options: ['Builder 1-year', 'Renewable 5-year retreatment bond', 'Renewable 10-year retreatment bond', 'No warranty'] },
+      { key: 'renewal_due', label: 'Renewal due by', type: 'text', section: 'Warranty & notes', placeholder: 'YYYY-MM-DD' },
+      { key: 'comments', label: 'Additional notes', type: 'textarea', section: 'Warranty & notes', placeholder: 'Pre-pour conditions, weather, retreatment triggers, etc.' },
     ],
   },
 };
