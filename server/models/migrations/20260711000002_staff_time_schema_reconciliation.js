@@ -43,6 +43,33 @@ const REQUIRED_COLUMNS = {
     'total_revenue',
     'avg_rpmh',
     'utilization_pct',
+    'approved_by',
+    'approved_at',
+    'approval_notes',
+    'tech_signed_at',
+    'tech_signature',
+  ],
+};
+
+// These values are derived from historical time entries. Adding them with
+// their canonical zero defaults to an existing summary would make unknown
+// payroll data look authoritative. Approval/sign-off fields are different:
+// they are nullable audit facts, so adding them to existing rows as NULL
+// truthfully records that no approval or signature was captured in this
+// schema.
+const SUMMARY_COLUMNS_REQUIRING_EMPTY_TABLE = {
+  time_entry_daily_summary: [
+    'total_admin_minutes',
+    'first_clock_in',
+    'last_clock_out',
+    'rpmh_actual',
+  ],
+  time_weekly_summary: [
+    'total_job_minutes',
+    'total_drive_minutes',
+    'total_revenue',
+    'avg_rpmh',
+    'utilization_pct',
   ],
 };
 
@@ -388,6 +415,21 @@ async function addMissingColumns(knex, missing) {
       if (missing.time_weekly_summary.includes('utilization_pct')) {
         table.decimal('utilization_pct', 5, 2).defaultTo(0);
       }
+      if (missing.time_weekly_summary.includes('approved_by')) {
+        table.uuid('approved_by').nullable();
+      }
+      if (missing.time_weekly_summary.includes('approved_at')) {
+        table.timestamp('approved_at').nullable();
+      }
+      if (missing.time_weekly_summary.includes('approval_notes')) {
+        table.text('approval_notes').nullable();
+      }
+      if (missing.time_weekly_summary.includes('tech_signed_at')) {
+        table.timestamp('tech_signed_at').nullable();
+      }
+      if (missing.time_weekly_summary.includes('tech_signature')) {
+        table.string('tech_signature', 200).nullable();
+      }
     });
   }
 }
@@ -460,19 +502,25 @@ exports.up = async function up(knex) {
     table,
     REQUIRED_COLUMNS[table].filter((column) => !existing.get(table)?.has(column)),
   ]));
+  const missingDerived = Object.fromEntries(
+    Object.entries(SUMMARY_COLUMNS_REQUIRING_EMPTY_TABLE).map(([table, columns]) => [
+      table,
+      columns.filter((column) => missing[table].includes(column)),
+    ]),
+  );
 
-  if (missing.time_entry_daily_summary.length || missing.time_weekly_summary.length) {
+  if (missingDerived.time_entry_daily_summary.length || missingDerived.time_weekly_summary.length) {
     const countResult = await knex.raw(`
       SELECT (SELECT COUNT(*)::integer FROM time_entry_daily_summary) AS daily_count,
              (SELECT COUNT(*)::integer FROM time_weekly_summary) AS weekly_count
     `);
     const counts = rowsFrom(countResult)[0] || {};
-    if (missing.time_entry_daily_summary.length && Number(counts.daily_count) > 0) {
+    if (missingDerived.time_entry_daily_summary.length && Number(counts.daily_count) > 0) {
       throw new Error(
         'time_entry_daily_summary contains rows but lacks derived payroll columns; reconcile them before deployment',
       );
     }
-    if (missing.time_weekly_summary.length && Number(counts.weekly_count) > 0) {
+    if (missingDerived.time_weekly_summary.length && Number(counts.weekly_count) > 0) {
       throw new Error(
         'time_weekly_summary contains rows but lacks derived payroll columns; reconcile them before deployment',
       );

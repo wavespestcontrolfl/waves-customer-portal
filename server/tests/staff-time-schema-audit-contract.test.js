@@ -1,3 +1,6 @@
+const { spawnSync } = require('child_process');
+const path = require('path');
+
 jest.mock('../models/db', () => ({
   destroy: jest.fn(),
   transaction: jest.fn(),
@@ -10,6 +13,33 @@ const {
 } = require('../scripts/audit-staff-rollout-readiness');
 
 describe('Staff time schema rollout audit contract', () => {
+  test('keeps Railway database URL resolution diagnostics off stdout', () => {
+    const serverDir = path.join(__dirname, '..');
+    const result = spawnSync(
+      process.execPath,
+      ['-e', "require('./knexfile')"],
+      {
+        cwd: serverDir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DATABASE_URL: '',
+          DATABASE_PRIVATE_URL: 'postgresql://staff-audit.invalid/railway',
+          DATABASE_PUBLIC_URL: '',
+          POSTGRES_URL: '',
+          POSTGRES_PRIVATE_URL: '',
+          PGDATABASE: '',
+          PGUSER: '',
+          PGHOST: '',
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
+  });
+
   test('checks schema, writer fencing, active timers, and legacy weekly rows', () => {
     const byKey = Object.fromEntries(checks.map((check) => [check.key, check]));
 

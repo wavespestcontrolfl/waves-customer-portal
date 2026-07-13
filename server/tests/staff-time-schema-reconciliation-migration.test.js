@@ -12,13 +12,53 @@ function canonicalColumnRows(omit = {}) {
   ));
 }
 
-function canonicalKnex({ omit, dailyCount = 0, weeklyCount = 0, activeTimer = false } = {}) {
+function canonicalKnex({
+  omit,
+  dailyCount = 0,
+  weeklyCount = 0,
+  activeTimer = false,
+  allowAlterTable = false,
+} = {}) {
   const rawCalls = [];
+  const addedColumns = [];
+  const columnBuilder = (tableName, type, name, args = []) => {
+    const definition = {
+      tableName,
+      type,
+      name,
+      args,
+      nullable: undefined,
+      defaultValue: undefined,
+    };
+    addedColumns.push(definition);
+    const chain = {
+      nullable: jest.fn(() => {
+        definition.nullable = true;
+        return chain;
+      }),
+      defaultTo: jest.fn((value) => {
+        definition.defaultValue = value;
+        return chain;
+      }),
+    };
+    return chain;
+  };
+  const tableBuilder = (tableName) => ({
+    uuid: (name) => columnBuilder(tableName, 'uuid', name),
+    timestamp: (name) => columnBuilder(tableName, 'timestamp', name),
+    text: (name) => columnBuilder(tableName, 'text', name),
+    string: (name, length) => columnBuilder(tableName, 'string', name, [length]),
+    integer: (name) => columnBuilder(tableName, 'integer', name),
+    decimal: (name, precision, scale) => (
+      columnBuilder(tableName, 'decimal', name, [precision, scale])
+    ),
+  });
   const knex = {
     schema: {
       hasTable: jest.fn(async () => true),
-      alterTable: jest.fn(async () => {
-        throw new Error('canonical fixture must not alter a table');
+      alterTable: jest.fn(async (tableName, callback) => {
+        if (!allowAlterTable) throw new Error('canonical fixture must not alter a table');
+        callback(tableBuilder(tableName));
       }),
     },
     raw: jest.fn(async (sql, bindings) => {
@@ -68,7 +108,7 @@ function canonicalKnex({ omit, dailyCount = 0, weeklyCount = 0, activeTimer = fa
       return { rows: [] };
     }),
   };
-  return { knex, rawCalls };
+  return { knex, rawCalls, addedColumns };
 }
 
 describe('Staff time schema reconciliation migration', () => {
@@ -92,6 +132,99 @@ describe('Staff time schema reconciliation migration', () => {
 
     await expect(migration.up(knex)).rejects.toThrow(
       /daily_summary contains rows but lacks derived payroll columns/,
+    );
+    expect(knex.schema.alterTable).not.toHaveBeenCalled();
+  });
+
+  test('adds canonical weekly approval and sign-off columns to an empty legacy table', async () => {
+    const { knex, addedColumns } = canonicalKnex({
+      omit: { time_weekly_summary: migration.REQUIRED_COLUMNS.time_weekly_summary },
+      allowAlterTable: true,
+    });
+
+    await migration.up(knex);
+
+    expect(addedColumns.filter(({ name }) => [
+      'approved_by',
+      'approved_at',
+      'approval_notes',
+      'tech_signed_at',
+      'tech_signature',
+    ].includes(name))).toEqual([
+      {
+        tableName: 'time_weekly_summary',
+        type: 'uuid',
+        name: 'approved_by',
+        args: [],
+        nullable: true,
+        defaultValue: undefined,
+      },
+      {
+        tableName: 'time_weekly_summary',
+        type: 'timestamp',
+        name: 'approved_at',
+        args: [],
+        nullable: true,
+        defaultValue: undefined,
+      },
+      {
+        tableName: 'time_weekly_summary',
+        type: 'text',
+        name: 'approval_notes',
+        args: [],
+        nullable: true,
+        defaultValue: undefined,
+      },
+      {
+        tableName: 'time_weekly_summary',
+        type: 'timestamp',
+        name: 'tech_signed_at',
+        args: [],
+        nullable: true,
+        defaultValue: undefined,
+      },
+      {
+        tableName: 'time_weekly_summary',
+        type: 'string',
+        name: 'tech_signature',
+        args: [200],
+        nullable: true,
+        defaultValue: undefined,
+      },
+    ]);
+  });
+
+  test('adds nullable weekly audit fields safely when historical rows exist', async () => {
+    const auditColumns = [
+      'approved_by',
+      'approved_at',
+      'approval_notes',
+      'tech_signed_at',
+      'tech_signature',
+    ];
+    const { knex, rawCalls, addedColumns } = canonicalKnex({
+      omit: { time_weekly_summary: auditColumns },
+      weeklyCount: 7,
+      allowAlterTable: true,
+    });
+
+    await migration.up(knex);
+
+    expect(addedColumns.map(({ name }) => name)).toEqual(auditColumns);
+    expect(rawCalls.some(({ sql }) => sql.includes('AS daily_count'))).toBe(false);
+  });
+
+  test('rejects a nonempty weekly table when a derived total is missing', async () => {
+    const { knex } = canonicalKnex({
+      omit: {
+        time_weekly_summary: ['total_job_minutes', 'approved_by', 'tech_signed_at'],
+      },
+      weeklyCount: 1,
+      allowAlterTable: true,
+    });
+
+    await expect(migration.up(knex)).rejects.toThrow(
+      /weekly_summary contains rows but lacks derived payroll columns/,
     );
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
   });
