@@ -476,7 +476,14 @@ function buildStationMapReportContext({
       status: statusByStationId.get(String(row.id)) || null,
     });
   }
-  if (!pins.length) return { available: false, reason: 'marks_stale' };
+  // ALL-OR-NOTHING, like the zones satellite overlay: drift resolution (or a
+  // malformed stored shape) can drop a single edge pin while the rest of the
+  // visit's rows survive, and a partial map would publish a summary ("4 of 4
+  // stations inspected") that contradicts the visit's frozen typed findings
+  // and check rows. Every station this visit covered renders, or no map.
+  if (pins.length !== visitRows.length || !pins.length) {
+    return { available: false, reason: 'marks_stale' };
+  }
 
   const summary = {
     total: pins.length,

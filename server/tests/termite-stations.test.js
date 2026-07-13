@@ -522,6 +522,28 @@ test('drift: a re-geocoded property far from the pin ref drops the mark; all dro
   expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
 });
 
+test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed (no partial summaries)', () => {
+  // st-1 was drawn against a ref far from today's render center (drops);
+  // st-2 was drawn against the current center (survives). A partial map
+  // would render "1 of 1 inspected" against a visit that checked 2 — the
+  // card must fail closed instead, like the zones satellite overlay.
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.5, 0.5, { ref: { ...REF, lat: REF.lat + 0.01 } })),
+      stationRow('st-2', 2, pin(0.3, 0.3)),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'ok' },
+      { station_id: 'st-2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
+});
+
 test('status vocabulary stays in lockstep with the DB CHECK', () => {
   expect(STATION_STATUSES).toEqual(['ok', 'activity', 'serviced', 'inaccessible']);
 });
