@@ -54,7 +54,10 @@ const SMS_TEMPLATE = {
   template_key: 'price_change_notice',
   name: 'Price Change Advance Notice',
   category: 'billing',
-  body: 'Hi {first_name} — a heads-up from Waves: the price of your recurring service changes on {effective_date}. Full details: {price_change_url}\n\nNo action needed to continue, and you can make changes anytime — just reply with questions. Reply STOP to opt out.',
+  // GSM-7 only (no em dashes / smart punctuation) and short enough to stay
+  // within 2 SMS segments with a rendered date + notice URL — this goes to
+  // batches of up to 2,000 customers, so a UCS-2 flip is a real cost spike.
+  body: 'Hi {first_name}, a heads-up from Waves: your recurring service price changes on {effective_date}. Details: {price_change_url}\nNo action needed. Reply with questions, or STOP to opt out.',
   description: 'SMS leg of the price-change advance notice; links to the tokened notice page.',
   variables: JSON.stringify(['first_name', 'effective_date', 'price_change_url']),
   is_active: true,

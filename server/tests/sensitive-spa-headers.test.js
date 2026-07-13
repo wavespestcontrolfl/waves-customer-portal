@@ -5,6 +5,7 @@ const {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isPriceChangeNoticePath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -115,5 +116,22 @@ describe('sensitive SPA document headers', () => {
     // Not single-segment estimate paths at all.
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
+  });
+
+  test('marks price-change notice token pages noindex, no-referrer, and no-store', () => {
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/price-change/${LAWN_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes only full price-change 32-hex token document paths', () => {
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}`)).toBe(true);
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}/`)).toBe(true);
+    expect(isPriceChangeNoticePath('/price-change/not-a-real-token')).toBe(false);
+    expect(isPriceChangeNoticePath('/api/public/price-change/0123456789abcdef0123456789abcdef')).toBe(false);
   });
 });

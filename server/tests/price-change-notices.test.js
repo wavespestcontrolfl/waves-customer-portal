@@ -33,6 +33,7 @@ let noticeInserts;
 let noticeUpdates;
 let activityInserts;
 let customersUpdateCalls;
+let existingNoticeRow;
 
 function customersQuery() {
   const q = {
@@ -56,9 +57,19 @@ function noticesQuery() {
       return { returning: jest.fn(async () => [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id }]) };
     }),
     where: jest.fn(() => q),
+    orderBy: jest.fn(() => q),
+    first: jest.fn(async () => existingNoticeRow),
     update: jest.fn(async (patch) => { noticeUpdates.push(patch); return 1; }),
   };
   return q;
+}
+
+// The send contract requires the digest from a real preview of the same
+// parameters — mirrors what AdminPriceChangePage passes through.
+async function digestFor(args) {
+  const { previewPriceChange: preview } = require('../services/price-change-notices');
+  const out = await preview({ increase: args.increase, locationId: args.locationId || null });
+  return out.digest;
 }
 
 function prefsQuery() {
@@ -77,6 +88,7 @@ beforeEach(() => {
   noticeUpdates = [];
   activityInserts = [];
   customersUpdateCalls = [];
+  existingNoticeRow = null;
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'price_change_notices') return noticesQuery();
@@ -116,6 +128,18 @@ describe('previewPriceChange', () => {
     expect(out.rows[0]).toMatchObject({ current: '$49', next: '$51.45', hasEmail: true, hasPhone: true });
     expect(out.rows[1]).toMatchObject({ current: '$100', next: '$105', hasEmail: false, hasPhone: false });
     expect(out.invalidCount).toBe(0);
+    expect(out.digest).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('changes the digest when membership or amounts change at the same count', async () => {
+    customerRows = [CUSTOMER];
+    const a = (await previewPriceChange({ increase: { type: 'amount', value: 3 } })).digest;
+    customerRows = [{ ...CUSTOMER, id: 'c-9' }];
+    const b = (await previewPriceChange({ increase: { type: 'amount', value: 3 } })).digest;
+    customerRows = [CUSTOMER];
+    const c = (await previewPriceChange({ increase: { type: 'amount', value: 4 } })).digest;
+    expect(b).not.toBe(a);
+    expect(c).not.toBe(a);
   });
 
   it('counts customers a negative adjustment would take to $0 or below', async () => {
@@ -142,7 +166,7 @@ describe('createAndSendBatch policy gates', () => {
 
   it('accepts the exact minimum date', async () => {
     customerRows = [CUSTOMER];
-    const out = await createAndSendBatch({ ...GOOD_ARGS, effectiveDate: '2026-08-11' });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, effectiveDate: '2026-08-11', expectedDigest: await digestFor(GOOD_ARGS) });
     expect(out.created).toBe(1);
   });
 
@@ -156,8 +180,27 @@ describe('createAndSendBatch policy gates', () => {
 
   it('refuses when any customer would land at $0 or below', async () => {
     customerRows = [{ ...CUSTOMER, monthly_rate: '2' }];
-    const out = await createAndSendBatch({ ...GOOD_ARGS, increase: { type: 'amount', value: -2 } });
+    const args = { ...GOOD_ARGS, increase: { type: 'amount', value: -2 } };
+    const out = await createAndSendBatch({ ...args, expectedDigest: await digestFor(args) });
     expect(out).toMatchObject({ ok: false, reason: 'invalid_amounts' });
+    expect(noticeInserts).toHaveLength(0);
+  });
+
+  it('refuses when membership or amounts changed even though the count matches', async () => {
+    customerRows = [CUSTOMER];
+    const staleDigest = await digestFor(GOOD_ARGS);
+    // Same count (1), different member: c-1 left the segment, c-9 entered.
+    customerRows = [{ ...CUSTOMER, id: 'c-9' }];
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: staleDigest });
+    expect(out).toMatchObject({ ok: false, reason: 'list_changed', count: 1 });
+    expect(noticeInserts).toHaveLength(0);
+    expect(sendTemplate).not.toHaveBeenCalled();
+  });
+
+  it('refuses when no digest is supplied', async () => {
+    customerRows = [CUSTOMER];
+    const out = await createAndSendBatch(GOOD_ARGS);
+    expect(out).toMatchObject({ ok: false, reason: 'list_changed' });
     expect(noticeInserts).toHaveLength(0);
   });
 });
@@ -165,8 +208,8 @@ describe('createAndSendBatch policy gates', () => {
 describe('createAndSendBatch delivery', () => {
   it('creates a tokened notice row and sends both legs with the notice URL', async () => {
     customerRows = [CUSTOMER];
-    const out = await createAndSendBatch(GOOD_ARGS);
-    expect(out).toMatchObject({ ok: true, created: 1, emailed: 1, texted: 1, unreachable: 0, failed: 0 });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 1, emailed: 1, texted: 1, unreachable: 0, alreadyNotified: 0, failed: 0 });
 
     expect(noticeInserts).toHaveLength(1);
     const row = noticeInserts[0];
@@ -175,7 +218,8 @@ describe('createAndSendBatch delivery', () => {
 
     const emailArgs = sendTemplate.mock.calls[0][0];
     expect(emailArgs.templateKey).toBe('billing.price_change_notice');
-    expect(emailArgs.idempotencyKey).toBe(`price_change:${row.batch_id}:c-1`);
+    // Stable across retry batches — keyed to the change event, not batch_id.
+    expect(emailArgs.idempotencyKey).toBe('price_change:c-1:2026-08-15:4900:5200');
     expect(emailArgs.payload.price_change_url).toBe(`https://portal.test/price-change/${row.notice_token}`);
     expect(emailArgs.payload).toMatchObject({ current_price: '$49', new_price: '$52' });
 
@@ -189,33 +233,64 @@ describe('createAndSendBatch delivery', () => {
 
   it('never modifies monthly_rate — notices only', async () => {
     customerRows = [CUSTOMER];
-    await createAndSendBatch(GOOD_ARGS);
+    await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
     expect(customersUpdateCalls).toHaveLength(0);
   });
 
   it('does not declare an email leg to the SMS gate when the email did not send', async () => {
     customerRows = [{ ...CUSTOMER, email: '' }];
     getInvoiceEmailRecipients.mockReturnValue([]);
-    await createAndSendBatch(GOOD_ARGS);
+    await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
     expect(sendCustomerMessage.mock.calls[0][0].hasEmailLeg).toBe(false);
   });
 
   it('counts customers with neither leg delivered as unreachable, still keeping the notice row', async () => {
     customerRows = [{ ...CUSTOMER, email: '', phone: '' }];
     getInvoiceEmailRecipients.mockReturnValue([]);
-    const out = await createAndSendBatch(GOOD_ARGS);
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
     expect(out).toMatchObject({ ok: true, created: 1, emailed: 0, texted: 0, unreachable: 1 });
     expect(noticeUpdates[0]).toMatchObject({ email_sent: false, sms_sent: false, status: 'sent' });
   });
 
+  it('skips customers already notified of the same change event on retry', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-prior', status: 'sent', notice_token: '0123456789abcdef0123456789abcdef',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 0, texted: 0, alreadyNotified: 1, failed: 0 });
+    expect(noticeInserts).toHaveLength(0);
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('resumes a draft row from a crashed attempt, reusing its token instead of inserting', async () => {
+    customerRows = [CUSTOMER];
+    existingNoticeRow = {
+      id: 'n-draft', status: 'draft', notice_token: 'feedfacefeedfacefeedfacefeedface',
+      customer_id: 'c-1', current_amount_cents: 4900, new_amount_cents: 5200,
+    };
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 1, texted: 1, alreadyNotified: 0, failed: 0 });
+    expect(noticeInserts).toHaveLength(0);
+    const emailArgs = sendTemplate.mock.calls[0][0];
+    expect(emailArgs.payload.price_change_url).toBe('https://portal.test/price-change/feedfacefeedfacefeedfacefeedface');
+    expect(emailArgs.idempotencyKey).toBe('price_change:c-1:2026-08-15:4900:5200');
+    expect(noticeUpdates[0]).toMatchObject({ email_sent: true, sms_sent: true, status: 'sent' });
+  });
+
   it('reports ok:false when a send throws, without losing the rest of the batch', async () => {
     customerRows = [CUSTOMER, { ...CUSTOMER, id: 'c-2', email: 'two@example.com' }];
+    const digest = await digestFor(GOOD_ARGS);
     let call = 0;
     db.mockImplementation((table) => {
       if (table === 'customers') return customersQuery();
       if (table === 'price_change_notices') {
         call += 1;
         if (call === 1) {
+          // c-1's prior-notice lookup blows up (no where/first on this stub).
           return { insert: jest.fn(() => { throw new Error('insert boom'); }) };
         }
         return noticesQuery();
@@ -224,7 +299,7 @@ describe('createAndSendBatch delivery', () => {
       if (table === 'activity_log') return activityQuery();
       throw new Error(`unexpected table ${table}`);
     });
-    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedCount: 2 });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedCount: 2, expectedDigest: digest });
     expect(out).toMatchObject({ ok: false, created: 1, failed: 1 });
     expect(activityInserts).toHaveLength(1);
   });

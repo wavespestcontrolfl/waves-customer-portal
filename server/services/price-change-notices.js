@@ -49,7 +49,14 @@ function formatMoney(cents) {
 function targetsQuery({ locationId = null } = {}) {
   let q = db('customers')
     .modify(whereLiveCustomer)
-    .where('monthly_rate', '>', 0);
+    .where('monthly_rate', '>', 0)
+    // Monthly-billed members only. per_application and annual_prepay
+    // customers are skipped by the monthly billing cron even when a
+    // monthly_rate is on file (same predicate as autopay-notifications),
+    // so a "per month" price notice would misstate their billing.
+    .where(function monthlyBilledOnly() {
+      this.whereNull('billing_mode').orWhereNotIn('billing_mode', ['per_application', 'annual_prepay']);
+    });
   if (locationId) {
     q = q.where(function locationMatch() {
       this.where('nearest_location_id', locationId)
@@ -115,6 +122,17 @@ function noticeRowsFor(customers, increase) {
   });
 }
 
+// Digest of the exact reviewed set — who gets a notice and at what amounts.
+// Sorted by customer id so preview (name order) and send (id order) agree.
+// The send endpoint refuses when this changes, so same-count membership or
+// amount drift between Preview and Send can never ship an unreviewed list.
+function previewDigest(rows) {
+  const h = crypto.createHash('sha256');
+  const sorted = [...rows].sort((a, b) => String(a.customerId).localeCompare(String(b.customerId)));
+  for (const r of sorted) h.update(`${r.customerId}:${r.currentCents}:${r.newCents}\n`);
+  return h.digest('hex');
+}
+
 async function previewPriceChange({ locationId = null, increase } = {}) {
   const inc = parseIncrease(increase);
   const loc = parseLocation(locationId);
@@ -125,6 +143,7 @@ async function previewPriceChange({ locationId = null, increase } = {}) {
   const rows = noticeRowsFor(customers, inc);
   const invalid = rows.filter((r) => r.newCents <= 0);
   return {
+    digest: previewDigest(rows),
     rows: rows.map((r) => ({
       customerId: r.customerId,
       name: r.name,
@@ -151,7 +170,7 @@ function validateEffectiveDate(effectiveDate) {
   return dateStr;
 }
 
-async function sendNoticeEmail({ customer, notice, vars }) {
+async function sendNoticeEmail({ customer, idempotencyKey, vars }) {
   try {
     const EmailTemplateLibrary = require('./email-template-library');
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
@@ -166,7 +185,7 @@ async function sendNoticeEmail({ customer, notice, vars }) {
       recipientId: customer.id,
       suppressionGroupKey: 'service_operational',
       categories: ['billing', 'price_change_notice'],
-      idempotencyKey: `price_change:${notice.batch_id}:${customer.id}`,
+      idempotencyKey,
       suppressProviderErrorLog: true,
       payload: {
         ...vars,
@@ -216,7 +235,7 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg }) {
   }
 }
 
-async function createAndSendBatch({ locationId = null, increase, effectiveDate, cadenceLabel = 'month', expectedCount, actorId = null } = {}) {
+async function createAndSendBatch({ locationId = null, increase, effectiveDate, cadenceLabel = 'month', expectedCount, expectedDigest = null, actorId = null } = {}) {
   const inc = parseIncrease(increase);
   const loc = parseLocation(locationId);
   const effective = validateEffectiveDate(effectiveDate);
@@ -233,6 +252,12 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   if (customers.length > BATCH_CAP) return { ok: false, reason: 'over_cap', count: customers.length };
 
   const rows = noticeRowsFor(customers, inc);
+  // The count can stay identical while one customer enters and another
+  // leaves the segment (or an amount changes) between Preview and Send —
+  // the digest pins the exact reviewed membership + amounts.
+  if (String(expectedDigest || '') !== previewDigest(rows)) {
+    return { ok: false, reason: 'list_changed', count: customers.length };
+  }
   if (rows.some((r) => r.newCents <= 0)) {
     return { ok: false, reason: 'invalid_amounts' };
   }
@@ -240,26 +265,48 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
   const batchId = crypto.randomUUID();
   const effectiveLabel = formatDisplayDate(effective, { fallback: effective });
   const byId = new Map(customers.map((c) => [c.id, c]));
-  const summary = { created: 0, emailed: 0, texted: 0, unreachable: 0, failed: 0 };
+  const summary = { created: 0, emailed: 0, texted: 0, unreachable: 0, alreadyNotified: 0, failed: 0 };
 
   for (let i = 0; i < rows.length; i += SEND_CONCURRENCY) {
     const batch = rows.slice(i, i + SEND_CONCURRENCY);
     await Promise.all(batch.map(async (row) => {
       try {
-        const token = crypto.randomBytes(16).toString('hex');
-        const [notice] = await db('price_change_notices').insert({
-          batch_id: batchId,
-          customer_id: row.customerId,
-          current_amount_cents: row.currentCents,
-          new_amount_cents: row.newCents,
-          cadence_label: cadence,
-          effective_date: effective,
-          notice_token: token,
-          status: 'draft',
-          created_by: actorId || null,
-          metadata: JSON.stringify({ increase: inc, location_id: loc }),
-        }).returning('*');
-        summary.created += 1;
+        // Retry idempotency: the change EVENT for a customer is identified
+        // by (customer, effective date, current → new amount), not by
+        // batch_id — a re-run of the same confirmed change after a partial
+        // failure must not re-notice customers who already got theirs.
+        const existing = await db('price_change_notices')
+          .where({
+            customer_id: row.customerId,
+            effective_date: effective,
+            current_amount_cents: row.currentCents,
+            new_amount_cents: row.newCents,
+          })
+          .orderBy('created_at', 'desc')
+          .first();
+        if (existing && existing.status !== 'draft') {
+          summary.alreadyNotified += 1;
+          return;
+        }
+
+        let notice = existing;
+        let token = existing ? existing.notice_token : null;
+        if (!notice) {
+          token = crypto.randomBytes(16).toString('hex');
+          [notice] = await db('price_change_notices').insert({
+            batch_id: batchId,
+            customer_id: row.customerId,
+            current_amount_cents: row.currentCents,
+            new_amount_cents: row.newCents,
+            cadence_label: cadence,
+            effective_date: effective,
+            notice_token: token,
+            status: 'draft',
+            created_by: actorId || null,
+            metadata: JSON.stringify({ increase: inc, location_id: loc }),
+          }).returning('*');
+          summary.created += 1;
+        }
 
         const customer = byId.get(row.customerId);
         const vars = {
@@ -269,7 +316,11 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
           cadence_label: cadence,
           price_change_url: portalUrl(`/price-change/${token}`),
         };
-        const emailed = await sendNoticeEmail({ customer, notice, vars });
+        // Keyed to the change event (stable across retry batches) so the
+        // email library dedupes even if a crash left the row in 'draft'
+        // after the email went out.
+        const idempotencyKey = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
+        const emailed = await sendNoticeEmail({ customer, idempotencyKey, vars });
         const texted = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: emailed });
         if (emailed) summary.emailed += 1;
         if (texted) summary.texted += 1;
@@ -293,7 +344,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
     await db('activity_log').insert({
       admin_user_id: actorId || null,
       action: 'price_change_batch_sent',
-      description: `Price-change notices (${inc.type === 'percent' ? `${inc.value}%` : formatMoney(Math.round(inc.value * 100))}${loc ? ` @ ${loc}` : ''}, effective ${effective}): ${summary.created} created, ${summary.emailed} emailed, ${summary.texted} texted, ${summary.unreachable} unreachable, ${summary.failed} failed.`,
+      description: `Price-change notices (${inc.type === 'percent' ? `${inc.value}%` : formatMoney(Math.round(inc.value * 100))}${loc ? ` @ ${loc}` : ''}, effective ${effective}): ${summary.created} created, ${summary.emailed} emailed, ${summary.texted} texted, ${summary.unreachable} unreachable, ${summary.alreadyNotified} already notified, ${summary.failed} failed.`,
       metadata: JSON.stringify({ batch_id: batchId, increase: inc, location_id: loc, effective_date: effective, summary }),
     });
   } catch (auditErr) {

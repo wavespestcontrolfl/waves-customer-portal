@@ -95,6 +95,7 @@ export default function AdminPriceChangePage() {
           effectiveDate: preview.effectiveDate,
           cadenceLabel: "month",
           expectedCount: preview.count,
+          expectedDigest: preview.digest,
         }),
       });
       setResult({ ok: data.ok !== false, text: data.message || "Notices sent." });
