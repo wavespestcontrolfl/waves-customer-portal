@@ -1387,7 +1387,12 @@ router.post('/', async (req, res, next) => {
       findings: findings || null,
       recommendations: recommendations || null,
       service_record_id: service_record_id || null,
-      scheduled_service_id: scheduled_service_id || null,
+      // Persist the DERIVED link too (record-only callers): the linked-only
+      // gate accepted this create because the record resolved to a scheduled
+      // visit, and the schedule/tech continuation path looks projects up by
+      // projects.scheduled_service_id — dropping it here would let the same
+      // visit mint a duplicate report (Codex round-2 P2).
+      scheduled_service_id: linkedScheduledServiceId || null,
       status: 'draft',
       created_by_tech_id: req.technicianId,
     }).returning('*');

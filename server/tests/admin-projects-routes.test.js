@@ -611,6 +611,61 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('record-only linked WDO create persists the DERIVED scheduled_service_id', async () => {
+    // The linked-only gate accepts a service_record_id link via the record's
+    // scheduled_service_id — the insert must persist that derived id or the
+    // schedule/tech continuation lookup (keyed on projects.scheduled_service_id)
+    // never finds the report and the visit can mint a duplicate (Codex r2).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-5', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
+    const projectInsert = chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'service_records') return chain({
+        // The scope validator re-reads the record and pins customer
+        // ownership — the mock must carry customer_id or the create 400s.
+        first: jest.fn().mockResolvedValue({
+          id: 'rec-9', customer_id: 'customer-1', technician_id: null,
+          scheduled_service_id: 'svc-7',
+        }),
+      });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-7', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', service_record_id: 'rec-9' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-5');
+        expect(projectInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+          service_record_id: 'rec-9',
+          scheduled_service_id: 'svc-7',
+        }));
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('wdo intelligence uses selected customer address and returns field suggestions', async () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     lookupPropertyFromAITrio.mockResolvedValue({

@@ -1171,9 +1171,12 @@ export default function DispatchPageV2({
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
   useEffect(() => {
     if (!continueProjectId || projectTypesRegistry) return;
+    // This page's adminFetch (utils/admin-fetch) returns the PARSED body,
+    // not a Response — calling .json() on it threw and permanently cached
+    // an empty registry, which blanked every findings field in the
+    // in-place editor (Codex round-2 P2).
     adminFetch("/admin/projects/types")
-      .then((r) => r.json())
-      .then((d) => setProjectTypesRegistry(d.types || {}))
+      .then((d) => setProjectTypesRegistry(d?.types || {}))
       .catch(() => setProjectTypesRegistry({}));
   }, [continueProjectId, projectTypesRegistry]);
   const [rescheduleService, setRescheduleService] = useState(null);
