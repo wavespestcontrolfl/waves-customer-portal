@@ -1254,6 +1254,21 @@ export default function DispatchPageV2({
     fetchSchedule(date);
   }, [date, fetchSchedule]);
 
+  // C4 (universal one-time services, ratified Q9): /tech deep-links typed
+  // jobs here as ?completeService=<scheduledServiceId> instead of alert-
+  // bouncing. The param is consumed once (deleted immediately, same shape
+  // as ?customer below); the open itself happens after handleComplete is
+  // defined, keyed off this ref.
+  const pendingCompleteIdRef = useRef(null);
+  useEffect(() => {
+    const id = searchParams.get("completeService");
+    if (!id) return;
+    pendingCompleteIdRef.current = id;
+    const next = new URLSearchParams(searchParams);
+    next.delete("completeService");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
   useEffect(() => {
     const customerId = searchParams.get("customer");
     if (!customerId) return;
@@ -1378,6 +1393,22 @@ export default function DispatchPageV2({
     }
     setCompletingService(service);
   }, []);
+
+  // Second half of the ?completeService deep-link: once the day's schedule
+  // is loaded, open the completion for the pending id through
+  // handleComplete (so project-backed routing still applies). An id not on
+  // the loaded date alerts once instead of silently hanging.
+  useEffect(() => {
+    const id = pendingCompleteIdRef.current;
+    if (!id || !data) return;
+    pendingCompleteIdRef.current = null;
+    const svc = (data.services || []).find((s) => String(s.id) === String(id));
+    if (svc) {
+      handleComplete(svc);
+    } else {
+      alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
+    }
+  }, [data, handleComplete]);
 
   const handleEnRoute = useCallback(
     async (service) => {
