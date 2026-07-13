@@ -399,7 +399,7 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
   // single receipt text. Best-effort: a receipt failure must never fail
   // deposit recording.
   if ((Array.isArray(inserted) && inserted.length > 0) || updated > 0) {
-    await sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceipt({ estimateId, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt failed for estimate ${estimateId}: ${err.message}`);
     });
   }
@@ -419,7 +419,19 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
 //     no-phone gap-fill (they paid through the tokened estimate page).
 // Kill switches: deposit_receipt SMS template row / deposit.receipt email
 // template row — each leg gates independently.
-async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }) {
+// {charge_note} for the receipt templates: empty for face-value payments
+// (wallets, debit, pre-revert); the actual-charge disclosure when a card
+// surcharge was collected — the receipt is proof of payment and must state
+// what the card was charged, while `amount` stays the deposit (the credit).
+function depositChargeNote(amountDollars, cardSurcharge) {
+  const fee = Number(cardSurcharge || 0);
+  if (!(fee > 0)) return '';
+  const total = (Math.round(Number(amountDollars || 0) * 100) + Math.round(fee * 100)) / 100;
+  const fmt = (n) => `$${n.toFixed(2).replace(/\.00$/, '')}`;
+  return ` (card charge total ${fmt(total)}, includes the ${fmt(fee)} card processing fee)`;
+}
+
+async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimate = await db('estimates')
     .where({ id: estimateId })
     .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
@@ -470,7 +482,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
     : (!phone && !!leadEmail);
 
   if (wantSms && phone) {
-    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt SMS failed for estimate ${estimateId}: ${err.message}`);
     });
   } else if (!wantSms) {
@@ -478,14 +490,14 @@ async function sendDepositReceipt({ estimateId, amountDollars, paymentIntentId }
   }
 
   if (wantEmail) {
-    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }).catch((err) => {
+    await sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, cardSurcharge, paymentIntentId }).catch((err) => {
       logger.warn(`[estimate-deposits] deposit receipt email failed for estimate ${estimateId}: ${err.message}`);
     });
   }
 }
 
 // SMS leg. Kill switch = the deposit_receipt SMS template row.
-async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, paymentIntentId }) {
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
@@ -495,6 +507,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
   const body = await renderSmsTemplate('deposit_receipt', {
     first_name: firstName,
     amount,
+    charge_note: depositChargeNote(amountDollars, cardSurcharge),
   }, {
     workflow: 'deposit_receipt',
     entity_type: 'estimate',
@@ -597,7 +610,7 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
 // already guarantees a single dispatch per deposit; the per-PaymentIntent
 // idempotency key is belt-and-suspenders AND deliberately NOT per-estimate —
 // a refunded deposit replaced by a new PaymentIntent must still receipt.
-async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, paymentIntentId }) {
+async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimateId = estimate.id;
   const sendgrid = require('./sendgrid-mail');
   if (!sendgrid.isConfigured()) {
@@ -640,6 +653,7 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       payload: {
         first_name: firstName,
         amount,
+        charge_note: depositChargeNote(amountDollars, cardSurcharge),
         estimate_url: estimateUrl,
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
@@ -831,6 +845,38 @@ async function createDepositIntentForEstimate(estimate, { oneTime = false } = {}
     })
     .onConflict('stripe_payment_intent_id')
     .merge({ updated_at: db.fn.now() });
+
+  // Supersede every OTHER pending intent for this estimate (Codex #2705
+  // r7): a key change (the _qac1 salt, an amount-class switch) mints a new
+  // PI while an already-open tab still holds the old one's usable client
+  // secret — if both confirm, two deposits record and both can credit.
+  // Cancel FIRST, flip the ledger row second: a cancel that loses to an
+  // in-flight success throws, the row stays pending, and the webhook
+  // records that money normally (flipping first would strand a captured
+  // payment on a terminal row). Failed rows feed retryGeneration, which is
+  // correct — they are terminal.
+  try {
+    const stalePending = await db('estimate_deposits')
+      .where({ estimate_id: estimate.id, status: 'pending' })
+      .whereNot({ stripe_payment_intent_id: paymentIntent.id })
+      .select('id', 'stripe_payment_intent_id');
+    for (const stale of stalePending) {
+      try {
+        await StripeService.cancelPaymentIntent(stale.stripe_payment_intent_id, { cancellation_reason: 'abandoned' });
+        await db('estimate_deposits')
+          .where({ id: stale.id, status: 'pending' })
+          .update({ status: 'failed', updated_at: db.fn.now() });
+        logger.info('[estimate-deposits] superseded stale pending deposit intent', {
+          estimateId: estimate.id,
+          canceledPaymentIntentId: stale.stripe_payment_intent_id,
+        });
+      } catch (cancelErr) {
+        logger.warn(`[estimate-deposits] could not cancel superseded deposit PI ${stale.stripe_payment_intent_id}: ${cancelErr.message}`);
+      }
+    }
+  } catch (sweepErr) {
+    logger.warn(`[estimate-deposits] stale-pending sweep failed for estimate ${estimate.id}: ${sweepErr.message}`);
+  }
 
   return {
     clientSecret: paymentIntent.client_secret,
@@ -1773,8 +1819,8 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
       .where({ estimate_id: estimateId })
       .whereIn('status', ['received', 'credited']);
     const ledgerRow = paymentIntentId
-      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'stripe_payment_intent_id')
-      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'stripe_payment_intent_id');
+      ? await ledgerQuery.where({ stripe_payment_intent_id: paymentIntentId }).first('amount', 'card_surcharge', 'stripe_payment_intent_id')
+      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'card_surcharge', 'stripe_payment_intent_id');
     if (!ledgerRow) return { sent: false, reason: 'no_received_deposit' };
 
     // Propagate the leg's real outcome — a no-recipient / suppression /
@@ -1785,6 +1831,7 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
       customer,
       prefs,
       amountDollars: Number(ledgerRow.amount || 0),
+      cardSurcharge: Number(ledgerRow.card_surcharge || 0),
       paymentIntentId: ledgerRow.stripe_payment_intent_id,
     });
     return emailResult?.sent ? { sent: true } : { sent: false, reason: emailResult?.reason || 'email_not_sent' };
