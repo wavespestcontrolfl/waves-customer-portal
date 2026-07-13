@@ -124,6 +124,7 @@ const COUNTY_LAYERS = {
     outFields: [
       'PARID', 'SITUS_ADDRESS', 'SITUS_POSTAL_CITY', 'SITUS_POSTAL_ZIP',
       'LAND_SQFT_CAMA', 'BLDGS_SQFT_LIVING', 'BLDG_R1_STORIES', 'BLDG_R1_YRBUILT',
+      'BLDG_C1_SQFTLIVNG', 'BLDG_C1_STORIES', 'BLDG_C1_YRBUILT',
       'BLDGS_LIVINGUNITS', 'CUR_DOR_LUC_CODE', 'CUR_MAN_LUC_DESC',
       'PAR_SUBDIV_NAME', 'PAR_SWIMPOOL_FLAG', 'CUR_ROLL_YEAR', 'FEATS_SQFT_IMPERV',
     ],
@@ -133,9 +134,13 @@ const COUNTY_LAYERS = {
       situsCity: cleanStr(g('SITUS_POSTAL_CITY')),
       situsZip: zip5(g('SITUS_POSTAL_ZIP')),
       lotSqft: positiveOrNull(g('LAND_SQFT_CAMA')),
-      livingAreaSqft: positiveOrNull(g('BLDGS_SQFT_LIVING')),
-      stories: positiveOrNull(g('BLDG_R1_STORIES')),
-      yearBuilt: positiveOrNull(g('BLDG_R1_YRBUILT')),
+      livingAreaSqft: positiveOrNull(g('BLDGS_SQFT_LIVING')) ?? positiveOrNull(g('BLDG_C1_SQFTLIVNG')),
+      // Manatee splits building facts into residential (BLDG_R1_*) and
+      // commercial (BLDG_C1_*) blocks; a pure-commercial parcel (warehouse,
+      // office) carries only the C1 block, so R1-only reads left stories /
+      // year built empty on every commercial lookup.
+      stories: positiveOrNull(g('BLDG_R1_STORIES')) ?? positiveOrNull(g('BLDG_C1_STORIES')),
+      yearBuilt: positiveOrNull(g('BLDG_R1_YRBUILT')) ?? positiveOrNull(g('BLDG_C1_YRBUILT')),
       residentialUnits: positiveOrNull(g('BLDGS_LIVINGUNITS')),
       dorUseCode: cleanStr(g('CUR_DOR_LUC_CODE')),
       landUseDescription: cleanStr(g('CUR_MAN_LUC_DESC')),
@@ -416,9 +421,20 @@ const SITUS_QUERY_FIELDS = {
   Charlotte: ['FullPropertyAddress', 'propertyaddress'],
 };
 
+// Situs ZIP per county, returned alongside each situs string so the audit can
+// scope its verdict to the typed ZIP — SWFL grid streets repeat across cities
+// ("51ST AVE E" exists in both Bradenton 34203 and Palmetto 34221), so a
+// county-wide house-number hit can validate the wrong city's address.
+const SITUS_ZIP_FIELDS = {
+  Manatee: 'SITUS_POSTAL_ZIP',
+  Sarasota: 'loczip',
+  Charlotte: 'zipcode',
+};
+
 // All situs strings on the county roll whose address contains the given
 // street text ("TOBERMORY" → every parcel on Tobermory Way, including
-// multi-situs paired-villa rows). Returns { situs, truncated } — truncated
+// multi-situs paired-villa rows). Returns { situs, zips, truncated } — zips
+// is index-parallel to situs (roll ZIP or null) for ZIP scoping; truncated
 // mirrors the ArcGIS exceededTransferLimit flag so the caller knows a "number
 // missing" verdict could be an artifact of the page cap on a long street.
 // Fail-open null on error/timeout — the audit is a diagnostic hint, never
@@ -431,10 +447,11 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!layer || !fields || text.length < 3) return null;
 
+  const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
     f: 'json',
     where: fields.map((f) => `UPPER(${f}) LIKE '%${text}%'`).join(' OR '),
-    outFields: fields.join(','),
+    outFields: [...fields, ...(zipField ? [zipField] : [])].join(','),
     returnGeometry: 'false',
     resultRecordCount: '2000',
   });
@@ -448,17 +465,22 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
     const data = await resp.json();
     if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);
     const features = Array.isArray(data?.features) ? data.features : [];
-    const situs = features
-      .map((f) => {
-        const g = ciAttr(f.attributes || {});
-        return fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
-      })
-      .filter(Boolean);
+    const situs = [];
+    const zips = [];
+    for (const f of features) {
+      const g = ciAttr(f.attributes || {});
+      const line = fields.map((field) => cleanStr(g(field))).filter(Boolean).join(';');
+      if (!line) continue;
+      situs.push(line);
+      // Parallel array: zips[i] is the roll ZIP for situs[i] (null when the
+      // layer/row has none — the audit treats unknown as in-scope, fail-open).
+      zips.push(zipField ? zip5(g(zipField)) : null);
+    }
     const truncated = !!data?.exceededTransferLimit;
     logger.info('[county-parcel-gis] street situs query', {
       county, matches: situs.length, truncated, elapsedMs: Date.now() - t0,
     });
-    return { situs, truncated };
+    return { situs, zips, truncated };
   } catch (err) {
     const aborted = err?.name === 'AbortError' || err?.code === 'ABORT_ERR';
     // County + error only — no street/address values in logs (PII rule).
