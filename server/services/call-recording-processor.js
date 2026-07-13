@@ -7672,8 +7672,33 @@ const CallRecordingProcessor = {
       .orderBy('created_at', 'desc')
       .limit(25);
 
+    // Incomplete PAN quarantines (round-15 P1): pan_detected without
+    // recording_quarantined means a Twilio delete is still owed. These rows
+    // fall outside the missing-recording filters above — the backfill feeds
+    // calls OLDER than the 7-day window, and the stamped-before-quarantine
+    // crash window leaves recording_url POPULATED — so they get their own
+    // candidate set; recoverRecordingForCall's pan guard runs the retry.
+    let quarantineRetries = [];
+    try {
+      quarantineRetries = await db('call_log')
+        .select('twilio_call_sid')
+        .whereNotNull('twilio_call_sid')
+        .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
+        .whereRaw("COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true'")
+        .orderBy('created_at', 'desc')
+        .limit(10);
+    } catch (qErr) {
+      logger.warn(`[call-proc] incomplete-quarantine sweep query failed: ${qErr.message}`);
+    }
+    const seenSids = new Set();
+    const sweepRows = [...rows, ...quarantineRetries].filter((row) => {
+      if (!row.twilio_call_sid || seenSids.has(row.twilio_call_sid)) return false;
+      seenSids.add(row.twilio_call_sid);
+      return true;
+    });
+
     const results = [];
-    for (const row of rows) {
+    for (const row of sweepRows) {
       try {
         results.push({ callSid: row.twilio_call_sid, ...(await this.recoverRecordingForCall(row.twilio_call_sid)) });
       } catch (err) {
@@ -7683,7 +7708,7 @@ const CallRecordingProcessor = {
 
     const recovered = results.filter((r) => r.recovered).length;
     if (recovered > 0) logger.info(`[call-proc] Recovered ${recovered} missing recent recording(s)`);
-    return { checked: rows.length, recovered, results };
+    return { checked: sweepRows.length, recovered, results };
   },
 
   /**

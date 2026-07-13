@@ -464,6 +464,24 @@ describe('scrubPans — round 13 hardening', () => {
   });
 });
 
+describe('scrubPans — round 15 hardening', () => {
+  it('absorbs the full slash-fused expiry tail via the widest valid split', () => {
+    expect(scrubPansDetailed('424242424242424212/28123')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('splits a fused 2-series Mastercard readback (strict future expiry)', () => {
+    expect(scrubPansDetailed('22230000484000111228123')).toEqual({ text: '[card ending 0011] [code removed]', count: 1 });
+  });
+
+  it('the widened splits still leave tracking numbers, reference numbers, and phone pairs intact', () => {
+    for (const s of [
+      'tracking 42424242424242424242',
+      'ref number 4242424242424241 on file',
+      '9415551234 2395559876',
+    ]) expect(scrubPans(s)).toBe(s);
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

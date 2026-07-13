@@ -235,7 +235,13 @@ function scrubNumericRun(run) {
         // (round-1 pinned contract).
         if ((tailLen > 4 || digits.length > 19) && !isValidCodeTail(tail)) continue;
         const prefix = digits.slice(0, plen);
-        if (digits.length > 19 && !strongCardIin(prefix)) continue;
+        // >19 totals need a card-shaped prefix: strong IIN with a code
+        // tail, or a PRECISE 2-series Mastercard with a STRICT future
+        // expiry (round-15 P1 — mirrors the spoken-path mc2 gate; a real
+        // 2223… readback fused into one token must not survive).
+        if (digits.length > 19
+          && !strongCardIin(prefix)
+          && !(mc2SeriesIin(prefix) && isStrictFutureExpiryTail(tail))) continue;
         if (panCandidateValid(prefix)) return prefix;
       }
       return null;
@@ -260,10 +266,12 @@ function scrubNumericRun(run) {
         if (spanSum >= 17) {
           const spanDigits = groups.slice(i, j + 1).map((grp) => grp.digits).join('');
           const prefix = trySplitUnseparated(spanDigits);
-          if (prefix) {
-            matched = { endGroup: j, digits: spanDigits, prefixMask: prefix };
-            break;
-          }
+          // WIDEST valid split wins (round-15 P1): "…424212/28123" splits
+          // at the 18-digit token too, but stopping there leaves "/28123"
+          // (year + CVV) beside the mask — keep walking and take the last
+          // span whose split still validates so the whole code tail is
+          // absorbed.
+          if (prefix) matched = { endGroup: j, digits: spanDigits, prefixMask: prefix };
         }
       }
     }

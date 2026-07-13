@@ -161,6 +161,17 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
           });
         if (legacyText.count > 0) call.transcription = legacyText.text;
         if (legacyStructured.count > 0) call.transcript_structured = legacyStructured.json;
+        // The synced voice message mirrors the transcript as its body —
+        // heal it in the same touch (round-15 P1) or the raw card number
+        // stays visible in Customer 360/Comms after the source row was
+        // masked. recording_url:null + media:null so the sync can never
+        // reattach the audio this job is about to quarantine.
+        if (legacyText.count > 0) {
+          await processor().updateUnifiedVoiceMessage(
+            { ...call, recording_url: null, transcription: legacyText.text },
+            { body: legacyText.text, media: null },
+          ).catch((mirrorErr) => logger.warn(`[retranscribe] message-mirror heal failed for call ${call.id}: ${mirrorErr.message}`));
+        }
       }
     } catch (healErr) {
       logger.error(`[retranscribe] legacy PAN heal failed for call ${call.id}: ${healErr.message}`);
