@@ -27,7 +27,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -101,9 +101,10 @@ const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
 
 // Base toolset for every admin context: core customer/schedule/revenue tools
-// plus read-only comms tools, so SMS/call history is visible from any page —
-// not just the Communications page.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
+// plus read-only comms tools and the email read+reply subset, so SMS/call
+// history and the inbox are visible from any page — not just the
+// Communications/Email pages.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
 
 // Writes that the REST equivalents guard with requireAdmin — technician
 // tokens must not reach them through the intelligence bar either.
@@ -125,6 +126,14 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  // Email tools return sender names/addresses and message bodies, and reply
+  // inputs carry the drafted body — same class of PII as the comms tools.
+  'get_inbox_summary',
+  'search_emails',
+  'get_email_thread',
+  'draft_email_reply',
+  'send_email_reply',
+  'reply_via_sms',
   'get_stock_movements',
   // Railway runtime logs can echo customer identifiers from app logging —
   // redact like any other PII-bearing tool result.
@@ -812,7 +821,7 @@ function getToolsForContext(context) {
   }
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS];
+    return [...TOOLS, ...COMMS_TOOLS, ...EMAIL_SHARED_TOOLS];
   }
   if (context === 'tax') {
     return [...BASE_TOOLS, ...TAX_TOOLS];
@@ -821,7 +830,8 @@ function getToolsForContext(context) {
     return [...BASE_TOOLS, ...LEADS_TOOLS];
   }
   if (context === 'email') {
-    return [...BASE_TOOLS, ...EMAIL_TOOLS];
+    // Full email set already includes the shared subset — don't double-load
+    return [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS];
   }
   if (context === 'banking') {
     return [...BASE_TOOLS, ...BANKING_QUERY_TOOLS];
@@ -940,6 +950,8 @@ IMAGE ATTACHMENTS:
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- You CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — never claim you can't see email. Use it to pull a sender's email address, find a customer's message, or check what came in.
+- You CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
 SCHEDULING INTELLIGENCE:
