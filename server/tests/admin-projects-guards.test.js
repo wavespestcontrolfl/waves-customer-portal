@@ -113,7 +113,12 @@ describe('admin project route guards', () => {
       },
       {
         project_type: 'termite_inspection',
-        findings: { areas_inspected: 'Garage, foundation, attic access, and exterior perimeter.' },
+        findings: {
+          areas_inspected: 'Garage, foundation, attic access, and exterior perimeter.',
+          // Phase-3 compliance content is required on the project path too.
+          areas_not_inspected: 'None',
+          inspection_notice_affixed: 'Yes',
+        },
       },
       {
         project_type: 'pest_inspection',
@@ -214,6 +219,88 @@ describe('admin project route guards', () => {
       gallons_applied: '180',
     });
     expect(soil.missing.map((item) => item.key)).toContain('cert_active_ingredient');
+  });
+
+  test('termite project sends enforce the Phase-3 compliance content (Codex P1 r2 on #2703)', () => {
+    const evaluate = (project_type, findings) => evaluateProjectSendReadiness({
+      project: {
+        id: `project-${project_type}`,
+        customer_id: 'customer-1',
+        project_date: '2026-07-13',
+        project_type,
+        findings,
+      },
+      customer: { id: 'customer-1' },
+    });
+
+    // Inspection: blank compliance answers block the send; 'No' on the
+    // notice is a blocking exception, not a sendable answer.
+    const blankInspection = evaluate('termite_inspection', {
+      areas_inspected: 'Garage, foundation, exterior perimeter.',
+    });
+    expect(blankInspection.missing.map((item) => item.key))
+      .toEqual(expect.arrayContaining(['ti_areas_not_inspected', 'ti_inspection_notice_affixed']));
+
+    const noticeNo = evaluate('termite_inspection', {
+      areas_inspected: 'Garage, foundation, exterior perimeter.',
+      areas_not_inspected: 'None',
+      inspection_notice_affixed: 'No',
+    });
+    expect(noticeNo.missing.map((item) => item.key)).toContain('ti_inspection_notice_affixed');
+    // Compliance blockers are hard — the send routes 422 on hardMissing
+    // BEFORE the override_reason escape is even consulted (Codex P1 r3).
+    expect(noticeNo.hardMissing.map((item) => item.key)).toContain('ti_inspection_notice_affixed');
+
+    // A blank treatment method must not silently skip the method-derived
+    // rules (Codex P1 r3) — it is itself a hard blocker.
+    const methodBlank = evaluate('termite_treatment', {
+      target_termite: 'Subterranean termites',
+      products_used: 'Termidor SC',
+      linear_feet_or_stations: '180 linear ft',
+      gallons_or_amount: '72 gal',
+      epa_registration: '7969-210',
+      posted_notice: 'Not applicable',
+    });
+    expect(methodBlank.hardMissing.map((item) => item.key)).toContain('tt_treatment_method');
+
+    // Treatment: perimeter methods demand a 'Yes' posted notice and the
+    // dilution; bait work needs neither the dilution nor a posted notice
+    // beyond an explicit answer.
+    const treatmentBase = {
+      target_termite: 'Subterranean termites',
+      areas_treated: 'Exterior perimeter',
+      products_used: 'Termidor SC',
+      linear_feet_or_stations: '180 linear ft',
+      gallons_or_amount: '72 gal',
+    };
+    const perimeterBlank = evaluate('termite_treatment', {
+      ...treatmentBase,
+      treatment_method: 'Liquid perimeter',
+      posted_notice: 'Not applicable',
+    });
+    expect(perimeterBlank.missing.map((item) => item.key))
+      .toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
+    expect(perimeterBlank.hardMissing.map((item) => item.key))
+      .toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
+
+    const perimeterComplete = evaluate('termite_treatment', {
+      ...treatmentBase,
+      treatment_method: 'Liquid perimeter',
+      percent_solution: '0.06%',
+      epa_registration: '7969-210',
+      posted_notice: 'Yes',
+    });
+    expect(perimeterComplete.missing.map((item) => item.key))
+      .not.toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
+
+    const baitComplete = evaluate('termite_treatment', {
+      ...treatmentBase,
+      treatment_method: 'Bait station setup',
+      epa_registration: '100-1503',
+      posted_notice: 'Not applicable',
+    });
+    expect(baitComplete.missing.map((item) => item.key))
+      .not.toEqual(expect.arrayContaining(['tt_epa_registration', 'tt_posted_notice', 'tt_percent_solution']));
   });
 
   test('certificate send readiness validates each additional application like the primary', () => {

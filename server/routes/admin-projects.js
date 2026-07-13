@@ -21,7 +21,15 @@ const config = require('../config');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { PROJECT_TYPES, PROJECT_TYPE_KEYS, WDO_CONSTRUCTION_OPTIONS, isValidProjectType, getProjectType } = require('../services/project-types');
+const {
+  PROJECT_TYPES,
+  PROJECT_TYPE_KEYS,
+  WDO_CONSTRUCTION_OPTIONS,
+  TERMITE_LIQUID_DILUTION_METHODS,
+  TERMITE_PERIMETER_METHODS,
+  isValidProjectType,
+  getProjectType,
+} = require('../services/project-types');
 const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
@@ -560,9 +568,52 @@ function evaluateProjectSendReadiness({ project, customer }) {
     );
   }
 
+  // Termite Phase-3 compliance content (Codex P1 r2 on #2703): the termite
+  // lanes still route through this project flow (project_required in the
+  // completion-lane registry), which never runs validateTypedFindings — so
+  // the send gate must enforce the same FS 482.226 / FAC 5E-14 content the
+  // typed path enforces, or the project path stays a bypass. Method lists
+  // are shared with the typed validator (project-types.js).
+  // `hard: true` keeps these out of the override_reason escape (Codex P1
+  // r3): an admin can override a thin narrative, not a statutory omission.
+  if (project?.project_type === 'termite_inspection') {
+    required.push(
+      { key: 'ti_areas_not_inspected', label: 'Areas not inspected / why ("None" if all visible areas were inspected)', ok: hasMeaningfulValue(findings.areas_not_inspected), hard: true },
+      // FS 482.226 wants the report to state the notice WAS affixed — 'No'
+      // blocks the send just like the typed path.
+      { key: 'ti_inspection_notice_affixed', label: 'Inspection notice affixed ("Yes" required)', ok: String(findings.inspection_notice_affixed || '') === 'Yes', hard: true },
+    );
+  }
+
+  if (project?.project_type === 'termite_treatment') {
+    const method = String(findings.treatment_method || '');
+    // The method itself must be recorded before the method-conditional
+    // requirements can mean anything — a blank method would silently skip
+    // the % solution rule and soften the posted-notice rule (Codex P1 r3).
+    required.push(
+      { key: 'tt_treatment_method', label: 'Treatment method', ok: hasMeaningfulValue(method), hard: true },
+      { key: 'tt_epa_registration', label: 'EPA reg. no.', ok: hasMeaningfulValue(findings.epa_registration), hard: true },
+      {
+        key: 'tt_posted_notice',
+        label: TERMITE_PERIMETER_METHODS.includes(method)
+          ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
+          : 'Posted notice placed',
+        ok: TERMITE_PERIMETER_METHODS.includes(method)
+          ? String(findings.posted_notice || '') === 'Yes'
+          : hasMeaningfulValue(findings.posted_notice),
+        hard: true,
+      },
+    );
+    if (TERMITE_LIQUID_DILUTION_METHODS.includes(method)) {
+      required.push({ key: 'tt_percent_solution', label: '% solution', ok: hasMeaningfulValue(findings.percent_solution), hard: true });
+    }
+  }
+
   return {
     required,
     missing: required.filter(item => !item.ok).map(({ key, label }) => ({ key, label })),
+    // Compliance blockers that a send override_reason must NOT bypass.
+    hardMissing: required.filter(item => !item.ok && item.hard).map(({ key, label }) => ({ key, label })),
   };
 }
 
@@ -2346,6 +2397,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       : null;
 
     const readiness = evaluateProjectSendReadiness({ project, customer });
+    // Statutory compliance blockers are not overridable (Codex P1 r3) —
+    // override_reason exists for judgment calls, not FS/FAC omissions.
+    if (readiness.hardMissing.length > 0) {
+      return res.status(422).json({
+        error: 'Project report is missing required compliance details (cannot be overridden)',
+        missing: readiness.hardMissing,
+      });
+    }
     const overrideReason = String(req.body?.override_reason || '').trim();
     const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
     if (readiness.missing.length > 0 && !hasReadinessOverride) {
@@ -2949,6 +3008,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
 
     // Readiness gate mirrors /send so we never email an incomplete report.
     const readiness = evaluateProjectSendReadiness({ project, customer });
+    // Statutory compliance blockers are not overridable (Codex P1 r3) —
+    // mirrors /send.
+    if (readiness.hardMissing.length > 0) {
+      return res.status(422).json({ error: 'Project report is missing required compliance details (cannot be overridden)', missing: readiness.hardMissing });
+    }
     const overrideReason = String(req.body?.override_reason || '').trim();
     const hasReadinessOverride = readiness.missing.length > 0 && overrideReason.length > 0;
     if (readiness.missing.length > 0 && !hasReadinessOverride) {

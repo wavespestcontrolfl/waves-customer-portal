@@ -91,6 +91,32 @@ const TYPE_LABELS = {
   pre_treatment_termite_certificate: 'Certificate of Compliance — Pre-Construction Termite Treatment',
 };
 
+// Termite Phase-3 compliance answers (FS 482.226 / FAC 5E-14) must render
+// on the customer report even when the AI-drafted narrative suppresses the
+// raw findings list — the narrative writer treats structured findings as
+// its INPUT, not its content, so these statutory statements would otherwise
+// vanish from the sent page (Codex P1 r3 on #2703). Labels mirror
+// CUSTOMER_FIELD_LABELS in activity-indicators.js. Exported for the admin
+// ProjectsPage customer-report preview, which must render the same block
+// under the same suppression rule (preview == final; Codex P2 r4).
+export const TERMITE_COMPLIANCE_SECTIONS = {
+  termite_inspection: {
+    eyebrow: 'Inspection record',
+    fields: [
+      ['areas_not_inspected', 'Areas not inspected'],
+      ['inspection_notice_affixed', 'Inspection notice posted'],
+    ],
+  },
+  termite_treatment: {
+    eyebrow: 'Application record',
+    fields: [
+      ['percent_solution', 'Solution strength'],
+      ['epa_registration', 'EPA registration no.'],
+      ['posted_notice', 'Posted notice placed'],
+    ],
+  },
+};
+
 // Mirrors the estimate hero's phone display (EstimateViewPage helper of the
 // same name): 10-digit US numbers get the (xxx) xxx-xxxx treatment, anything
 // else renders as stored.
@@ -394,6 +420,14 @@ export default function ProjectReportViewPage() {
   const aiNarrativeSections = data.recommendations ? parseSections(String(data.recommendations)) : null;
   const suppressFindingsForNarrative = Boolean(aiNarrativeSections)
     && (data.projectType !== 'wdo_inspection' || Boolean(data.fdacsPdfAvailable));
+  // Statutory compliance answers survive the narrative suppression in their
+  // own block; when the raw findings list renders they're already in it.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[data.projectType] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings[key]])
+      .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    : [];
   const atAGlanceRows = buildAtAGlance({ data, typeLabel });
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   // The certificate headline mirrors the full type label (owner directive
@@ -546,6 +580,25 @@ export default function ProjectReportViewPage() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* Termite Phase-3 compliance answers — rendered deterministically
+              when the narrative suppresses the raw findings list, so the
+              statutory statements always reach the sent page (Codex P1 r3). */}
+          {complianceEntries.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 12 }}>
+                {complianceSection.eyebrow}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {complianceEntries.map(([label, value]) => (
+                  <div key={label} style={{ padding: '12px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{label}</div>
+                    <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
