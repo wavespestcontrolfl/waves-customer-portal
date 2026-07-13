@@ -1,4 +1,15 @@
 const adminScheduleRouter = require('../routes/admin-schedule');
+const { invoiceAmountDue } = require('../services/invoice-helpers');
+
+describe('Charge-now response math (canonical invoiceAmountDue)', () => {
+  test('nets credit_applied off the gross — the tender surfaces collect this', () => {
+    // Pins the contract the checkout sheet relies on: a $214 invoice with
+    // $50 account credit charges $164, never the gross.
+    expect(invoiceAmountDue({ total: '214.00', credit_applied: '50.00' })).toBe(164);
+    expect(invoiceAmountDue({ total: 214, credit_applied: 0 })).toBe(214);
+    expect(invoiceAmountDue({ total: 50, credit_applied: 80 })).toBe(0);
+  });
+});
 
 describe('compactCheckoutInvoiceLines (schedule payload invoice summary)', () => {
   const { compactCheckoutInvoiceLines } = adminScheduleRouter._test;

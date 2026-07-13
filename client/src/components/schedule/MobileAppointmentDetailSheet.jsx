@@ -185,8 +185,12 @@ export default function MobileAppointmentDetailSheet({
   // setup+application invoice, or a tech pre-mint). It's what completion /
   // Charge-now actually collects, so surface its breakdown — the per-visit
   // Total above can legitimately differ (e.g. $115 per application while the
-  // first-visit invoice is $214 with the WaveGuard setup fee).
-  const visitInvoice = attachedVisitInvoice(service);
+  // first-visit invoice is $214 with the WaveGuard setup fee). Payer-billed
+  // visits are suppressed: their invoice routes to the payer's AP inbox and
+  // "collected at the visit" wording would send the tech after the homeowner.
+  const visitInvoice = (service.billedToPayer || service.payerId)
+    ? null
+    : attachedVisitInvoice(service);
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required

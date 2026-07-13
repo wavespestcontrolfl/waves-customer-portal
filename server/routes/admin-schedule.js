@@ -4241,9 +4241,15 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['schedule.invoice.mint', String(svc.id)],
         );
+        // Replay = the double-tap window returning the FIRST request's fresh
+        // invoice. Terminal invoices (refunded/cancelled — every payment
+        // route rejects them) are not replay candidates: returning one here
+        // would resurrect a dead invoice the caller's reuse filter just
+        // skipped, instead of minting the replacement.
         const replayed = await trx('invoices')
           .where({ scheduled_service_id: svc.id })
           .whereNot('status', 'void')
+          .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
           .orderBy('created_at', 'desc')
           .first();
         if (replayed) return { invoice: replayed, reused: true };
@@ -4772,10 +4778,15 @@ router.post('/:id/invoice', async (req, res, next) => {
     };
 
     // Reuse the existing invoice for this visit if one already exists and isn't
-    // void — avoids dupes if the tech taps "Charge now" twice.
+    // void — avoids dupes if the tech taps "Charge now" twice. Refunded/
+    // cancelled invoices are terminal too: every payment route rejects them,
+    // so reusing one would hand the tech an uncollectible token and block the
+    // sheet from minting the replacement it promises. Skip them so a fresh
+    // invoice mints below instead.
     let existing = await db('invoices')
       .where({ scheduled_service_id: svc.id })
       .whereNot('status', 'void')
+      .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
@@ -4799,8 +4810,10 @@ router.post('/:id/invoice', async (req, res, next) => {
         invoiceId: existing.id,
         // Settled invoices have nothing left to collect — report 0 due and an
         // alreadyPaid flag so the tech checkout sheet doesn't open tender
-        // options for a covered/prepaid visit.
-        total: alreadyPaid ? 0 : Number(existing.total),
+        // options for a covered/prepaid visit. Otherwise report the amount
+        // DUE (net of credit_applied) — the gross would over-collect on
+        // cash/check tenders for a credit-applied invoice.
+        total: alreadyPaid ? 0 : invoiceAmountDue(existing),
         prepaidCredit: applied.prepaidCredit,
         token: existing.token,
         status: existing.status,
@@ -4937,7 +4950,10 @@ router.post('/:id/invoice', async (req, res, next) => {
       success: true,
       reused: minted.reused,
       invoiceId: invoice.id,
-      total: Number(invoice.total),
+      // Amount DUE (net of any auto-applied account credit) — the tender
+      // sheets collect this figure, so it must match what record-payment
+      // will actually book.
+      total: invoiceAmountDue(invoice),
       prepaidCredit: applied.prepaidCredit,
       token: invoice.token,
       status: invoice.status,

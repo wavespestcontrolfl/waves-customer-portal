@@ -133,4 +133,37 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add Service' })).toBeInTheDocument();
   });
+
+  it('never presents a payer-billed visit\'s attached invoice as collectible', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          billedToPayer: { id: 'payer-1', name: 'HOA Management' },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    // The Charge-now endpoint refuses in-person collection for payer-billed
+    // visits — the sheet must not promise the attached invoice.
+    expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Charging collects this invoice as-is/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
+  });
+
+  it('blocks charging outright while the attached invoice is processing', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoiceStatus: 'processing' }}
+        onClose={() => {}}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'Payment processing — nothing to collect' });
+    expect(button).toBeDisabled();
+    // The invoice context still shows, but no tender or edit affordances.
+    expect(screen.getByText(/Invoice on file · WPC-2099-0001/)).toBeInTheDocument();
+    expect(screen.getByText(/already processing — do not collect again/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Service' })).not.toBeInTheDocument();
+  });
 });

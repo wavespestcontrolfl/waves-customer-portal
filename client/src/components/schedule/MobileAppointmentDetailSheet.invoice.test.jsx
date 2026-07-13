@@ -94,4 +94,20 @@ describe('MobileAppointmentDetailSheet invoice-on-file block', () => {
     render(<MobileAppointmentDetailSheet service={BASE_SERVICE} onClose={() => {}} />);
     expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
   });
+
+  it('suppresses the invoice block for payer-billed visits', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          billedToPayer: { id: 'payer-1', name: 'HOA Management' },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    // The invoice routes to the payer's AP inbox — "collected at the visit"
+    // wording would send the tech after the homeowner.
+    expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
+  });
 });

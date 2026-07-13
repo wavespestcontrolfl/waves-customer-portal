@@ -120,15 +120,24 @@ export default function MobileCheckoutSheet({
   // (e.g. a $214 first-visit invoice on a $115/application plan), and drop
   // the add-service/discount affordances that would silently do nothing.
   const inv = attachedVisitInvoice(service);
-  const openVisitInvoice = inv && inv.open && inv.total > 0 ? inv : null;
+  // Payer-billed visits never collect in person — the Charge-now endpoint
+  // refuses them and AR routes to the payer's AP inbox — so an attached
+  // invoice must not be presented as collectible here.
+  const payerBilled = !!(service.billedToPayer || service.payerId);
+  const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
+  // A processing invoice is money already in flight (e.g. a pending ACH
+  // debit) — the payment routes reject it, so block charging outright
+  // instead of falling back to a preview that fails after tender pick.
+  const processingVisitInvoice = !payerBilled && inv && inv.processing ? inv : null;
+  const invoicePreview = openVisitInvoice || processingVisitInvoice;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already
   // consumed by this invoice (prepaidApplied), its total is already net, so
   // netting service.prepaidAmount again would understate the button.
-  const totalBeforePrepaid = openVisitInvoice
-    ? openVisitInvoice.amountDue
+  const totalBeforePrepaid = invoicePreview
+    ? invoicePreview.amountDue
     : Math.max(0, servicesSubtotal + extraDiscountsTotal);
-  const prepaidCredit = openVisitInvoice && openVisitInvoice.prepaidApplied
+  const prepaidCredit = invoicePreview && invoicePreview.prepaidApplied
     ? 0
     : Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
@@ -138,7 +147,7 @@ export default function MobileCheckoutSheet({
   // chargeable amount: a positive-price visit that's fully prepaid still needs to
   // mint its invoice (the endpoint applies the prepaid credit → paid receipt), so
   // it must stay enabled even though `total` nets to $0.
-  const nothingToCharge = totalBeforePrepaid <= 0;
+  const nothingToCharge = totalBeforePrepaid <= 0 || !!processingVisitInvoice;
 
   // One-line card-on-file note for the tech. Shows the first non-expired
   // method (server orders default first); if every method is expired, says
@@ -303,9 +312,11 @@ export default function MobileCheckoutSheet({
         >
           {minting
             ? 'Opening payment…'
-            : nothingToCharge
-              ? 'No charge — complete from job'
-              : `Charge $${total.toFixed(2)}`}
+            : processingVisitInvoice
+              ? 'Payment processing — nothing to collect'
+              : nothingToCharge
+                ? 'No charge — complete from job'
+                : `Charge $${total.toFixed(2)}`}
         </button>
         {cardOnFileNote && (
           <div className="text-center text-ink-tertiary" style={{ fontSize: 13, marginTop: 8 }}>
@@ -319,7 +330,7 @@ export default function MobileCheckoutSheet({
         )}
         {/* Service line items */}
         <div className="mt-6">
-          {openVisitInvoice ? (
+          {invoicePreview ? (
             <>
               {/* The attached invoice is collected as-is — its lines ARE the
                   charge preview. No edit affordance: line edits on the
@@ -330,7 +341,7 @@ export default function MobileCheckoutSheet({
                     {baseServiceLabel}
                   </div>
                   <div className="text-ink-tertiary truncate" style={{ fontSize: 12, marginTop: 2 }}>
-                    Invoice on file{openVisitInvoice.number ? ` · ${openVisitInvoice.number}` : ''}
+                    Invoice on file{invoicePreview.number ? ` · ${invoicePreview.number}` : ''}
                   </div>
                   {timeSubtitle && (
                     <div className="text-ink-tertiary u-nums" style={{ fontSize: 12, marginTop: 1 }}>
@@ -339,7 +350,7 @@ export default function MobileCheckoutSheet({
                   )}
                 </div>
               </div>
-              {openVisitInvoice.lines.map((line, i) => (
+              {invoicePreview.lines.map((line, i) => (
                 <div
                   key={`${line.description}-${i}`}
                   className="flex items-start justify-between gap-3 py-4 border-b border-hairline border-zinc-200"
@@ -352,15 +363,15 @@ export default function MobileCheckoutSheet({
                   </div>
                 </div>
               ))}
-              {openVisitInvoice.creditApplied > 0 && (
+              {invoicePreview.creditApplied > 0 && (
                 <div className="flex items-center justify-between gap-3 py-4 border-b border-hairline border-zinc-200">
                   <span className="text-zinc-900" style={{ fontSize: 15 }}>Account credit applied</span>
                   <span className="u-nums text-zinc-900 shrink-0" style={{ fontSize: 15 }}>
-                    −${openVisitInvoice.creditApplied.toFixed(2)}
+                    −${invoicePreview.creditApplied.toFixed(2)}
                   </span>
                 </div>
               )}
-              {openVisitInvoice.prepaidApplied && (
+              {invoicePreview.prepaidApplied && (
                 <div className="py-3 text-ink-secondary border-b border-hairline border-zinc-200" style={{ fontSize: 13 }}>
                   Recorded prepayment already applied to this invoice.
                 </div>
@@ -475,11 +486,13 @@ export default function MobileCheckoutSheet({
             already attached: the mint endpoint reuses that invoice as-is and
             ignores extraLineItems, so offering the pickers would silently
             drop whatever the tech added. */}
-        {openVisitInvoice ? (
+        {invoicePreview ? (
           <div className="mt-4 text-ink-secondary" style={{ fontSize: 13 }}>
-            Charging collects this invoice as-is. To change the amounts, edit{' '}
-            {openVisitInvoice.number ? `invoice ${openVisitInvoice.number}` : 'the invoice'} from
-            the Invoices page before charging.
+            {processingVisitInvoice
+              ? 'A payment for this invoice is already processing — do not collect again.'
+              : <>Charging collects this invoice as-is. To change the amounts, edit{' '}
+                {invoicePreview.number ? `invoice ${invoicePreview.number}` : 'the invoice'} from
+                the Invoices page before charging.</>}
           </div>
         ) : (
         <div className="mt-4 space-y-3">
