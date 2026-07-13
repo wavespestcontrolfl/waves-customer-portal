@@ -129,7 +129,7 @@ test('re-delivery for a completed CARD save is a benign no-op re-run (already_en
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
 });
 
-test('browser died before POST /cards: webhook saves the method itself', async () => {
+test('browser died before POST /cards: webhook saves the method itself (attached-only)', async () => {
   state.paymentMethodRow = null;
   mockSavePaymentMethod.mockImplementation(async () => {
     state.paymentMethodRow = { id: 'pm-row-3', customer_id: 'cust-1', method_type: 'ach', ach_status: 'verified' };
@@ -140,6 +140,19 @@ test('browser died before POST /cards: webhook saves the method itself', async (
   expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_bank_1', {
     enableAutopay: false,
     makeDefault: false,
+    requireAttached: true,
   });
   expect(mockRecordConsent).toHaveBeenCalled();
+});
+
+test('a REMOVED pending method is never resurrected: detached PM skips the backstop quietly (Codex r1)', async () => {
+  state.paymentMethodRow = null;
+  const detachedErr = new Error('Payment method is not attached to this customer');
+  detachedErr.code = 'PM_NOT_ATTACHED';
+  mockSavePaymentMethod.mockRejectedValue(detachedErr);
+  // Resolves (acks) — a retry can't change a customer's removal.
+  await expect(handleSetupIntentSucceeded(setupIntent())).resolves.toBeUndefined();
+  expect(mockRecordConsent).not.toHaveBeenCalled();
+  expect(mockEnroll).not.toHaveBeenCalled();
+  expect(mockPmUpdate).not.toHaveBeenCalled();
 });

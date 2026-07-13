@@ -3838,6 +3838,7 @@ function BillingTab({ customer }) {
   const [addMethodType, setAddMethodType] = useState('card');
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
+  const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -3961,16 +3962,19 @@ function BillingTab({ customer }) {
         setStripeLoading(false);
         return;
       }
-      if (redirectToSetupIntentAction(setupIntent)) return;
-      // Micro-deposit fallback (portal ACH): the SetupIntent stays
-      // requires_action for 1–2 business days. The server saves the bank
-      // account as PENDING (consent recorded now, Auto Pay enrollment
-      // deferred to the verification webhook) — show the pending notice
-      // instead of an error.
+      // Micro-deposit fallback (portal ACH): handled BEFORE the generic
+      // redirect (Codex #2706 r1) — redirectToSetupIntentAction follows
+      // hosted_verification_url, which would navigate away without ever
+      // persisting the pending row or the ACH consent. The SetupIntent
+      // stays requires_action for 1–2 business days; the server saves the
+      // bank account as PENDING (consent recorded now, Auto Pay enrollment
+      // deferred to the verification webhook) and the notice carries the
+      // hosted verification link instead of the redirect.
       const awaitingMicrodeposits = setupIntent?.status === 'requires_action'
         && setupIntent?.next_action?.type === 'verify_with_microdeposits';
       if (awaitingMicrodeposits && setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        setBankPendingVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
         setBankPendingNotice(true);
         setShowAddCard(false);
         paymentElementRef.current = null;
@@ -3980,6 +3984,7 @@ function BillingTab({ customer }) {
         setStripeLoading(false);
         return;
       }
+      if (redirectToSetupIntentAction(setupIntent)) return;
       if (!setupIntent || setupIntent.status !== 'succeeded') {
         setStripeError(setupIntentIncompleteMessage('saving'));
         setStripeLoading(false);
@@ -4639,6 +4644,15 @@ function BillingTab({ customer }) {
         {bankPendingNotice && !showAddCard && (
           <div style={{ padding: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
             Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and ready for Auto Pay.
+            {bankPendingVerifyUrl && (
+              <>
+                {' '}
+                <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 850 }}>
+                  Confirm the deposits here
+                </a>
+                {' '}once they arrive.
+              </>
+            )}
           </div>
         )}
       </div>

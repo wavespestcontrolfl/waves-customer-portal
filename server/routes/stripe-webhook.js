@@ -2496,11 +2496,23 @@ async function handleSetupIntentSucceeded(setupIntent) {
         // Browser died between confirmSetup and POST /cards. The portal
         // add modal always renders the locked consent copy before confirm,
         // so a confirmed SI means the customer saw it — same rationale as
-        // the covered_capture backstop above.
-        saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
-          enableAutopay: false,
-          makeDefault: false,
-        });
+        // the covered_capture backstop above. requireAttached (Codex
+        // #2706 r1): a customer who REMOVED the method before verification
+        // detached it at Stripe (removeCard detaches + deletes the row) —
+        // the backstop must never resurrect and enroll it.
+        try {
+          saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+            enableAutopay: false,
+            makeDefault: false,
+            requireAttached: true,
+          });
+        } catch (saveErr) {
+          if (saveErr.code === 'PM_NOT_ATTACHED') {
+            logger.info(`[stripe-webhook] portal-add-method pm ${stripePmId} no longer attached (customer removed it) — skipping backstop for ${wavesCustomerId}`);
+            return;
+          }
+          throw saveErr;
+        }
       }
       // Verification cleared — a pending bank row becomes chargeable.
       if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {

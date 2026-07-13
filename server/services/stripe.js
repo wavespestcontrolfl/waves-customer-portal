@@ -316,6 +316,19 @@ const StripeService = {
         throw new Error('Payment method does not belong to this customer');
       }
 
+      // requireAttached (portal ACH lane, Codex #2706 r1): backstop callers
+      // that would otherwise RE-ATTACH a detached method must not — a
+      // customer who removed a pending bank row (removeCard detaches at
+      // Stripe + deletes the row) would have it resurrected and enrolled by
+      // the later setup_intent.succeeded event. A method the customer kept
+      // is still attached (a succeeded SetupIntent attaches it), so this
+      // cleanly distinguishes "browser died" from "customer removed it".
+      if (options.requireAttached && existingPm.customer !== stripeCustomerId) {
+        const detachedErr = new Error('Payment method is not attached to this customer');
+        detachedErr.code = 'PM_NOT_ATTACHED';
+        throw detachedErr;
+      }
+
       // Attach PM to the Stripe customer (may already be attached via SetupIntent)
       try {
         await stripe.paymentMethods.attach(paymentMethodId, {
@@ -361,20 +374,43 @@ const StripeService = {
         record.ach_status = options.achStatus || pm.us_bank_account.status || 'verified';
       }
 
-      const saved = await db.transaction(async trx => {
-        const [inserted] = await trx('payment_methods').insert(record).returning('*');
-        if (makeDefault) {
-          await trx('payment_methods')
-            .where({ customer_id: customerId })
-            .whereNot({ id: inserted.id })
-            .update({ is_default: false });
+      let saved;
+      try {
+        saved = await db.transaction(async trx => {
+          const [inserted] = await trx('payment_methods').insert(record).returning('*');
+          if (makeDefault) {
+            await trx('payment_methods')
+              .where({ customer_id: customerId })
+              .whereNot({ id: inserted.id })
+              .update({ is_default: false });
+          }
+          return inserted;
+        });
+      } catch (insertErr) {
+        // Duplicate-key race (Codex #2706 r1): the browser's POST /cards
+        // and the setup_intent.succeeded webhook both do lookup-first
+        // before this plain insert under the unique
+        // stripe_payment_method_id index — when both lookups miss, one
+        // insert loses. The row the winner created IS the desired
+        // outcome: reload it (ownership-checked) instead of turning a
+        // successful save into a 500/webhook retry.
+        const isDuplicate = insertErr.code === '23505' || /duplicate key value/i.test(insertErr.message || '');
+        if (!isDuplicate) throw insertErr;
+        const existingRow = await db('payment_methods')
+          .where({ stripe_payment_method_id: paymentMethodId })
+          .first();
+        if (!existingRow || existingRow.customer_id !== customerId) {
+          throw new Error('Payment method does not belong to this customer');
         }
-        return inserted;
-      });
+        logger.info(`[stripe] Payment method save raced an existing row for ${customerId}: ${paymentMethodId} — reusing it`);
+        saved = existingRow;
+      }
 
       logger.info(`[stripe] Payment method saved for ${customerId}: ${pm.type} ****${record.last_four}`);
       return saved;
     } catch (err) {
+      // Typed sentinel for backstop callers — must survive the generic wrap.
+      if (err.code === 'PM_NOT_ATTACHED') throw err;
       logger.error(`[stripe] Save payment method failed: ${err.message}`);
       throw new Error('Failed to save payment method');
     }
