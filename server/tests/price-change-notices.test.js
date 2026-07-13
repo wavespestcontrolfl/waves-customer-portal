@@ -34,6 +34,7 @@ let noticeUpdates;
 let activityInserts;
 let customersUpdateCalls;
 let existingNoticeRow;
+let insertConflict;
 
 function customersQuery() {
   const q = {
@@ -54,7 +55,9 @@ function noticesQuery() {
   const q = {
     insert: jest.fn((row) => {
       noticeInserts.push(row);
-      return { returning: jest.fn(async () => [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id }]) };
+      const returned = insertConflict ? [] : [{ id: `n-${noticeInserts.length}`, batch_id: row.batch_id }];
+      const returning = jest.fn(async () => returned);
+      return { onConflict: jest.fn(() => ({ ignore: jest.fn(() => ({ returning })) })), returning };
     }),
     where: jest.fn(() => q),
     orderBy: jest.fn(() => q),
@@ -89,6 +92,7 @@ beforeEach(() => {
   activityInserts = [];
   customersUpdateCalls = [];
   existingNoticeRow = null;
+  insertConflict = false;
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery();
     if (table === 'price_change_notices') return noticesQuery();
@@ -264,6 +268,27 @@ describe('createAndSendBatch delivery', () => {
     expect(sendTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('skips a customer when a concurrent send wins the event-insert race', async () => {
+    customerRows = [CUSTOMER];
+    insertConflict = true; // unique event index swallowed our insert
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: true, created: 0, emailed: 0, texted: 0, alreadyNotified: 1, failed: 0 });
+    expect(sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(noticeUpdates).toHaveLength(0);
+  });
+
+  it('keeps the row retryable when a reachable customer has a provider failure on every leg', async () => {
+    customerRows = [CUSTOMER];
+    sendTemplate.mockResolvedValue({ sent: false });
+    sendCustomerMessage.mockResolvedValue({ sent: false });
+    const out = await createAndSendBatch({ ...GOOD_ARGS, expectedDigest: await digestFor(GOOD_ARGS) });
+    expect(out).toMatchObject({ ok: false, created: 1, emailed: 0, texted: 0, unreachable: 0, failed: 1 });
+    // The row must NOT flip to 'sent' — a retry of the same change resumes it.
+    expect(noticeUpdates).toHaveLength(1);
+    expect(noticeUpdates[0].status).toBeUndefined();
   });
 
   it('resumes a draft row from a crashed attempt, reusing its token instead of inserting', async () => {

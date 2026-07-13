@@ -170,6 +170,10 @@ exports.up = async function up(knex) {
       t.index('batch_id');
       t.index('customer_id');
       t.index('status');
+      // One notice per change EVENT (customer + effective date + amounts) —
+      // the DB-level guard behind the send path's onConflict-ignore, so
+      // concurrent /send calls can never double-notice a customer.
+      t.unique(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents'], { indexName: 'price_change_notices_event_uniq' });
     });
   }
 

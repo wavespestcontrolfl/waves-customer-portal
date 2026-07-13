@@ -131,6 +131,8 @@ describe('sensitive SPA document headers', () => {
   test('recognizes only full price-change 32-hex token document paths', () => {
     expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}`)).toBe(true);
     expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN}/`)).toBe(true);
+    // The public API's TOKEN_RE accepts uppercased tokens — the shell matcher must too.
+    expect(isPriceChangeNoticePath(`/price-change/${LAWN_TOKEN.toUpperCase()}`)).toBe(true);
     expect(isPriceChangeNoticePath('/price-change/not-a-real-token')).toBe(false);
     expect(isPriceChangeNoticePath('/api/public/price-change/0123456789abcdef0123456789abcdef')).toBe(false);
   });

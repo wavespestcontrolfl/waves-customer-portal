@@ -293,7 +293,11 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         let token = existing ? existing.notice_token : null;
         if (!notice) {
           token = crypto.randomBytes(16).toString('hex');
-          [notice] = await db('price_change_notices').insert({
+          // onConflict on the event tuple (unique index): if a concurrent
+          // /send won the insert race between our lookup and here, we get
+          // nothing back — the winner is already sending, so skip rather
+          // than double-text the customer.
+          const inserted = await db('price_change_notices').insert({
             batch_id: batchId,
             customer_id: row.customerId,
             current_amount_cents: row.currentCents,
@@ -304,7 +308,12 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
             status: 'draft',
             created_by: actorId || null,
             metadata: JSON.stringify({ increase: inc, location_id: loc }),
-          }).returning('*');
+          }).onConflict(['customer_id', 'effective_date', 'current_amount_cents', 'new_amount_cents']).ignore().returning('*');
+          if (!inserted.length) {
+            summary.alreadyNotified += 1;
+            return;
+          }
+          notice = inserted[0];
           summary.created += 1;
         }
 
@@ -324,6 +333,16 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         const texted = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: emailed });
         if (emailed) summary.emailed += 1;
         if (texted) summary.texted += 1;
+
+        if (!emailed && !texted && (row.hasEmail || row.hasPhone)) {
+          // A reachable customer with zero delivered legs is a provider or
+          // template failure, not no-contact — keep the row 'draft' so a
+          // retry of the same change resumes it instead of skipping a
+          // customer who never got their advance notice.
+          summary.failed += 1;
+          await db('price_change_notices').where({ id: notice.id }).update({ updated_at: new Date() });
+          return;
+        }
         if (!emailed && !texted) summary.unreachable += 1;
 
         await db('price_change_notices').where({ id: notice.id }).update({

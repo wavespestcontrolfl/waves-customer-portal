@@ -54,9 +54,10 @@ function isCardPath(reqPath = '') {
 // Public tokened price-change notice page — 32-hex bearer token
 // (price_change_notices.notice_token) showing the customer's name and
 // billing amounts, so the shell must never be indexed/cached and must not
-// leak the token via Referer.
+// leak the token via Referer. Case-insensitive to match the public API's
+// TOKEN_RE (price-change-public.js), which accepts uppercased tokens.
 function isPriceChangeNoticePath(reqPath = '') {
-  return /^\/price-change\/[a-f0-9]{32}\/?$/.test(String(reqPath || ''));
+  return /^\/price-change\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
 }
 
 function applySensitiveSpaHeaders(reqPath, res) {

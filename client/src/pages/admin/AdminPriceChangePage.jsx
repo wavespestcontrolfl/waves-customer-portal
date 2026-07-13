@@ -78,7 +78,11 @@ export default function AdminPriceChangePage() {
     } catch (e) {
       if (previewSeq.current === requestId) setResult({ ok: false, text: "Preview failed: " + e.message });
     } finally {
-      if (previewSeq.current === requestId) setPreviewing(false);
+      // Always clear the spinner — a parameter change mid-flight bumps
+      // previewSeq (invalidating the RESULT), but only one request is ever
+      // in flight, so an unconditional clear can't race a newer one. Gating
+      // this on requestId left the page stuck on "Building preview…".
+      setPreviewing(false);
     }
   };
 
