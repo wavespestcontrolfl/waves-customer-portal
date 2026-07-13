@@ -65,6 +65,19 @@ function scanLadderGrid() {
       detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — the monthly floor is not being enforced`,
     });
   }
+  // Same class of guard for the collected-margin floor: a blanked/0 live
+  // value makes priceLawnCare derive costFloorAnnual = annual COST (finite
+  // and positive, so the per-cell malformed_cost_floor check passes) while
+  // the 35% margin guarantee is silently disabled.
+  const rawMarginFloor = LAWN_PRICING_V2.targetCollectedMarginFloor;
+  const marginFloor = Number(rawMarginFloor);
+  if (!Number.isFinite(marginFloor) || marginFloor <= 0 || marginFloor >= 1) {
+    violations.push({
+      check: 'malformed_margin_floor',
+      cell: 'lawn_pricing_v2.targetCollectedMarginFloor',
+      detail: `live config collected-margin floor is ${JSON.stringify(rawMarginFloor)} — the cost floor's margin guarantee is not being enforced`,
+    });
+  }
 
   for (const track of TRACKS) {
     const prevMonthlyBySizeTier = {};
@@ -295,7 +308,7 @@ async function upsertSweepAlert(violations, metadata) {
     status: 'open',
     // material_budget_unverified stays 'high' — a partially costed inventory
     // rotation is a data-quality exception to fix, not a margin emergency.
-    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price', 'malformed_program_minimum', 'malformed_cost_floor'].includes(v.check))
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price', 'malformed_program_minimum', 'malformed_cost_floor', 'malformed_margin_floor'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',

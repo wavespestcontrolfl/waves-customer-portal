@@ -448,6 +448,19 @@ describe('sweep red paths — failures become alert violations, never silent gre
     }
   });
 
+  test('a blanked/zero margin floor is a violation — costFloorAnnual stays finite so only a config check catches it', () => {
+    const prior = LAWN_PRICING_V2.targetCollectedMarginFloor;
+    LAWN_PRICING_V2.targetCollectedMarginFloor = 0;
+    try {
+      const { sweep } = loadSweep({ priceLawnCare: cleanTiers });
+      const { violations } = sweep.scanLadderGrid();
+      expect(violations.map((v) => v.check)).toEqual(['malformed_margin_floor']);
+      expect(violations[0].detail).toContain('0');
+    } finally {
+      LAWN_PRICING_V2.targetCollectedMarginFloor = prior;
+    }
+  });
+
   test('repeat alerts keep their first detected_at; only a post-resolution re-fire starts a new episode', async () => {
     const { sweep, calls } = loadSweep({
       priceLawnCare: () => {
