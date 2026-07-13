@@ -7849,8 +7849,15 @@ export function CompletionPanel({
   const stationAutoCountsRef = useRef({});
   useEffect(() => {
     if (!stationFeatureOn) return;
+    // Drift-hidden ("stale") pins that haven't been re-placed are excluded:
+    // the report map cannot render them this visit, so counting them as
+    // checked would publish typed counts the customer-visible map can't
+    // show. Re-pinning (a move) brings a stale station back into the counts.
     const activeKeys = [
-      ...stationPreloads.filter((station) => !stationRetired.includes(station.id)).map((station) => station.id),
+      ...stationPreloads
+        .filter((station) => !stationRetired.includes(station.id)
+          && (station.shape || stationMoves[station.id]))
+        .map((station) => station.id),
       ...stationNew.map((station) => station.key),
     ];
     if (!activeKeys.length) return;
@@ -7891,7 +7898,7 @@ export function CompletionPanel({
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationPreloads, stationNew, stationStatuses, stationRetired]);
+  }, [stationFeatureOn, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -10107,7 +10114,10 @@ export function CompletionPanel({
               const moved = stationMoves[station.id];
               const status = stationStatuses[station.id] || "ok";
               if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status });
-              else entries.push({ id: station.id, status });
+              // A drift-hidden pin that was never re-placed submits NOTHING:
+              // a status would mint a check row for a station the visit's
+              // map cannot show (mirrors the auto-count exclusion above).
+              else if (station.shape) entries.push({ id: station.id, status });
             });
             if (ref) {
               stationNew.forEach((station) => {

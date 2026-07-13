@@ -2797,6 +2797,15 @@ function TermiteStationsPanel({ customerId }) {
     if (newPins.some((station) => station.key === key)) {
       setNewPins((prev) => prev.filter((station) => station.key !== key));
     } else {
+      // A pending move for this id must not survive the retire — the save
+      // payload would carry BOTH a retire and a shape entry for one station,
+      // which the server rejects as a duplicate id and Save dead-ends.
+      setMoves((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
       setRetired((prev) => (prev.includes(key) ? prev : [...prev, key]));
     }
   };
@@ -2818,7 +2827,10 @@ function TermiteStationsPanel({ customerId }) {
       };
       const entries = [
         ...retired.map((id) => ({ id, retire: true })),
-        ...Object.entries(moves).map(([id, shape]) => ({ id, shape: { ...shape, ref } })),
+        // belt to removePin's suspenders: one final state per station id
+        ...Object.entries(moves)
+          .filter(([id]) => !retired.includes(id))
+          .map(([id, shape]) => ({ id, shape: { ...shape, ref } })),
         ...newPins.map((station) => ({ shape: { ...station.shape, ref } })),
       ];
       const res = await adminFetch(

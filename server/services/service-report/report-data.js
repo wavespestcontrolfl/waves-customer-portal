@@ -1952,8 +1952,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     scheduledServicePromise,
     loadApprovedVisualServiceMomentsForReport(service, knex).catch(() => []),
     // Bait station map (station-map-v1) — fail-soft to [] so a missing table
-    // (pre-migration) or a load error never takes down the report.
-    knex('termite_stations').where({ customer_id: service.customer_id, is_active: true }).orderBy('station_number').catch(() => []),
+    // (pre-migration) or a load error never takes down the report. Retired
+    // rows load on purpose: report tokens are long-lived and the builder
+    // scopes rows to THE VISIT (a station retired after this visit must keep
+    // rendering on this report).
+    knex('termite_stations').where({ customer_id: service.customer_id }).orderBy('station_number').catch(() => []),
     knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
@@ -2279,6 +2282,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       height: 340,
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
+    serviceDate: service.service_date || null,
   });
 
   const onSiteMin = computeOnSiteMin({

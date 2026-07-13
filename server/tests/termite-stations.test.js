@@ -26,7 +26,7 @@ const {
 // (where/orderBy/insert.returning/insert.onConflict.merge/update, plus a
 // passthrough transaction), recording writes for assertions.
 function makeFakeDb({ stations = [], checks = [] } = {}) {
-  const state = { stations: [...stations], checks: [...checks] };
+  const state = { stations: [...stations], checks: [...checks], rawCalls: [] };
   let nextId = 0;
   const rowsFor = (table) => {
     if (table === 'termite_stations') return state.stations;
@@ -73,6 +73,7 @@ function makeFakeDb({ stations = [], checks = [] } = {}) {
     return builder;
   };
   db.fn = { now: () => 'NOW()' };
+  db.raw = async (sql, bindings) => { state.rawCalls.push({ sql, bindings }); };
   db.transaction = async (fn) => fn(db);
   return { db, state };
 }
@@ -110,8 +111,19 @@ test('validateStationEntriesBody rejects malformed payloads with 400-material me
     { id: 'st-1', status: 'ok' },
     { id: 'st-1', status: 'activity' },
   ])).toMatch(/more than one entry/);
-  const tooMany = Array.from({ length: 61 }, () => ({ shape: pin(0.5, 0.5) }));
-  expect(validateStationEntriesBody(tooMany)).toMatch(/at most 60/);
+  const tooMany = Array.from({ length: 121 }, () => ({ shape: pin(0.5, 0.5) }));
+  expect(validateStationEntriesBody(tooMany)).toMatch(/at most 120/);
+});
+
+test('entry cap covers a fully-mapped property (active cap + retires in one payload)', () => {
+  // 80 active statuses + a retire + a create must fit — the completion
+  // submit sends one status entry per active station.
+  const fullProperty = [
+    ...Array.from({ length: 80 }, (_, i) => ({ id: `st-${i}`, status: 'ok' })),
+    { id: 'st-old', retire: true },
+    { shape: pin(0.5, 0.5), status: 'ok' },
+  ];
+  expect(validateStationEntriesBody(fullProperty)).toBeNull();
 });
 
 test('office mode (allowStatus: false) rejects statuses', () => {
@@ -173,6 +185,26 @@ test('moves update geometry, retires deactivate, foreign/retired ids are skipped
   expect(foreign.geometry_image).toMatchObject({ cx: 0.5 }); // untouched
 });
 
+test('creates take the per-customer advisory allocation lock; status-only payloads do not', async () => {
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.1, 0.1) },
+    ],
+  });
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ id: 'st-1', status: 'ok' }],
+  });
+  expect(state.rawCalls).toHaveLength(0);
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ shape: pin(0.6, 0.6) }],
+  });
+  expect(state.rawCalls).toHaveLength(1);
+  expect(state.rawCalls[0].sql).toMatch(/pg_advisory_xact_lock/);
+  expect(state.rawCalls[0].bindings).toEqual([`termite_stations:${CUSTOMER}`]);
+});
+
 // ── completion sync (registry + checks) ──────────────────────────────────────
 
 test('syncStationsForCompletion writes check rows for existing AND newly-created stations', async () => {
@@ -195,6 +227,26 @@ test('syncStationsForCompletion writes check rows for existing AND newly-created
   expect(state.checks).toHaveLength(2);
   const existingCheck = state.checks.find((row) => row.station_id === 'st-1');
   expect(existingCheck).toMatchObject({ service_record_id: 'record-1', status: 'activity' });
+});
+
+test('a resumed completion replaying an id-less create dedupes to the existing station', async () => {
+  const { db, state } = makeFakeDb({ stations: [] });
+  const body = {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-1',
+    entries: [{ shape: pin(0.6, 0.6), status: 'ok' }],
+  };
+  const first = await syncStationsForCompletion(db, body);
+  expect(first.created).toBe(1);
+  const replay = await syncStationsForCompletion(db, body);
+  expect(replay.created).toBe(0);
+  expect(replay.deduped).toBe(1);
+  expect(replay.checksApplied).toBe(1);
+  // one physical station, one check row — the replayed check landed on the
+  // originally-created station
+  expect(state.stations).toHaveLength(1);
+  expect(state.checks).toHaveLength(1);
+  expect(state.checks[0].station_id).toBe(state.stations[0].id);
 });
 
 test('check rows upsert on replay (same station + record) instead of duplicating', async () => {
@@ -306,6 +358,51 @@ test('a companion termite_bait_station type also renders (combined pest+termite 
   // no check this visit → status null → "on file" pin, still counted in total
   expect(context.stations[0].status).toBeNull();
   expect(context.summary).toMatchObject({ total: 1, checked: 0 });
+});
+
+test('historical reports stay pinned to THE VISIT: checked stations render even after retirement, later additions stay off', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      // checked on this visit, retired afterwards — must still render here
+      stationRow('st-1', 1, pin(0.2, 0.3), { is_active: false, retired_at: '2026-08-01T15:00:00Z' }),
+      stationRow('st-2', 2, pin(0.5, 0.5), { is_active: true }),
+      // added to the registry AFTER this visit, never checked — must not
+      // appear on this report as "on file"
+      stationRow('st-9', 9, pin(0.8, 0.8), { is_active: true, created_at: '2026-09-01T15:00:00Z' }),
+    ],
+    checkRows: [
+      { station_id: 'st-1', status: 'serviced' },
+      { station_id: 'st-2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(context.available).toBe(true);
+  expect(context.stations.map((s) => s.number).sort((a, b) => a - b)).toEqual([1, 2]);
+  expect(context.summary.total).toBe(2);
+});
+
+test('no-check fallback windows stations to the visit day (ET): later creations and earlier retirements excluded', () => {
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3), { is_active: true, created_at: '2026-06-01T12:00:00Z' }),
+      // retired a month BEFORE this visit — off the map
+      stationRow('st-2', 2, pin(0.4, 0.4), { is_active: false, created_at: '2026-06-01T12:00:00Z', retired_at: '2026-06-10T12:00:00Z' }),
+      // retired AFTER this visit — existed on visit day, stays on the map
+      stationRow('st-3', 3, pin(0.6, 0.5), { is_active: false, created_at: '2026-06-01T12:00:00Z', retired_at: '2026-08-01T12:00:00Z' }),
+      // created after the visit day — off the map
+      stationRow('st-4', 4, pin(0.8, 0.6), { is_active: true, created_at: '2026-09-01T12:00:00Z' }),
+    ],
+    checkRows: [],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(context.available).toBe(true);
+  expect(context.stations.map((s) => s.number).sort((a, b) => a - b)).toEqual([1, 3]);
 });
 
 test('drift: a re-geocoded property far from the pin ref drops the mark; all dropped → marks_stale', () => {

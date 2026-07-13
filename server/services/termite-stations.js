@@ -26,9 +26,14 @@
 
 const { sanitizeZoneShape } = require('./property-zones');
 const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
+const { parseETDateTime } = require('../utils/datetime-et');
 
 const STATION_STATUSES = ['ok', 'activity', 'serviced', 'inaccessible'];
-const MAX_STATION_ENTRIES = 60;
+// Must exceed MAX_ACTIVE_STATIONS with headroom: the completion submit sends
+// one status entry for EVERY active station (plus any retires/creates in the
+// same payload), so a cap below the active-station cap would make a fully
+// mapped property impossible to complete (Codex P2, PR #2714).
+const MAX_STATION_ENTRIES = 120;
 const MAX_ACTIVE_STATIONS = 80;
 const MAX_ACTION_ENTRIES = 10;
 
@@ -123,9 +128,22 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
  */
 async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {}) {
   const summary = {
-    created: 0, moved: 0, retired: 0, skipped: [], stationIdByIndex: new Map(),
+    created: 0, moved: 0, retired: 0, deduped: 0, skipped: [], stationIdByIndex: new Map(),
   };
   if (!customerId || !Array.isArray(entries) || !entries.length) return summary;
+
+  // Number allocation reads max(station_number) below — two concurrent saves
+  // for one customer (office PUT + a field completion) could both read the
+  // same max and collide on the unique (customer_id, station_number), which
+  // in the post-commit completion path would silently drop the new pins.
+  // A per-customer advisory lock serializes allocation; it releases at
+  // transaction end, so this function MUST run inside a transaction (both
+  // callers do). Only taken when the payload actually creates stations.
+  const hasCreates = entries.some((entry) => entry && entry.retire !== true
+    && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null);
+  if (hasCreates) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}`]);
+  }
 
   const existing = await trx('termite_stations')
     .where({ customer_id: customerId })
@@ -134,6 +152,24 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
     .filter((row) => row.is_active !== false)
     .map((row) => [String(row.id), row]));
   let activeCount = activeById.size;
+  // Replay guard: a durable completion can resume after this post-commit
+  // sync already ran but before the attempt was marked succeeded, replaying
+  // the same body — id-less create entries would then insert duplicate
+  // stations. A resumed body carries byte-identical shapes, so an active
+  // station at the exact same normalized position IS that create: reuse it
+  // (two physical stations never share one hole in the ground).
+  const positionKey = (shape) => {
+    const parsed = typeof shape === 'string'
+      ? (() => { try { return JSON.parse(shape); } catch { return null; } })()
+      : shape;
+    if (!parsed || parsed.cx == null || parsed.cy == null) return null;
+    return `${Number(parsed.cx)}:${Number(parsed.cy)}`;
+  };
+  const activeByPosition = new Map();
+  for (const row of activeById.values()) {
+    const key = positionKey(row.geometry_image);
+    if (key && !activeByPosition.has(key)) activeByPosition.set(key, row);
+  }
   // Numbers are never reused — allocate above the max across ALL rows,
   // retired included, so "station 7" keeps meaning the same hole in the
   // ground in every historical report.
@@ -191,6 +227,14 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
       summary.skipped.push('new:invalid-shape');
       continue;
     }
+    const existingAtPosition = activeByPosition.get(positionKey(shape));
+    if (existingAtPosition) {
+      // completion-replay dedupe — the status check row still lands on the
+      // already-created station via stationIdByIndex
+      summary.deduped += 1;
+      summary.stationIdByIndex.set(i, String(existingAtPosition.id));
+      continue;
+    }
     if (activeCount >= MAX_ACTIVE_STATIONS) {
       summary.skipped.push('new:station-cap');
       continue;
@@ -210,6 +254,8 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
     if (created?.id) {
       activeById.set(String(created.id), created);
       summary.stationIdByIndex.set(i, String(created.id));
+      const createdKey = positionKey(shape);
+      if (createdKey) activeByPosition.set(createdKey, created);
     }
   }
 
@@ -286,10 +332,51 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
   };
 }
 
+// Scopes the station rows to THE VISIT the report describes. Report tokens
+// are long-lived, so rendering the current registry would make historical
+// reports mutate as the office later adds or retires stations (Codex P2,
+// PR #2714). Primary rule: when the visit recorded per-station checks, the
+// map shows exactly the checked stations (retired-later included — the row
+// still existed for that visit). Fallback (no check rows — reports rendered
+// between migration and the first checked visit): stations that existed on
+// the visit's ET service day (created before end-of-day, not retired before
+// start-of-day). Positions always render from the current row so drift
+// re-anchoring and physical re-pins keep pointing at the real ground.
+function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) {
+  if (statusByStationId.size > 0) {
+    return stationRows.filter((row) => statusByStationId.has(String(row.id)));
+  }
+  const dateStr = typeof serviceDate === 'string'
+    ? serviceDate.slice(0, 10)
+    : serviceDate instanceof Date && !Number.isNaN(serviceDate.getTime())
+      ? serviceDate.toISOString().slice(0, 10)
+      : null;
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    // no visit anchor — active rows only (legacy behavior)
+    return stationRows.filter((row) => row.is_active !== false);
+  }
+  const dayStart = parseETDateTime(`${dateStr}T00:00:00`);
+  const dayEnd = parseETDateTime(`${dateStr}T23:59:59`);
+  return stationRows.filter((row) => {
+    const createdAt = row.created_at ? new Date(row.created_at) : null;
+    if (createdAt && !Number.isNaN(createdAt.getTime()) && createdAt > dayEnd) return false;
+    if (row.is_active === false) {
+      const retiredAt = row.retired_at ? new Date(row.retired_at) : null;
+      // a retired row with no timestamp can't be placed in time — keep it
+      // off historical maps rather than resurrecting it everywhere
+      if (!retiredAt || Number.isNaN(retiredAt.getTime())) return false;
+      if (retiredAt < dayStart) return false;
+    }
+    return true;
+  });
+}
+
 /**
  * Customer-report context for the station map. Pure given its inputs —
- * report-data supplies the rows, the already-built satellite context, the
- * drift image context, and the viewer-visible typed snapshot types.
+ * report-data supplies the rows (ACTIVE AND RETIRED — visit scoping happens
+ * here), the visit's check rows and service date, the already-built
+ * satellite context, the drift image context, and the viewer-visible typed
+ * snapshot types.
  *
  * Renders ONLY for termite-bait-typed reports (primary or viewer-visible
  * companion): gating on the visible snapshot types keeps an internal_only
@@ -302,6 +389,7 @@ function buildStationMapReportContext({
   satelliteMap = null,
   imageContext = {},
   typedTypes = [],
+  serviceDate = null,
 } = {}) {
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
   if (!Array.isArray(typedTypes) || !typedTypes.includes('termite_bait_station')) {
@@ -321,7 +409,10 @@ function buildStationMapReportContext({
     }
   }
 
-  const resolved = resolveZoneRowsImageDrift(stationRows, imageContext);
+  const visitRows = selectStationRowsForVisit(stationRows, statusByStationId, serviceDate);
+  if (!visitRows.length) return { available: false, reason: 'no_stations' };
+
+  const resolved = resolveZoneRowsImageDrift(visitRows, imageContext);
   const pins = [];
   for (const row of resolved) {
     const shape = typeof row.geometry_image === 'string'
