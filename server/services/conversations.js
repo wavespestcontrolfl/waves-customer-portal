@@ -285,7 +285,12 @@ async function syncVoiceMessageForCall(callSid, extraPatch = {}) {
       ...extraPatch,
       updated_at: new Date(),
     };
-    if (media.length && !patch.media) patch.media = JSON.stringify(media);
+    // An EXPLICIT media: null in extraPatch means "clear the media" (PAN
+    // quarantine heals) — auto-populate from the row's recording_url only
+    // when the caller didn't address media at all (Codex #2676 round-16 P1:
+    // the falsy check overwrote the null and reattached quarantined audio).
+    const mediaExplicit = Object.prototype.hasOwnProperty.call(extraPatch, 'media');
+    if (media.length && !mediaExplicit && !patch.media) patch.media = JSON.stringify(media);
 
     const direction = call.direction || 'inbound';
     const ourEndpointId = direction === 'outbound' ? call.from_phone : call.to_phone;

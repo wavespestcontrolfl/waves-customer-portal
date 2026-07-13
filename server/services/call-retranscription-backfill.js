@@ -152,6 +152,12 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
             ...(legacyStructured.count > 0 ? { transcript_structured: legacyStructured.json } : {}),
             // Stamp pan_detected IN THE SAME TOUCH that scrubs the text —
             // the durable signal the recompute above keys on after a crash.
+            // The ROW's recording_url is stripped here too (round-16 P1):
+            // any message re-sync in the crash window before the quarantine
+            // re-reads the row and must not find a URL to reattach. The
+            // IN-MEMORY call.recording_url stays for the re-listen, and the
+            // quarantine deletes at Twilio via recording_sid.
+            recording_url: null,
             transcription_metadata: JSON.stringify({
               ...priorMeta,
               pan_detected: true,

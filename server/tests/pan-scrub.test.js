@@ -482,6 +482,19 @@ describe('scrubPans — round 15 hardening', () => {
   });
 });
 
+describe('scrubPans — round 16 hardening', () => {
+  it('dash-glued runs still scrub (boundary excludes digits only)', () => {
+    expect(scrubPansDetailed('card-4242-4242-4242-4242')).toEqual({ text: 'card-[card ending 4242]', count: 1 });
+    expect(scrubPansDetailed('4242-4242-4242-4242-exp')).toEqual({ text: '[card ending 4242]-exp', count: 1 });
+    const range = 'the range is 2024-2025 for that plan';
+    expect(scrubPans(range)).toBe(range);
+  });
+
+  it('a fused 2-series Mastercard with an EXPIRED tail still masks (an expired card is still a PAN)', () => {
+    expect(scrubPansDetailed('22230000484000110125123')).toEqual({ text: '[card ending 0011] [code removed]', count: 1 });
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

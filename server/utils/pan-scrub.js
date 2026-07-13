@@ -92,13 +92,17 @@ function maskFor(digits) {
 // into the mask when a PAN bridges it — a small diarization loss, the right
 // trade against a stored card number.
 const LABEL_SEP = '(?:(?:speaker\\s*\\d+|agent|caller)\\s*:[\\s,.-]{1,3})';
+// Boundaries exclude DIGITS only (round-16 P1): a punctuation dash glued
+// to the run ("card-4242-4242-4242-4242") must not stop the run from
+// starting/ending — internal dashes are already separators, and maximal
+// matching means a suffix can't be matched apart from its head.
 // The negative lookbehind on "speaker" keeps a run from STARTING on the
 // label's own digit ("Speaker 1: 4242…" must begin at 4242, not at the 1) —
 // and scrubNumericRun drops any digit group that sits inside a label token,
 // so "Speaker 1:" mid-readback can never poison the Luhn stream (Codex
 // #2676 round-6 P1).
 const NUMERIC_RUN_RE = new RegExp(
-  `(?<![\\d-])(?<!speaker\\s{0,3})\\d(?:(?:(?:\\s{1,40}|[\\s,./-]{1,3})${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?![\\d-])`,
+  `(?<!\\d)(?<!speaker\\s{0,3})\\d(?:(?:(?:\\s{1,40}|[\\s,./-]{1,3})${LABEL_SEP}?|${LABEL_SEP})?\\d)*(?!\\d)`,
   'gi'
 );
 const LABEL_TOKEN_RE = new RegExp('(?:speaker\\s*\\d+|agent|caller)\\s*:', 'gi');
@@ -235,13 +239,16 @@ function scrubNumericRun(run) {
         // (round-1 pinned contract).
         if ((tailLen > 4 || digits.length > 19) && !isValidCodeTail(tail)) continue;
         const prefix = digits.slice(0, plen);
-        // >19 totals need a card-shaped prefix: strong IIN with a code
-        // tail, or a PRECISE 2-series Mastercard with a STRICT future
-        // expiry (round-15 P1 — mirrors the spoken-path mc2 gate; a real
-        // 2223… readback fused into one token must not survive).
+        // >19 totals need a card-shaped prefix: a strong IIN or a PRECISE
+        // 2-series Mastercard (2221–2720). No live-expiry requirement here
+        // (round-16 P1): an EXPIRED card number is still a PAN and must
+        // not persist. The strict-future gate stays on the SPOKEN phone
+        // path only — that ambiguity is grouped/dictated phone pairs,
+        // which never arrive as one fused 20+ digit token; the code-shaped
+        // tail requirement above already screens fused non-card tokens.
         if (digits.length > 19
           && !strongCardIin(prefix)
-          && !(mc2SeriesIin(prefix) && isStrictFutureExpiryTail(tail))) continue;
+          && !mc2SeriesIin(prefix)) continue;
         if (panCandidateValid(prefix)) return prefix;
       }
       return null;
