@@ -30,7 +30,7 @@ const {
   isValidProjectType,
   getProjectType,
 } = require('../services/project-types');
-const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
+const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
@@ -997,7 +997,11 @@ router.get('/types', async (_req, res) => {
   const managed = await appointmentManagedProjectTypes();
   const types = {};
   for (const key of PROJECT_TYPE_KEYS) {
-    types[key] = { ...PROJECT_TYPES[key], appointmentManaged: managed.has(key) };
+    types[key] = {
+      ...PROJECT_TYPES[key],
+      appointmentManaged: managed.has(key),
+      linkedCreationOnly: PROJECT_CREATION_LINKED_ONLY_TYPES.has(key),
+    };
   }
   res.json({ types, keys: PROJECT_TYPE_KEYS, appointmentManaged: Array.from(managed) });
 });
@@ -1358,6 +1362,38 @@ router.post('/', async (req, res, next) => {
         code: 'project_type_appointment_managed',
       });
     }
+    // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
+    // scheduled visit, so ad-hoc/unlinked creation closes, and the link must
+    // be THE compliance visit itself — either the linked profile's pointer
+    // matches, or (legacy rows with no service_id, whose name-based profile
+    // resolution finds nothing — Codex r2) the visit's own service text
+    // matches the compliance service. A random lawn/pest visit must not
+    // carry a WDO/cert create (Codex r3). Typed visits already 422'd above
+    // as scheduled_service_appointment_managed; the completion machinery
+    // (FDACS signature/PDF/filing) is unchanged.
+    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type)) {
+      if (!linkedScheduledServiceId) {
+        return res.status(422).json({
+          error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
+          code: 'project_type_linked_only',
+        });
+      }
+      if (!linkedProjectTypeMatches) {
+        const linkedVisit = await db('scheduled_services')
+          .where({ id: linkedScheduledServiceId })
+          .first('service_type');
+        const label = String(linkedVisit?.service_type || '');
+        const legacyLabelMatches = project_type === 'wdo_inspection'
+          ? /\bwdo\b|wood[\s-]?destroying/i.test(label)
+          : /pre[\s-]?treat|slab/i.test(label);
+        if (!legacyLabelMatches) {
+          return res.status(422).json({
+            error: 'The linked appointment is not a WDO / pre-treat visit — open the report from the compliance visit it documents.',
+            code: 'project_type_link_mismatch',
+          });
+        }
+      }
+    }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
@@ -1369,7 +1405,12 @@ router.post('/', async (req, res, next) => {
       findings: findings || null,
       recommendations: recommendations || null,
       service_record_id: service_record_id || null,
-      scheduled_service_id: scheduled_service_id || null,
+      // Persist the DERIVED link too (record-only callers): the linked-only
+      // gate accepted this create because the record resolved to a scheduled
+      // visit, and the schedule/tech continuation path looks projects up by
+      // projects.scheduled_service_id — dropping it here would let the same
+      // visit mint a duplicate report (Codex round-2 P2).
+      scheduled_service_id: linkedScheduledServiceId || null,
       status: 'draft',
       created_by_tech_id: req.technicianId,
     }).returning('*');

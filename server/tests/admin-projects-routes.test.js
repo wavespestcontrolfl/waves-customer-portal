@@ -496,6 +496,215 @@ describe('admin projects routes', () => {
     }
   });
 
+  test('linked-only WDO create is rejected without a scheduled-visit link (owner ruling 2026-07-13)', async () => {
+    // WDO + pre-treat certs are never done without something scheduled —
+    // ad-hoc/unlinked creation 422s while the visit-linked door stays open.
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        for (const projectType of ['wdo_inspection', 'pre_treatment_termite_certificate']) {
+          const res = await fetch(`${baseUrl}/admin/projects`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customer_id: 'customer-1', project_type: projectType }),
+          });
+          const body = await res.json();
+          expect(res.status).toBe(422);
+          expect(body.code).toBe('project_type_linked_only');
+        }
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
+  test('linked-only WDO create passes with its scheduled-visit link', async () => {
+    // The linked service's own special_project profile pointing at
+    // wdo_inspection is the one door in — same bypass as the managed gate.
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-3', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
+    const profilesChain = modeAwareProfilesChain({
+      flipped: [],
+      backed: [{ project_type: 'wdo_inspection' }],
+      first: {
+        service_key: 'wdo_inspection', completion_mode: 'special_project',
+        project_type: 'wdo_inspection', active: true,
+      },
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-11', service_id: 'service-5', service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue({ service_key: 'wdo_inspection', name: 'WDO Inspection', category: 'termite', billing_type: 'one_time' }) });
+      if (table === 'service_completion_profiles') return profilesChain;
+      if (table === 'projects') return chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-11' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-3');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
+  test('linked-only gate accepts a legacy WDO visit that resolves no project-backed profile', async () => {
+    // Legacy scheduled WDO rows (service_type text, no service_id) resolve
+    // the DEFAULT generic profile — the gate requires the LINK, not a
+    // resolved pointer, or real dispatched visits 422 (Codex P2).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-4', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-legacy', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      if (table === 'projects') return chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-legacy' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-4');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
+  test('linked-only gate rejects a WDO create linked to an unrelated visit', async () => {
+    // The link must be THE compliance visit (pointer match or legacy WDO
+    // service text) — a stale client posting wdo_inspection against a lawn
+    // visit must not attach a compliance report to the wrong appointment
+    // (Codex r3).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-lawn', service_id: null, service_type: 'Lawn Care Visit',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', scheduled_service_id: 'svc-lawn' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(422);
+        expect(body.code).toBe('project_type_link_mismatch');
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
+  test('record-only linked WDO create persists the DERIVED scheduled_service_id', async () => {
+    // The linked-only gate accepts a service_record_id link via the record's
+    // scheduled_service_id — the insert must persist that derived id or the
+    // schedule/tech continuation lookup (keyed on projects.scheduled_service_id)
+    // never finds the report and the visit can mint a duplicate (Codex r2).
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const createdProject = { id: 'project-5', customer_id: 'customer-1', project_type: 'wdo_inspection', status: 'draft' };
+    const projectInsert = chain({ returning: jest.fn().mockResolvedValue([createdProject]) });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'service_records') return chain({
+        // The scope validator re-reads the record and pins customer
+        // ownership — the mock must carry customer_id or the create 400s.
+        first: jest.fn().mockResolvedValue({
+          id: 'rec-9', customer_id: 'customer-1', technician_id: null,
+          scheduled_service_id: 'svc-7',
+        }),
+      });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-7', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({
+        flipped: [],
+        backed: [],
+        first: undefined,
+      });
+      if (table === 'projects') return projectInsert;
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    try {
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/projects`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: 'customer-1', project_type: 'wdo_inspection', service_record_id: 'rec-9' }),
+        });
+        const body = await res.json();
+        expect(res.status).toBe(200);
+        expect(body.project.id).toBe('project-5');
+        expect(projectInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+          service_record_id: 'rec-9',
+          scheduled_service_id: 'svc-7',
+        }));
+      });
+    } finally {
+      delete db.schema;
+    }
+  });
+
   test('wdo intelligence uses selected customer address and returns field suggestions', async () => {
     process.env.ANTHROPIC_API_KEY = 'test-key';
     lookupPropertyFromAITrio.mockResolvedValue({

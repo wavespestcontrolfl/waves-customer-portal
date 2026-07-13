@@ -70,6 +70,8 @@ import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import { ProjectDetail } from "./ProjectsPage";
+import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
 import { Button, Badge, Card, CardBody, cn } from "../../components/ui";
@@ -1160,6 +1162,23 @@ export default function DispatchPageV2({
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
   const [projectService, setProjectService] = useState(null);
+  // In-place project editor (owner ask 2026-07-13): a project-backed visit's
+  // report opens right here in the schedule — the same interaction as the
+  // pest CompletionPanel — instead of bouncing to the Jobs page.
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  // ProjectDetail needs the types registry for form labels/fields; fetched
+  // once on first open, then cached for the session.
+  const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
+  useEffect(() => {
+    if (!continueProjectId || projectTypesRegistry) return;
+    // This page's adminFetch (utils/admin-fetch) returns the PARSED body,
+    // not a Response — calling .json() on it threw and permanently cached
+    // an empty registry, which blanked every findings field in the
+    // in-place editor (Codex round-2 P2).
+    adminFetch("/admin/projects/types")
+      .then((d) => setProjectTypesRegistry(d?.types || {}))
+      .catch(() => setProjectTypesRegistry({}));
+  }, [continueProjectId, projectTypesRegistry]);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
   const [detailService, setDetailService] = useState(null);
@@ -1385,7 +1404,8 @@ export default function DispatchPageV2({
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
-        window.location.assign(`/admin/projects?projectId=${service.linkedProject.id}`);
+        // Open the existing report in place — no Jobs-page bounce.
+        setContinueProjectId(service.linkedProject.id);
         return;
       }
       setProjectService(service);
@@ -2374,11 +2394,39 @@ export default function DispatchPageV2({
               : null
           }
           onClose={() => setProjectService(null)}
-          onCreated={() => {
+          onCreated={(p) => {
             setProjectService(null);
             fetchSchedule(date);
+            // Chain straight into the report editor so fill → review → send
+            // all happens without leaving the schedule.
+            if (p?.id) setContinueProjectId(p.id);
           }}
         />
+      )}
+      {continueProjectId && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
+          onClick={() => {
+            setContinueProjectId(null);
+            fetchSchedule(date);
+          }}
+        >
+          <div
+            className="max-w-4xl mx-auto my-6 px-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <ProjectDetail
+              projectId={continueProjectId}
+              typesRegistry={projectTypesRegistry}
+              onClose={() => {
+                setContinueProjectId(null);
+                fetchSchedule(date);
+              }}
+              onChanged={() => fetchSchedule(date)}
+              canAdminActions={getAdminUser()?.role === "admin"}
+            />
+          </div>
+        </div>
       )}
       {rescheduleService && (
         <RescheduleModal

@@ -245,6 +245,19 @@ export default function CreateProjectModal({
     letterSpacing: isEstimateStyle ? '0.12em' : 1,
     marginBottom: 8,
   };
+  // Sectioned findings schemas (WDO, pre-treat cert) render an inline header
+  // above the first field of each section — same scan-in-groups pattern as
+  // the typed CompletionPanel's sectioned findings.
+  const sectionHeaderStyle = {
+    fontSize: 12,
+    fontWeight: wStrong,
+    letterSpacing: isEstimateStyle ? '0.12em' : 1,
+    textTransform: 'uppercase',
+    color: P.text,
+    margin: '20px 0 10px',
+    paddingBottom: 6,
+    borderBottom: `1px solid ${P.border}`,
+  };
 
   const [typesRegistry, setTypesRegistry] = useState(null);
   const [productCatalog, setProductCatalog] = useState([]);
@@ -510,12 +523,21 @@ export default function CreateProjectModal({
       : null
   ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft]);
   // appointmentManaged types complete through the standard appointment flow
-  // now — they're not creatable as projects (server 422s them too). An
-  // explicit allowedProjectTypes prop (the special-project dispatch path)
-  // still wins so WDO/pre-treat routing keeps working.
+  // now — they're not creatable as projects (server 422s them too).
+  // linkedCreationOnly types (WDO, pre-treat cert — owner ruling 2026-07-13)
+  // create only from their scheduled visit, so the AD-HOC picker hides them
+  // — but a visit-linked open (defaultScheduledServiceId set) IS the allowed
+  // door, and a legacy visit's profile may resolve no pointer to build an
+  // explicit allowedProjectTypes from (Codex r3): keep the compliance types
+  // selectable whenever a linked visit is present; the server still rejects
+  // a mismatched visit (project_type_link_mismatch). An explicit
+  // allowedProjectTypes prop (the special-project dispatch path) still wins.
+  const linkedVisitContext = !!defaultScheduledServiceId;
   const visibleTypes = typesRegistry
     ? Object.entries(typesRegistry).filter(([key, cfg]) => (
-      allowedProjectTypes ? allowedProjectTypes.includes(key) : !cfg?.appointmentManaged
+      allowedProjectTypes
+        ? allowedProjectTypes.includes(key)
+        : !cfg?.appointmentManaged && (!cfg?.linkedCreationOnly || linkedVisitContext)
     ))
     : [];
 
@@ -1225,7 +1247,7 @@ export default function CreateProjectModal({
                 />
               )}
 
-              {typeCfg.findingsFields.map(field => {
+              {typeCfg.findingsFields.map((field, fieldIndex) => {
                 // The applicator must be one of our licensed techs — swap the
                 // free-text field for a dropdown of active technicians once
                 // the list loads (free text remains the offline fallback).
@@ -1235,8 +1257,15 @@ export default function CreateProjectModal({
                   : field;
                 return (
                 <div key={field.key}>
+                  {field.section && field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
+                    <div style={sectionHeaderStyle}>{field.section}</div>
+                  )}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                    <label style={{ ...labelStyle, marginBottom: 0 }}>{field.label}</label>
+                    {/* A field whose label IS its section name (the applications
+                        repeater) would stutter under the section header. */}
+                    {field.label !== field.section && (
+                      <label style={{ ...labelStyle, marginBottom: 0 }}>{field.label}</label>
+                    )}
                     {projectType === 'wdo_inspection' && field.key === 'property_address' && formatCustomerAddress(selectedCustomer) && (
                       <button
                         type="button"

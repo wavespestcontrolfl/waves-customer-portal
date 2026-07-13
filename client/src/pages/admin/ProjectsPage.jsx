@@ -1276,7 +1276,6 @@ export default function ProjectsPage() {
               projects={wdoProjects}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onCreate={() => setCreateMode("wdo")}
             />
           )}
         </div>
@@ -1298,13 +1297,20 @@ export default function ProjectsPage() {
         <CreateProjectModal
           theme="light"
           allowAiDraft
-          defaultProjectType={createMode === "wdo" ? WDO_TYPE : ""}
+          defaultProjectType=""
           allowedProjectTypes={
-            createMode === "wdo"
-              ? [WDO_TYPE]
-              : GENERAL_PROJECT_TYPES.filter(
-                  (key) => !typesRegistry?.[key]?.appointmentManaged,
+            /* linkedCreationOnly (WDO, pre-treat cert — owner ruling
+               2026-07-13) create from their scheduled visit, never ad hoc.
+               FAIL CLOSED while the registry is loading/unavailable (Codex
+               P2): an unfiltered list here would override the modal's own
+               registry filtering and resurrect the linked-only lanes. */
+            typesRegistry
+              ? GENERAL_PROJECT_TYPES.filter(
+                  (key) =>
+                    !typesRegistry?.[key]?.appointmentManaged &&
+                    !typesRegistry?.[key]?.linkedCreationOnly,
                 )
+              : []
           }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
@@ -1318,7 +1324,7 @@ export default function ProjectsPage() {
   );
 }
 
-function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
+function WdoReportsSection({ projects, selectedId, onSelect }) {
   const urgentCount = projects.filter((p) => {
     if (p.status === "sent" || p.status === "closed") return false;
     const created = p.created_at ? new Date(p.created_at).getTime() : 0;
@@ -1345,9 +1351,9 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
             </div>
           )}
         </div>{" "}
-        <Button variant="secondary" size="sm" onClick={onCreate} className="whitespace-nowrap">
-          + New WDO
-        </Button>{" "}
+        {/* + New WDO removed (owner ruling 2026-07-13): WDO reports are
+            created from their scheduled visit in Dispatch / the tech
+            portal, never ad hoc. */}
       </div>
       {projects.length === 0 ? (
         <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-12 text-zinc-500 text-center">
@@ -1431,7 +1437,11 @@ function ProjectRow({ project, active, onSelect, compactType }) {
   );
 }
 
-function ProjectDetail({
+// Named export: DispatchPageV2 and the tech portal mount this same editor
+// in an overlay so project-backed visits (WDO, pre-treat cert) open their
+// report in place from the schedule — the pest-completion interaction
+// (owner ask 2026-07-13). Self-contained: fetches its own project by id.
+export function ProjectDetail({
   projectId,
   typesRegistry,
   onClose,
@@ -2407,8 +2417,28 @@ function ProjectDetail({
           />
         )}
         {/* Type-specific findings */}
-        {typeCfg?.findingsFields?.map((field) => (
+        {typeCfg?.findingsFields?.map((field, fieldIndex) => (
           <div key={field.key}>
+            {/* Sectioned schemas (WDO, pre-treat cert): header above the
+                first field of each section — same scan-in-groups pattern as
+                the typed CompletionPanel and CreateProjectModal. */}
+            {field.section &&
+              field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 500,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    color: "#27272A",
+                    margin: "20px 0 10px",
+                    paddingBottom: 6,
+                    borderBottom: "1px solid #E4E4E7",
+                  }}
+                >
+                  {field.section}
+                </div>
+              )}
             {" "}
             <div
               style={{
@@ -2419,12 +2449,14 @@ function ProjectDetail({
                 marginBottom: 6,
               }}
             >
-              <Label
-                htmlFor={fieldInputId(field.key)}
-                style={{ marginBottom: 0 }}
-              >
-                {field.label}
-              </Label>
+              {field.label !== field.section && (
+                <Label
+                  htmlFor={fieldInputId(field.key)}
+                  style={{ marginBottom: 0 }}
+                >
+                  {field.label}
+                </Label>
+              )}
               {project.project_type === WDO_TYPE &&
                 field.key === "property_address" &&
                 formatProjectCustomerAddress(project) && (
@@ -2752,7 +2784,11 @@ function ProjectDetail({
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
       </div>
-      {canAdminActions && project.project_type === WDO_TYPE && project.status !== "closed" && (
+      {/* Signature capture is a FIELD action — the licensee signs at the
+          inspection, and POST /:id/wdo-signature is requireTechOrAdmin — so
+          it is deliberately NOT behind canAdminActions (Codex P2 on the
+          tech in-place embed). Send/PDF/close stay admin-gated. */}
+      {project.project_type === WDO_TYPE && project.status !== "closed" && (
         <div style={{ padding: "0 16px" }}>
           <WdoSignaturePad
             projectId={project.id}

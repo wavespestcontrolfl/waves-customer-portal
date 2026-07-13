@@ -40,7 +40,8 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
@@ -53,6 +54,15 @@ import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
+
+// In-place report editor for project-backed visits (WDO, pre-treat cert —
+// owner ask 2026-07-13): tapping a visit whose report already exists opens
+// that report right here, like the pest completion, instead of re-opening
+// a create form (duplicate risk) or leaving the portal. Lazy so the admin
+// Jobs module stays out of the tech bundle until first use.
+const ProjectDetail = lazy(() =>
+  import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
+);
 
 const DARK = {
   bg: '#0f1923',
@@ -342,6 +352,34 @@ export default function TechHomePage() {
     } : {});
     setShowCreateProject(true);
   }, []);
+  // A visit whose report already exists (linkedProject rides the schedule
+  // payload) CONTINUES that report in place — re-opening the create form
+  // would mint a duplicate project for the same visit.
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
+  useEffect(() => {
+    if (!continueProjectId || projectTypesRegistry) return;
+    fetch(`${API}/api/admin/projects/types`, {
+      headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
+    })
+      .then((r) => r.json())
+      .then((d) => setProjectTypesRegistry(d.types || {}))
+      .catch(() => setProjectTypesRegistry({}));
+  }, [continueProjectId, projectTypesRegistry]);
+  const openProjectOrContinue = useCallback((service) => {
+    // Terminal guard (Codex P1 + r3, stricter than DispatchPageV2's
+    // projectCompletionIsClosed on purpose): a completed visit, a closed
+    // report, or a SENT report is a delivered customer-facing compliance
+    // record — the field portal must not reopen it for editing. Admin
+    // corrections go through the Jobs page / dispatch.
+    const linkedStatus = service?.linkedProject?.status;
+    if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
+    if (service?.linkedProject?.id) {
+      setContinueProjectId(service.linkedProject.id);
+      return;
+    }
+    openProjectForService(service);
+  }, [openProjectForService]);
   const handleProjectQuickAction = useCallback(() => {
     if (myServices.length === 1) {
       const only = myServices[0];
@@ -352,12 +390,12 @@ export default function TechHomePage() {
       } else if (isPestControlService(only)) {
         setRecapService(only);
       } else {
-        openProjectForService(only);
+        openProjectOrContinue(only);
       }
       return;
     }
     setShowProjectPicker(true);
-  }, [myServices, openProjectForService]);
+  }, [myServices, openProjectOrContinue]);
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
@@ -583,7 +621,7 @@ export default function TechHomePage() {
                 onProject={() => (
                   isTypedFindingsService(s)
                     ? openTypedCompletion(s)
-                    : isPestControlService(s) ? setRecapService(s) : openProjectForService(s)
+                    : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
                 onPhotos={() => setPhotoTarget({
                   id: s.id,
@@ -610,6 +648,41 @@ export default function TechHomePage() {
         />
       )}
 
+      {continueProjectId && createPortal(
+        <div
+          /* Portaled to document.body at zIndex 50 so the stack lands right
+             (Codex P2): the overlay mounts AFTER #root, so it paints above
+             the TechLayout bottom nav (also z-50, inside #root) — and
+             ProjectDetail's confirmations use the shared Dialog portal
+             (z-50), which mounts LATER at body-end and therefore paints
+             above this scrim. A higher z here would bury the dialogs. */
+          style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
+          onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
+        >
+          {/* The report editor is a customer-document surface — it renders
+              light (V2) over the dark portal, same as the report preview. */}
+          <div
+            style={{ maxWidth: 900, margin: '20px auto', padding: '0 12px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <Suspense fallback={(
+              <div style={{ background: '#fff', borderRadius: 6, padding: 24, textAlign: 'center', color: '#71717A' }}>
+                Loading report…
+              </div>
+            )}>
+              <ProjectDetail
+                projectId={continueProjectId}
+                typesRegistry={projectTypesRegistry}
+                onClose={() => { setContinueProjectId(null); fetchSchedule(); }}
+                onChanged={() => fetchSchedule()}
+                canAdminActions={getAdminUser()?.role === 'admin'}
+              />
+            </Suspense>
+          </div>
+        </div>,
+        document.body,
+      )}
+
       {showProjectPicker && (
         <ProjectServicePicker
           services={myServices}
@@ -618,7 +691,7 @@ export default function TechHomePage() {
             setShowProjectPicker(false);
             if (isTypedFindingsService(service)) openTypedCompletion(service);
             else if (isPestControlService(service)) setRecapService(service);
-            else openProjectForService(service);
+            else openProjectOrContinue(service);
           }}
         />
       )}
@@ -941,7 +1014,14 @@ function ServiceRow({ service, onPhotos, onProject }) {
           border: `1px solid ${DARK.border}`, background: 'transparent',
           color: DARK.teal, cursor: 'pointer',
         }}>
-          🗂️ Report
+          {/* A visit with an existing linked report continues it (in-place
+              editor) instead of creating a duplicate; a sent/closed report
+              or completed visit is terminal (openProjectOrContinue no-ops). */}
+          {service.linkedProject?.status === 'sent'
+            ? '🗂️ Sent'
+            : service.linkedProject?.status === 'closed' || service.status === 'completed'
+              ? '🗂️ Completed'
+              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
         </button>
         <button onClick={onPhotos} style={{
           padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
