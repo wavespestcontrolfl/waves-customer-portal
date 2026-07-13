@@ -218,6 +218,10 @@ export default function CreateProjectModal({
 }) {
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
+  // V2 zinc restricts admin type to weights 400/500; the tech-portal dark
+  // theme keeps its heavier Montserrat-era weights.
+  const wStrong = isEstimateStyle ? 500 : 800;
+  const wMed = isEstimateStyle ? 500 : 700;
   const inputStyle = {
     width: '100%',
     background: isEstimateStyle ? ESTIMATE_INPUT_BG : P.bg,
@@ -235,7 +239,7 @@ export default function CreateProjectModal({
   const labelStyle = {
     display: 'block',
     fontSize: 12,
-    fontWeight: 800,
+    fontWeight: wStrong,
     color: P.muted,
     textTransform: 'uppercase',
     letterSpacing: isEstimateStyle ? '0.12em' : 1,
@@ -963,7 +967,7 @@ export default function CreateProjectModal({
           <div>
             <div style={{
               fontSize: isEstimateStyle ? 18 : 16,
-              fontWeight: 800,
+              fontWeight: wStrong,
               color: P.heading,
               fontFamily: P.bodyFont,
               letterSpacing: 0,
@@ -1005,7 +1009,7 @@ export default function CreateProjectModal({
               borderRadius: 10, padding: 12,
               display: 'flex', flexDirection: 'column', gap: 10,
             }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: P.heading }}>
+              <div style={{ fontSize: 13, fontWeight: wStrong, color: P.heading }}>
                 Restore saved draft?
               </div>
               <div style={{ fontSize: 11, color: P.muted }}>
@@ -1017,7 +1021,7 @@ export default function CreateProjectModal({
                   type="button"
                   onClick={restoreDraft}
                   style={{
-                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 800,
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: wStrong,
                     background: P.accent, color: P.accentText, border: 'none', cursor: 'pointer',
                   }}
                 >Restore</button>
@@ -1025,7 +1029,7 @@ export default function CreateProjectModal({
                   type="button"
                   onClick={discardDraft}
                   style={{
-                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: wMed,
                     background: 'transparent', color: P.text, border: `1px solid ${P.border}`, cursor: 'pointer',
                   }}
                 >Discard</button>
@@ -1049,7 +1053,7 @@ export default function CreateProjectModal({
                       background: active ? P.accent : (theme === 'light' ? P.bg : P.bg),
                       color: active ? P.accentText : P.text,
                       border: `1px solid ${active ? P.accent : P.border}`,
-                      fontSize: 12, fontWeight: 700, textAlign: 'left',
+                      fontSize: 12, fontWeight: wMed, textAlign: 'left',
                     }}
                   >
                     {cfg.short || cfg.label}
@@ -1065,7 +1069,7 @@ export default function CreateProjectModal({
                   href="/forms/fdacs-13645-wdo-inspection-report.pdf"
                   target="_blank"
                   rel="noreferrer"
-                  style={{ display: 'inline-block', marginTop: 8, fontSize: 12, fontWeight: 800, color: P.accent }}
+                  style={{ display: 'inline-block', marginTop: 8, fontSize: 12, fontWeight: wStrong, color: P.accent }}
                 >
                   Open FDACS-13645 form
                 </a>
@@ -1126,7 +1130,7 @@ export default function CreateProjectModal({
                           fontSize: 13,
                         }}
                       >
-                        <div style={{ fontWeight: 700 }}>
+                        <div style={{ fontWeight: wMed }}>
                           {c.firstName || c.first_name || ''} {c.lastName || c.last_name || ''}
                           {!(c.firstName || c.first_name || c.lastName || c.last_name) && (c.phone || 'Unnamed customer')}
                         </div>
@@ -1177,7 +1181,7 @@ export default function CreateProjectModal({
                           padding: '10px 12px', cursor: 'pointer', color: P.text,
                         }}
                       >
-                        <div style={{ fontSize: 13, fontWeight: 800 }}>{s.name}</div>
+                        <div style={{ fontSize: 13, fontWeight: wStrong }}>{s.name}</div>
                         <div style={{ fontSize: 11, color: P.muted }}>
                           {[s.category, s.billing_type, s.default_duration_minutes ? `${s.default_duration_minutes} min` : ''].filter(Boolean).join(' · ')}
                         </div>
@@ -1242,7 +1246,7 @@ export default function CreateProjectModal({
                           border: 'none',
                           color: P.accent,
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: wStrong,
                           cursor: 'pointer',
                           padding: 0,
                           whiteSpace: 'nowrap',
@@ -1260,7 +1264,7 @@ export default function CreateProjectModal({
                           border: 'none',
                           color: P.accent,
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: wStrong,
                           cursor: 'pointer',
                           padding: 0,
                           whiteSpace: 'nowrap',
@@ -1287,6 +1291,7 @@ export default function CreateProjectModal({
                     products={productCatalog}
                     onProductSelect={(product) => handleProductSelect(field.key, product)}
                     palette={P}
+                    appearance={theme}
                   />
                   {field.key === 'product_name' && chemAuto?.status === 'not_applicable' && chemAuto.note && (
                     <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{chemAuto.note}</div>
@@ -1319,7 +1324,7 @@ export default function CreateProjectModal({
                       onClick={handleAiDraft}
                       disabled={aiWriting || saving || !projectType}
                       style={{
-                        padding: '6px 10px', borderRadius: 8, fontSize: 11, fontWeight: 800,
+                        padding: '6px 10px', borderRadius: 8, fontSize: 11, fontWeight: wStrong,
                         background: theme === 'light' ? P.card : P.bg,
                         color: P.text, border: `1px solid ${P.border}`,
                         cursor: (aiWriting || saving || !projectType) ? 'default' : 'pointer',
@@ -1411,7 +1416,7 @@ export default function CreateProjectModal({
               padding: isEstimateStyle ? '0 18px' : '10px 16px',
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
-              fontWeight: 700,
+              fontWeight: wMed,
               background: isEstimateStyle ? P.card : 'transparent',
               border: `1px solid ${P.border}`,
               color: P.text, cursor: saving ? 'default' : 'pointer',
@@ -1426,7 +1431,7 @@ export default function CreateProjectModal({
               padding: isEstimateStyle ? '0 18px' : '10px 18px',
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
-              fontWeight: 800,
+              fontWeight: wStrong,
               background: (!projectType || !customerId) ? P.muted : P.accent,
               color: P.accentText, border: 'none',
               cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',
@@ -1477,7 +1482,7 @@ function PhotoQueue({ queue, setQueue, categories, onAdd, palette: P, inputStyle
     flex: 1,
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
     padding: '10px 12px', borderRadius: 8, background: P.accent, color: P.accentText,
-    fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
+    fontSize: 12, fontWeight: theme === 'light' ? 500 : 700, cursor: 'pointer', whiteSpace: 'nowrap',
   };
   const libraryButtonStyle = {
     ...addButtonStyle,
