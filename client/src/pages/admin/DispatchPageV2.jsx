@@ -1171,6 +1171,26 @@ export default function DispatchPageV2({
   // surfaces, mirroring the pest CompletionPanel's Details pill. Set and
   // cleared together with continueProjectId.
   const [continueProjectService, setContinueProjectService] = useState(null);
+  // Keep that snapshot pinned to the LIVE schedule row (Codex P1): closing
+  // the report inside ProjectDetail also completes the visit and refreshes
+  // the schedule via onChanged — a stale pre-close snapshot handed to the
+  // detail sheet would offer Cancel/No-show against a completed compliance
+  // visit. Re-pointing on every refresh keeps the sheet's status gating
+  // truthful; a row that left the day view clears the handoff. Reads
+  // data?.services (the state), not the post-early-return derived const —
+  // this hook must run unconditionally. Settles in one pass: once the
+  // snapshot IS the live row the effect stops writing.
+  useEffect(() => {
+    if (!continueProjectService) return;
+    const fresh = (data?.services || []).find(
+      (s) => String(s.id) === String(continueProjectService.id),
+    );
+    if (!fresh) {
+      setContinueProjectService(null);
+    } else if (fresh !== continueProjectService) {
+      setContinueProjectService(fresh);
+    }
+  }, [data, continueProjectService]);
   // ProjectDetail needs the types registry for form labels/fields; fetched
   // once on first open, then cached for the session.
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
