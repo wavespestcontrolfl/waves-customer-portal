@@ -191,6 +191,42 @@ describe('Staff active timer serialization', () => {
     expect(specs[1].insertPayload.utilization_pct).toBe(16.03);
   });
 
+  test('uses the canonical scheduled-service price for daily RPMH rounding', async () => {
+    const events = [];
+    const specs = [
+      {
+        table: 'time_entries',
+        label: 'dailyEntries',
+        thenValue: [
+          { entry_type: 'shift', status: 'completed', duration_minutes: '64.00' },
+          {
+            entry_type: 'job',
+            status: 'completed',
+            duration_minutes: '10.00',
+            job_id: 'job-1',
+          },
+        ],
+      },
+      {
+        table: 'scheduled_services',
+        label: 'jobRevenue',
+        thenValue: [{ estimated_price: '69.04' }],
+      },
+      {
+        table: 'time_entry_daily_summary',
+        label: 'dailyUpsert',
+        returningValue: [{ id: 'daily-1' }],
+      },
+    ];
+    const { trx } = installTransaction(specs, events);
+
+    await timeTracking.computeDailySummaryInTransaction(trx, 'tech-1', '2026-07-06');
+
+    expect(specs[1].selectArgs).toEqual(['estimated_price']);
+    expect(specs[2].insertPayload.revenue_generated).toBe(69.04);
+    expect(specs[2].insertPayload.rpmh_actual).toBe(64.73);
+  });
+
   test('rounds weekly RPMH like PostgreSQL NUMERIC at a half-cent boundary', async () => {
     const events = [];
     const specs = [

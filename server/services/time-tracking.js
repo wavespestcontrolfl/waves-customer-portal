@@ -831,8 +831,13 @@ async function computeDailySummaryInTransaction(trx, technicianId, workDate) {
   const jobIds = jobEntries.filter(e => e.job_id).map(e => e.job_id);
   let revenueUnits = 0n;
   if (jobIds.length > 0) {
-    const jobs = await trx('scheduled_services').whereIn('id', jobIds).select('price');
-    revenueUnits = jobs.reduce((sum, job) => sum + payrollUnits(job.price), 0n);
+    const jobs = await trx('scheduled_services')
+      .whereIn('id', jobIds)
+      .select('estimated_price');
+    revenueUnits = jobs.reduce(
+      (sum, job) => sum + payrollUnits(job.estimated_price),
+      0n,
+    );
   }
   const revenue = payrollNumber(revenueUnits);
 

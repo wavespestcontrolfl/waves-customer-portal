@@ -737,7 +737,7 @@ const checks = [
         GROUP BY technician_id, work_date
       ), job_revenue AS (
         SELECT jobs.technician_id, jobs.work_date,
-               COALESCE(SUM(services.price), 0)::numeric AS revenue_generated
+               COALESCE(SUM(services.estimated_price), 0)::numeric AS revenue_generated
         FROM (
           SELECT DISTINCT technician_id,
             (clock_in::timestamptz AT TIME ZONE 'America/New_York')::date AS work_date,

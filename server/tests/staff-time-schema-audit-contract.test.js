@@ -158,6 +158,10 @@ describe('Staff time schema rollout audit contract', () => {
       /status IN \('completed', 'edited'\)[\s\S]*LEFT JOIN[\s\S]*utilization_pct/,
     );
     expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /SUM\(services\.estimated_price\)/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).not.toMatch(/services\.price/);
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
       /DATE_TRUNC\('week', summary\.work_date::timestamp\)::date/,
     );
     expect(byKey.daily_summary_total_mismatch.sql).toMatch(
