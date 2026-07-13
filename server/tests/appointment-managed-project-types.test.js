@@ -9,6 +9,7 @@ const {
   serializeProfile,
   V1_EXCLUDED_PROJECT_TYPES,
   PROJECT_CREATION_KEPT_TYPES,
+  PROJECT_CREATION_LINKED_ONLY_TYPES,
 } = require('../services/service-completion-profiles');
 
 function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = false } = {}) {
@@ -92,6 +93,17 @@ describe('appointmentManagedProjectTypes', () => {
       active: true,
     });
     expect(profile.completionMode).toBe('service_report');
+  });
+
+  // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
+  // scheduled visit — creation is linked-only (POST guard + picker flag).
+  // Pinned here beside the V1 exclusion because both sets protect the same
+  // compliance types, in different directions: linked-only closes ad-hoc
+  // CREATION; the V1 exclusion protects COMPLETION routing.
+  test('linked-only creation covers exactly the two compliance project types', () => {
+    expect(PROJECT_CREATION_LINKED_ONLY_TYPES).toEqual(
+      new Set(['wdo_inspection', 'pre_treatment_termite_certificate']),
+    );
   });
 
   // wdo_inspection completion is compliance machinery (licensee e-signature

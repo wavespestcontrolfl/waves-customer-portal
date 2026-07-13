@@ -523,12 +523,16 @@ export default function CreateProjectModal({
       : null
   ), [hasChemistryFields, findings.product_name, findings.square_footage, findings.linear_feet, findings.trench_depth_ft]);
   // appointmentManaged types complete through the standard appointment flow
-  // now — they're not creatable as projects (server 422s them too). An
-  // explicit allowedProjectTypes prop (the special-project dispatch path)
-  // still wins so WDO/pre-treat routing keeps working.
+  // now — they're not creatable as projects (server 422s them too).
+  // linkedCreationOnly types (WDO, pre-treat cert — owner ruling 2026-07-13)
+  // create only from their scheduled visit, so the ad-hoc picker hides them.
+  // An explicit allowedProjectTypes prop (the special-project dispatch path)
+  // still wins so visit-linked WDO/pre-treat routing keeps working.
   const visibleTypes = typesRegistry
     ? Object.entries(typesRegistry).filter(([key, cfg]) => (
-      allowedProjectTypes ? allowedProjectTypes.includes(key) : !cfg?.appointmentManaged
+      allowedProjectTypes
+        ? allowedProjectTypes.includes(key)
+        : !cfg?.appointmentManaged && !cfg?.linkedCreationOnly
     ))
     : [];
 

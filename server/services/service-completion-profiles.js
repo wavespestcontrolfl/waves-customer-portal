@@ -30,6 +30,15 @@ const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_tre
 // cut over (#2708), every fully-typed family now completes through the
 // appointment flow only. The mechanism stays for a future exemption.
 const PROJECT_CREATION_KEPT_TYPES = new Set([]);
+// Compliance project types create ONLY from their scheduled visit (owner
+// ruling 2026-07-13: "we don't ever do a WDO or pre-treat without something
+// scheduled"). Creation-side only — completion stays on the project flow
+// (V1_EXCLUDED_PROJECT_TYPES / the special_project profiles are untouched).
+// POST /admin/projects enforces it with the same linked-profile bypass the
+// appointment-managed gate uses (the linked service's own project-backed
+// profile must point at this exact type); pickers hide these from ad-hoc
+// creation via the linkedCreationOnly flag on GET /admin/projects/types.
+const PROJECT_CREATION_LINKED_ONLY_TYPES = new Set(['wdo_inspection', 'pre_treatment_termite_certificate']);
 
 const DEFAULT_SERVICE_REPORT_PROFILE = {
   serviceKey: null,
@@ -364,4 +373,5 @@ module.exports = {
   DEFAULT_SERVICE_REPORT_PROFILE,
   V1_EXCLUDED_PROJECT_TYPES,
   PROJECT_CREATION_KEPT_TYPES,
+  PROJECT_CREATION_LINKED_ONLY_TYPES,
 };

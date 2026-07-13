@@ -1276,7 +1276,6 @@ export default function ProjectsPage() {
               projects={wdoProjects}
               selectedId={selectedId}
               onSelect={setSelectedId}
-              onCreate={() => setCreateMode("wdo")}
             />
           )}
         </div>
@@ -1298,13 +1297,15 @@ export default function ProjectsPage() {
         <CreateProjectModal
           theme="light"
           allowAiDraft
-          defaultProjectType={createMode === "wdo" ? WDO_TYPE : ""}
+          defaultProjectType=""
           allowedProjectTypes={
-            createMode === "wdo"
-              ? [WDO_TYPE]
-              : GENERAL_PROJECT_TYPES.filter(
-                  (key) => !typesRegistry?.[key]?.appointmentManaged,
-                )
+            /* linkedCreationOnly (WDO, pre-treat cert — owner ruling
+               2026-07-13) create from their scheduled visit, never ad hoc. */
+            GENERAL_PROJECT_TYPES.filter(
+              (key) =>
+                !typesRegistry?.[key]?.appointmentManaged &&
+                !typesRegistry?.[key]?.linkedCreationOnly,
+            )
           }
           onClose={() => setCreateMode(null)}
           onCreated={(p) => {
@@ -1318,7 +1319,7 @@ export default function ProjectsPage() {
   );
 }
 
-function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
+function WdoReportsSection({ projects, selectedId, onSelect }) {
   const urgentCount = projects.filter((p) => {
     if (p.status === "sent" || p.status === "closed") return false;
     const created = p.created_at ? new Date(p.created_at).getTime() : 0;
@@ -1345,9 +1346,9 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
             </div>
           )}
         </div>{" "}
-        <Button variant="secondary" size="sm" onClick={onCreate} className="whitespace-nowrap">
-          + New WDO
-        </Button>{" "}
+        {/* + New WDO removed (owner ruling 2026-07-13): WDO reports are
+            created from their scheduled visit in Dispatch / the tech
+            portal, never ad hoc. */}
       </div>
       {projects.length === 0 ? (
         <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-12 text-zinc-500 text-center">

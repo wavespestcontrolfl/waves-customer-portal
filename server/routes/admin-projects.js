@@ -30,7 +30,7 @@ const {
   isValidProjectType,
   getProjectType,
 } = require('../services/project-types');
-const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId } = require('../services/service-completion-profiles');
+const { appointmentManagedProjectTypes, resolveCompletionProfileForServiceId, PROJECT_CREATION_LINKED_ONLY_TYPES } = require('../services/service-completion-profiles');
 const { lookupPropertyFromAITrio } = require('../services/property-lookup/ai-property-lookup');
 const { lookupWdoHistory } = require('../services/property-lookup/wdo-history-lookup');
 const serviceLibrary = require('../services/service-library');
@@ -997,7 +997,11 @@ router.get('/types', async (_req, res) => {
   const managed = await appointmentManagedProjectTypes();
   const types = {};
   for (const key of PROJECT_TYPE_KEYS) {
-    types[key] = { ...PROJECT_TYPES[key], appointmentManaged: managed.has(key) };
+    types[key] = {
+      ...PROJECT_TYPES[key],
+      appointmentManaged: managed.has(key),
+      linkedCreationOnly: PROJECT_CREATION_LINKED_ONLY_TYPES.has(key),
+    };
   }
   res.json({ types, keys: PROJECT_TYPE_KEYS, appointmentManaged: Array.from(managed) });
 });
@@ -1356,6 +1360,16 @@ router.post('/', async (req, res, next) => {
       return res.status(422).json({
         error: 'This service type is completed through the appointment flow now — finish the visit from Dispatch instead of creating a project.',
         code: 'project_type_appointment_managed',
+      });
+    }
+    // Owner ruling 2026-07-13: WDO + pre-treat certs are never done without a
+    // scheduled visit, so ad-hoc/unlinked creation closes. The visit-linked
+    // path (the same linked-profile bypass as above) is the only door in —
+    // the completion machinery (FDACS signature/PDF/filing) is unchanged.
+    if (PROJECT_CREATION_LINKED_ONLY_TYPES.has(project_type) && !linkedProjectTypeMatches) {
+      return res.status(422).json({
+        error: 'WDO and pre-treat certificate reports are created from their scheduled visit — open the appointment in Dispatch or the tech portal and create the report there.',
+        code: 'project_type_linked_only',
       });
     }
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
