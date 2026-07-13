@@ -5,11 +5,13 @@
  * customer-facing draft (WHAT WE DID / WHAT WE FOUND) into the notes box for
  * the tech to review. These tests pin the trust boundary:
  *  - only notes carrying that exact shape parse as customer copy — free-form
- *    notes, prefixed internal text, or half-shapes never do;
- *  - banned customer wording (hand edits) drops the copy;
- *  - the typed snapshot uses the copy ONLY in the generic tail compositions
- *    (the one-time pest family from the owner's report) — owner-specified
- *    story branches keep their approved wording;
+ *    notes, prefixed/appended internal text, extra paragraphs, or
+ *    half-shapes never do;
+ *  - banned customer wording (hand edits) drops the copy, including the
+ *    summary pipeline's forbidden-language list;
+ *  - the typed snapshot uses the copy ONLY in the generic non-gauge default
+ *    composition (the one-time pest family from the owner's report) —
+ *    zero states and owner-specified story branches keep approved wording;
  *  - template-only output is byte-identical to before (no bodySource key).
  */
 
@@ -72,6 +74,25 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     )).toBeNull();
   });
 
+  test('an internal note appended AFTER the report keeps the whole blob off the customer surface', () => {
+    expect(technicianReportCustomerCopy(
+      `${AI_REPORT}\n\ngate code 4411 — bill the property manager, office to follow up`
+    )).toBeNull();
+  });
+
+  test('a second paragraph inside a section is unreviewed free text — parses to null', () => {
+    expect(technicianReportCustomerCopy(
+      'WHAT WE DID\n\nTreated the perimeter.\n\nAlso replaced the bait stations.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'
+    )).toBeNull();
+  });
+
+  test('soft line wraps inside a section paragraph still parse as one paragraph', () => {
+    const parsed = technicianReportCustomerCopy(
+      'WHAT WE DID\n\nTreated the exterior perimeter\nand the garage entry.\n\nWHAT WE FOUND\n\nLight activity near the lanai.'
+    );
+    expect(parsed?.body).toBe('Treated the exterior perimeter and the garage entry. Light activity near the lanai.');
+  });
+
   test('an empty section parses to null', () => {
     expect(technicianReportCustomerCopy('WHAT WE DID\n\nWHAT WE FOUND\nActivity noted.')).toBeNull();
     expect(technicianReportCustomerCopy('WHAT WE DID\nTreated.\nWHAT WE FOUND\n\n')).toBeNull();
@@ -100,6 +121,15 @@ describe('technicianReportCustomerCopy — shape parsing', () => {
     expect(parsed.body).toBeNull();
     expect(parsed.violations.length).toBeGreaterThan(0);
   });
+
+  test('the summary pipeline forbidden-language list applies too (bare "infestation")', () => {
+    const parsed = technicianReportCustomerCopy(
+      'WHAT WE DID\nTreated the kitchen for the active roach infestation.\nWHAT WE FOUND\nActivity should taper over the next week.'
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed.body).toBeNull();
+    expect(parsed.violations).toContain('forbidden_language');
+  });
 });
 
 describe('typed snapshot — technician report body in the generic tail compositions', () => {
@@ -120,7 +150,7 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(snapshot.summaryTemplateVersion).toBe(3);
   });
 
-  test('one-time pest zero state: reviewed report replaces the template body, zero headline kept', () => {
+  test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {
     const result = buildTodaysResult({
       projectType: 'one_time_pest_treatment',
       reportTypeLabel: 'Pest Control Re-Service Summary',
@@ -129,8 +159,8 @@ describe('typed snapshot — technician report body in the generic tail composit
       technicianReportBody: AI_BODY,
     });
     expect(result.headline).toBe('No active signs of pest activity observed today.');
-    expect(result.body).toBe(`${AI_BODY} Continue monitoring and contact us if activity returns.`);
-    expect(result.bodySource).toBe('technician_report');
+    expect(result.body).toBe('We completed the scheduled service. Continue monitoring and contact us if activity returns.');
+    expect(result).not.toHaveProperty('bodySource');
   });
 
   test('without a technician report the template output is unchanged and unstamped', () => {
