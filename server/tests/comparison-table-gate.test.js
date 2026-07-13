@@ -1114,6 +1114,24 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-49 findings (#2633) ──
+
+  test('Codex r49: contrastive denials, mixed cells, passive reputation, object-position, pronoun antecedents, and headlines block', () => {
+    for (const body of ['Acme Pest Solutions has no hidden fees but is dishonest.', `Pest control providers are known as a scam operation.\n\n${CATEGORY_TABLE}`, `Customers call pest control companies scams.\n\n${CATEGORY_TABLE}`, `Waves looks cheap; it scams customers.\n\n${CATEGORY_TABLE}`, `Waves is called a scam by some reviewers.\n\n${CATEGORY_TABLE}`, 'Best in Venice for pest control.', 'Top-rated pest control in Venice.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+    const cell = gate.evaluate({ body: CATEGORY_TABLE.replace('"Usually"', '"No warranty, hidden fees"') }, {});
+    expect(cell.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('Codex r49: unmatched anatomy and dash product ratings stay educational', () => {
+    for (const body of [`Unmatched wing pairs help identify termites.\n\n${CATEGORY_TABLE}`, `Waves deploys Advion — rated #1 by researchers.\n\n${CATEGORY_TABLE}`, 'Gel bait is the best option for pest control in small apartments.']) {
+      const r = gate.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-48 findings (#2633) ──
 
   test('Codex r48: provider disclosure, being-form, plan #1, and intrinsic winner claims block', () => {

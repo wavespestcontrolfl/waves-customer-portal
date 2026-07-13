@@ -182,7 +182,7 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // as the own-brand arm). Standalone appear counts as a copula too —
   // "companies appear dishonest" (Codex r16). Post-verb gap words are
   // negator-excluded too ("are never dishonest" is a denial).
-  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged)\\s+to\\s+be)\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}${NOUN_VERB_GAP}(?:are|is|were|was|seems?|seemed|looks?|sounds?|remains?|remained|stays?|stayed|tend to be|can be|get|got|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged|known)\\s+to\\s+be|known\\s+as|(?:is|are|was|were)\\s+(?:called|described\\s+as|labell?ed(?:\\s+as)?|considered))\\b(?:\\s+${NON_NEGATED_WORD}){0,2}\\s+(?:${DISPARAGEMENT_RE.source})`,
   // Possession/usage with a required accusation object: "companies have
   // hidden fees", "chains use shady billing" (Codex r2/r3 on #2633).
   // Reputation forms count — "providers known for hidden fees", "accused
@@ -204,6 +204,10 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
   // pest control companies look cheap; they are dishonest." (Codex r40).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  // Object-position insults at a provider class — "Customers call pest
+  // control companies scams" (Codex r49); negator lookbehind keeps "do not
+  // call providers scams" a denial.
+  `(?<!\\b(?:not|never|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|rarely|hardly|seldom)\\s)\\b(?:calls?|called|describes?|described|labels?|labell?ed|considers?|considered)\\s+(?:[\\w'’-]+\\s+){0,2}?\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s+(?:as\\s+)?(?:(?:a|an|the)\\s+)?(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Being-form provider-class accusations — "Rumors about pest control
   // companies being overpriced" (Codex r48).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s+being\\s+(?:(?:really|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
@@ -269,7 +273,7 @@ const OWN_BRAND_DISPARAGEMENT_RE = new RegExp([
   // stays clean ("our lanais are shady and humid") (Codex r14 on #2633).
   // "service" is deliberately absent: "our service area is shady" is
   // educational geography, and NOUN_VERB_GAP would bridge "area".
-  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  `\\bour\\s+(?:billing|pricing|prices?|rates?|fees?|contracts?|quotes?|invoices?|invoicing|sales|tactics?|practices?|teams?|staff|crews?|technicians?|techs?|company|owners?)\\b${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was)\\s+(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // First-person linking form requires the verb DIRECTLY after "we" — the
   // appositive gap would match relative clauses like "the zones we treat
   // are shady, damp corners".
@@ -357,7 +361,7 @@ const NUMERIC_SELF_RANKING_RE = new RegExp([
   // #1" statistical statements ("Florida is ranked #1 for termite pressure"
   // — Codex r18); subject-anchored is-ranked forms are covered by the
   // we/waves/provider-noun arms, whose word gaps absorb "ranked".
-  `(?<![\\w'’]\\s)(?<!,)(?<!,\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
+  `(?<![\\w'’]\\s)(?<!,)(?<!,\\s)(?<!—)(?<!—\\s)(?<!–)(?<!–\\s)(?<!:)(?<!:\\s)\\b(?:ranked|rated|voted|awarded|chosen|selected|named|crowned)\\s+(?:(?:as|the)\\s+){0,2}${NUMERIC_ONE_ALT}`,
   // (The own-brand-subject ranking arm — "Waves, after years of serving …,
   // is #1", Codex r5 — lives outside this joined regex behind the
   // case-sensitive anchor; see OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE.)
@@ -417,7 +421,7 @@ const OWN_BRAND_NUMERIC_TAIL_RE = new RegExp(
 // lowercase common-noun "waves" a subject ("summer heat waves can be lousy
 // for turf" hard-blocked; Codex r18 on #2633).
 const OWN_BRAND_LINKING_TAIL_RE = new RegExp(
-  `^(?!\\s+service\\s+areas?\\b)${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
+  `^(?!\\s+service\\s+areas?\\b)${NOUN_VERB_GAP}(?:is|are|was|were|seems?|seemed|remains?|remained|stays?|stayed|looks?|sounds?|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:may|might|could)\\s+be|can\\s+be|tends?\\s+to\\s+be|has\\s+been|have\\s+been|(?:is|was)\\s+(?:called|known\\s+as|described\\s+as|labell?ed(?:\\s+as)?|considered)|known\\s+as)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b)`, 'i',
 );
 // Reverse form ("…dishonest Waves"): the vocabulary needs 'i' but the brand
 // token must be case-VERIFIED in code (capture group checked against
@@ -470,7 +474,7 @@ const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
 // window they turned service copy into accusations — "X will treat shady
 // corners around the lanai" (Codex r25 on #2633). Their be-forms stay, and
 // modal+active accusations are ACTIVE_ADVERBS' job.
-const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|(?:will|would)\\s+be|can(?:not)?\\s+be|can\'?t\\s+be|won\'?t\\s+be|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged)\\s+to\\s+be';
+const SUBJECT_VERBS = 'is|are|was|were|isn\'?t|aren\'?t|seem(?:s|ed)?|looks?|sounds?|remain(?:s|ed)?|stay(?:s|ed)?|has(?:\\s+been)?|have(?:\\s+been)?|(?:will|would)\\s+be|can(?:not)?\\s+be|can\'?t\\s+be|won\'?t\\s+be|tends?(?:\\s+to\\s+be)?|tend|(?:may|might|could)\\s+be|appear(?:s|ed)?(?:\\s+to\\s+be)?|(?:rumored|said|reputed|alleged|known)\\s+to\\s+be|known\\s+as';
 
 // Numeric self-ranking ("#1", "No. 1", "number one") split out of the
 // context-free ranking set: in educational pest prose these are overwhelmingly
@@ -723,7 +727,7 @@ function sentenceHasNegator(text, index, length) {
   // "since <year>" excluded. The reset only applies when the post-marker
   // clause carries the accusation vocabulary itself — "No hidden fees
   // because Waves keeps pricing transparent" keeps its denial (Codex r36).
-  const markerRe = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
+  const markerRe = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:but|yet)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
   let lastMarker = -1;
   let cm;
   while ((cm = markerRe.exec(clause)) !== null) lastMarker = cm.index + cm[0].length;
@@ -749,7 +753,7 @@ function spanUnnegated(m) {
   // hidden fees; it is dishonest about scheduling" (Codex r44): the same
   // vocab-gated marker reset used by sentenceHasNegator applies here.
   let scope = tail;
-  const markerRe2 = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
+  const markerRe2 = /[.!?;:—–]|,\s*(?:and|but|yet|so)\b|\b(?:but|yet)\b|\b(?:because|although|though|even\s+though|while|since(?!\s+\d))\b/gi;
   let lastMarker = -1;
   let mk;
   while ((mk = markerRe2.exec(scope)) !== null) lastMarker = mk.index + mk[0].length;
@@ -829,6 +833,15 @@ function scanOwnBrandDisparagementArms(scanText) {
       if (am2 && !SENTENCE_NEGATOR_RE.test(am2[0])) tm = am2;
     }
     if (tm) return [scanText.slice(la.index, la.index + la[0].length + tm[0].length)];
+  }
+  // Waves antecedent carried to it/they — "Waves looks cheap; it scams
+  // customers" (Codex r49); case-verified + clause-reset negation guard.
+  const pronounRe = new RegExp(`\\b(?<brandTok>waves)\\b(?:['’]s?)?[^!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:it|they)\\s+(?:${ACTIVE_ADVERBS}(?:${ACTIVE_DISPARAGEMENT_SRC})|(?:ha(?:s|ve|d)|uses?|used|includes?|included|comes?\\s+with)\\s+(?:(?:a|an|the|really|very)\\s+){0,2}${POSSESSION_ACCUSATION_SRC}|(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}))`, 'gi');
+  let pr;
+  while ((pr = pronounRe.exec(scanText)) !== null) {
+    if (!OWN_BRAND_CASE_RE.test(pr.groups.brandTok)) continue;
+    if (sentenceHasNegator(scanText, pr.index, pr[0].length)) continue;
+    return [pr[0]];
   }
   // Being-form self-accusations — "Rumors about Waves being overpriced"
   // (Codex r47); case-verified.
@@ -963,7 +976,7 @@ function scanAdjacentProviderNumeric(text) {
 // Intrinsically self-ranking phrases need no subject — "Best in town for
 // pest control", "Clear winner …" declare a winner on their face
 // (Codex r45).
-const INTRINSIC_WINNER_RE = /\b(?:clear\s+winner|hands[-\s]down|best\s+in\s+(?:town|the\s+(?:area|business|region|county))|second\s+to\s+none|unbeatable|unmatched|can'?t\s+be\s+beat)\b/i;
+const INTRINSIC_WINNER_RE = /\b(?:clear\s+winner|hands[-\s]down|best\s+in\s+(?:town|the\s+(?:area|business|region|county))|second\s+to\s+none|unbeatable|can'?t\s+be\s+beat)\b/i;
 function scopedSelfRankingMatch(text) {
   // Intrinsic phrases are scanned DIRECTLY (SELF_RANKING_RE does not
   // contain them — Codex r48 caught the dead code), negation-guarded but
@@ -973,6 +986,26 @@ function scopedSelfRankingMatch(text) {
     let im;
     while ((im = iw.exec(text)) !== null) {
       if (!sentenceHasNegator(text, im.index, im[0].length)) return im;
+    }
+  }
+  // Subjectless service-ranking headlines — "Best in Venice for pest
+  // control", "Top-rated pest control in Venice" (Codex r49). Sentence-
+  // initial only (optional leading article), so "gel bait is the best
+  // option for pest control" stays advice.
+  {
+    const hl = new RegExp(`\\b(?:best|top[-\\s]?rated)\\b[^.!?\\n]{0,50}?\\b(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|mosquito\\s+control|termite\\s+control|exterminators?)\\b(?!\\s+(?:methods?|tips?|tricks?|mistakes?|advice|strateg(?:y|ies)|techniques?|practices?|habits?|myths?))`, 'gi');
+    let hm;
+    while ((hm = hl.exec(text)) !== null) {
+      const sentStart = Math.max(
+        text.lastIndexOf('.', hm.index),
+        text.lastIndexOf('!', hm.index),
+        text.lastIndexOf('?', hm.index),
+        text.lastIndexOf('\n', hm.index),
+      ) + 1;
+      const prefix = text.slice(sentStart, hm.index).trim().toLowerCase();
+      if (prefix !== '' && prefix !== 'the') continue;
+      if (sentenceHasNegator(text, hm.index, hm[0].length)) continue;
+      return hm;
     }
   }
   const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
@@ -1015,6 +1048,9 @@ function scopedSelfRankingMatch(text) {
         && /\bW(?:aves|AVES)\b/.test(lead);
       subjLead = subjLead.slice(repMatch[0].length);
     }
+    // A trailing "for <topic>" frame is scope, not subject — "the best
+    // option FOR pest control" ranks the option (Codex r49).
+    subjLead = subjLead.replace(/\bfor\b[\s\S]*$/i, '');
     // Bare editorial "our" is not a provider subject — "Our guide to
     // German roaches: gel bait is the best option" (Codex r40); "our"
     // counts only with a business/people noun.
@@ -2046,7 +2082,10 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       let bm;
       while ((bm = g.exec(block)) !== null) {
         const cellStart = Math.max(block.lastIndexOf('"', bm.index), block.lastIndexOf("'", bm.index)) + 1;
-        if (SENTENCE_NEGATOR_RE.test(block.slice(cellStart, bm.index + bm[0].length))) continue;
+        // Denial scope is the comma-segment holding the match — "No
+        // warranty, hidden fees" still accuses (Codex r49).
+        const cellSeg = block.slice(cellStart, bm.index + bm[0].length).split(',').pop();
+        if (SENTENCE_NEGATOR_RE.test(cellSeg)) continue;
         findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
           `Comparison table contains disparaging language about an option ("${bm[0].trim()}"). State attributes, never insults.`));
         break;
