@@ -42,14 +42,14 @@ const COMPLIANCE_PROJECT_KEYS = {
 
 // Q5 (ratified 2026-07-12): typed cutover blocked on the owner's
 // FS 482.226 / FS 482.2265 / FAC 5E-14 review of the inspection + remedial
-// lanes (bait-station lane precedent signed off 2026-06-12).
-const PENDING_COMPLIANCE_REVIEW_KEYS = [
-  'termite_inspection',
-  'termite_spot_treatment',
-  'termite_pretreatment',
-  'termite_trenching',
-  'termite_liquid',
-];
+// lanes (bait-station lane precedent signed off 2026-06-12). CLEARED
+// 2026-07-13: the Phase-3 compliance fields + send gates shipped with owner
+// signoff (#2703), and 20260713100000 flips the five termite keys
+// (termite_inspection, termite_spot_treatment, termite_pretreatment,
+// termite_trenching, termite_liquid) to the typed flow keeping their exact
+// Jobs-form pointers — they now classify as unlisted typed. The list stays
+// for the next family that needs a compliance hold.
+const PENDING_COMPLIANCE_REVIEW_KEYS = [];
 
 // Owner-approved cutovers/repoints not yet shipped — classification accepts
 // the declared BEFORE state and the typed AFTER state, nothing else (a
