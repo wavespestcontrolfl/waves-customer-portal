@@ -673,6 +673,44 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
 // A live-retrieved PaymentIntent counts only when Stripe says it succeeded
 // AND its metadata pins it to THIS estimate — the id arrives from the
 // client, so everything about it must be re-derived server-side.
+// Surcharge-bypass audit (mirrors the invoice webhook's quarantine in
+// spirit): the PI's client secret lets a stale/modified client
+// confirmPayment directly, skipping /deposit-quote + /deposit-finalize —
+// a CREDIT card would then pay face value with no fee. Finalize always
+// stamps card_surcharge (even '0' for debit), and wallet payments carry
+// card.wallet on the PM — so quote_at_confirm + no card_surcharge key +
+// credit funding + not-a-wallet = a bypassed manual credit card. The
+// deposit itself is fully collected and MUST still satisfy the accept
+// gate (recording happens before this runs — never strand an acceptance
+// over our own missing fee); the alert makes the under-collection loud.
+// Called from BOTH recording paths — the webhook AND the accept flow's
+// live verification (Codex #2705 r6): whichever wins the race records
+// the row, and the loser returns as a replay before reaching any audit,
+// so each recorder must audit its own win. Best-effort by design.
+async function auditDepositSurchargeBypass(paymentIntent, estimateId) {
+  if (paymentIntent.metadata?.surcharge_policy !== 'quote_at_confirm'
+    || paymentIntent.metadata?.card_surcharge != null) {
+    return;
+  }
+  try {
+    const pm = await StripeService.retrievePaymentMethod(
+      typeof paymentIntent.payment_method === 'string'
+        ? paymentIntent.payment_method
+        : paymentIntent.payment_method?.id,
+    );
+    if (pm?.card?.funding === 'credit' && !pm.card.wallet) {
+      logger.error('[estimate-deposits] deposit confirmed OUTSIDE the quote/finalize path with a credit card — surcharge not collected', {
+        estimateId,
+        paymentIntentId: paymentIntent.id,
+      });
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+    }
+  } catch (auditErr) {
+    logger.warn(`[estimate-deposits] surcharge-bypass audit failed for ${paymentIntent.id}: ${auditErr.message}`);
+  }
+}
+
 function depositIntentMatchesEstimate(paymentIntent, estimateId) {
   return !!paymentIntent
     && paymentIntent.status === 'succeeded'
@@ -714,6 +752,10 @@ async function ensureDepositSatisfied({ estimate, depositPaymentIntentId = null,
         amountDollars,
         cardSurcharge: depositSurchargeDollars(paymentIntent),
       });
+      // This live verification can WIN the race against the webhook, whose
+      // replay short-circuit then never reaches its audit — so the winner
+      // audits (Codex #2705 r6).
+      await auditDepositSurchargeBypass(paymentIntent, estimate.id);
       // Ledger state is the authority, not Stripe's status: a refunded PI
       // still reports succeeded/amount_received, the monotonic mark above
       // touches 0 rows for it, and a refunded deposit must never unlock
@@ -1242,36 +1284,7 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
-  // Surcharge-bypass audit (mirrors the invoice webhook's quarantine in
-  // spirit): the PI's client secret lets a stale/modified client
-  // confirmPayment directly, skipping /deposit-quote + /deposit-finalize —
-  // a CREDIT card would then pay face value with no fee. Finalize always
-  // stamps card_surcharge (even '0' for debit), and wallet payments carry
-  // card.wallet on the PM — so quote_at_confirm + no card_surcharge key +
-  // credit funding + not-a-wallet = a bypassed manual credit card. The
-  // deposit itself is fully collected and MUST still satisfy the accept
-  // gate (recording already happened above — never strand an acceptance
-  // over our own missing fee); the alert makes the under-collection loud.
-  if (paymentIntent.metadata?.surcharge_policy === 'quote_at_confirm'
-    && paymentIntent.metadata?.card_surcharge == null) {
-    try {
-      const pm = await StripeService.retrievePaymentMethod(
-        typeof paymentIntent.payment_method === 'string'
-          ? paymentIntent.payment_method
-          : paymentIntent.payment_method?.id,
-      );
-      if (pm?.card?.funding === 'credit' && !pm.card.wallet) {
-        logger.error('[estimate-deposits] deposit confirmed OUTSIDE the quote/finalize path with a credit card — surcharge not collected', {
-          estimateId,
-          paymentIntentId: paymentIntent.id,
-        });
-        const { triggerNotification } = require('./notification-triggers');
-        await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
-      }
-    } catch (auditErr) {
-      logger.warn(`[estimate-deposits] surcharge-bypass audit failed for ${paymentIntent.id}: ${auditErr.message}`);
-    }
-  }
+  await auditDepositSurchargeBypass(paymentIntent, estimateId);
 
   // A paid deposit is an acceptance signal — convert the originating lead to
   // won if it's still open. Gated on requireAcceptedEstimate: a succeeded

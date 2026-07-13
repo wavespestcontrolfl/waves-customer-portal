@@ -1,5 +1,6 @@
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
 const mockRetrievePaymentIntent = jest.fn();
+const mockRetrievePaymentMethod = jest.fn();
 const mockCreateEstimateDepositIntent = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -40,6 +41,7 @@ const mockFindLinkedAppt = jest.fn(async () => null);
 
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePaymentIntent(...args),
+  retrievePaymentMethod: (...args) => mockRetrievePaymentMethod(...args),
   createEstimateDepositIntent: (...args) => mockCreateEstimateDepositIntent(...args),
   refundPaymentIntent: (...args) => mockRefundPaymentIntent(...args),
 }));
@@ -423,6 +425,29 @@ describe('ensureDepositSatisfied', () => {
     expect(result.receivedTotal).toBe(70);
     expect(upserts).toHaveLength(1);
     expect(upserts[0].stripe_payment_intent_id).toBe('pi_1');
+  });
+
+  it('live verification WINNING the webhook race still fires the surcharge-bypass audit (r6)', async () => {
+    // A modified client confirmed a CREDIT card directly at face value
+    // (quote_at_confirm, no card_surcharge stamp, PM not a wallet), and the
+    // accept flow's live verification records it before the webhook — the
+    // webhook then replays out, so THIS path must raise the alert.
+    const upserts = [];
+    const table = depositsTable({
+      receivedTotals: [0, 49],
+      upserts,
+      ledgerRow: { status: 'received', amount: '49.00' },
+    });
+    mockDbHandler = () => table;
+    mockRetrievePaymentIntent.mockResolvedValue({
+      id: 'pi_bypass', status: 'succeeded', amount_received: 4900, payment_method: 'pm_credit',
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', surcharge_policy: 'quote_at_confirm' },
+    });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_credit', type: 'card', card: { funding: 'credit', wallet: null } });
+
+    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_bypass' });
+    expect(result.satisfied).toBe(true);
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 
   it('a REFUNDED ledger row never satisfies, even though Stripe still says succeeded', async () => {
