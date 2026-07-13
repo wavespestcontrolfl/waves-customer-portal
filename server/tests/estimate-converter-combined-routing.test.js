@@ -1,9 +1,14 @@
 /**
  * Combined-service estimate routing (combined-service-completions.md):
- * matching-cadence pairs (pest+rodent bait, pest+termite bait, lawn+T&S)
- * schedule as ONE combined service at accept; mismatched cadences and
- * unrelated lines flow through unchanged. Pricing/tier/billing read the
- * estimate lines and are never touched by combining.
+ * matching-cadence pairs (pest+termite bait, lawn+T&S) schedule as ONE
+ * combined service at accept; mismatched cadences and unrelated lines flow
+ * through unchanged. Pricing/tier/billing read the estimate lines and are
+ * never touched by combining.
+ *
+ * The pest+rodent combined route was REMOVED by owner decision 2026-07-12:
+ * sold rodent bait (a recurring line OR a server-priced supplement) now
+ * schedules as its own standalone "Quarterly Rodent Bait Station Service"
+ * visit (STANDALONE_SUPPLEMENT_ROUTES) — never combined, never dropped.
  */
 const {
   combineRecurringServicesForScheduling,
@@ -15,16 +20,26 @@ const {
 const { serviceKeyFor, buildRecurringFollowUpRows } = require('../services/recurring-appointment-seeder');
 
 describe('combineRecurringServicesForScheduling', () => {
-  test('pest + rodent bait at matching cadence combine into Pest & Rodent Control', () => {
-    const { remaining, combos } = combineRecurringServicesForScheduling([
+  test('pest + rodent bait NEVER combine — bait schedules as its own catalog visit (owner 2026-07-12)', () => {
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
       { name: 'Quarterly Pest Control', frequency: 'quarterly' },
       { name: 'Rodent Bait Stations', frequency: 'quarterly' },
     ]);
-    expect(remaining).toEqual([]);
-    expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Pest & Rodent Control');
-    expect(combos[0].service.frequency).toBe('quarterly');
-    expect(combos[0].route.catalogServiceKey).toBe('pest_rodent_quarterly');
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(1);
+    expect(recurringServiceKey(remaining[0])).toBe('pest_control');
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
+    expect(standalone[0].service.name).toBe('Quarterly Rodent Bait Station Service');
+    expect(standalone[0].service.frequency).toBe('quarterly');
+  });
+
+  test('a rodent bait line with no cadence gets the quarterly program default standalone', () => {
+    const { standalone } = combineRecurringServicesForScheduling([
+      { name: 'Rodent Bait Stations', service: 'rodent_bait' },
+    ]);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].service.frequency).toBe('quarterly');
   });
 
   test('pest + termite bait combine; lawn + tree & shrub combine', () => {
@@ -45,7 +60,7 @@ describe('combineRecurringServicesForScheduling', () => {
   test('mismatched cadences stay separate rows', () => {
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Monthly Pest Control', frequency: 'monthly' },
-      { name: 'Rodent Bait Stations', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
     ]);
     expect(combos).toEqual([]);
     expect(remaining).toHaveLength(2);
@@ -89,21 +104,22 @@ describe('combineRecurringServicesForScheduling', () => {
   test('explicit unequal visit counts block combining on any route', () => {
     const { combos } = combineRecurringServicesForScheduling([
       { name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4 },
-      { name: 'Rodent Bait Stations', frequency: 'quarterly', visitsPerYear: 5 },
+      { name: 'Termite Bait Station System', frequency: 'quarterly', visitsPerYear: 5 },
     ]);
     expect(combos).toEqual([]);
   });
 
-  test('a pest line combines with at most ONE companion — rodent bait wins, termite stays standalone', () => {
-    const { remaining, combos } = combineRecurringServicesForScheduling([
+  test('pest combines with termite bait; rodent bait rides standalone beside the combo', () => {
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling([
       { name: 'Quarterly Pest Control', frequency: 'quarterly' },
       { name: 'Rodent Bait Stations', frequency: 'quarterly' },
       { name: 'Termite Bait Station System', frequency: 'quarterly' },
     ]);
     expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Pest & Rodent Control');
-    expect(remaining).toHaveLength(1);
-    expect(recurringServiceKey(remaining[0])).toBe('termite_bait');
+    expect(combos[0].service.name).toBe('Quarterly Pest + Termite Bait Station');
+    expect(remaining).toEqual([]);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
   });
 
   test('unrelated lines pass through untouched alongside a combo', () => {
@@ -111,7 +127,7 @@ describe('combineRecurringServicesForScheduling', () => {
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Quarterly Pest Control', frequency: 'quarterly' },
       mosquito,
-      { name: 'Rodent Bait Stations', frequency: 'quarterly' },
+      { name: 'Termite Bait Station System', frequency: 'quarterly' },
     ]);
     expect(combos).toHaveLength(1);
     expect(remaining).toEqual([mosquito]);
@@ -120,9 +136,9 @@ describe('combineRecurringServicesForScheduling', () => {
   test('single lines and empty input never combine', () => {
     expect(combineRecurringServicesForScheduling([
       { name: 'Quarterly Pest Control', frequency: 'quarterly' },
-    ])).toEqual({ remaining: [{ name: 'Quarterly Pest Control', frequency: 'quarterly' }], combos: [] });
-    expect(combineRecurringServicesForScheduling([])).toEqual({ remaining: [], combos: [] });
-    expect(combineRecurringServicesForScheduling(undefined)).toEqual({ remaining: [], combos: [] });
+    ])).toEqual({ remaining: [{ name: 'Quarterly Pest Control', frequency: 'quarterly' }], combos: [], standalone: [] });
+    expect(combineRecurringServicesForScheduling([])).toEqual({ remaining: [], combos: [], standalone: [] });
+    expect(combineRecurringServicesForScheduling(undefined)).toEqual({ remaining: [], combos: [], standalone: [] });
   });
 
   test('line-level visit counts drive the combo cadence when no plan selection was recorded', () => {
@@ -140,7 +156,7 @@ describe('combineRecurringServicesForScheduling', () => {
     const { combos } = combineRecurringServicesForScheduling(
       [
         { name: 'Pest Control', service: 'pest_control', frequency: 'quarterly', visitsPerYear: 4 },
-        { name: 'Rodent Bait Stations', service: 'rodent_bait' },
+        { name: 'Termite Bait', service: 'termite_bait' },
       ],
       { acceptFrequency: 'monthly' },
     );
@@ -149,12 +165,12 @@ describe('combineRecurringServicesForScheduling', () => {
 
   test('stale line visit counts never BLOCK an accepted quarterly combo (Codex P1)', () => {
     // Public accept can leave the original pest line at 12 visits while the
-    // rodent line carries 4 — the accepted quarterly plan must still
+    // termite line carries 4 — the accepted quarterly plan must still
     // combine; the stale count neither blocks nor rides.
     const { combos } = combineRecurringServicesForScheduling(
       [
         { name: 'Pest Control', service: 'pest_control', visitsPerYear: 12 },
-        { name: 'Rodent Bait Stations', service: 'rodent_bait', visitsPerYear: 4 },
+        { name: 'Termite Bait', service: 'termite_bait', visitsPerYear: 4 },
       ],
       { acceptFrequency: 'quarterly' },
     );
@@ -170,7 +186,7 @@ describe('combineRecurringServicesForScheduling', () => {
     const { combos } = combineRecurringServicesForScheduling(
       [
         { name: 'Pest Control', service: 'pest_control', visitsPerYear: 12 },
-        { name: 'Rodent Bait Stations', service: 'rodent_bait' },
+        { name: 'Termite Bait', service: 'termite_bait' },
       ],
       { acceptFrequency: 'quarterly' },
     );
@@ -182,11 +198,11 @@ describe('combineRecurringServicesForScheduling', () => {
   test('a primary with no cadence anywhere never combines', () => {
     // Pest line has no service-level cadence and no accepted frequency was
     // passed — the platform's "pest defaults quarterly" must NOT bypass the
-    // gate (Codex P2). The rodent companion's program default alone cannot
+    // gate (Codex P2). The termite companion's program default alone cannot
     // create a combo.
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Pest Control' },
-      { name: 'Rodent Bait Stations' },
+      { name: 'Termite Bait' },
     ]);
     expect(combos).toEqual([]);
     expect(remaining).toHaveLength(2);
@@ -197,7 +213,7 @@ describe('combineRecurringServicesForScheduling', () => {
     // customer selected the quarterly plan. Companion defaults to its
     // quarterly program → combine.
     const quarterly = combineRecurringServicesForScheduling(
-      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Rodent Bait Stations', service: 'rodent_bait' }],
+      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Termite Bait', service: 'termite_bait' }],
       { acceptFrequency: 'quarterly' },
     );
     expect(quarterly.combos).toHaveLength(1);
@@ -206,7 +222,7 @@ describe('combineRecurringServicesForScheduling', () => {
     // Legacy monthly pest plan: accepted monthly ≠ quarterly bait program →
     // stays separate (Codex P2 regression).
     const monthly = combineRecurringServicesForScheduling(
-      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Rodent Bait Stations', service: 'rodent_bait' }],
+      [{ name: 'Pest Control', service: 'pest_control' }, { name: 'Termite Bait', service: 'termite_bait' }],
       { acceptFrequency: 'monthly' },
     );
     expect(monthly.combos).toEqual([]);
@@ -223,20 +239,83 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(combos[0].service.frequency).toBe('quarterly');
   });
 
-  test('rodent bait supplements (rodentBaitMo) join the match — server-priced estimates never put them in services (Codex P2)', () => {
+  test('rodent bait supplements (rodentBaitMo) schedule standalone — server-priced estimates never put them in services (Codex P2)', () => {
     const supplements = supplementalCompanionLines({
       result: { recurring: { rodentBaitMo: 39 } },
     });
     expect(supplements).toHaveLength(1);
     expect(recurringServiceKey(supplements[0])).toBe('rodent_bait');
 
-    const { remaining, combos } = combineRecurringServicesForScheduling(
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling(
       [{ name: 'Pest Control', service: 'pest_control', frequency: 'quarterly' }],
       { supplementalCompanions: supplements },
     );
-    expect(combos).toHaveLength(1);
-    expect(combos[0].service.name).toBe('Pest & Rodent Control');
+    expect(combos).toEqual([]);
+    expect(remaining).toHaveLength(1);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
+    expect(standalone[0].service.name).toBe('Quarterly Rodent Bait Station Service');
+    expect(standalone[0].service.frequency).toBe('quarterly');
+  });
+
+  test('a bait recurring LINE and a duplicate rodentBaitMo supplement schedule ONE standalone visit, not two (Codex P2)', () => {
+    const { standalone } = combineRecurringServicesForScheduling(
+      [
+        { name: 'Quarterly Pest Control', frequency: 'quarterly' },
+        { name: 'Rodent Bait Stations', service: 'rodent_bait', frequency: 'quarterly' },
+      ],
+      { supplementalCompanions: supplementalCompanionLines({ recurring: { rodentBaitMo: 39 } }) },
+    );
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
+  });
+
+  test('a rodent bait supplement schedules standalone even with NO recurring lines at all', () => {
+    const { remaining, combos, standalone } = combineRecurringServicesForScheduling(
+      [],
+      { supplementalCompanions: supplementalCompanionLines({ recurring: { rodentBaitMo: 25 } }) },
+    );
     expect(remaining).toEqual([]);
+    expect(combos).toEqual([]);
+    expect(standalone).toHaveLength(1);
+    expect(standalone[0].catalogServiceKey).toBe('rodent_bait_quarterly');
+  });
+
+  test('a pest plan with a bait supplement is a bundle — no WaveGuard setup fee (owner rule: bundles carry no setup)', () => {
+    const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
+    const pestLine = [{ name: 'Quarterly Pest Control', service: 'pest_control', frequency: 'quarterly' }];
+    // Solo pest still charges the setup.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: pestLine,
+      estimateData: {},
+    })).toBe(true);
+    // Pest + bait scalar schedules as two services → bundle → no setup fee.
+    expect(shouldIncludeWaveGuardSetupFeeForRecurring({
+      recurringServices: pestLine,
+      estimateData: { recurring: { rodentBaitMo: 39 } },
+    })).toBe(false);
+  });
+
+  test('annualPrepayRecurringUnitCount counts standalone bait and dedupes line+scalar (deposit-intent parity)', () => {
+    const { annualPrepayRecurringUnitCount } = require('../services/estimate-converter');
+    // Bait scalar only → one unit (a bait-only prepay is a single program).
+    expect(annualPrepayRecurringUnitCount({
+      recurring: { rodentBaitMo: 25 }, services: [],
+    })).toBe(1);
+    // A real bait line + duplicate scalar → still one unit, not two.
+    expect(annualPrepayRecurringUnitCount({
+      recurring: {
+        rodentBaitMo: 25,
+        services: [{ name: 'Rodent Bait Stations', service: 'rodent_bait', frequency: 'quarterly' }],
+      },
+    })).toBe(1);
+    // Lawn line + bait scalar → two units (prepay blocks / deposit-intent must too).
+    expect(annualPrepayRecurringUnitCount({
+      recurring: {
+        rodentBaitMo: 25,
+        services: [{ name: 'Lawn Care', service: 'lawn_care', frequency: 'monthly' }],
+      },
+    })).toBe(2);
   });
 
   test('supplemental extraction reads both persisted shapes', () => {
@@ -252,7 +331,7 @@ describe('combineRecurringServicesForScheduling', () => {
         id: 'parent-1',
         customer_id: 'cust-1',
         scheduled_date: '2026-06-20',
-        service_type: 'Pest & Rodent Control',
+        service_type: 'Quarterly Pest + Termite Bait Station',
         service_id: 'catalog-uuid-1',
       },
       { pattern: 'quarterly' },
@@ -263,38 +342,38 @@ describe('combineRecurringServicesForScheduling', () => {
 });
 
 describe('reservedRowComboRewrites (slot-reserved accepts)', () => {
-  const pestRodentCombo = () => combineRecurringServicesForScheduling([
+  const pestTermiteCombo = () => combineRecurringServicesForScheduling([
     { name: 'Quarterly Pest Control', frequency: 'quarterly' },
-    { name: 'Rodent Bait Stations', frequency: 'quarterly' },
+    { name: 'Termite Bait Station System', frequency: 'quarterly' },
   ]).combos;
 
   test('a reserved primary-line row is rewritten to the combined service', () => {
     const row = { id: 'ss-1', service_type: 'Quarterly Pest Control' };
-    const rewrites = reservedRowComboRewrites([row], pestRodentCombo());
+    const rewrites = reservedRowComboRewrites([row], pestTermiteCombo());
     expect(rewrites).toHaveLength(1);
     expect(rewrites[0].row).toBe(row);
-    expect(rewrites[0].combo.route.name).toBe('Pest & Rodent Control');
+    expect(rewrites[0].combo.route.name).toBe('Quarterly Pest + Termite Bait Station');
   });
 
   test('a reserved companion-line row also maps to the combo', () => {
-    const row = { id: 'ss-2', service_type: 'Rodent Bait Stations' };
-    const rewrites = reservedRowComboRewrites([row], pestRodentCombo());
+    const row = { id: 'ss-2', service_type: 'Termite Bait Station System' };
+    const rewrites = reservedRowComboRewrites([row], pestTermiteCombo());
     expect(rewrites).toHaveLength(1);
-    expect(rewrites[0].combo.route.catalogServiceKey).toBe('pest_rodent_quarterly');
+    expect(rewrites[0].combo.route.catalogServiceKey).toBe('pest_termite_bait_quarterly');
   });
 
   test('both halves separately reserved → NO rewrite (would double-cover the work)', () => {
     const rewrites = reservedRowComboRewrites([
       { id: 'ss-1', service_type: 'Quarterly Pest Control' },
-      { id: 'ss-2', service_type: 'Rodent Bait Stations' },
-    ], pestRodentCombo());
+      { id: 'ss-2', service_type: 'Termite Bait Station System' },
+    ], pestTermiteCombo());
     expect(rewrites).toEqual([]);
   });
 
   test('unrelated reserved rows are ignored', () => {
     const rewrites = reservedRowComboRewrites([
       { id: 'ss-3', service_type: 'Mosquito Treatment' },
-    ], pestRodentCombo());
+    ], pestTermiteCombo());
     expect(rewrites).toEqual([]);
   });
 
@@ -307,6 +386,8 @@ describe('reservedRowComboRewrites (slot-reserved accepts)', () => {
 
 describe('combined-name downstream keys', () => {
   test('serviceKeyFor keys combined names as pest_control (follow-up seeding + cadence defaults)', () => {
+    // 'Pest & Rodent Control' stays mapped: HISTORICAL rows carry the name
+    // even though the combined route was removed 2026-07-12.
     expect(serviceKeyFor({ service_type: 'Pest & Rodent Control' })).toBe('pest_control');
     expect(serviceKeyFor({ service_type: 'Quarterly Pest + Termite Bait Station' })).toBe('pest_control');
     expect(serviceKeyFor({ service_type: 'Lawn + Tree & Shrub' })).toBe('lawn_care');
