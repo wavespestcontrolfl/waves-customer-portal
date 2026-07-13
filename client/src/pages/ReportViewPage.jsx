@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
@@ -2275,25 +2275,111 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
+/**
+ * D1: designed finding tiles (the pestV2/lawnV2 visual standard) replacing
+ * the bare definition list. Same section, same title, same snapshot items in
+ * the same reportPriority order, same customer copy — presentation only.
+ */
+// Visually-hidden but real DOM text (screen readers + copy-paste see it).
+const CHIP_SEPARATOR_STYLE = {
+  position: 'absolute',
+  width: 1,
+  height: 1,
+  padding: 0,
+  margin: -1,
+  overflow: 'hidden',
+  clip: 'rect(0 0 0 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
+};
+
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
-      <h2>What we found & did</h2>
-      <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
-        {items.map((item) => (
-          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 12 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
-              {item.customerLabel}
-            </dt>
-            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#04395E', lineHeight: 1.5 }}>
-              {item.customerValueLabel != null && item.customerValueLabel !== ''
-                ? String(item.customerValueLabel)
-                : String(item.value)}
-            </dd>
-          </div>
-        ))}
+      <h2>What we found &amp; did</h2>
+      {/* <dl> keeps the label/value term-definition semantics the pre-D1
+          list exposed to assistive tech; each tile is a <div> group wrapper
+          (valid dl content per the HTML spec). */}
+      <dl
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+          gap: 12,
+          margin: 0,
+        }}
+      >
+        {items.map((item) => {
+          const text = item.customerValueLabel != null && item.customerValueLabel !== ''
+            ? String(item.customerValueLabel)
+            : String(item.value);
+          // Chips render ONLY from the snapshot's authoritative mapped
+          // parts (multi-select fields persist them at completion) — never
+          // from splitting the display text, which would shred customer
+          // labels containing commas (Codex P2). Legacy snapshots without
+          // the array render as prose, exactly the pre-D1 presentation.
+          const chips = Array.isArray(item.customerValueParts) && item.customerValueParts.length > 1
+            ? item.customerValueParts
+            : null;
+          return (
+            <div
+              key={item.fieldKey}
+              style={{
+                background: 'var(--wash)',
+                border: '1px solid var(--line)',
+                borderRadius: 12,
+                padding: '14px 16px',
+                // Long prose tiles read better full-width.
+                gridColumn: !chips && text.length > 90 ? '1 / -1' : undefined,
+              }}
+            >
+              <dt
+                style={{
+                  fontSize: 12,
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  color: 'var(--muted)',
+                  fontWeight: 500,
+                  marginBottom: 6,
+                }}
+              >
+                {item.customerLabel}
+              </dt>
+              {chips ? (
+                <dd style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: 0 }}>
+                  {chips.map((chip, idx) => (
+                    <Fragment key={chip}>
+                      {/* Real ", " text nodes (visually hidden) keep the
+                          customer copy intact for copy-paste and screen
+                          readers — the pills alone would concatenate. */}
+                      {idx > 0 && <span style={CHIP_SEPARATOR_STYLE}>, </span>}
+                      <span
+                        className="sr-ink"
+                        style={{
+                          display: 'inline-block',
+                          background: 'var(--paper)',
+                          border: '1px solid var(--line)',
+                          borderRadius: 999,
+                          padding: '4px 10px',
+                          fontSize: 14,
+                          color: '#04395E',
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        {chip}
+                      </span>
+                    </Fragment>
+                  ))}
+                </dd>
+              ) : (
+                <dd className="sr-ink" style={{ fontSize: 14, color: '#04395E', lineHeight: 1.5, margin: 0 }}>
+                  {text}
+                </dd>
+              )}
+            </div>
+          );
+        })}
       </dl>
     </section>
   );

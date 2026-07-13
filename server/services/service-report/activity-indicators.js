@@ -2069,10 +2069,18 @@ function buildTypedReportSnapshot({
     const value = values[field.key];
     if (value == null || value === '') continue;
     // chips persist a comma-joined selection — map each element through
-    // the copy map individually so per-chip customer wording applies.
-    const customerValueLabel = field.type === 'chips'
+    // the copy map individually so per-chip customer wording applies. The
+    // mapped PARTS also persist on the item (D1): the report renders chips
+    // from this authoritative array only — a client-side comma split would
+    // shred single-select customer labels that contain commas ("Older,
+    // inactive damage only"), and mapped chip labels may themselves carry
+    // commas. Legacy snapshots without the array render as prose.
+    const customerValueParts = field.type === 'chips'
       ? String(value).split(',').map((s) => s.trim()).filter(Boolean)
-        .map((part) => customerLabelForValue(field.key, part)).join(', ')
+        .map((part) => customerLabelForValue(field.key, part))
+      : null;
+    const customerValueLabel = customerValueParts
+      ? customerValueParts.join(', ')
       : customerLabelForValue(field.key, value);
     items.push({
       fieldKey: field.key,
@@ -2080,6 +2088,7 @@ function buildTypedReportSnapshot({
       customerLabel: customerLabelForField(field.key, field.label),
       value,
       customerValueLabel,
+      ...(customerValueParts && customerValueParts.length ? { customerValueParts } : {}),
     });
   }
 
