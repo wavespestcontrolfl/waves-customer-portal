@@ -207,6 +207,25 @@ function parseSnapshot(value) {
   }
 }
 
+// Column guard for scheduled_services.self_pay_override (migration
+// 20260713000001). Selecting it unguarded on a pre-migration database would
+// error the whole scheduled-service lookup — and on the fail-soft path that
+// silently DROPS an existing per-job payer_id/PO. Introspection result is
+// cached process-wide on success (migrations run pre-deploy, so a booted
+// process's schema is stable); introspection that itself fails (e.g. mocked
+// databases in tests) assumes the modern schema and is NOT cached.
+let selfPayColumnCache = null;
+async function scheduledServicesHasSelfPay(database) {
+  if (selfPayColumnCache !== null) return selfPayColumnCache;
+  try {
+    const present = await database.schema.hasColumn('scheduled_services', 'self_pay_override');
+    selfPayColumnCache = present;
+    return present;
+  } catch {
+    return true;
+  }
+}
+
 async function resolveForInvoice({ database = db, customerId, customer = null, scheduledServiceId = null, throwOnError = false } = {}) {
   const SELF_PAY = { payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null };
   // throwOnError: callers whose contract is "skip on uncertainty" (e.g. the
@@ -229,9 +248,11 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
     if (scheduledServiceId) {
       const ssWhere = { id: scheduledServiceId };
       if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
+      const ssCols = ['payer_id', 'po_number'];
+      if (await scheduledServicesHasSelfPay(database)) ssCols.push('self_pay_override');
       const ss = await softNull(database('scheduled_services')
         .where(ssWhere)
-        .first('payer_id', 'po_number', 'self_pay_override'));
+        .first(ssCols));
       if (ss) {
         if (ss.payer_id) payerId = ss.payer_id;
         if (clean(ss.po_number)) poNumber = clean(ss.po_number);
@@ -413,5 +434,6 @@ module.exports = {
   freezeApEmail,
   payerRecipient,
   payerSnapshot,
+  scheduledServicesHasSelfPay,
   _private: { isEmailLike, normalizeTerms, parseSnapshot },
 };

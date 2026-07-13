@@ -7270,12 +7270,17 @@ export function CompletionPanel({
   // else the account default unless the visit is pinned to self-pay), the
   // invoice routes to the payer's AP inbox and the tech must NOT collect on
   // site (the server blocks in-person collection for payer-billed visits).
-  // The banner and the self-pay UI suppression only engage once the payer is
-  // CONFIRMED live and ACTIVE — server resolution ignores missing/inactive
-  // payers (falls back to self-pay), so a stale link must not tell the tech
-  // "don't collect" on a visit that will actually mint a self-pay invoice.
-  // A failed lookup (403/offline) therefore shows nothing: the server-side
+  // The banner and the self-pay UI suppression only engage for a CONFIRMED
+  // live ACTIVE payer — server resolution ignores missing/inactive payers
+  // (falls back to self-pay), so a stale link must not tell the tech "don't
+  // collect" on a visit that will actually mint a self-pay invoice.
+  // Preferred source: `service.billedToPayer`, resolved (active-checked)
+  // server-side on the tech-visible schedule day payload — /admin/payers/* is
+  // admin-only, so a tech can't look the payer up client-side. Payloads that
+  // don't carry the field (older list shapes) fall back to the admin lookup;
+  // when that fails (403/offline) nothing is suppressed — the server-side
   // guards still prevent real mis-collection either way.
+  const serverBilledTo = service.billedToPayer;
   const effectivePayerId =
     service.payerId ||
     (service.selfPayOverride === true ? null : customerDefaultPayerId) ||
@@ -7284,6 +7289,12 @@ export function CompletionPanel({
   useEffect(() => {
     let live = true;
     setPayerBillTo(null);
+    if (serverBilledTo !== undefined) {
+      if (serverBilledTo) {
+        setPayerBillTo({ name: serverBilledTo.name || "a third-party payer" });
+      }
+      return undefined;
+    }
     if (!effectivePayerId) return undefined;
     adminFetch(`/admin/payers/${effectivePayerId}`)
       .then((d) => {
@@ -7295,7 +7306,7 @@ export function CompletionPanel({
       })
       .catch(() => { /* unconfirmed — keep self-pay UI */ });
     return () => { live = false; };
-  }, [effectivePayerId]);
+  }, [serverBilledTo, effectivePayerId]);
   const payerBanner = payerBillTo
     ? `Billed to ${payerBillTo.name} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
     : null;
