@@ -11453,7 +11453,24 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // from the flag's CURRENT state would also suppress pay links for
   // pre-rollout and exempt accepts whose open invoice genuinely needs
   // paying (Codex #2680 r3).
-  const recurringCardLaneRetry = rawEstData?.recurringCardLaneAccepted === true;
+  let recurringCardLaneRetry = rawEstData?.recurringCardLaneAccepted === true;
+  // The stamp's promise is PRE-completion ("the enrolled card auto-charges
+  // this at the first visit"). Once the attached visit is COMPLETED and the
+  // invoice is still collectible, the auto-charge was skipped or declined
+  // (above-quote review, no-cap review, card decline) and completion's
+  // fallback pay link is the customer's real payment path — stop hiding it
+  // on retries (Codex #2680 r7). A lookup failure keeps the pre-visit
+  // posture (suppressed).
+  if (recurringCardLaneRetry && invoice && !invoiceSettled && invoice.scheduled_service_id) {
+    try {
+      const attachedVisit = await db('scheduled_services')
+        .where({ id: invoice.scheduled_service_id })
+        .first('status');
+      if (attachedVisit && String(attachedVisit.status || '').toLowerCase() === 'completed') {
+        recurringCardLaneRetry = false;
+      }
+    } catch { /* keep suppression */ }
+  }
   // Never hand the homeowner a payer's bearer /pay token — nor ANY /pay token
   // for a settled invoice (nothing is owed), nor a pay-now link for a
   // card-lane accept whose invoice completion will auto-charge.
