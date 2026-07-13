@@ -9,6 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
+const { isBankMethodType } = require('../services/autopay-eligibility');
 
 router.use(authenticate);
 
@@ -159,7 +160,7 @@ router.get('/cards/:id/bank-verification-link', async (req, res, next) => {
     const row = await db('payment_methods')
       .where({ id: req.params.id, customer_id: req.customerId })
       .first();
-    if (!row || row.method_type !== 'ach' || !row.stripe_setup_intent_id) {
+    if (!row || !isBankMethodType(row.method_type) || !row.stripe_setup_intent_id) {
       return res.status(404).json({ error: 'No verification in progress for this payment method' });
     }
     const si = await StripeService.retrieveSetupIntent(row.stripe_setup_intent_id);
@@ -326,12 +327,15 @@ router.post('/cards', async (req, res, next) => {
           enableAutopay: false,
           makeDefault: false,
           achStatus: 'pending_verification',
+          // Atomic with the insert (Codex r5) — a post-insert update left
+          // a crash window with a pending row removeCard couldn't
+          // tombstone.
+          setupIntentId,
         });
       }
-      // Durable resume handle (Codex r3): the hosted verification URL only
-      // lives in browser state — persist the SetupIntent id so
-      // GET /cards/:id/bank-verification-link can rebuild the link after a
-      // reload instead of stranding a permanently pending row.
+      // Backfill for rows saved before the id rode the insert (a retry of
+      // a partially-failed earlier attempt) — the resume endpoint and the
+      // removal tombstone both need it.
       if (!pendingRow.stripe_setup_intent_id) {
         await db('payment_methods').where({ id: pendingRow.id }).update({ stripe_setup_intent_id: setupIntentId });
       }
@@ -409,7 +413,7 @@ router.post('/cards', async (req, res, next) => {
     // enrollConsentedMethod refuses ACH targets while it's non-active, so
     // clearing only the row still 409'd this return path. 'suspended'
     // deliberately stays (see the webhook branch).
-    if (card.method_type === 'ach' && card.ach_status !== 'verified') {
+    if (isBankMethodType(card.method_type) && card.ach_status !== 'verified') {
       await db('payment_methods').where({ id: card.id }).update({ ach_status: 'verified' });
       card.ach_status = 'verified';
       await db('customers')
@@ -441,7 +445,7 @@ router.post('/cards', async (req, res, next) => {
       stripePaymentMethodId: resolvedPaymentMethodId,
       // Distinct audit source for bank saves (portal ACH lane) — the
       // snapshot itself is already method-correct via methodType.
-      source: card.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+      source: isBankMethodType(card.method_type) ? 'portal_add_bank' : 'portal_add_card',
       methodType: card.method_type || 'card',
       ip: req.ip,
       userAgent: req.get('user-agent') || null,
@@ -664,14 +668,14 @@ router.put('/cards/:id/default', async (req, res, next) => {
     // means customerOnAutopay/cron treat a bank default as inactive — a
     // suspended customer clicking Set default on a bank would silently
     // turn a chargeable card setup into one that never collects.
-    if (card.method_type === 'ach' && ['pending_verification', 'verification_failed'].includes(card.ach_status)) {
+    if (isBankMethodType(card.method_type) && ['pending_verification', 'verification_failed'].includes(card.ach_status)) {
       return res.status(400).json({
         error: card.ach_status === 'verification_failed'
           ? 'This bank account could not be verified. Remove it and add it again.'
           : 'This bank account is still being verified. You can make it your default as soon as verification clears.',
       });
     }
-    if (card.method_type === 'ach') {
+    if (isBankMethodType(card.method_type)) {
       const achCustomer = await db('customers').where({ id: req.customerId }).first('ach_status');
       if (achCustomer?.ach_status && achCustomer.ach_status !== 'active') {
         return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — keep a card as your default until that clears.' });

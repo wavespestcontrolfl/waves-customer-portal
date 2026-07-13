@@ -7,7 +7,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
-const { isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+const { isChargeableAutopayMethod, isBankMethodType } = require('../services/autopay-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -236,7 +236,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     // setup_intent.succeeded webhook flips the row to 'verified' and
     // enrolls it; until then the portal shows it as pending.
     if (willBeEnabled
-      && selectedPaymentMethod?.method_type === 'ach'
+      && isBankMethodType(selectedPaymentMethod?.method_type)
       && ['pending_verification', 'verification_failed'].includes(selectedPaymentMethod?.ach_status)) {
       return res.status(400).json({
         error: selectedPaymentMethod.ach_status === 'verification_failed'
@@ -252,7 +252,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     // 'suspended' clears through a successful ACH payment (or
     // needs_verification through a bank verification).
     if (willBeEnabled
-      && selectedPaymentMethod?.method_type === 'ach'
+      && isBankMethodType(selectedPaymentMethod?.method_type)
       && current.ach_status && current.ach_status !== 'active') {
       return res.status(400).json({ error: 'Bank payments are unavailable on your account right now — Auto Pay needs a card until that clears.' });
     }

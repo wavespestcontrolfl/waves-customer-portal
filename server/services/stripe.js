@@ -374,6 +374,14 @@ const StripeService = {
         record.ach_status = options.achStatus || pm.us_bank_account.status || 'verified';
       }
 
+      // Persisted ATOMICALLY with the row (Codex #2706 r5): a separate
+      // post-insert update left a crash window where a pending bank row
+      // existed without its SetupIntent id — removeCard then couldn't
+      // cancel the hosted verification and the tombstone guarantee broke.
+      if (options.setupIntentId) {
+        record.stripe_setup_intent_id = options.setupIntentId;
+      }
+
       let saved;
       try {
         saved = await db.transaction(async trx => {
@@ -671,7 +679,7 @@ const StripeService = {
       // reading the SI: already succeeded/canceled → removal proceeds
       // (the detach + requireAttached pair covers those); anything else →
       // fail closed and let the customer retry.
-      if (card.method_type === 'ach' && card.ach_status !== 'verified' && card.stripe_setup_intent_id) {
+      if (require('./autopay-eligibility').isBankMethodType(card.method_type) && card.ach_status !== 'verified' && card.stripe_setup_intent_id) {
         try {
           await stripe.setupIntents.cancel(card.stripe_setup_intent_id);
         } catch (cancelErr) {

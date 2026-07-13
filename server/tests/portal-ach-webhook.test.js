@@ -55,13 +55,18 @@ jest.mock('../services/payment-method-consents', () => ({
 const mockEnroll = jest.fn(async () => ({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' }));
 jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: (...a) => mockEnroll(...a) }));
 
-const state = { paymentMethodRow: null, updates: [] };
+const state = { paymentMethodRow: null, updates: [], failUpdates: false };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const q = { _wheres: [] };
     q.where = jest.fn((...a) => { q._wheres.push(a[0]); return q; });
+    q.whereIn = jest.fn((col, vals) => { q._wheres.push({ [col]: vals }); return q; });
     q.first = jest.fn(async () => (table === 'payment_methods' ? state.paymentMethodRow : null));
-    q.update = jest.fn(async (patch) => { state.updates.push({ table, wheres: q._wheres, patch }); return 1; });
+    q.update = jest.fn(async (patch) => {
+      if (state.failUpdates) throw new Error('db write failed');
+      state.updates.push({ table, wheres: q._wheres, patch });
+      return 1;
+    });
     return q;
   });
   db.transaction = jest.fn();
@@ -89,6 +94,7 @@ beforeEach(() => {
   mockHasEnrollmentScopedConsent.mockResolvedValue(true);
   mockEnroll.mockResolvedValue({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' });
   state.updates = [];
+  state.failUpdates = false;
   state.paymentMethodRow = {
     id: 'pm-row-1',
     customer_id: 'cust-1',
@@ -224,4 +230,22 @@ test('setup_failed moves a pending bank row to verification_failed (Codex r3)', 
   // Scoped to PENDING rows only — a stale failure event can never demote a
   // verified account.
   expect(pmUpdates[0].wheres).toContainEqual(expect.objectContaining({ ach_status: 'pending_verification' }));
+});
+
+test('setup_failed row-write errors BUBBLE so Stripe retries — a swallowed write strands the row pending (Codex r5)', async () => {
+  state.failUpdates = true;
+  await expect(handleSetupIntentFailed({
+    id: 'si_md',
+    payment_method: 'pm_bank_1',
+    last_setup_error: { message: 'Microdeposit amounts do not match' },
+    metadata: { waves_customer_id: 'cust-1' },
+  })).rejects.toThrow('db write failed');
+});
+
+test("the 'us_bank_account' alias verifies + clears + enrolls like 'ach' (Codex r5)", async () => {
+  state.paymentMethodRow = { ...state.paymentMethodRow, method_type: 'us_bank_account' };
+  await handleSetupIntentSucceeded(setupIntent());
+  expect(updatesFor('payment_methods').map((u) => u.patch)).toContainEqual({ ach_status: 'verified' });
+  expect(updatesFor('customers')).toHaveLength(1);
+  expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_bank' }));
 });

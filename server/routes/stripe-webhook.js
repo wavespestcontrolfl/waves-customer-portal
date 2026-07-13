@@ -3,6 +3,7 @@ const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { isBankMethodType } = require('../services/autopay-eligibility');
 const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
@@ -2499,7 +2500,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // even though the lane is closed. No local row means probing the PM
       // type from Stripe first; a local row carries its own method_type.
       if (!gateOn) {
-        const bankAlready = saved?.method_type === 'ach';
+        const bankAlready = isBankMethodType(saved?.method_type);
         const bankIncoming = !saved
           && (await StripeService.retrievePaymentMethod(stripePmId))?.type === 'us_bank_account';
         if (bankAlready || bankIncoming) {
@@ -2530,7 +2531,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
         }
       }
       // Verification cleared — a pending bank row becomes chargeable.
-      if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {
+      if (isBankMethodType(saved.method_type) && saved.ach_status !== 'verified') {
         await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
       }
       // A freshly VERIFIED bank clears a customer-level needs_verification
@@ -2541,7 +2542,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
       // was earned by repeated failed debits and keeps its organic exit (a
       // successful ACH payment clears it in the payment_intent.succeeded
       // handler). The failure LOG stays authoritative for escalation.
-      if (saved.method_type === 'ach') {
+      if (isBankMethodType(saved.method_type)) {
         await db('customers')
           .where({ id: wavesCustomerId, ach_status: 'needs_verification' })
           .update({ ach_status: 'active' });
@@ -2560,7 +2561,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
           stripePaymentMethodId: stripePmId,
-          source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+          source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
           methodType: saved.method_type || 'card',
         });
       }
@@ -2569,7 +2570,7 @@ async function handleSetupIntentSucceeded(setupIntent) {
       const enrollment = await enrollConsentedMethod({
         customerId: wavesCustomerId,
         paymentMethodId: saved.id,
-        source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+        source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
         details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
       });
       if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
@@ -3722,20 +3723,21 @@ async function handleSetupIntentFailed(setupIntent) {
   // forever with no failure state or retry path. Matched on the persisted
   // SetupIntent id; only pending rows flip (a verified row is never
   // demoted by a stale/duplicate failure event).
-  try {
-    const failedPmId = typeof setupIntent.payment_method === 'string'
-      ? setupIntent.payment_method
-      : setupIntent.payment_method?.id;
-    const rowFilter = failedPmId
-      ? { stripe_payment_method_id: failedPmId }
-      : { stripe_setup_intent_id: setupIntent.id };
-    await db('payment_methods')
-      .where(rowFilter)
-      .where({ method_type: 'ach', ach_status: 'pending_verification' })
-      .update({ ach_status: 'verification_failed' });
-  } catch (markErr) {
-    logger.warn(`[stripe-webhook] failed to mark pending bank row for SI ${setupIntent.id}: ${markErr.message}`);
-  }
+  // The write is NOT caught (Codex r5): swallowing it acks the event and
+  // Stripe never retries, stranding the row in pending — let it bubble so
+  // the dispatcher 500s and the retry re-runs this idempotent update. It
+  // runs BEFORE the SMS so a retry can't double-text.
+  const failedPmId = typeof setupIntent.payment_method === 'string'
+    ? setupIntent.payment_method
+    : setupIntent.payment_method?.id;
+  const rowFilter = failedPmId
+    ? { stripe_payment_method_id: failedPmId }
+    : { stripe_setup_intent_id: setupIntent.id };
+  await db('payment_methods')
+    .where(rowFilter)
+    .whereIn('method_type', ['ach', 'us_bank_account'])
+    .where({ ach_status: 'pending_verification' })
+    .update({ ach_status: 'verification_failed' });
 
   try {
     const customerId = setupIntent.metadata?.waves_customer_id;

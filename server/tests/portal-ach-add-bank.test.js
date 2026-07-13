@@ -26,7 +26,10 @@ jest.mock('../services/payment-lifecycle-email', () => ({
   sendPaymentMethodUpdated: jest.fn(async () => {}),
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}), getRecent: jest.fn(async () => []) }));
-jest.mock('../services/autopay-eligibility', () => ({ isChargeableAutopayMethod: jest.fn(() => true) }));
+jest.mock('../services/autopay-eligibility', () => ({
+  isChargeableAutopayMethod: jest.fn(() => true),
+  isBankMethodType: (t) => ['ach', 'us_bank_account'].includes(String(t || '').toLowerCase()),
+}));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn(), isCardMethodType: jest.fn((t) => t === 'card') }));
 jest.mock('../services/card-enrollment-email', () => ({ sendAutopayEnrollmentConfirmation: jest.fn(async () => null) }));
 
@@ -175,6 +178,9 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
       enableAutopay: false,
       makeDefault: false,
       achStatus: 'pending_verification',
+      // Atomic with the insert (Codex r5) — no crash window between the
+      // pending row and its removal-tombstone handle.
+      setupIntentId: 'si_md',
     });
     expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({
       source: 'portal_add_bank',
@@ -315,6 +321,22 @@ describe('PUT /api/billing/autopay — pending bank cannot take charge', () => {
     });
     // customerOnAutopay/cron would treat these flags as inactive — reject
     // honestly instead of silently stopping collection.
+    expect(statusCode).toBe(400);
+    expect(body.error).toMatch(/unavailable on your account/i);
+  });
+
+  test("the 'us_bank_account' ALIAS hits the same guards — alias rows must not slip past (Codex r5)", async () => {
+    state.tables.customers = [{ autopay_enabled: false, autopay_payment_method_id: null, billing_day: 1, ach_status: 'suspended' }];
+    state.tables.payment_methods = [{
+      id: 'pm-bank',
+      processor: 'stripe',
+      stripe_payment_method_id: 'pm_bank_1',
+      method_type: 'us_bank_account',
+      ach_status: 'verified',
+    }];
+    const { statusCode, body } = await invoke(handler(), {
+      body: { autopay_enabled: true, autopay_payment_method_id: 'pm-bank' },
+    });
     expect(statusCode).toBe(400);
     expect(body.error).toMatch(/unavailable on your account/i);
   });
