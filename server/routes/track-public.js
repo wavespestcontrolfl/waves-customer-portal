@@ -78,21 +78,14 @@ function firstNameOf(fullName) {
   return trimmed.split(/\s+/)[0];
 }
 
-// Display masks for the tracker's client block: the token-only payload never
-// carries raw contact PII (a forwarded tracking SMS link must not become a
-// contact-info disclosure), but the customer still recognizes their own
-// details on the card.
-function maskEmail(email) {
-  const clean = String(email || '').trim();
-  const at = clean.indexOf('@');
-  if (at < 1) return null;
-  return `${clean[0]}•••@${clean.slice(at + 1)}`;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length < 4) return null;
-  return `(•••) •••-${digits.slice(-4)}`;
+// Phone display for the tracker's client block — (xxx) xxx-xxxx when the
+// stored value is a clean 10/11-digit US number, otherwise the raw value.
+function formatPhoneDisplay(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return null;
+  const d = digits.length === 11 && digits[0] === '1' ? digits.slice(1) : digits;
+  if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+  return String(raw).trim() || null;
 }
 
 function composeWindowIso(scheduledDate, windowTime) {
@@ -420,15 +413,14 @@ router.get('/:token', async (req, res, next) => {
         : null,
       arrivedAt: row.arrived_at || null,
       customerFirstName: row.cust_first_name || null,
-      // Client identity block for the card. Name + address ride the same
-      // trusted track-token boundary the property address always used;
-      // email/phone are MASKED server-side (s•••@domain, last-4) so a
-      // forwarded or leaked tracking link never yields usable contact PII —
-      // the customer still recognizes their own details on the card.
+      // Client identity block for the card. Name, address, email, and phone
+      // all ride the same trusted track-token boundary — shown in full per
+      // owner decision (2026-07-13); the token link is the only gate, same
+      // as the full property address above.
       customer: {
         name: [row.cust_first_name, row.cust_last_name].filter(Boolean).join(' ') || null,
-        email: maskEmail(row.cust_email),
-        phone: maskPhone(row.cust_phone),
+        email: String(row.cust_email || '').trim() || null,
+        phone: formatPhoneDisplay(row.cust_phone),
       },
       prepToken: null,
       meta: {

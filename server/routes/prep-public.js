@@ -21,22 +21,6 @@ const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
-// Display masks for the prep contact block — same shapes as the tracker's
-// (track-public.js): a token-only public payload never carries raw contact
-// PII, but the customer still recognizes their own details.
-function maskEmail(email) {
-  const clean = String(email || '').trim();
-  const at = clean.indexOf('@');
-  if (at < 1) return null;
-  return `${clean[0]}•••@${clean.slice(at + 1)}`;
-}
-
-function maskPhone(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length < 4) return null;
-  return `(•••) •••-${digits.slice(-4)}`;
-}
-
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -245,13 +229,13 @@ router.get('/:token', async (req, res) => {
     return res.json({
       customerFirstName,
       // Contact block (owner 2026-07-09): the prep page renders the same
-      // name / email / phone / address lines as the report heroes — but
-      // email/phone are MASKED like the tracker payload (track-public.js):
-      // track responses expose prepToken, so a forwarded/leaked link must
-      // never yield usable contact PII.
+      // name / email / phone / address lines as the report heroes. Email
+      // and phone are shown in full per owner decision (2026-07-13) — the
+      // token link is the gate, matching the tracker payload
+      // (track-public.js). PrepGuidePage formats the phone for display.
       customerName: vars.customer_name,
-      customerEmail: maskEmail(customer?.email),
-      customerPhone: maskPhone(customer?.phone),
+      customerEmail: String(customer?.email || '').trim() || null,
+      customerPhone: String(customer?.phone || '').trim() || null,
       projectTypeLabel: typeLabel,
       serviceDate,
       propertyAddress,
