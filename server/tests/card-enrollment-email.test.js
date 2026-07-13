@@ -144,8 +144,8 @@ describe('autopay enrollment confirmation (gate on)', () => {
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 
-  test('non-card methods are skipped — the card template must never describe a bank account (Codex r1)', async () => {
-    state.tables.payment_methods = [{ id: 'pm-1', stripe_payment_method_id: 'pm_bank_1', method_type: 'ach' }];
+  test('unknown method families are skipped — no matching template, no send', async () => {
+    state.tables.payment_methods = [{ id: 'pm-1', stripe_payment_method_id: 'pm_x_1', method_type: 'cashapp' }];
     expect(await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
@@ -159,6 +159,64 @@ describe('autopay enrollment confirmation (gate on)', () => {
   test('missing pm row → skip: no agreement of record, no authorization copy (Codex r3)', async () => {
     state.tables.payment_methods = [];
     expect(await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-x' })).toBe(null);
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe('BANK enrollment confirmation (portal ACH lane)', () => {
+  const BANK_PM = {
+    id: 'pm-1',
+    stripe_payment_method_id: 'pm_bank_1',
+    method_type: 'ach',
+    bank_name: 'Chase Bank',
+    bank_last_four: '6789',
+    last_four: '6789',
+  };
+  const ACH_CONSENT_V10 = {
+    id: 'consent-88',
+    source: 'portal_add_bank',
+    consent_text_version: 'v10_2026-07-13',
+    consent_text_snapshot: 'SNAPSHOT: the exact ACH debit authorization the customer agreed to (v10)',
+    created_at: '2026-07-13T08:00:00Z',
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.GATE_CARD_ENROLLMENT_EMAILS = 'true';
+    state.tables = {
+      customers: [CUSTOMER],
+      payment_methods: [BANK_PM],
+      payment_method_consents: [ACH_CONSENT_V10],
+    };
+  });
+  afterAll(() => { delete process.env.GATE_CARD_ENROLLMENT_EMAILS; });
+
+  test('bank enrollment sends the ACH template with debit wording — never card copy over a debit authorization', async () => {
+    await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    const call = mockSendTemplate.mock.calls[0][0];
+    expect(call.templateKey).toBe('autopay.enrollment_confirmation_ach');
+    expect(call.payload.bank_line).toBe('your Chase Bank account ending 6789');
+    expect(call.payload.debit_timing_line)
+      .toBe("After each completed service, your bank account is debited that service's amount automatically, and you get a receipt every time.");
+    // Never the card variables — the template's required set is bank-shaped.
+    expect(call.payload.card_line).toBeUndefined();
+    expect(call.payload.charge_timing_line).toBeUndefined();
+    expect(call.payload.authorization_text).toBe('SNAPSHOT: the exact ACH debit authorization the customer agreed to (v10)');
+    // Template-keyed + consent-version-keyed, same dedupe semantics as card.
+    expect(call.idempotencyKey).toBe('autopay.enrollment_confirmation_ach:cust-1:pm-1:v10_2026-07-13');
+  });
+
+  test('monthly-billed bank accounts get the monthly DEBIT line', async () => {
+    state.tables.customers = [{ ...CUSTOMER, billing_mode: null, monthly_rate: '120.00' }];
+    await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' });
+    expect(mockSendTemplate.mock.calls[0][0].payload.debit_timing_line)
+      .toBe('Your bank account is debited your monthly plan amount on your billing day each month, and you get a receipt every time.');
+  });
+
+  test('bank enrollment with no qualifying consent → skip (never fabricate an ACH authorization copy)', async () => {
+    state.tables.payment_method_consents = [];
+    expect(await sendAutopayEnrollmentConfirmation({ customerId: 'cust-1', paymentMethodRowId: 'pm-1' })).toBe(null);
     expect(mockSendTemplate).not.toHaveBeenCalled();
   });
 });
@@ -244,20 +302,23 @@ describe('card-hold confirmation (gate on)', () => {
 
 describe('seeded template rows stay inside the admin route enums (Codex r3)', () => {
   const { _TEMPLATES } = require('../models/migrations/20260713010010_seed_card_enrollment_email_templates');
+  const { _TEMPLATES: ACH_TEMPLATES } = require('../models/migrations/20260713100010_seed_ach_enrollment_email_template');
 
   test('content sensitivity is a member of the admin SENSITIVITIES enum', () => {
     // Mirror of SENSITIVITIES in routes/admin-email-templates.js — an
     // out-of-enum seed makes every later admin save of the template fail
     // validation.
     const allowed = new Set(['normal', 'financial', 'account', 'health_safety', 'property_sensitive']);
-    for (const t of _TEMPLATES) {
+    for (const t of [..._TEMPLATES, ...ACH_TEMPLATES]) {
       expect(allowed.has(t.sensitivity)).toBe(true);
     }
   });
 
   test('sender-composed lines are declared as required template variables', () => {
-    const byKey = Object.fromEntries(_TEMPLATES.map((t) => [t.key, t]));
+    const byKey = Object.fromEntries([..._TEMPLATES, ...ACH_TEMPLATES].map((t) => [t.key, t]));
     expect(byKey['autopay.enrollment_confirmation'].required).toContain('charge_timing_line');
     expect(byKey['cardhold.confirmation'].required).toContain('surcharge_line');
+    expect(byKey['autopay.enrollment_confirmation_ach'].required)
+      .toEqual(expect.arrayContaining(['bank_line', 'debit_timing_line', 'authorization_text']));
   });
 });

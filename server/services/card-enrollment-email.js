@@ -73,13 +73,24 @@ async function loadCustomerEmail(customerId) {
   return { customer, email };
 }
 
+// "your Chase Bank account ending 6789" — bank twin of cardLineFor.
+function bankLineFor(pm) {
+  const bank = clean(pm?.bank_name);
+  const last4 = clean(pm?.bank_last_four || pm?.last_four);
+  if (bank && last4) return `your ${bank} account ending ${last4}`;
+  if (last4) return `your bank account ending ${last4}`;
+  return 'your bank account on file';
+}
+
 // The "How Auto Pay works" timing line must match the customer's actual
 // billing mode (Codex #2698 r3): monthly-billed accounts are charged
 // monthly_rate by the monthly billing cron, not after each visit, so the
 // per-service sentence would state the wrong timing/amount basis on their
 // authorization copy. Column-guarded like the autopay GET route —
-// pre-migration DBs default to the per-service copy.
-async function chargeTimingLine(customerId) {
+// pre-migration DBs default to the per-service copy. The tender phrase
+// follows the method family: cards are CHARGED, bank accounts are DEBITED
+// (the ACH consent's own verb).
+async function chargeTimingLine(customerId, { tender = 'your card', verb = 'charged' } = {}) {
   let mode = null;
   let monthlyRate = 0;
   try {
@@ -87,15 +98,16 @@ async function chargeTimingLine(customerId) {
     mode = row?.billing_mode || null;
     monthlyRate = Number(row?.monthly_rate) || 0;
   } catch { /* billing_mode column absent pre-migration */ }
+  const Tender = `${tender.charAt(0).toUpperCase()}${tender.slice(1)}`;
   if (mode === 'annual_prepay') {
     // Term is prepaid; echo the consent's own scope rather than promising
     // a charge cadence the annual flow doesn't have.
-    return 'Your card is charged for your service invoices as agreed, and you get a receipt every time.';
+    return `${Tender} is ${verb} for your service invoices as agreed, and you get a receipt every time.`;
   }
   if (mode !== 'per_application' && monthlyRate > 0) {
-    return 'Your card is charged your monthly plan amount on your billing day each month, and you get a receipt every time.';
+    return `${Tender} is ${verb} your monthly plan amount on your billing day each month, and you get a receipt every time.`;
   }
-  return "After each completed service, your card is charged that service's amount automatically, and you get a receipt every time.";
+  return `After each completed service, ${tender} is ${verb} that service's amount automatically, and you get a receipt every time.`;
 }
 
 async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId } = {}) {
@@ -108,15 +120,15 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
     }
     const pm = await db('payment_methods')
       .where({ id: paymentMethodRowId, customer_id: customerId })
-      .first('id', 'stripe_payment_method_id', 'card_brand', 'last_four', 'method_type');
-    // CARD-ONLY template (Codex #2698 r1): an ACH/bank enrollment reaching
-    // this hook (pay-page saves already support us_bank_account) would get
-    // "your card is charged" wording over the ACH debit authorization —
-    // wrong on both counts. The bank variant ships with the scoped portal
-    // ACH lane (its own owner-approved template); skip it here.
+      .first('id', 'stripe_payment_method_id', 'card_brand', 'last_four', 'method_type', 'bank_name', 'bank_last_four');
+    // Method family selects the template (Codex #2698 r1 established the
+    // rule; the portal ACH lane shipped the bank variant): card wording
+    // over an ACH debit authorization — or vice versa — is wrong on both
+    // counts. Unknown method families still skip.
     const methodType = clean(pm?.method_type || 'card').toLowerCase();
-    if (pm && methodType !== 'card') {
-      logger.info(`[card-enrollment-email] non-card method (${methodType}) for customer ${customerId}; autopay confirmation skipped (card template only)`);
+    const isBank = methodType === 'ach' || methodType === 'us_bank_account';
+    if (pm && methodType !== 'card' && !isBank) {
+      logger.info(`[card-enrollment-email] unknown method family (${methodType}) for customer ${customerId}; autopay confirmation skipped (no matching template)`);
       return null;
     }
     // The customer's copy must be the EXACT text they agreed to — the
@@ -146,13 +158,18 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
       logger.info(`[card-enrollment-email] no enrollment-scoped consent for customer ${customerId}; autopay confirmation skipped (no agreement of record)`);
       return null;
     }
+    const templateKey = isBank ? 'autopay.enrollment_confirmation_ach' : 'autopay.enrollment_confirmation';
+    const timingLine = await chargeTimingLine(customerId, isBank
+      ? { tender: 'your bank account', verb: 'debited' }
+      : { tender: 'your card', verb: 'charged' });
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'autopay.enrollment_confirmation',
+      templateKey,
       to: email,
       payload: {
         first_name: clean(customer.first_name) || 'there',
-        card_line: cardLineFor(pm),
-        charge_timing_line: await chargeTimingLine(customerId),
+        ...(isBank
+          ? { bank_line: bankLineFor(pm), debit_timing_line: timingLine }
+          : { card_line: cardLineFor(pm), charge_timing_line: timingLine }),
         authorization_text: clean(consentRow.consent_text_snapshot),
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
@@ -168,13 +185,13 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
       // must keep: a re-authorization under BUMPED consent copy is a new
       // agreement → new version → fresh copy; a re-authorization under
       // identical copy is deduped — the customer already holds a verbatim
-      // copy of that exact agreement for this card.
-      idempotencyKey: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
-      triggerEventId: `autopay.enrollment_confirmation:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
+      // copy of that exact agreement for this method.
+      idempotencyKey: `${templateKey}:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
+      triggerEventId: `${templateKey}:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
       categories: ['autopay_enrollment_confirmation'],
       suppressProviderErrorLog: true,
     });
-    logger.info(`[card-enrollment-email] autopay confirmation sent for customer ${customerId}`);
+    logger.info(`[card-enrollment-email] autopay confirmation sent for customer ${customerId} (${isBank ? 'bank' : 'card'})`);
     return result;
   } catch (err) {
     const reason = err.status

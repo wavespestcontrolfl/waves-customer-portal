@@ -3,6 +3,7 @@ const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { isBankMethodType } = require('../services/autopay-eligibility');
 const stripeConfig = require('../config/stripe-config');
 const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
@@ -2471,6 +2472,122 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // Portal add-method completion (portal ACH lane): for the micro-deposit
+  // deferred save this webhook is the ONLY place enrollment can finish —
+  // the customer's session ended days before verification cleared. For a
+  // synchronously-completed save (card, or bank via Financial Connections)
+  // it's a no-op re-run: every step is idempotent (lookup-first save,
+  // hasConsentFor-guarded consent, already_enrolled enrollment).
+  if (setupIntent.metadata?.purpose === 'portal_add_method'
+    && setupIntent.metadata?.waves_customer_id
+    && setupIntent.payment_method) {
+    const wavesCustomerId = setupIntent.metadata.waves_customer_id;
+    const stripePmId = typeof setupIntent.payment_method === 'string'
+      ? setupIntent.payment_method
+      : setupIntent.payment_method.id;
+    try {
+      const StripeService = require('../services/stripe');
+      const ConsentService = require('../services/payment-method-consents');
+      const gateOn = require('../config/feature-gates').isEnabled('portalAchAutopay');
+      let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
+      if (saved && saved.customer_id !== wavesCustomerId) {
+        logger.warn(`[stripe-webhook] portal-add-method pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
+        return;
+      }
+      // Kill-switch integrity BEFORE any persistence (Codex r4): with the
+      // gate off, the browser-died path must not save a bank row at all —
+      // a persisted verified row would be selectable by the billing routes
+      // even though the lane is closed. No local row means probing the PM
+      // type from Stripe first; a local row carries its own method_type.
+      if (!gateOn) {
+        const bankAlready = isBankMethodType(saved?.method_type);
+        const bankIncoming = !saved
+          && (await StripeService.retrievePaymentMethod(stripePmId))?.type === 'us_bank_account';
+        if (bankAlready || bankIncoming) {
+          logger.info(`[stripe-webhook] portal-add-method bank pm ${stripePmId} skipped — GATE_PORTAL_ACH_AUTOPAY off`);
+          return;
+        }
+      }
+      if (!saved) {
+        // Browser died between confirmSetup and POST /cards. The portal
+        // add modal always renders the locked consent copy before confirm,
+        // so a confirmed SI means the customer saw it — same rationale as
+        // the covered_capture backstop above. requireAttached (Codex
+        // #2706 r1): a customer who REMOVED the method before verification
+        // detached it at Stripe (removeCard detaches + deletes the row) —
+        // the backstop must never resurrect and enroll it.
+        try {
+          saved = await StripeService.savePaymentMethod(wavesCustomerId, stripePmId, {
+            enableAutopay: false,
+            makeDefault: false,
+            requireAttached: true,
+          });
+        } catch (saveErr) {
+          if (saveErr.code === 'PM_NOT_ATTACHED') {
+            logger.info(`[stripe-webhook] portal-add-method pm ${stripePmId} no longer attached (customer removed it) — skipping backstop for ${wavesCustomerId}`);
+            return;
+          }
+          throw saveErr;
+        }
+      }
+      // Verification cleared — a pending bank row becomes chargeable.
+      if (isBankMethodType(saved.method_type) && saved.ach_status !== 'verified') {
+        await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
+      }
+      // A freshly VERIFIED bank clears a customer-level needs_verification
+      // block (Codex r2): that state asks for exactly this proof, and
+      // without clearing it the replacement bank stays unusable
+      // (enrollConsentedMethod refuses ACH targets while the customer flag
+      // is non-active). 'suspended' is deliberately NOT cleared here — it
+      // was earned by repeated failed debits and keeps its organic exit (a
+      // successful ACH payment clears it in the payment_intent.succeeded
+      // handler). The failure LOG stays authoritative for escalation.
+      if (isBankMethodType(saved.method_type)) {
+        await db('customers')
+          .where({ id: wavesCustomerId, ach_status: 'needs_verification' })
+          .update({ ach_status: 'active' });
+      }
+      // Ensure an ENROLLMENT-SCOPED consent exists (Codex r2): the old
+      // hasConsentFor guard suppressed the portal consent whenever ANY row
+      // existed — a hold-scoped-only history (estimate_card_hold) passed
+      // it, so the consent the customer just granted in the locked portal
+      // modal was never written and enrollment silently skipped. Recording
+      // is still suppressed when an enrollment-scoped consent already
+      // exists (backstop re-runs stay deduped), and enrollment stays
+      // consent-gated: the row below is the authority, never SI metadata
+      // (Codex #2507 P1).
+      if (!(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId))) {
+        await ConsentService.recordConsent({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: stripePmId,
+          source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
+          methodType: saved.method_type || 'card',
+        });
+      }
+      await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
+      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      const enrollment = await enrollConsentedMethod({
+        customerId: wavesCustomerId,
+        paymentMethodId: saved.id,
+        source: isBankMethodType(saved.method_type) ? 'portal_add_bank' : 'portal_add_card',
+        details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
+      });
+      if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+        // No rethrow: a webhook retry can't change a refused bank state
+        // (ach_blocked); the method stays saved and the customer can
+        // enable Auto Pay from the portal once the state clears.
+        logger.warn(`[stripe-webhook] portal-add-method enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId}`);
+      }
+      logger.info(`[stripe-webhook] portal-add-method completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
+    } catch (err) {
+      // Re-throw so Stripe retries: for the micro-deposit flow this event
+      // is the only completion path, and every step above is idempotent.
+      logger.error(`[stripe-webhook] portal-add-method completion failed for SI ${setupIntent.id} (Stripe will retry): ${err.message}`);
+      throw err;
+    }
+    return;
+  }
   const customerId = setupIntent.metadata?.waves_customer_id || 'unknown';
   logger.info(`[stripe-webhook] SetupIntent succeeded for customer ${customerId}: ${setupIntent.id}`);
 }
@@ -3600,6 +3717,28 @@ async function handleSetupIntentFailed(setupIntent) {
   const reason = setupIntent.last_setup_error?.message || 'Unknown';
   logger.warn(`[stripe-webhook] SetupIntent failed: ${setupIntent.id} — ${reason}`);
 
+  // Portal ACH lane (Codex #2706 r3): a failed micro-deposit verification
+  // must move the durable pending row OUT of pending — otherwise the
+  // portal shows "Verification pending — watch for two small deposits"
+  // forever with no failure state or retry path. Matched on the persisted
+  // SetupIntent id; only pending rows flip (a verified row is never
+  // demoted by a stale/duplicate failure event).
+  // The write is NOT caught (Codex r5): swallowing it acks the event and
+  // Stripe never retries, stranding the row in pending — let it bubble so
+  // the dispatcher 500s and the retry re-runs this idempotent update. It
+  // runs BEFORE the SMS so a retry can't double-text.
+  const failedPmId = typeof setupIntent.payment_method === 'string'
+    ? setupIntent.payment_method
+    : setupIntent.payment_method?.id;
+  const rowFilter = failedPmId
+    ? { stripe_payment_method_id: failedPmId }
+    : { stripe_setup_intent_id: setupIntent.id };
+  await db('payment_methods')
+    .where(rowFilter)
+    .whereIn('method_type', ['ach', 'us_bank_account'])
+    .where({ ach_status: 'pending_verification' })
+    .update({ ach_status: 'verification_failed' });
+
   try {
     const customerId = setupIntent.metadata?.waves_customer_id;
     if (customerId) {
@@ -3630,3 +3769,5 @@ module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
+module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
+module.exports._handleSetupIntentFailed = handleSetupIntentFailed;

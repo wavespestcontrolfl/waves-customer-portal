@@ -80,10 +80,20 @@ function autopayActivePredicate() {
   return { sql, binding: etDateString() };
 }
 
+// Bank rows appear under BOTH aliases — savePaymentMethod writes 'ach',
+// other paths have written Stripe's 'us_bank_account' (the same pair
+// enrollConsentedMethod's BANK_ALIASES handles). Every bank guard must
+// accept both or alias rows slip past it (Codex #2706 r5).
+function isBankMethodType(methodType) {
+  const t = String(methodType || '').toLowerCase();
+  return t === 'ach' || t === 'us_bank_account';
+}
+
 module.exports = {
   customerOnAutopay,
   getChargeableAutopayMethod,
   isChargeableAutopayMethod,
+  isBankMethodType,
   isPaused,
   autopayActivePredicate,
 };

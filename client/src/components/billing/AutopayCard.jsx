@@ -61,6 +61,11 @@ import SaveCardConsent from './SaveCardConsent';
 import Icon from '../Icon';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 
+// Bank rows arrive under BOTH aliases — the server guards handle 'ach'
+// and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
+// too or alias rows lose the pending/failed affordances.
+const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+
 // Local alias kept for the many call sites below; values come from the
 // shared customer palette (this used to be a hand-copied hex block).
 const PORTAL_BILLING = CUSTOMER_SURFACE;
@@ -149,6 +154,14 @@ export default function AutopayCard({ onStateChange }) {
   const [selectedDay, setSelectedDay] = useState(1);
   const [addingCard, setAddingCard] = useState(false);
   const [stripeReady, setStripeReady] = useState(false);
+  // Portal ACH (gated server-side): the Payment Element tab drives the
+  // consent copy (card vs ACH authorization — not interchangeable), the
+  // setup-intent response decides whether the bank tab exists at all, and
+  // bankPending renders the micro-deposit notice after a deferred save.
+  const [addMethodType, setAddMethodType] = useState('card');
+  const [achOffered, setAchOffered] = useState(false);
+  const [bankPending, setBankPending] = useState(false);
+  const [bankVerifyUrl, setBankVerifyUrl] = useState('');
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -328,8 +341,14 @@ export default function AutopayCard({ onStateChange }) {
     setErr('');
     setAddingCard(true);
     setStripeReady(false);
+    setAddMethodType('card');
+    setBankPending(false);
     try {
+      // card_or_bank is a REQUEST — the server downgrades to card-only
+      // while GATE_PORTAL_ACH_AUTOPAY is off; the echoed paymentMethodTypes
+      // decides the bank affordances.
       const setupData = await api.createSetupIntent('card_or_bank');
+      setAchOffered((setupData.paymentMethodTypes || []).includes('us_bank_account'));
       const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
@@ -343,6 +362,9 @@ export default function AutopayCard({ onStateChange }) {
           pe.mount(mountRef.current);
           paymentElementRef.current = pe;
           pe.on('ready', () => setStripeReady(true));
+          // Consent copy follows the selected tab — the box the customer
+          // sees must be the text that gets snapshotted.
+          pe.on('change', (event) => setAddMethodType(event?.value?.type || 'card'));
         }
       }, 100);
     } catch (e) {
@@ -361,6 +383,26 @@ export default function AutopayCard({ onStateChange }) {
         redirect: 'if_required',
       });
       if (error) { setErr(error.message); setSaving(false); return; }
+      // Micro-deposit fallback (portal ACH): handled BEFORE the generic
+      // redirect (Codex #2706 r1) — redirectToSetupIntentAction follows
+      // hosted_verification_url, which would navigate away without ever
+      // persisting the pending row or the ACH consent. The server saves
+      // the bank account as PENDING (consent recorded, enrollment deferred
+      // to the verification webhook) — it can't be put in charge of Auto
+      // Pay yet, so no auto-select; the notice carries the hosted
+      // verification link instead of the redirect.
+      const awaitingMicrodeposits = setupIntent?.status === 'requires_action'
+        && setupIntent?.next_action?.type === 'verify_with_microdeposits';
+      if (awaitingMicrodeposits && setupIntent.payment_method) {
+        await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        setBankVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
+        resetAddCard();
+        setModal(null);
+        setBankPending(true);
+        await load();
+        setSaving(false);
+        return;
+      }
       if (redirectToSetupIntentAction(setupIntent)) return;
       if (!setupIntent || setupIntent.status !== 'succeeded') {
         setErr(setupIntentIncompleteMessage('enabling Auto Pay'));
@@ -444,13 +486,28 @@ export default function AutopayCard({ onStateChange }) {
           )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {activeCard.method_type === 'ach' ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
+              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>
       </div>
 
       {!modal && errorBanner}
+
+      {!modal && bankPending && (
+        <div style={{ padding: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: PORTAL_BILLING.body, marginBottom: 10 }}>
+          Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and Auto Pay can use it.
+          {bankVerifyUrl && (
+            <>
+              {' '}
+              <a href={bankVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: PORTAL_BILLING.body, fontWeight: 850 }}>
+                Confirm the deposits here
+              </a>
+              {' '}once they arrive.
+            </>
+          )}
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
         {state === 'active' && (
@@ -473,14 +530,14 @@ export default function AutopayCard({ onStateChange }) {
         <Modal title={
           modal === 'manage' ? 'Manage Auto Pay' :
           modal === 'pause' ? 'Pause Auto Pay' :
-          modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay card') :
+          modal === 'card' ? (state === 'disabled' ? 'Set up Auto Pay' : 'Change Auto Pay method') :
           'Change billing day'
         } onClose={() => { setModal(null); setErr(''); }}>
           {errorBanner}
           {modal === 'manage' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('pause')}>Pause payments</button>
-              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change card</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change payment method</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off Auto Pay</button>
             </div>
@@ -511,21 +568,31 @@ export default function AutopayCard({ onStateChange }) {
                   No cards on file yet. Add a payment method before Auto Pay can run.
                 </div>
               ) : (
-                payment_methods.map((pm) => (
-                  <label key={pm.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 10, padding: 12,
-                    border: `1px solid ${selectedCard === pm.id ? PORTAL_BILLING.softBorder : PORTAL_BILLING.borderStrong}`,
-                    background: selectedCard === pm.id ? PORTAL_BILLING.soft : PORTAL_BILLING.surface,
-                    borderRadius: 8, cursor: 'pointer',
-                  }}>
-                    <input type="radio" name="autopay-card" checked={selectedCard === pm.id}
-                      onChange={() => setSelectedCard(pm.id)} />
-                    <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
-                      {pm.brand || 'Card'} ending in {pm.last4}
-                      {pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}
-                    </span>
-                  </label>
-                ))
+                payment_methods.map((pm) => {
+                  // A micro-deposit bank account can't be put in charge of
+                  // Auto Pay until verification clears (the server refuses
+                  // it too) — shown, but not selectable. Same for a failed
+                  // verification.
+                  const pendingBank = isBankMethod(pm.method_type) && ['pending_verification', 'verification_failed'].includes(pm.ach_status);
+                  return (
+                    <label key={pm.id} style={{
+                      display: 'flex', alignItems: 'center', gap: 10, padding: 12,
+                      border: `1px solid ${selectedCard === pm.id ? PORTAL_BILLING.softBorder : PORTAL_BILLING.borderStrong}`,
+                      background: selectedCard === pm.id ? PORTAL_BILLING.soft : PORTAL_BILLING.surface,
+                      borderRadius: 8, cursor: pendingBank ? 'not-allowed' : 'pointer',
+                      opacity: pendingBank ? 0.6 : 1,
+                    }}>
+                      <input type="radio" name="autopay-card" checked={selectedCard === pm.id}
+                        disabled={pendingBank}
+                        onChange={() => setSelectedCard(pm.id)} />
+                      <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
+                        {isBankMethod(pm.method_type)
+                          ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pm.ach_status === 'verification_failed' ? ' - verification failed' : (pendingBank ? ' - verification pending' : '')}`
+                          : `${pm.brand || 'Card'} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
+                      </span>
+                    </label>
+                  );
+                })
               )}
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), alignSelf: 'flex-start' }} disabled={saving} onClick={startAddCard}>
                 Add new card
@@ -549,14 +616,20 @@ export default function AutopayCard({ onStateChange }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div ref={mountRef} style={{ minHeight: 180 }} />
               {!stripeReady && <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>Loading payment form...</div>}
-              {/* Save-card authorization — locked because saving is the
+              {achOffered && (
+                <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>
+                  Bank payments have no card surcharge.
+                </div>
+              )}
+              {/* Save-method authorization — locked because saving is the
                   whole purpose of this modal. Shown so the consent row
-                  reflects the copy the customer saw. */}
-              <SaveCardConsent locked onChange={() => {}} />
+                  reflects the copy the customer saw; the copy follows the
+                  Payment Element tab (card vs ACH authorization). */}
+              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} />
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                 <button type="button" {...btnGlass('secondary')} style={btn('secondary')} disabled={saving} onClick={resetAddCard}>Back</button>
                 <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving || !stripeReady} onClick={submitNewCard}>
-                  {saving ? 'Saving...' : 'Save card'}
+                  {saving ? 'Saving...' : (addMethodType === 'us_bank_account' ? 'Save bank account' : 'Save card')}
                 </button>
               </div>
             </div>

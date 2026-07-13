@@ -251,6 +251,19 @@ const StripeService = {
       const setupIntent = await stripe.setupIntents.create({
         customer: stripeCustomerId,
         payment_method_types: paymentMethodTypes,
+        // Bank verification policy, stated explicitly (portal ACH lane):
+        // Financial Connections first (instant verification inside the
+        // Payment Element), micro-deposit fallback allowed — 'automatic'
+        // is Stripe's default, pinned here so a Stripe default change
+        // can't silently alter how bank accounts verify.
+        ...(paymentMethodTypes.includes('us_bank_account') ? {
+          payment_method_options: {
+            us_bank_account: {
+              financial_connections: { permissions: ['payment_method'] },
+              verification_method: 'automatic',
+            },
+          },
+        } : {}),
         // Callers may tag a purpose (e.g. 'covered_capture') so the
         // setup_intent.succeeded webhook can route completion; the
         // waves_customer_id key always wins over caller metadata.
@@ -264,6 +277,7 @@ const StripeService = {
       return {
         clientSecret: setupIntent.client_secret,
         setupIntentId: setupIntent.id,
+        paymentMethodTypes,
       };
     } catch (err) {
       logger.error(`[stripe] SetupIntent creation failed: ${err.message}`);
@@ -300,6 +314,19 @@ const StripeService = {
       if (existingPm.customer && existingPm.customer !== stripeCustomerId) {
         logger.warn(`[stripe] Refusing to attach PM ${paymentMethodId} — owned by different Stripe customer`);
         throw new Error('Payment method does not belong to this customer');
+      }
+
+      // requireAttached (portal ACH lane, Codex #2706 r1): backstop callers
+      // that would otherwise RE-ATTACH a detached method must not — a
+      // customer who removed a pending bank row (removeCard detaches at
+      // Stripe + deletes the row) would have it resurrected and enrolled by
+      // the later setup_intent.succeeded event. A method the customer kept
+      // is still attached (a succeeded SetupIntent attaches it), so this
+      // cleanly distinguishes "browser died" from "customer removed it".
+      if (options.requireAttached && existingPm.customer !== stripeCustomerId) {
+        const detachedErr = new Error('Payment method is not attached to this customer');
+        detachedErr.code = 'PM_NOT_ATTACHED';
+        throw detachedErr;
       }
 
       // Attach PM to the Stripe customer (may already be attached via SetupIntent)
@@ -340,23 +367,58 @@ const StripeService = {
         record.bank_name = pm.us_bank_account.bank_name;
         record.bank_last_four = pm.us_bank_account.last4;
         record.last_four = pm.us_bank_account.last4;
-        record.ach_status = pm.us_bank_account.status || 'verified';
+        // achStatus override (portal ACH lane): the micro-deposit deferred
+        // save mirrors the row BEFORE verification, and the PM object
+        // carries no reliable pending marker — without the override that
+        // save would stamp an unverified account 'verified'.
+        record.ach_status = options.achStatus || pm.us_bank_account.status || 'verified';
       }
 
-      const saved = await db.transaction(async trx => {
-        const [inserted] = await trx('payment_methods').insert(record).returning('*');
-        if (makeDefault) {
-          await trx('payment_methods')
-            .where({ customer_id: customerId })
-            .whereNot({ id: inserted.id })
-            .update({ is_default: false });
+      // Persisted ATOMICALLY with the row (Codex #2706 r5): a separate
+      // post-insert update left a crash window where a pending bank row
+      // existed without its SetupIntent id — removeCard then couldn't
+      // cancel the hosted verification and the tombstone guarantee broke.
+      if (options.setupIntentId) {
+        record.stripe_setup_intent_id = options.setupIntentId;
+      }
+
+      let saved;
+      try {
+        saved = await db.transaction(async trx => {
+          const [inserted] = await trx('payment_methods').insert(record).returning('*');
+          if (makeDefault) {
+            await trx('payment_methods')
+              .where({ customer_id: customerId })
+              .whereNot({ id: inserted.id })
+              .update({ is_default: false });
+          }
+          return inserted;
+        });
+      } catch (insertErr) {
+        // Duplicate-key race (Codex #2706 r1): the browser's POST /cards
+        // and the setup_intent.succeeded webhook both do lookup-first
+        // before this plain insert under the unique
+        // stripe_payment_method_id index — when both lookups miss, one
+        // insert loses. The row the winner created IS the desired
+        // outcome: reload it (ownership-checked) instead of turning a
+        // successful save into a 500/webhook retry.
+        const isDuplicate = insertErr.code === '23505' || /duplicate key value/i.test(insertErr.message || '');
+        if (!isDuplicate) throw insertErr;
+        const existingRow = await db('payment_methods')
+          .where({ stripe_payment_method_id: paymentMethodId })
+          .first();
+        if (!existingRow || existingRow.customer_id !== customerId) {
+          throw new Error('Payment method does not belong to this customer');
         }
-        return inserted;
-      });
+        logger.info(`[stripe] Payment method save raced an existing row for ${customerId}: ${paymentMethodId} — reusing it`);
+        saved = existingRow;
+      }
 
       logger.info(`[stripe] Payment method saved for ${customerId}: ${pm.type} ****${record.last_four}`);
       return saved;
     } catch (err) {
+      // Typed sentinel for backstop callers — must survive the generic wrap.
+      if (err.code === 'PM_NOT_ATTACHED') throw err;
       logger.error(`[stripe] Save payment method failed: ${err.message}`);
       throw new Error('Failed to save payment method');
     }
@@ -401,6 +463,13 @@ const StripeService = {
     const stripe = getStripe();
     if (!stripe) return null;
     return stripe.setupIntents.retrieve(setupIntentId, options);
+  },
+
+  async retrievePaymentMethod(paymentMethodId) {
+    if (!paymentMethodId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentMethods.retrieve(paymentMethodId);
   },
 
   /**
@@ -601,11 +670,47 @@ const StripeService = {
       const stripe = getStripe();
       if (!stripe) throw new Error('Stripe not configured');
 
+      // Removing an UNVERIFIED bank cancels its SetupIntent first (Codex
+      // #2706 r4): Stripe can complete the original hosted micro-deposit
+      // verification even after a detach and RE-ATTACH the payment method,
+      // so attachment state alone can't prove the customer kept it. A
+      // canceled SetupIntent can never succeed → the portal webhook can
+      // never resurrect the removed account. Cancel failure falls back to
+      // reading the SI: already succeeded/canceled → removal proceeds
+      // (the detach + requireAttached pair covers those); anything else →
+      // fail closed and let the customer retry.
+      if (require('./autopay-eligibility').isBankMethodType(card.method_type) && card.ach_status !== 'verified' && card.stripe_setup_intent_id) {
+        try {
+          await stripe.setupIntents.cancel(card.stripe_setup_intent_id);
+        } catch (cancelErr) {
+          let si = null;
+          try { si = await stripe.setupIntents.retrieve(card.stripe_setup_intent_id); } catch { /* fail closed below */ }
+          if (!si || !['canceled', 'succeeded'].includes(si.status)) {
+            logger.error(`[stripe] SetupIntent cancel failed and state unverifiable — refusing removal: ${cancelErr.message}`);
+            throw new Error('Could not remove the payment method — please try again.');
+          }
+        }
+      }
+
       try {
         await stripe.paymentMethods.detach(card.stripe_payment_method_id);
       } catch (err) {
-        // If already detached in Stripe, just remove from DB
-        logger.warn(`[stripe] Detach warning (proceeding with DB removal): ${err.message}`);
+        // Only proceed when the PM is GENUINELY no longer attached (Codex
+        // #2706 r2): swallowing a transient detach failure used to delete
+        // the local row while the PM stayed attached at Stripe, and the
+        // requireAttached backstop then treats "attached" as "customer
+        // kept it" — resurrecting a removed pending bank on verification.
+        // Verify, and fail closed when we can't.
+        let stillAttached = true;
+        try {
+          const pmCheck = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+          stillAttached = !!pmCheck.customer;
+        } catch { /* can't verify — fail closed */ }
+        if (stillAttached) {
+          logger.error(`[stripe] Detach failed and PM still attached — refusing removal: ${err.message}`);
+          throw new Error('Could not remove the payment method — please try again.');
+        }
+        logger.warn(`[stripe] Detach warning (PM already detached, proceeding with DB removal): ${err.message}`);
       }
       await db('payment_methods').where({ id: cardId }).del();
       await this._disableAutopayIfMethodRemoved(customerId, card);
@@ -719,11 +824,21 @@ const StripeService = {
 
     let paymentIntent;
     try {
+      // Saved-method charges support BOTH tender families (mirrors
+      // chargeInvoiceWithSavedCard's documented lock — Codex #2706 r6 P1):
+      // a PI without payment_method_types defaults to ['card'] and Stripe
+      // refuses to confirm it against a us_bank_account pm, so the monthly
+      // cron would fail every ACH Auto Pay account on its next run. An ACH
+      // confirm lands 'processing' (not 'succeeded'); the paid/processing
+      // status mapping below already handles that lifecycle, and
+      // computeChargeAmount already priced ACH surcharge-free.
+      const savedMethodIsBank = require('./autopay-eligibility').isBankMethodType(card.method_type);
       const piParams = {
         amount: totalCents,
         currency: 'usd',
         customer: stripeCustomerId,
         payment_method: card.stripe_payment_method_id,
+        payment_method_types: [savedMethodIsBank ? 'us_bank_account' : 'card'],
         off_session: true,
         confirm: true,
         expand: ['latest_charge'],

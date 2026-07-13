@@ -263,6 +263,12 @@ class ApiClient {
     return this.request(`/billing/cards/${cardId}`, { method: 'DELETE' });
   }
 
+  // Portal ACH: rebuild the hosted micro-deposit verification link for a
+  // pending bank row (also heals stale pending/failed states server-side).
+  getBankVerificationLink(cardId) {
+    return this.request(`/billing/cards/${cardId}/bank-verification-link`);
+  }
+
   setDefaultCard(cardId) {
     return this.request(`/billing/cards/${cardId}/default`, { method: 'PUT' });
   }

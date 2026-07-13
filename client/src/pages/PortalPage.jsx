@@ -27,6 +27,11 @@ import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '..
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
+// Bank rows arrive under BOTH aliases — the server guards handle 'ach'
+// and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
+// too or alias rows lose the pending/failed affordances.
+const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+
 // Portal glass state, readable from any tab component. Warm #FAF8F3
 // sub-panels turn whisper-white under glass (the report-glass idiom) so
 // solid beige tiles never sit on top of translucent cards.
@@ -3829,6 +3834,16 @@ function BillingTab({ customer }) {
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
   const [stripeReady, setStripeReady] = useState(false);
+  // Portal ACH (gated server-side): which method family the customer has
+  // selected in the Payment Element — drives the consent copy (card vs ACH
+  // authorization; the texts are NOT interchangeable) — plus whether the
+  // bank tab is offered at all (the setup-intent response is authoritative;
+  // with GATE_PORTAL_ACH_AUTOPAY off the server mints card-only) and the
+  // micro-deposit pending notice after a deferred bank save.
+  const [addMethodType, setAddMethodType] = useState('card');
+  const [achOffered, setAchOffered] = useState(false);
+  const [bankPendingNotice, setBankPendingNotice] = useState(false);
+  const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
   const stripeRef = useRef(null);
   const elementsRef = useRef(null);
   const paymentElementRef = useRef(null);
@@ -3902,8 +3917,14 @@ function BillingTab({ customer }) {
     setStripeLoading(true);
     setStripeError('');
     setStripeReady(false);
+    setBankPendingNotice(false);
+    setAddMethodType('card');
     try {
-      const setupData = await api.createSetupIntent('card');
+      // card_or_bank is a REQUEST — the server downgrades to card-only
+      // while GATE_PORTAL_ACH_AUTOPAY is off, and the echoed
+      // paymentMethodTypes is what actually decides the bank affordances.
+      const setupData = await api.createSetupIntent('card_or_bank');
+      setAchOffered((setupData.paymentMethodTypes || []).includes('us_bank_account'));
       const stripe = await getStripe(setupData.publishableKey);
       stripeRef.current = stripe;
       const elements = stripe.elements({ clientSecret: setupData.clientSecret, appearance: { theme: 'stripe' } });
@@ -3914,11 +3935,20 @@ function BillingTab({ customer }) {
         if (cardMountRef.current) {
           const pe = elements.create('payment', {
             layout: { type: 'tabs' },
-            paymentMethodOrder: ['us_bank_account', 'card', 'apple_pay', 'google_pay'],
+            // Card-first (Codex #2706 r3): the consent state initializes to
+            // 'card' and only follows change events — a bank-first default
+            // tab could show the CARD authorization while a bank account
+            // saves. Card-first makes the initial copy match the initial
+            // tab deterministically; picking the bank tab fires 'change'.
+            paymentMethodOrder: ['card', 'apple_pay', 'google_pay', 'us_bank_account'],
           });
           pe.mount(cardMountRef.current);
           paymentElementRef.current = pe;
           pe.on('ready', () => setStripeReady(true));
+          // The consent copy must follow the selected tab — card and ACH
+          // authorizations have different regulatory floors, and the box
+          // the customer sees has to be the text that gets snapshotted.
+          pe.on('change', (event) => setAddMethodType(event?.value?.type || 'card'));
         }
       }, 100);
     } catch (err) {
@@ -3939,6 +3969,28 @@ function BillingTab({ customer }) {
       });
       if (error) {
         setStripeError(error.message);
+        setStripeLoading(false);
+        return;
+      }
+      // Micro-deposit fallback (portal ACH): handled BEFORE the generic
+      // redirect (Codex #2706 r1) — redirectToSetupIntentAction follows
+      // hosted_verification_url, which would navigate away without ever
+      // persisting the pending row or the ACH consent. The SetupIntent
+      // stays requires_action for 1–2 business days; the server saves the
+      // bank account as PENDING (consent recorded now, Auto Pay enrollment
+      // deferred to the verification webhook) and the notice carries the
+      // hosted verification link instead of the redirect.
+      const awaitingMicrodeposits = setupIntent?.status === 'requires_action'
+        && setupIntent?.next_action?.type === 'verify_with_microdeposits';
+      if (awaitingMicrodeposits && setupIntent.payment_method) {
+        await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
+        setBankPendingVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
+        setBankPendingNotice(true);
+        setShowAddCard(false);
+        paymentElementRef.current = null;
+        elementsRef.current = null;
+        stripeRef.current = null;
+        await refreshCards();
         setStripeLoading(false);
         return;
       }
@@ -3965,6 +4017,25 @@ function BillingTab({ customer }) {
       setStripeError(err.message || 'Failed to save card');
     }
     setStripeLoading(false);
+  };
+
+  // Resume micro-deposit verification for a pending bank row (Codex #2706
+  // r3): the hosted link from save time doesn't survive a reload, so this
+  // rebuilds it server-side. The endpoint also heals stale states (already
+  // verified / verification failed) — refresh the list on those.
+  const handleResumeBankVerification = async (cardId) => {
+    setStripeError('');
+    try {
+      const result = await api.getBankVerificationLink(cardId);
+      if (result?.url) {
+        window.open(result.url, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      await refreshCards();
+      if (result?.verified) setAutopayRefreshKey((k) => k + 1);
+    } catch (err) {
+      setStripeError(err.message || 'Could not load the verification link');
+    }
   };
 
   const handleRemoveCard = async (cardId) => {
@@ -4034,7 +4105,7 @@ function BillingTab({ customer }) {
   const methodLabel = (method) => {
     if (!method) return 'No method on file';
     const last4 = methodLast4(method);
-    if (method.methodType === 'ach') return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
+    if (isBankMethod(method.methodType)) return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
     return `${method.brand || 'Card'}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
@@ -4559,16 +4630,39 @@ function BillingTab({ customer }) {
                 background: B.glassNavy,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
-              }}>{(c.brand || 'CARD').toUpperCase().slice(0, 6)}</div>
+              }}>{(c.brand || (isBankMethod(c.methodType) ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
             )}
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{methodLabel(c)}</div>
               {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
-              {c.methodType === 'ach' && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
+              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
+              {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
+                  Verification pending — watch for two small deposits.
+                  {' '}
+                  <button
+                    type="button"
+                    onClick={() => handleResumeBankVerification(c.id)}
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 850, color: B.glassNavy, textDecoration: 'underline' }}
+                  >
+                    Confirm deposits
+                  </button>
+                </div>
+              )}
+              {isBankMethod(c.methodType) && c.achStatus === 'verification_failed' && (
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.red, marginTop: 2 }}>
+                  Verification failed — remove this account and add it again
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
                 <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
+              ) : (isBankMethod(c.methodType) && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
+                // Server refuses a pending/failed bank as default
+                // (set-default carries Auto Pay) — don't offer the
+                // dead-end button.
+                null
               ) : (
                 <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Set default</button>
               )}
@@ -4588,6 +4682,20 @@ function BillingTab({ customer }) {
         {stripeError && !showAddCard && (
           <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 8 }}>
             {stripeError}
+          </div>
+        )}
+        {bankPendingNotice && !showAddCard && (
+          <div style={{ padding: 10, background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
+            Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and ready for Auto Pay.
+            {bankPendingVerifyUrl && (
+              <>
+                {' '}
+                <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 850 }}>
+                  Confirm the deposits here
+                </a>
+                {' '}once they arrive.
+              </>
+            )}
           </div>
         )}
       </div>
@@ -4618,11 +4726,17 @@ function BillingTab({ customer }) {
                 {stripeError}
               </div>
             )}
-            {/* Save-card authorization — locked because saving is the
+            {achOffered && (
+              <div style={{ fontSize: 14, color: muted, marginBottom: 12 }}>
+                Bank payments have no card surcharge.
+              </div>
+            )}
+            {/* Save-method authorization — locked because saving is the
                 purpose of this modal. Shown so the consent record
-                reflects the copy the customer saw. */}
+                reflects the copy the customer saw; the copy follows the
+                Payment Element tab (card vs ACH authorization). */}
             <div style={{ marginBottom: 12 }}>
-              <SaveCardConsent locked onChange={() => {}} />
+              <SaveCardConsent locked onChange={() => {}} methodType={addMethodType} />
             </div>
             <button onClick={handleConfirmCard} disabled={stripeLoading || !stripeReady} data-glass-accent="" style={{
               ...primaryButton,
@@ -4632,9 +4746,9 @@ function BillingTab({ customer }) {
               color: stripeReady ? '#fff' : B.grayMid,
               opacity: stripeLoading ? 0.6 : 1,
               cursor: stripeLoading || !stripeReady ? 'not-allowed' : 'pointer',
-            }}>{stripeLoading ? 'Saving...' : 'Save Card'}</button>
+            }}>{stripeLoading ? 'Saving...' : (addMethodType === 'us_bank_account' ? 'Save Bank Account' : 'Save Card')}</button>
             <div style={{ fontSize: 12, color: muted, marginTop: 10, textAlign: 'center' }}>
-              Secured by Stripe. We never store your card details directly.
+              Secured by Stripe. We never store your {addMethodType === 'us_bank_account' ? 'bank' : 'card'} details directly.
             </div>
           </div>
         </div>
@@ -12036,7 +12150,9 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
       initialSentRef.current = true;
       send(initialQuestion);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // (react-hooks/exhaustive-deps disable removed — the plugin left the
+    // errors-only lint config, and the stale directive itself errored,
+    // blocking every commit that touches this file.)
   }, [initialQuestion]);
 
   const send = async (textOverride) => {

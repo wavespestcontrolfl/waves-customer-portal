@@ -96,3 +96,243 @@ describe('StripeService.savePaymentMethod', () => {
     expect(insertedRecord.autopay_enabled).toBe(true);
   });
 });
+
+describe('savePaymentMethod — duplicate-key race + requireAttached (portal ACH, Codex #2706 r1)', () => {
+  let stripeClient;
+  let dbMock;
+  let existingRow;
+  let insertError;
+  let retrievedPm;
+
+  beforeEach(() => {
+    jest.resetModules();
+    insertError = null;
+    existingRow = {
+      id: 'pm_db_existing',
+      customer_id: 'cust_123',
+      stripe_payment_method_id: 'pm_stripe_123',
+      method_type: 'card',
+    };
+    retrievedPm = {
+      id: 'pm_stripe_123',
+      customer: 'cus_123',
+      type: 'card',
+      card: { brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2030 },
+    };
+
+    stripeClient = {
+      paymentMethods: {
+        retrieve: jest.fn(async () => retrievedPm),
+        attach: jest.fn().mockResolvedValue({ id: 'pm_stripe_123' }),
+      },
+    };
+
+    const customerQuery = {
+      where: jest.fn(() => customerQuery),
+      first: jest.fn().mockResolvedValue({ id: 'cust_123', stripe_customer_id: 'cus_123' }),
+    };
+    const pmWriteQuery = {
+      insert: jest.fn(() => ({
+        returning: jest.fn(() => (insertError
+          ? Promise.reject(insertError)
+          : Promise.resolve([{ id: 'pm_db_new', customer_id: 'cust_123' }]))),
+      })),
+      where: jest.fn(() => pmWriteQuery),
+      whereNot: jest.fn(() => pmWriteQuery),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    const pmReadQuery = {
+      where: jest.fn(() => pmReadQuery),
+      first: jest.fn(async () => existingRow),
+    };
+    const trxMock = jest.fn(() => pmWriteQuery);
+    dbMock = jest.fn((table) => (table === 'customers' ? customerQuery : pmReadQuery));
+    dbMock.transaction = jest.fn(async (cb) => cb(trxMock));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('duplicate-key insert reloads the row the racing writer created (POST /cards vs webhook)', async () => {
+    insertError = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+    const StripeService = require('../services/stripe');
+    const saved = await StripeService.savePaymentMethod('cust_123', 'pm_stripe_123');
+    expect(saved).toBe(existingRow);
+  });
+
+  test('duplicate-key with an ownership mismatch still fails closed', async () => {
+    insertError = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+    existingRow = { ...existingRow, customer_id: 'cust_OTHER' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.savePaymentMethod('cust_123', 'pm_stripe_123'))
+      .rejects.toThrow('Failed to save payment method');
+  });
+
+  test('requireAttached refuses a DETACHED method with the typed sentinel — removed methods are never resurrected', async () => {
+    retrievedPm = { ...retrievedPm, customer: null };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.savePaymentMethod('cust_123', 'pm_stripe_123', { requireAttached: true }))
+      .rejects.toMatchObject({ code: 'PM_NOT_ATTACHED' });
+    expect(stripeClient.paymentMethods.attach).not.toHaveBeenCalled();
+  });
+
+  test('requireAttached passes for a still-attached method (browser-died backstop keeps working)', async () => {
+    const StripeService = require('../services/stripe');
+    const saved = await StripeService.savePaymentMethod('cust_123', 'pm_stripe_123', { requireAttached: true, makeDefault: false });
+    expect(saved.id).toBe('pm_db_new');
+  });
+});
+
+describe('removeCard — detach must actually stick (portal ACH, Codex #2706 r2)', () => {
+  let stripeClient;
+  let dbMock;
+  let deleted;
+  let detachError;
+  let retrievedAfterDetachFail;
+
+  beforeEach(() => {
+    jest.resetModules();
+    deleted = false;
+    detachError = null;
+    retrievedAfterDetachFail = { id: 'pm_stripe_123', customer: 'cus_123' };
+
+    stripeClient = {
+      paymentMethods: {
+        detach: jest.fn(async () => {
+          if (detachError) throw detachError;
+          return { id: 'pm_stripe_123' };
+        }),
+        retrieve: jest.fn(async () => retrievedAfterDetachFail),
+      },
+    };
+
+    const pmQuery = {
+      where: jest.fn(() => pmQuery),
+      first: jest.fn().mockResolvedValue({
+        id: 'pm_db_123',
+        customer_id: 'cust_123',
+        processor: 'stripe',
+        stripe_payment_method_id: 'pm_stripe_123',
+        autopay_enabled: false,
+      }),
+      del: jest.fn(async () => { deleted = true; return 1; }),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    dbMock = jest.fn(() => pmQuery);
+    dbMock.transaction = jest.fn(async (cb) => cb(dbMock));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('transient detach failure with the PM still attached → removal FAILS CLOSED (no resurrection window)', async () => {
+    detachError = new Error('stripe transient error');
+    retrievedAfterDetachFail = { id: 'pm_stripe_123', customer: 'cus_123' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123'))
+      .rejects.toThrow('Could not remove the payment method');
+    expect(deleted).toBe(false);
+  });
+
+  test('detach error but PM genuinely detached → removal proceeds', async () => {
+    detachError = new Error('payment method is not attached');
+    retrievedAfterDetachFail = { id: 'pm_stripe_123', customer: null };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123')).resolves.toEqual({ success: true });
+    expect(deleted).toBe(true);
+  });
+
+  test('unverifiable state (retrieve also fails) → fail closed', async () => {
+    detachError = new Error('stripe transient error');
+    stripeClient.paymentMethods.retrieve = jest.fn(async () => { throw new Error('network'); });
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123'))
+      .rejects.toThrow('Could not remove the payment method');
+    expect(deleted).toBe(false);
+  });
+});
+
+describe('removeCard — pending bank removal cancels its SetupIntent (Codex #2706 r4 P1)', () => {
+  let stripeClient;
+  let dbMock;
+  let deleted;
+  let cancelError;
+  let retrievedSi;
+
+  const pendingBankCard = {
+    id: 'pm_db_123',
+    customer_id: 'cust_123',
+    processor: 'stripe',
+    stripe_payment_method_id: 'pm_stripe_123',
+    stripe_setup_intent_id: 'si_md_123',
+    method_type: 'ach',
+    ach_status: 'pending_verification',
+    autopay_enabled: false,
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    deleted = false;
+    cancelError = null;
+    retrievedSi = { id: 'si_md_123', status: 'requires_action' };
+
+    stripeClient = {
+      paymentMethods: {
+        detach: jest.fn(async () => ({ id: 'pm_stripe_123' })),
+        retrieve: jest.fn(async () => ({ id: 'pm_stripe_123', customer: null })),
+      },
+      setupIntents: {
+        cancel: jest.fn(async () => {
+          if (cancelError) throw cancelError;
+          return { id: 'si_md_123', status: 'canceled' };
+        }),
+        retrieve: jest.fn(async () => retrievedSi),
+      },
+    };
+
+    const pmQuery = {
+      where: jest.fn(() => pmQuery),
+      first: jest.fn().mockResolvedValue(pendingBankCard),
+      del: jest.fn(async () => { deleted = true; return 1; }),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    dbMock = jest.fn(() => pmQuery);
+    dbMock.transaction = jest.fn(async (cb) => cb(dbMock));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('removing a pending bank cancels the SetupIntent BEFORE detach — a canceled SI can never resurrect the account', async () => {
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123')).resolves.toEqual({ success: true });
+    expect(stripeClient.setupIntents.cancel).toHaveBeenCalledWith('si_md_123');
+    expect(deleted).toBe(true);
+  });
+
+  test('cancel fails and the SI is still live → removal FAILS CLOSED', async () => {
+    cancelError = new Error('stripe transient error');
+    retrievedSi = { id: 'si_md_123', status: 'requires_action' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123'))
+      .rejects.toThrow('Could not remove the payment method');
+    expect(deleted).toBe(false);
+  });
+
+  test('cancel fails because the SI already succeeded → removal proceeds (detach + requireAttached cover it)', async () => {
+    cancelError = new Error('You cannot cancel this SetupIntent because it has already succeeded.');
+    retrievedSi = { id: 'si_md_123', status: 'succeeded' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123')).resolves.toEqual({ success: true });
+    expect(deleted).toBe(true);
+  });
+});
