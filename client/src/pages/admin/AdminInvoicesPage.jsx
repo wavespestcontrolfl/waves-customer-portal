@@ -78,6 +78,7 @@ import { computeCardTotal } from "../../lib/cardSurcharge";
 import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
+import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -618,6 +619,7 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
+  const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
 
   const load = useCallback(
@@ -1295,6 +1297,18 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
                               Charge in person
                             </button>
                           )}
+                          {/* Payer-billed invoices collect from the payer's AP
+                              inbox — the saved card belongs to the homeowner,
+                              so the charge endpoint rejects them. */}
+                          {canCollect && cardOnFile && !inv.payer_id && (
+                            <button
+                              onClick={() => setCardOnFileInvoice(inv)}
+                              style={sBtn(D.heading, D.white, isMobile)}
+                              title="Charge the customer's saved card or bank on file — collects now, no send needed"
+                            >
+                              Charge card on file
+                            </button>
+                          )}
                           {canCollect && (
                             <button
                               onClick={() => setPaymentModalInvoice(inv)}
@@ -1610,6 +1624,40 @@ function InvoiceList({ showToast, onRefresh, onEdit, isMobile, stats }) {
             onRefresh();
           }}
           onError={(msg) => showToast(msg)}
+        />
+      )}
+
+      {cardOnFileInvoice && (
+        <MobileCardOnFileSheet
+          desktopVisible
+          invoiceId={cardOnFileInvoice.id}
+          customerId={cardOnFileInvoice.customer_id}
+          customerName={
+            `${cardOnFileInvoice.first_name || ""} ${cardOnFileInvoice.last_name || ""}`.trim() ||
+            "Customer"
+          }
+          onClose={() => setCardOnFileInvoice(null)}
+          onChargeSuccess={(r) => {
+            setCardOnFileInvoice(null);
+            if (r?.covered_by_credit) {
+              showToast(
+                "Account credit covered it — invoice marked prepaid, card not charged",
+              );
+            } else if (r?.status === "processing") {
+              showToast(
+                "Bank payment started — invoice will mark paid when it settles",
+              );
+            } else {
+              const brand = r?.brand
+                ? r.brand.charAt(0).toUpperCase() + r.brand.slice(1).toLowerCase()
+                : "Card";
+              showToast(
+                `Charged $${Number(r?.amount || 0).toFixed(2)} to ${brand}${r?.last4 ? ` •${r.last4}` : ""} on file`,
+              );
+            }
+            load();
+            onRefresh();
+          }}
         />
       )}
     </div>
