@@ -495,6 +495,36 @@ describe('scrubPans — round 16 hardening', () => {
   });
 });
 
+describe('scrubPans — round 17 hardening', () => {
+  const W17 = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const say17 = (digits) => digits.split('').map((d) => W17[Number(d)]).join(' ');
+
+  it('hyphen-separated spoken digit words scrub', () => {
+    const hyphenated = '4242424242424242'.split('').map((d) => W17[Number(d)]).join('-');
+    expect(scrubPansDetailed(hyphenated)).toEqual({ text: '[card ending 4242]', count: 1 });
+  });
+
+  it('absorbs MM + four-digit-year expiries plus the CVV', () => {
+    expect(scrubPansDetailed('4242 4242 4242 4242 12 2028 123')).toEqual({ text: '[card ending 4242] [code removed]', count: 1 });
+  });
+
+  it('spoken JCB with a future expiry beats the phone guard (precise range + strict expiry)', () => {
+    const r = scrubPansDetailed(`${say17('3528000000000007')} one two two eight`);
+    expect(r.count).toBe(1);
+    expect(r.text).toBe('[card ending 0007] [code removed]');
+  });
+
+  it('the FP suite holds against the round-17 widenings', () => {
+    for (const s of [
+      'tracking 42424242424242424242',
+      'ref number 4242424242424241 on file',
+      '9415551234 2395559876',
+      'call me at 941-555-1234 or (941) 555-9876, order 123456789012, tracking 42424242424242424242',
+      'the range is 2024-2025 for that plan',
+    ]) expect(scrubPans(s)).toBe(s);
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

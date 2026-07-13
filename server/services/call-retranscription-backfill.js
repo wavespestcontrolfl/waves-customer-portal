@@ -162,6 +162,16 @@ async function runRetranscriptionBackfill({ dbi = db, batchLimit = BATCH_LIMIT, 
               ...priorMeta,
               pan_detected: true,
               quarantine_source: priorMeta.quarantine_source || 'retranscription_backfill_legacy_pending',
+              // Rows with a URL but no recording_sid would otherwise lose
+              // their only Twilio locator in this same update — the
+              // incomplete-quarantine sweep needs SOMETHING to retry the
+              // delete against after a crash (round-17 P1).
+              ...((() => {
+                const pendingSid = call.recording_sid
+                  || (call.recording_url && (String(call.recording_url).match(/\/Recordings\/(RE[a-f0-9]{32})/i) || [])[1])
+                  || null;
+                return pendingSid && !priorMeta.quarantine_recording_sid ? { quarantine_recording_sid: pendingSid } : {};
+              })()),
             }),
             updated_at: dbi.fn.now(),
           });

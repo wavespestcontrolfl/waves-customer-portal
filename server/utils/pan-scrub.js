@@ -248,7 +248,9 @@ function scrubNumericRun(run) {
         // tail requirement above already screens fused non-card tokens.
         if (digits.length > 19
           && !strongCardIin(prefix)
-          && !mc2SeriesIin(prefix)) continue;
+          && !mc2SeriesIin(prefix)
+          && !jcbIin(prefix)
+          && !discover622Iin(prefix)) continue;
         if (panCandidateValid(prefix)) return prefix;
       }
       return null;
@@ -322,8 +324,18 @@ function scrubNumericRun(run) {
       };
       let absorbedDigits = 0;
       let absorbedGroups = 0;
+      // MM + four-digit-year expiries ("12 2028 123") need 10 digits of
+      // budget; the stretch only applies when the tail actually opens with
+      // that shape (round-17 P1).
+      let absorbBudget = 8;
+      if (i < groups.length && groups[i].digits.length === 2) {
+        const mmPeek = Number(groups[i].digits);
+        if (mmPeek >= 1 && mmPeek <= 12 && i + 1 < groups.length && /^20\d\d$/.test(groups[i + 1].digits)) {
+          absorbBudget = 10;
+        }
+      }
       while (i < groups.length && !locked[i] && groups[i].digits.length <= 4
-        && absorbedDigits + groups[i].digits.length <= 8
+        && absorbedDigits + groups[i].digits.length <= absorbBudget
         && !startsValidPanSpan(i)) {
         absorbedDigits += groups[i].digits.length;
         cursor = groups[i].end;
@@ -355,7 +367,7 @@ const DIGIT_WORD_ALT = Object.keys(DIGIT_WORDS).join('|');
 // content — they must not end a run or the expiry/CVV after them survives
 // beside the mask (Codex #2676 round-10 P1).
 const SPOKEN_FILLER = '(?:um+|uh+|erm|ah|hm+|slash|dash)';
-const SPOKEN_SEP = `(?:[\\s,.]+(?:(?:${SPOKEN_FILLER}|(?:speaker\\s*\\d+|agent|caller)\\s*:)[\\s,.]+){0,2})`;
+const SPOKEN_SEP = `(?:[\\s,./-]+(?:(?:${SPOKEN_FILLER}|(?:speaker\\s*\\d+|agent|caller)\\s*:)[\\s,./-]+){0,2})`;
 const WORD_RUN_RE = new RegExp(
   `\\b(?:(?:${DIGIT_WORD_ALT})${SPOKEN_SEP}){12,}(?:${DIGIT_WORD_ALT})\\b`,
   'gi'
@@ -391,6 +403,12 @@ function isValidCodeTail(tail) {
     const mm = Number(tail.slice(0, 2));
     return mm >= 1 && mm <= 12;
   }
+  // Four-digit expiry years are common in readbacks (round-17 P1):
+  // MMYYYY (6), MMYYYY+CVV (9), MMYYYY+CVV4 (10).
+  if (tail.length === 6 || tail.length === 9 || tail.length === 10) {
+    const mm = Number(tail.slice(0, 2));
+    return mm >= 1 && mm <= 12 && tail.slice(2, 4) === '20';
+  }
   return false;
 }
 
@@ -418,6 +436,19 @@ function mc2SeriesIin(digits) {
   return Number.isFinite(four) && four >= 2221 && four <= 2720;
 }
 
+// Precise JCB (3528–3589) and Discover-622 (622126–622925) ranges — same
+// role as the 2-series check: too weak for the generic guard (3xx/6xx NANP
+// area codes), but exact-range evidence for the strict-expiry tie breakers
+// (Codex #2676 round-17 P1).
+function jcbIin(digits) {
+  const four = Number(digits.slice(0, 4));
+  return Number.isFinite(four) && four >= 3528 && four <= 3589;
+}
+function discover622Iin(digits) {
+  const six = Number(digits.slice(0, 6));
+  return Number.isFinite(six) && six >= 622126 && six <= 622925;
+}
+
 function isStrictFutureExpiryTail(tail) {
   if (tail.length !== 4 && tail.length !== 7 && tail.length !== 8) return false;
   const mm = Number(tail.slice(0, 2));
@@ -440,7 +471,7 @@ function scrubSpokenRun(run) {
   // Words may include fillers/label tokens the separator let through —
   // track which word positions are DIGIT words so windows count digits,
   // not words (a filler inside the readback is swallowed by the mask).
-  const words = run.split(/[\s,.]+/).filter(Boolean);
+  const words = run.split(/[\s,./-]+/).filter(Boolean);
   const digitWordIdx = [];
   const digitChars = [];
   words.forEach((w, i) => {
@@ -466,7 +497,8 @@ function scrubSpokenRun(run) {
     // the residual trade accepted in favor of never persisting a PAN.
     if (phoneRun
       && !(strongCardIin(candidate) && isValidCodeTail(digits.slice(len)))
-      && !(mc2SeriesIin(candidate) && isStrictFutureExpiryTail(digits.slice(len)))) continue;
+      && !((mc2SeriesIin(candidate) || jcbIin(candidate) || discover622Iin(candidate))
+        && isStrictFutureExpiryTail(digits.slice(len)))) continue;
     if (panCandidateValid(candidate)) {
       // Mask through the len-th DIGIT word (fillers inside the readback are
       // swallowed by the mask). A short DIGIT tail (≤8) is the expiry/CVV
@@ -475,7 +507,10 @@ function scrubSpokenRun(run) {
       const lastMaskedWordIdx = digitWordIdx[len - 1];
       const tailWords = words.slice(lastMaskedWordIdx + 1);
       const tailDigitCount = digits.length - len;
-      if (tailDigitCount > 0 && tailDigitCount <= 8) {
+      const tailDigits = digits.slice(len);
+      if (tailDigitCount > 0
+        && (tailDigitCount <= 8
+          || (tailDigitCount <= 10 && /^(0[1-9]|1[0-2])20\d\d/.test(tailDigits)))) {
         return { text: maskFor(candidate) + ' [code removed]', count: 1 };
       }
       if (tailWords.length) {

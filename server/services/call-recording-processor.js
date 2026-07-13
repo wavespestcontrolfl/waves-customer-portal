@@ -226,15 +226,16 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
     } catch { meta = {}; }
     // pan_detected can now be stamped BEFORE the first quarantine call
     // (same-write stamps in the webhook/fallback paths), so it no longer
-    // implies the office was alerted — pan_notified is the notify guard;
-    // a completed pre-marker quarantine counts as notified (round-13 P2).
-    alreadyQuarantined = meta.pan_notified === true || meta.recording_quarantined === true;
+    // implies the office was alerted — pan_notified is the notify guard,
+    // and it is stamped ONLY AFTER the alert actually sends (round-17 P2:
+    // stamping it in this update meant a failed/interrupted notifyAdmin
+    // was never retried and the office never heard about the quarantine).
+    alreadyQuarantined = meta.pan_notified === true;
     await db('call_log').where({ id: call.id }).update({
       recording_url: null,
       transcription_metadata: JSON.stringify({
         ...meta,
         pan_detected: true,
-        pan_notified: true,
         recording_quarantined: twilioDeleted || meta.recording_quarantined === true,
         quarantine_source: meta.quarantine_source || source,
         // A failed Twilio delete must not lose the only SID a later retry
@@ -263,6 +264,20 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
         'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
         { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
       );
+      // Alert DELIVERED — only now mark it, so a failed/interrupted send
+      // retries on the next quarantine/recovery touch (round-17 P2).
+      try {
+        const fresh = await db('call_log').where({ id: call.id }).first('transcription_metadata');
+        const rawFresh = fresh?.transcription_metadata;
+        let freshMeta = {};
+        try { freshMeta = typeof rawFresh === 'string' ? JSON.parse(rawFresh) : (rawFresh && typeof rawFresh === 'object' ? rawFresh : {}); } catch { freshMeta = {}; }
+        await db('call_log').where({ id: call.id }).update({
+          transcription_metadata: JSON.stringify({ ...freshMeta, pan_notified: true }),
+          updated_at: new Date(),
+        });
+      } catch (stampErr) {
+        logger.warn(`[call-proc] pan_notified stamp failed (a duplicate alert may follow): ${stampErr.message}`);
+      }
     } catch (e) { logger.warn(`[call-proc] PAN quarantine notify failed: ${e.message}`); }
   }
   return { quarantined: true, twilioDeleted, alreadyQuarantined };
