@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Badge, Button, Select } from "../../components/ui";
+import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
@@ -14,7 +14,7 @@ import ProjectFindingFieldInput, {
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
 import { parseSections } from "../ProjectReportViewPage";
-import { COLORS, FONTS } from "../../theme-brand";
+
 
 /**
  * Projects — post-service inspection / documentation reports.
@@ -24,39 +24,78 @@ import { COLORS, FONTS } from "../../theme-brand";
  * customer-facing /report/project/:token link.
  */
 
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  accent: "#18181B",
-  accentHover: "#27272A",
-  success: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  inputBorder: "#D4D4D8",
-  pill: "#F4F4F5",
-};
 
 const MONO = "'JetBrains Mono', monospace";
-const ESTIMATE_BG = "#FAF8F3";
-const ESTIMATE_BORDER = "#E7E2D7";
-const ESTIMATE_INPUT_BORDER = "#CFE7F5";
-const ESTIMATE_INPUT_BG = "#F8FCFE";
-const ESTIMATE_TEXT = COLORS.blueDeeper;
-const ESTIMATE_MUTED = "#6B7280";
 
-// C1 restyle: the LIST's status pills ride the shared Badge on the zinc
-// ramp — sent is the "done" state (strong), draft/closed stay neutral;
-// alert-fg is reserved for genuine alerts (the stale-WDO-draft line), never
-// status decoration. bg/fg stay for the detail pane's legacy pill until the
-// C2 restyle replaces it.
+// C2 restyle: native confirm()/prompt() replaced with the shared Dialog
+// primitives. ask(message) resolves true/false; ask(message, { input:
+// "<placeholder>" }) renders a required text field and resolves the entered
+// string, or null on cancel. Messages keep their \n structure (pre-line).
+function useConfirmDialog() {
+  const [pending, setPending] = useState(null);
+  const [inputValue, setInputValue] = useState("");
+  const ask = useCallback(
+    (message, opts = {}) =>
+      new Promise((resolve) => {
+        setInputValue("");
+        setPending({ message, ...opts, resolve });
+      }),
+    [],
+  );
+  const settle = (result) => {
+    if (pending) pending.resolve(result);
+    setPending(null);
+  };
+  const element = pending ? (
+    <Dialog open size="sm" onClose={() => settle(pending.input ? null : false)}>
+      <DialogBody>
+        <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
+          {pending.message}
+        </div>
+        {pending.input && (
+          <input
+            autoFocus
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder={pending.input}
+            style={{ ...inputStyle, marginTop: 12 }}
+          />
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <Button variant="secondary" onClick={() => settle(pending.input ? null : false)}>
+          Cancel
+        </Button>
+        <Button
+          onClick={() => settle(pending.input ? inputValue.trim() : true)}
+          disabled={pending.input ? !inputValue.trim() : false}
+        >
+          {pending.confirmLabel || "Confirm"}
+        </Button>
+      </DialogFooter>
+    </Dialog>
+  ) : null;
+  return [ask, element];
+}
+
+// C1/C2 restyle: the detail pane's chrome constants now carry the V2 zinc
+// ramp (whites/greys/black — owner direction). Names kept so the ~200
+// consumer sites need no churn; the embedded CustomerProjectReportPreview
+// deliberately does NOT read these — it mimics the customer-facing report.
+const ESTIMATE_BG = "#FFFFFF";
+const ESTIMATE_BORDER = "#E4E4E7";
+const ESTIMATE_INPUT_BORDER = "#D4D4D8";
+const ESTIMATE_INPUT_BG = "#FFFFFF";
+const ESTIMATE_TEXT = "#18181B";
+const ESTIMATE_MUTED = "#71717A";
+
+// Status pills ride the shared Badge on the zinc ramp — sent is the "done"
+// state (strong), draft/closed stay neutral; alert-fg is reserved for
+// genuine alerts (stale WDO drafts, send blockers), never status decoration.
 const STATUS_STYLES = {
-  draft: { tone: "neutral", bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
-  sent: { tone: "strong", bg: "#DCFCE7", fg: "#166534", label: "Sent" },
-  closed: { tone: "neutral", bg: "#E4E4E7", fg: "#52525B", label: "Closed" },
+  draft: { tone: "neutral", label: "Draft" },
+  sent: { tone: "strong", label: "Sent" },
+  closed: { tone: "neutral", label: "Closed" },
 };
 
 const TYPE_LABELS = {
@@ -1048,10 +1087,10 @@ export default function ProjectsPage() {
     <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Jobs"
+        title="Projects"
         icon={ClipboardList}
         action={{
-          label: "New Job",
+          label: "New Project",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
@@ -1106,7 +1145,7 @@ export default function ProjectsPage() {
               <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
               <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
-                No jobs match these filters.
+                No projects match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (
@@ -1286,6 +1325,7 @@ function ProjectDetail({
   onChanged,
   canAdminActions = false,
 }) {
+  const [confirmAsk, confirmDialog] = useConfirmDialog();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1446,27 +1486,27 @@ function ProjectDetail({
         ...readiness.quality.map((item) => `Review: ${item}`),
       ];
       if (
-        !confirm(
+        !(await confirmAsk(
           `This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`,
-        )
+          { confirmLabel: "Send anyway" },
+        ))
       )
         return;
     }
     let overrideReason = "";
     if (readiness.missing.length) {
       overrideReason =
-        window
-          .prompt(
-            "Enter the admin override reason for sending this incomplete report:",
-          )
-          ?.trim() || "";
+        (await confirmAsk(
+          "Enter the admin override reason for sending this incomplete report:",
+          { input: "Override reason", confirmLabel: "Continue" },
+        )) || "";
       if (!overrideReason) return;
     }
     const actionLabel =
       project.status === "sent"
         ? "Resend report to customer?"
         : "Send report to customer? This generates a public link and marks the project as Sent.";
-    if (!confirm(actionLabel)) return;
+    if (!(await confirmAsk(actionLabel, { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1544,9 +1584,12 @@ function ProjectDetail({
     let overrideReason = "";
     if (readiness.missing.length) {
       const lines = readiness.missing.map((item) => `Missing: ${item.label}`);
-      if (!confirm(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`)) return;
+      if (!(await confirmAsk(`This report has items to review before sending:\n\n${lines.join("\n")}\n\nSend anyway?`, { confirmLabel: "Send anyway" }))) return;
       overrideReason =
-        window.prompt("Enter the admin override reason for sending this incomplete report:")?.trim() || "";
+        (await confirmAsk(
+          "Enter the admin override reason for sending this incomplete report:",
+          { input: "Override reason", confirmLabel: "Continue" },
+        )) || "";
       if (!overrideReason) return;
     }
     setSaving(true);
@@ -1585,11 +1628,12 @@ function ProjectDetail({
         .filter(Boolean)
         .join("\n");
       if (
-        !confirm(
+        !(await confirmAsk(
           `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
             `The customer gets one email (${emailContents}) and one text (report + pay links).` +
             (routingLines ? `\n\n${routingLines}` : ""),
-        )
+          { confirmLabel: verb },
+        ))
       ) {
         setSaving(false);
         return;
@@ -1631,7 +1675,7 @@ function ProjectDetail({
       setError("No default prep guide is configured for this project type.");
       return;
     }
-    if (!confirm("Send the prep guide email for this project?")) return;
+    if (!(await confirmAsk("Send the prep guide email for this project?", { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1656,7 +1700,7 @@ function ProjectDetail({
       setError("Admin access required to send portal invites.");
       return;
     }
-    if (!confirm("Send a customer portal invite email for this project?")) return;
+    if (!(await confirmAsk("Send a customer portal invite email for this project?", { confirmLabel: "Send" }))) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -1687,9 +1731,10 @@ function ProjectDetail({
     if (
       editRecs &&
       editRecs.trim() &&
-      !confirm(
+      !(await confirmAsk(
         "Replace the current Recommendations text with an AI-drafted version?\n\nThe tech's original notes will still be used as context for the AI.",
-      )
+        { confirmLabel: "Replace" },
+      ))
     )
       return;
     setAiWriting(true);
@@ -1783,7 +1828,7 @@ function ProjectDetail({
       "Close this project? It stays accessible but is filtered out of Sent view.",
       closeoutLines.length ? `\n${closeoutLines.join("\n")}` : "",
     ].join("");
-    if (!confirm(confirmText))
+    if (!(await confirmAsk(confirmText, { confirmLabel: "Close project" })))
       return;
     setSaving(true);
     setError("");
@@ -1825,7 +1870,7 @@ function ProjectDetail({
   }
 
   async function handlePhotoDelete(photoId) {
-    if (!confirm("Remove this photo?")) return;
+    if (!(await confirmAsk("Remove this photo?", { confirmLabel: "Remove" }))) return;
     setError("");
     setNotice("");
     try {
@@ -1934,11 +1979,11 @@ function ProjectDetail({
     return (
       <div
         style={{
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 10,
+          background: "#FFFFFF",
+          border: `1px solid #E4E4E7`,
+          borderRadius: 6,
           padding: 24,
-          color: D.muted,
+          color: "#71717A",
         }}
       >
         {loading ? "Loading project…" : error || "Project unavailable."}
@@ -1962,7 +2007,7 @@ function ProjectDetail({
       style={{
         background: ESTIMATE_BG,
         border: `1px solid ${ESTIMATE_BORDER}`,
-        borderRadius: 16,
+        borderRadius: 6,
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
@@ -1977,7 +2022,7 @@ function ProjectDetail({
           justifyContent: "space-between",
           padding: "20px 24px",
           borderBottom: `1px solid ${ESTIMATE_BORDER}`,
-          background: COLORS.white,
+          background: "#FFFFFF",
         }}
       >
         {" "}
@@ -1989,19 +2034,19 @@ function ProjectDetail({
               color: ESTIMATE_MUTED,
               textTransform: "uppercase",
               letterSpacing: "0.12em",
-              fontWeight: 800,
+              fontWeight: 500,
             }}
           >
             {typeCfg?.label || project.project_type} · {project.customer_name}
           </div>{" "}
           <div
             style={{
-              fontFamily: FONTS.serif,
-              fontSize: 32,
+              fontSize: 24,
               fontWeight: 500,
+              letterSpacing: "-0.01em",
               color: ESTIMATE_TEXT,
               marginTop: 4,
-              lineHeight: 1.1,
+              lineHeight: 1.15,
               overflowWrap: "anywhere",
             }}
           >
@@ -2017,26 +2062,13 @@ function ProjectDetail({
             }}
           >
             {" "}
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                padding: "2px 8px",
-                borderRadius: 999,
-                background: status.bg,
-                color: status.fg,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-              }}
-            >
-              {status.label}
-            </span>{" "}
-            <span style={{ fontSize: 11, color: D.muted }}>
+            <Badge tone={status.tone}>{status.label}</Badge>{" "}
+            <span style={{ fontSize: 11, color: "#71717A" }}>
               Inspection {fmtDate(project.project_date || project.created_at)}{" "}
               by {project.tech_name || "—"}
             </span>
             {project.sent_at && (
-              <span style={{ fontSize: 11, color: D.muted }}>
+              <span style={{ fontSize: 11, color: "#71717A" }}>
                 · Sent {fmtDate(project.sent_at)}
               </span>
             )}
@@ -2048,7 +2080,7 @@ function ProjectDetail({
           style={{
             background: "transparent",
             border: "none",
-            color: D.muted,
+            color: "#71717A",
             fontSize: 22,
             cursor: "pointer",
             padding: "0 8px",
@@ -2076,15 +2108,15 @@ function ProjectDetail({
           <div
             style={{
               padding: "10px 12px",
-              background: "#ECFDF5",
-              border: `1px solid #A7F3D0`,
-              borderRadius: 8,
+              background: "#FAFAFA",
+              border: `1px solid #E4E4E7`,
+              borderRadius: 6,
               fontSize: 12,
-              color: D.heading,
+              color: "#09090B",
             }}
           >
             {" "}
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            <div style={{ fontWeight: 500, marginBottom: 4 }}>
               Customer-facing report
             </div>{" "}
             <div
@@ -2095,7 +2127,7 @@ function ProjectDetail({
                 href={sentLink}
                 target="_blank"
                 rel="noreferrer"
-                style={{ color: "#065F46" }}
+                style={{ color: "#18181B" }}
               >
                 {sentLink}
               </a>{" "}
@@ -2118,8 +2150,8 @@ function ProjectDetail({
           <div
             style={{
               padding: "10px 12px",
-              background: D.pill,
-              border: `1px solid ${D.border}`,
+              background: "#F4F4F5",
+              border: `1px solid #E4E4E7`,
               borderRadius: 8,
               display: "flex",
               justifyContent: "space-between",
@@ -2129,10 +2161,10 @@ function ProjectDetail({
           >
             {" "}
             <div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+              <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
                 FDACS-13645 WDO form
               </div>
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
                 Preview the filled report exactly as it will be filed.
               </div>
               <a
@@ -2141,7 +2173,7 @@ function ProjectDetail({
                 rel="noreferrer"
                 style={{
                   fontSize: 11,
-                  color: D.muted,
+                  color: "#71717A",
                   textDecoration: "underline",
                   marginTop: 4,
                   display: "inline-block",
@@ -2162,11 +2194,11 @@ function ProjectDetail({
                   padding: "7px 10px",
                   borderRadius: 6,
                   fontSize: 11,
-                  fontWeight: 800,
-                  color: D.heading,
+                  fontWeight: 500,
+                  color: "#09090B",
                   cursor: "pointer",
-                  background: D.card,
-                  border: `1px solid ${D.inputBorder}`,
+                  background: "#FFFFFF",
+                  border: `1px solid #D4D4D8`,
                 }}
               >
                 View filled form
@@ -2227,15 +2259,15 @@ function ProjectDetail({
             onEvidencePhotoSelected={handleEvidencePhotoSelected}
             disabled={saving || aiWriting}
             palette={{
-              card: D.card,
-              bg: D.pill,
-              border: D.border,
-              heading: D.heading,
-              text: D.text,
-              muted: D.muted,
-              accent: D.accent,
+              card: "#FFFFFF",
+              bg: "#F4F4F5",
+              border: "#E4E4E7",
+              heading: "#09090B",
+              text: "#27272A",
+              muted: "#71717A",
+              accent: "#18181B",
               accentText: "#fff",
-              red: D.red,
+              red: "#991B1B",
             }}
           />
         )}
@@ -2267,9 +2299,9 @@ function ProjectDetail({
                     style={{
                       background: "transparent",
                       border: "none",
-                      color: D.accent,
+                      color: "#18181B",
                       fontSize: 11,
-                      fontWeight: 800,
+                      fontWeight: 500,
                       cursor: "pointer",
                       padding: 0,
                       whiteSpace: "nowrap",
@@ -2325,10 +2357,10 @@ function ProjectDetail({
                   padding: "4px 10px",
                   borderRadius: 6,
                   fontSize: 11,
-                  fontWeight: 700,
-                  background: aiWriting ? D.muted : D.card,
-                  color: D.heading,
-                  border: `1px solid ${D.inputBorder}`,
+                  fontWeight: 500,
+                  background: aiWriting ? "#71717A" : "#FFFFFF",
+                  color: "#09090B",
+                  border: `1px solid #D4D4D8`,
                   cursor: aiWriting || saving ? "default" : "pointer",
                   display: "inline-flex",
                   alignItems: "center",
@@ -2349,7 +2381,7 @@ function ProjectDetail({
                 gap: 10,
                 margin: "0 0 8px",
                 fontSize: 11,
-                color: D.muted,
+                color: "#71717A",
               }}
             >
               {" "}
@@ -2409,11 +2441,11 @@ function ProjectDetail({
                 style={{
                   padding: "5px 8px",
                   borderRadius: 6,
-                  border: `1px solid ${D.inputBorder}`,
-                  background: D.card,
-                  color: D.heading,
+                  border: `1px solid #D4D4D8`,
+                  background: "#FFFFFF",
+                  color: "#09090B",
                   fontSize: 11,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   cursor: "pointer",
                 }}
               >
@@ -2445,8 +2477,8 @@ function ProjectDetail({
                 padding: "6px 12px",
                 borderRadius: 6,
                 fontSize: 12,
-                fontWeight: 700,
-                background: D.accent,
+                fontWeight: 500,
+                background: "#18181B",
                 color: "#fff",
                 cursor: "pointer",
               }}
@@ -2485,7 +2517,7 @@ function ProjectDetail({
               style={{
                 padding: "20px 0",
                 fontSize: 12,
-                color: D.muted,
+                color: "#71717A",
                 textAlign: "center",
               }}
             >
@@ -2496,8 +2528,8 @@ function ProjectDetail({
         {canAdminActions && closeoutPreview && project.status !== "closed" && (
           <div
             style={{
-              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : D.border}`,
-              background: closeoutBlocksClose ? "#FEF2F2" : "#F8FAFC",
+              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : "#E4E4E7"}`,
+              background: closeoutBlocksClose ? "#FEF2F2" : "#FAFAFA",
               borderRadius: 8,
               padding: 12,
             }}
@@ -2507,7 +2539,7 @@ function ProjectDetail({
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
-                color: D.heading,
+                color: "#09090B",
                 fontSize: 13,
                 fontWeight: 850,
                 marginBottom: 8,
@@ -2525,10 +2557,10 @@ function ProjectDetail({
               }}
             >
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Service
                 </div>
-                <div style={{ color: D.heading, fontWeight: 800 }}>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.serviceCompletion?.willCompleteService
                     ? `Complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
                     : closeoutPreview.serviceCompletion?.linked
@@ -2537,47 +2569,47 @@ function ProjectDetail({
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Billing
                 </div>
                 <div
                   style={{
-                    color: billingBlocksClose ? D.red : D.heading,
-                    fontWeight: 800,
+                    color: billingBlocksClose ? "#991B1B" : "#09090B",
+                    fontWeight: 500,
                   }}
                 >
                   {closeoutBillingLabel(closeoutPreview.billing)}
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Follow-up
                 </div>
-                <div style={{ color: followupBlocksClose ? D.red : D.heading, fontWeight: 800 }}>
+                <div style={{ color: followupBlocksClose ? "#991B1B" : "#09090B", fontWeight: 500 }}>
                   {closeoutFollowupLabel(closeoutPreview.followup)}
                 </div>
               </div>
               <div>
-                <div style={{ color: D.muted, fontSize: 11, fontWeight: 800 }}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
                   Report
                 </div>
-                <div style={{ color: D.heading, fontWeight: 800 }}>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.portal?.attached ? "Portal attached" : "Token-only"}
                 </div>
               </div>
             </div>
             {billingBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
                 Resolve billing before closing. The project can stay in review until the invoice or prepaid coverage exists.
               </div>
             )}
             {followupBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
                 Auto-schedule follow-up is not wired yet. Use alert follow-up or schedule the return manually before closing.
               </div>
             )}
             {previewBlocksClose && !billingBlocksClose && !followupBlocksClose && (
-              <div style={{ marginTop: 8, color: D.red, fontSize: 12, fontWeight: 750 }}>
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 750 }}>
                 This project cannot close from the linked service’s current state.
               </div>
             )}
@@ -2600,7 +2632,7 @@ function ProjectDetail({
       <div
         style={{
           padding: "12px 16px",
-          borderTop: `1px solid ${D.border}`,
+          borderTop: `1px solid #E4E4E7`,
           display: "flex",
           gap: 10,
           flexWrap: "wrap",
@@ -2722,6 +2754,7 @@ function ProjectDetail({
             </button>
           )}
       </div>{" "}
+      {confirmDialog}
     </div>
   );
 }
@@ -2764,8 +2797,8 @@ function ProjectHistoryPanel({ activity }) {
       <div
         style={{
           fontSize: 14,
-          fontWeight: 800,
-          color: D.heading,
+          fontWeight: 500,
+          color: "#09090B",
           marginBottom: 8,
         }}
       >
@@ -2774,7 +2807,7 @@ function ProjectHistoryPanel({ activity }) {
       {activity.length > 0 ? (
         <div
           style={{
-            border: `1px solid ${D.border}`,
+            border: `1px solid #E4E4E7`,
             borderRadius: 8,
             overflow: "hidden",
           }}
@@ -2784,8 +2817,8 @@ function ProjectHistoryPanel({ activity }) {
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
               style={{
                 padding: "10px 12px",
-                borderTop: idx === 0 ? "none" : `1px solid ${D.border}`,
-                background: D.card,
+                borderTop: idx === 0 ? "none" : `1px solid #E4E4E7`,
+                background: "#FFFFFF",
               }}
             >
               {" "}
@@ -2801,15 +2834,15 @@ function ProjectHistoryPanel({ activity }) {
                 <div style={{ minWidth: 0 }}>
                   {" "}
                   <div
-                    style={{ fontSize: 14, fontWeight: 800, color: D.heading }}
+                    style={{ fontSize: 14, fontWeight: 500, color: "#09090B" }}
                   >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
                   </div>{" "}
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: "#71717A", marginTop: 2 }}>
                     {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                    <div style={{ fontSize: 14, color: "#71717A", marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
@@ -2818,7 +2851,7 @@ function ProjectHistoryPanel({ activity }) {
                   style={{
                     flexShrink: 0,
                     fontSize: 14,
-                    color: D.muted,
+                    color: "#71717A",
                     textAlign: "right",
                   }}
                 >
@@ -2829,7 +2862,7 @@ function ProjectHistoryPanel({ activity }) {
           ))}
         </div>
       ) : (
-        <div style={{ padding: "12px 0", fontSize: 14, color: D.muted }}>
+        <div style={{ padding: "12px 0", fontSize: 14, color: "#71717A" }}>
           No activity recorded yet.
         </div>
       )}
@@ -2864,9 +2897,9 @@ function PhotoThumb({ photo, projectId, onDelete }) {
     <div
       style={{
         position: "relative",
-        background: D.pill,
+        background: "#F4F4F5",
         borderRadius: 8,
-        border: `1px solid ${D.border}`,
+        border: `1px solid #E4E4E7`,
         overflow: "hidden",
         aspectRatio: "1/1",
       }}
@@ -2894,7 +2927,7 @@ function PhotoThumb({ photo, projectId, onDelete }) {
             alignItems: "center",
             justifyContent: "center",
             fontSize: 11,
-            color: D.muted,
+            color: "#71717A",
           }}
         >
           {loadFailed ? "Photo unavailable" : "Loading…"}
@@ -2910,7 +2943,7 @@ function PhotoThumb({ photo, projectId, onDelete }) {
           background: "rgba(0,0,0,0.55)",
           color: "#fff",
           fontSize: 10,
-          fontWeight: 600,
+          fontWeight: 500,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -2956,10 +2989,12 @@ function ReadinessPanel({ readiness }) {
   return (
     <div
       style={{
+        // V2 monochrome: complete = neutral zinc; blockers gate the send,
+        // so the incomplete state carries the genuine-alert tint.
         padding: "10px 12px",
-        background: complete && !hasQualityNotes ? "#ECFDF5" : "#FFFBEB",
-        border: `1px solid ${complete && !hasQualityNotes ? "#A7F3D0" : "#FDE68A"}`,
-        borderRadius: 8,
+        background: complete && !hasQualityNotes ? "#FAFAFA" : "#FEF2F2",
+        border: `1px solid ${complete && !hasQualityNotes ? "#E4E4E7" : "#FECACA"}`,
+        borderRadius: 6,
       }}
     >
       {" "}
@@ -2974,10 +3009,10 @@ function ReadinessPanel({ readiness }) {
         {" "}
         <div>
           {" "}
-          <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
             Pre-send review
           </div>{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+          <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
             {complete
               ? "Required report details are present."
               : `${readiness.missing.length} required item${readiness.missing.length === 1 ? "" : "s"} still need attention.`}
@@ -2987,8 +3022,8 @@ function ReadinessPanel({ readiness }) {
           style={{
             flexShrink: 0,
             fontSize: 10,
-            fontWeight: 800,
-            color: complete && !hasQualityNotes ? "#065F46" : "#92400E",
+            fontWeight: 500,
+            color: complete && !hasQualityNotes ? "#3F3F46" : "#991B1B",
             textTransform: "uppercase",
             letterSpacing: 0.5,
           }}
@@ -3009,9 +3044,9 @@ function ReadinessPanel({ readiness }) {
             key={item.label}
             style={{
               fontSize: 11,
-              color: item.ok ? "#166534" : "#92400E",
-              background: item.ok ? "#F0FDF4" : "#FEF3C7",
-              border: `1px solid ${item.ok ? "#BBF7D0" : "#FDE68A"}`,
+              color: item.ok ? "#3F3F46" : "#991B1B",
+              background: item.ok ? "#FAFAFA" : "#FEF2F2",
+              border: `1px solid ${item.ok ? "#E4E4E7" : "#FECACA"}`,
               borderRadius: 6,
               padding: "5px 7px",
             }}
@@ -3032,7 +3067,7 @@ function ReadinessPanel({ readiness }) {
           {readiness.quality.map((note) => (
             <div
               key={note}
-              style={{ fontSize: 11, color: "#92400E", lineHeight: 1.4 }}
+              style={{ fontSize: 11, color: "#71717A", lineHeight: 1.4 }}
             >
               Review: {note}
             </div>
@@ -3048,11 +3083,13 @@ function Alert({ tone = "success", children }) {
   return (
     <div
       style={{
+        // V2 monochrome: confirmations are neutral zinc; alert red is
+        // reserved for genuine errors.
         padding: "9px 12px",
-        background: isError ? "#FEF2F2" : "#ECFDF5",
-        border: `1px solid ${isError ? "#FECACA" : "#A7F3D0"}`,
-        borderRadius: 8,
-        color: isError ? D.red : "#065F46",
+        background: isError ? "#FEF2F2" : "#FAFAFA",
+        border: `1px solid ${isError ? "#FECACA" : "#E4E4E7"}`,
+        borderRadius: 6,
+        color: isError ? "#991B1B" : "#3F3F46",
         fontSize: 12,
         lineHeight: 1.45,
       }}
@@ -3069,8 +3106,8 @@ function DeliveryPanel({ channels, status }) {
     <div
       style={{
         padding: "10px 12px",
-        background: D.pill,
-        border: `1px solid ${D.border}`,
+        background: "#F4F4F5",
+        border: `1px solid #E4E4E7`,
         borderRadius: 8,
       }}
     >
@@ -3078,8 +3115,8 @@ function DeliveryPanel({ channels, status }) {
       <div
         style={{
           fontSize: 12,
-          fontWeight: 800,
-          color: D.heading,
+          fontWeight: 500,
+          color: "#09090B",
           marginBottom: 8,
         }}
       >
@@ -3099,8 +3136,8 @@ function DeliveryPanel({ channels, status }) {
             {" "}
             <span
               style={{
-                color: D.text,
-                fontWeight: 700,
+                color: "#27272A",
+                fontWeight: 500,
                 textTransform: "uppercase",
               }}
             >
@@ -3108,7 +3145,7 @@ function DeliveryPanel({ channels, status }) {
             </span>{" "}
             <span
               style={{
-                color: result?.ok ? D.success : D.red,
+                color: result?.ok ? "#15803D" : "#991B1B",
                 textAlign: "right",
               }}
             >
@@ -3127,7 +3164,7 @@ function Label({ children, style, htmlFor }) {
       htmlFor={htmlFor}
       style={{
         fontSize: 12,
-        fontWeight: 800,
+        fontWeight: 500,
         color: ESTIMATE_MUTED,
         textTransform: "uppercase",
         letterSpacing: "0.12em",
@@ -3143,38 +3180,37 @@ function Label({ children, style, htmlFor }) {
 
 const inputStyle = {
   width: "100%",
-  minHeight: 48,
+  minHeight: 44,
   background: ESTIMATE_INPUT_BG,
   color: ESTIMATE_TEXT,
   border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
-  borderRadius: 10,
-  padding: "12px 14px",
-  fontSize: 15,
-  fontWeight: 500,
+  borderRadius: 4,
+  padding: "10px 12px",
+  fontSize: 14,
+  fontWeight: 400,
   boxSizing: "border-box",
-  fontFamily: FONTS.body,
   outline: "none",
 };
 
 const btnPrimary = {
-  minHeight: 48,
+  minHeight: 44,
   padding: "0 18px",
-  borderRadius: 10,
+  borderRadius: 4,
   fontSize: 14,
-  fontWeight: 700,
-  background: ESTIMATE_TEXT,
+  fontWeight: 500,
+  background: "#18181B",
   color: "#fff",
   border: "none",
   cursor: "pointer",
 };
 const btnSecondary = {
-  minHeight: 48,
+  minHeight: 44,
   padding: "0 16px",
-  borderRadius: 10,
+  borderRadius: 4,
   fontSize: 14,
-  fontWeight: 600,
-  background: COLORS.white,
+  fontWeight: 500,
+  background: "#FFFFFF",
   color: ESTIMATE_TEXT,
-  border: `1px solid ${ESTIMATE_BORDER}`,
+  border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
   cursor: "pointer",
 };

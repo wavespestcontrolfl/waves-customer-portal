@@ -89,9 +89,7 @@ const NAV_SECTIONS = [
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
       { path: "/admin/service-library", icon: BookOpen, label: "Services" },
-      // Ratified Q7 (universal one-time services): label-only rename with
-      // the C1 restyle — route and files stay /admin/projects.
-      { path: "/admin/projects", icon: FileText, label: "Jobs" },
+      { path: "/admin/projects", icon: FileText, label: "Projects" },
       { path: "/admin/contracts", icon: FileText, label: "Contracts" },
     ],
   },
