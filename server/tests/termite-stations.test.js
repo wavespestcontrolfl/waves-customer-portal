@@ -468,6 +468,48 @@ test('no-check fallback windows stations to the visit day (ET): later creations 
   expect(context.stations.map((s) => s.number).sort((a, b) => a - b)).toEqual([1, 3]);
 });
 
+test('a retire-all visit does not resurrect same-day-retired pins via the no-check fallback', () => {
+  // retire-all completions write NO check rows (retires carry no status),
+  // so the builder lands in the day-window fallback — the pins this visit
+  // just removed must not render as "on file" while the counts read zero
+  const context = buildStationMapReportContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.2, 0.3), { is_active: false, created_at: '2026-06-01T12:00:00Z', retired_at: '2026-07-13T18:30:00Z' }),
+      stationRow('st-2', 2, pin(0.5, 0.5), { is_active: false, created_at: '2026-06-01T12:00:00Z', retired_at: '2026-07-13T18:30:00Z' }),
+    ],
+    checkRows: [],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(context).toMatchObject({ available: false, reason: 'no_stations' });
+});
+
+test('a move onto another active station\'s exact spot is skipped, not stacked', async () => {
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.2, 0.2) },
+      { id: 'st-2', customer_id: CUSTOMER, station_number: 2, is_active: true, geometry_image: pin(0.5, 0.5) },
+    ],
+  });
+  const summary = await syncStationsForCompletion(db, {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-1',
+    entries: [
+      { id: 'st-1', shape: pin(0.5, 0.5), status: 'ok' }, // st-2's exact hole
+    ],
+  });
+  expect(summary.moved).toBe(0);
+  expect(summary.skipped).toContain('station:st-1:position-occupied');
+  const st1 = state.stations.find((row) => row.id === 'st-1');
+  expect(st1.geometry_image).toMatchObject({ cx: 0.2, cy: 0.2 }); // unmoved
+  // the visit's status still lands — the check is real even if the move
+  // could not be
+  expect(summary.checksApplied).toBe(1);
+  expect(state.checks[0].station_id).toBe('st-1');
+});
+
 test('drift: a re-geocoded property far from the pin ref drops the mark; all dropped → marks_stale', () => {
   const context = buildStationMapReportContext({
     stationRows: [stationRow('st-1', 1, pin(0.5, 0.5))],

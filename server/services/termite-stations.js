@@ -229,16 +229,25 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
           summary.skipped.push(`station:${entry.id}`);
           continue;
         }
-        patch.geometry_image = JSON.stringify(shape);
-        // re-key the dedupe index — a later create at this station's OLD
-        // spot is a new station, and a create at its NEW spot is a replay
-        const oldKey = positionKey(station.geometry_image);
-        if (oldKey && activeByPosition.get(oldKey) === station) {
-          activeByPosition.delete(oldKey);
-        }
-        station.geometry_image = patch.geometry_image;
         const newKey = positionKey(shape);
-        if (newKey && !activeByPosition.has(newKey)) activeByPosition.set(newKey, station);
+        const occupant = newKey ? activeByPosition.get(newKey) : null;
+        if (occupant && occupant !== station) {
+          // another ACTIVE station already sits at these exact coordinates —
+          // persisting the move would stack two rows in one hole (stacked
+          // report pins, diverging statuses for one physical station). Skip
+          // the geometry write; the entry's status still lands below.
+          summary.skipped.push(`station:${entry.id}:position-occupied`);
+        } else {
+          patch.geometry_image = JSON.stringify(shape);
+          // re-key the dedupe index — a later create at this station's OLD
+          // spot is a new station, and a create at its NEW spot is a replay
+          const oldKey = positionKey(station.geometry_image);
+          if (oldKey && activeByPosition.get(oldKey) === station) {
+            activeByPosition.delete(oldKey);
+          }
+          station.geometry_image = patch.geometry_image;
+          if (newKey) activeByPosition.set(newKey, station);
+        }
       }
       if (entry.label !== undefined) patch.label = normalizeLabel(entry.label);
       if (Object.keys(patch).length) {
@@ -384,7 +393,6 @@ function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) 
     // no visit anchor — active rows only (legacy behavior)
     return stationRows.filter((row) => row.is_active !== false);
   }
-  const dayStart = parseETDateTime(`${dateStr}T00:00:00`);
   const dayEnd = parseETDateTime(`${dateStr}T23:59:59`);
   return stationRows.filter((row) => {
     const createdAt = row.created_at ? new Date(row.created_at) : null;
@@ -394,7 +402,15 @@ function selectStationRowsForVisit(stationRows, statusByStationId, serviceDate) 
       // a retired row with no timestamp can't be placed in time — keep it
       // off historical maps rather than resurrecting it everywhere
       if (!retiredAt || Number.isNaN(retiredAt.getTime())) return false;
-      if (retiredAt < dayStart) return false;
+      // Retired on or before the visit day → off THIS visit's map. A
+      // retire-all completion writes no check rows (retires carry no
+      // status), so it lands in this fallback — its just-retired pins must
+      // not render as "on file" while the visit's counts dropped to zero.
+      // The trade (an office retirement later the same ET day also hides
+      // the pin on that morning's no-check report) shows the customer a
+      // station that no longer exists one report early, which is the safer
+      // direction than resurrecting removed stations.
+      if (retiredAt <= dayEnd) return false;
     }
     return true;
   });
