@@ -13,7 +13,7 @@ import ProjectFindingFieldInput, {
   hasCatalogBackedProjectFields,
   normalizeApplicationRows,
 } from "../../components/tech/ProjectFindingFieldInput";
-import { parseSections } from "../ProjectReportViewPage";
+import { parseSections, TERMITE_COMPLIANCE_SECTIONS } from "../ProjectReportViewPage";
 
 
 /**
@@ -474,15 +474,19 @@ function evaluateProjectReadiness({
   // and then failing with a generic 422 on send. Method lists mirror
   // TERMITE_PERIMETER_METHODS / TERMITE_LIQUID_DILUTION_METHODS in
   // project-types.js.
+  // hard: true mirrors the server's non-overridable hardMissing gate — the
+  // send flows must NOT offer the override path for these (Codex P3 r4).
   if (project?.project_type === "termite_inspection") {
     required.push(
       {
         label: 'Areas not inspected / why ("None" if all visible areas were inspected)',
         ok: hasMeaningfulValue(findings?.areas_not_inspected),
+        hard: true,
       },
       {
         label: 'Inspection notice affixed ("Yes" required)',
         ok: String(findings?.inspection_notice_affixed || "") === "Yes",
+        hard: true,
       },
     );
   }
@@ -490,8 +494,8 @@ function evaluateProjectReadiness({
     const method = String(findings?.treatment_method || "");
     const isPerimeter = ["Liquid perimeter", "Trenching"].includes(method);
     required.push(
-      { label: "Treatment method", ok: hasMeaningfulValue(method) },
-      { label: "EPA reg. no.", ok: hasMeaningfulValue(findings?.epa_registration) },
+      { label: "Treatment method", ok: hasMeaningfulValue(method), hard: true },
+      { label: "EPA reg. no.", ok: hasMeaningfulValue(findings?.epa_registration), hard: true },
       {
         label: isPerimeter
           ? 'Posted notice placed ("Yes" required for exterior/perimeter applications)'
@@ -499,12 +503,14 @@ function evaluateProjectReadiness({
         ok: isPerimeter
           ? String(findings?.posted_notice || "") === "Yes"
           : hasMeaningfulValue(findings?.posted_notice),
+        hard: true,
       },
     );
     if (["Spot treatment", "Liquid perimeter", "Trenching", "Wood treatment"].includes(method)) {
       required.push({
         label: "% solution",
         ok: hasMeaningfulValue(findings?.percent_solution),
+        hard: true,
       });
     }
   }
@@ -567,6 +573,9 @@ function evaluateProjectReadiness({
   return {
     required,
     missing: required.filter((item) => !item.ok),
+    // Mirrors the server's hardMissing — compliance blockers the send
+    // routes 422 on regardless of override_reason.
+    hardMissing: required.filter((item) => !item.ok && item.hard),
     quality,
   };
 }
@@ -866,6 +875,15 @@ function CustomerProjectReportPreview({
   const findingsEntries = suppressFindingsForNarrative ? [] : Object.entries(findings || {}).filter(
     ([k, v]) => !INTERNAL_FINDING_KEYS.has(k) && hasMeaningfulValue(formatProjectPreviewValue(v)),
   );
+  // Same compliance-block rule as the public page (preview == final,
+  // Codex P2 r4): when the narrative suppresses the raw findings, the
+  // termite Phase-3 answers still render in their own record block.
+  const complianceSection = TERMITE_COMPLIANCE_SECTIONS[project.project_type] || null;
+  const complianceEntries = (suppressFindingsForNarrative && complianceSection)
+    ? complianceSection.fields
+      .map(([key, label]) => [label, findings?.[key]])
+      .filter(([, v]) => hasMeaningfulValue(formatProjectPreviewValue(v)))
+    : [];
   const visiblePhotos = (photos || []).slice(0, 4);
   const address = customerAddressLine(project);
   const metaRows = [
@@ -987,6 +1005,43 @@ function CustomerProjectReportPreview({
                   >
                     <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
                       {projectFieldLabel(typeCfg, key)}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+                      {formatProjectPreviewValue(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {complianceEntries.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 900,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
+                {complianceSection.eyebrow}
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {complianceEntries.map(([label, value]) => (
+                  <div
+                    key={label}
+                    style={{
+                      padding: "9px 10px",
+                      borderRadius: 9,
+                      background: "#F0F7FC",
+                      border: "1px solid #D7E3EA",
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1B2C5B", marginBottom: 2 }}>
+                      {label}
                     </div>
                     <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                       {formatProjectPreviewValue(value)}
@@ -1538,6 +1593,17 @@ function ProjectDetail({
       recommendations: editRecs,
       projectDate: editProjectDate,
     });
+    // Non-overridable compliance blockers (mirrors the server's hardMissing
+    // 422): stop here instead of walking the admin into the override prompt
+    // and a dead-end rejection (Codex P3 r4).
+    if (readiness.hardMissing.length) {
+      setError(
+        `Required compliance fields must be completed before this report can send: ${readiness.hardMissing
+          .map((item) => item.label)
+          .join("; ")}`,
+      );
+      return;
+    }
     if (readiness.missing.length || readiness.quality.length) {
       const lines = [
         ...readiness.missing.map((item) => `Missing: ${item.label}`),
@@ -1639,6 +1705,17 @@ function ProjectDetail({
       recommendations: editRecs,
       projectDate: editProjectDate,
     });
+    // Non-overridable compliance blockers (mirrors the server's hardMissing
+    // 422): stop here instead of walking the admin into the override prompt
+    // and a dead-end rejection (Codex P3 r4).
+    if (readiness.hardMissing.length) {
+      setError(
+        `Required compliance fields must be completed before this report can send: ${readiness.hardMissing
+          .map((item) => item.label)
+          .join("; ")}`,
+      );
+      return;
+    }
     let overrideReason = "";
     if (readiness.missing.length) {
       const lines = readiness.missing.map((item) => `Missing: ${item.label}`);

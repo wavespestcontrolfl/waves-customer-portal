@@ -96,8 +96,10 @@ const TYPE_LABELS = {
 // raw findings list — the narrative writer treats structured findings as
 // its INPUT, not its content, so these statutory statements would otherwise
 // vanish from the sent page (Codex P1 r3 on #2703). Labels mirror
-// CUSTOMER_FIELD_LABELS in activity-indicators.js.
-const TERMITE_COMPLIANCE_SECTIONS = {
+// CUSTOMER_FIELD_LABELS in activity-indicators.js. Exported for the admin
+// ProjectsPage customer-report preview, which must render the same block
+// under the same suppression rule (preview == final; Codex P2 r4).
+export const TERMITE_COMPLIANCE_SECTIONS = {
   termite_inspection: {
     eyebrow: 'Inspection record',
     fields: [
