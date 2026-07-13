@@ -6055,6 +6055,7 @@ router.post('/:serviceId/pest-recap/draft', async (req, res, next) => {
       serviceId: req.params.serviceId,
       technicianNotes,
       areasTreated,
+      includeCustomerComms: req.body?.includeCustomerComms === true,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
     res.json(result);

@@ -158,16 +158,35 @@ async function buildRecapContext(serviceId, knex = db) {
 }
 
 /** Draft the customer-facing recap SMS copy via the shared recap generator. */
-async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, knex = db }) {
+async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, includeCustomerComms = false, knex = db }) {
   const { ok, reason, svc, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
   if (!eligible) return { ok: false, reason: 'not_pest_control' };
+
+  // F2 (ratified Q13): opt-in windowed comms context. resolveEligibility
+  // already bound this call to the service, and the route's ownership guard
+  // gates the caller — the context is scoped to this service's customer.
+  let commsContext = '';
+  if (includeCustomerComms === true && svc.customer_id) {
+    try {
+      const { buildCompletionCommsContext } = require('./completion-comms-context');
+      const comms = await buildCompletionCommsContext({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+        knex,
+      });
+      if (comms.text) commsContext = `${comms.promptHint}\n${comms.text}`;
+    } catch (err) {
+      logger.warn(`[pest-recap] comms context failed: ${err.message}`);
+    }
+  }
 
   const { recap, source } = await generateRecap({
     serviceType: svc.service_type,
     technicianNotes,
     areasTreated,
     visitOutcome: 'completed',
+    commsContext,
   });
   return { ok: true, recap, source };
 }

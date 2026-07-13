@@ -74,6 +74,8 @@ export default function ServiceRecapModal({
   const [sendText, setSendText] = useState(true);
 
   const [drafting, setDrafting] = useState(false);
+  // F2 (ratified Q13): windowed comms context on the AI draft — default CHECKED.
+  const [includeComms, setIncludeComms] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   // Synchronous re-entrancy guard: a fast double-tap can fire handleSubmit
@@ -135,7 +137,7 @@ export default function ServiceRecapModal({
     try {
       const data = await request(`${base}/draft`, {
         method: 'POST',
-        body: JSON.stringify({ technicianNotes: note }),
+        body: JSON.stringify({ technicianNotes: note, includeCustomerComms: includeComms }),
       });
       if (data?.recap) setMessage(data.recap);
     } catch (err) {
@@ -143,14 +145,14 @@ export default function ServiceRecapModal({
     } finally {
       setDrafting(false);
     }
-  }, [base, note, request]);
+  }, [base, note, includeComms, request]);
 
   const handleSubmit = useCallback(async () => {
     if (submitInFlight.current) return;
     const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
     if (willSend) {
       const name = ctx?.service?.customerName || 'the customer';
-      // eslint-disable-next-line no-alert
+       
       if (!window.confirm(`Text this recap to ${name}?\n\n${message.trim()}`)) return;
     }
     submitInFlight.current = true;
@@ -322,6 +324,18 @@ export default function ServiceRecapModal({
                 {drafting ? 'Drafting…' : '✨ Draft with AI'}
               </button>
             </div>
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+              color: P.muted, cursor: 'pointer', marginBottom: 6,
+            }}>
+              <input
+                type="checkbox"
+                checked={includeComms}
+                onChange={(e) => setIncludeComms(e.target.checked)}
+                style={{ width: 15, height: 15 }}
+              />
+              Include recent customer calls/texts/emails
+            </label>
             <textarea
               value={message}
               onChange={(e) => setMessage(e.target.value)}

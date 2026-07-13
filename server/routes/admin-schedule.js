@@ -5888,6 +5888,7 @@ router.post('/generate-report', async (req, res) => {
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
+      includeCustomerComms,
     } = req.body;
 
     const asArray = (v) => (Array.isArray(v) ? v.filter(Boolean).map((x) => String(x).trim()).filter(Boolean) : []);
@@ -6182,7 +6183,27 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
     }
 
-    const fullUserMessage = `${userMessage}${contextText}`;
+    // F2 (universal one-time services, ratified Q13): opt-in windowed comms
+    // context on the recurring report draft. Rides the SAME grounding
+    // authorization — an unauthorized caller degrades to a notes-only draft
+    // and never pulls another customer's communications.
+    let commsBlock = '';
+    if (includeCustomerComms === true && groundingCustomerId) {
+      try {
+        const { buildCompletionCommsContext } = require('../services/completion-comms-context');
+        const comms = await buildCompletionCommsContext({
+          customerId: groundingCustomerId,
+          scheduledServiceId,
+        });
+        if (comms.text) {
+          commsBlock = `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
+        }
+      } catch (commsErr) {
+        logger.warn(`[generate-report] comms context failed: ${commsErr.message}`);
+      }
+    }
+
+    const fullUserMessage = `${userMessage}${contextText}${commsBlock}`;
     const cacheKey = crypto.createHash('sha256').update(`v3|${model}|${fullUserMessage}`).digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
