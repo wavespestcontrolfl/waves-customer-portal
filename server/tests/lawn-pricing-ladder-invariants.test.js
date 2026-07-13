@@ -99,10 +99,14 @@ describe('pricing provenance — engine → mapper → stored estimate shape', (
     return { v1, mapped, R: mapped.results };
   }
 
-  test('the mapper carries the engine version for the pricing_version column stamp', () => {
+  test('the mapper stamps the LAWN mechanism version, not the hardcoded engine constant', () => {
     const { v1, mapped } = lawnOnlyMapped();
+    // Top-level pricingVersion is a hardcoded constant that equals the
+    // pricing_version column default — stamping it is a no-op (Codex #2667
+    // r4). A lawn-priced estimate must carry the lawn mechanism token.
     expect(v1.pricingVersion).toBeTruthy();
-    expect(mapped.engineVersion).toBe(v1.pricingVersion);
+    expect(mapped.engineVersion).toBe(LAWN_PRICING_V2.pricingVersion);
+    expect(mapped.engineVersion).not.toBe(v1.pricingVersion);
   });
 
   test('every stored lawn tier row carries mechanism + dollar provenance', () => {
@@ -199,9 +203,9 @@ describe('sweep red paths — failures become alert violations, never silent gre
         },
         insert: (payload) => ({
           onConflict: () => ({
-            merge: () => ({
+            merge: (mergeArg) => ({
               returning: async () => {
-                calls.inserts.push({ table, payload });
+                calls.inserts.push({ table, payload, mergeArg });
                 return [{ id: 42 }];
               },
             }),
@@ -211,6 +215,7 @@ describe('sweep red paths — failures become alert violations, never silent gre
       return chain;
     };
     dbFn.schema = { hasTable: async () => true };
+    dbFn.raw = (sql) => ({ __raw: sql });
     return { dbFn, calls };
   }
 
@@ -305,5 +310,53 @@ describe('sweep red paths — failures become alert violations, never silent gre
     expect(result.budgetCheck).toBe('skipped');
     expect(calls.inserts).toHaveLength(0);
     expect(calls.updates).toHaveLength(1); // clean run resolves any open alert
+  });
+
+  test('non-finite ladder prices are violations, never a silent clean pass', () => {
+    const { sweep } = loadSweep({
+      // NaN compares false against every invariant threshold — without an
+      // explicit finite check this grid reads as perfectly clean.
+      priceLawnCare: () => ({
+        tiers: SOLD_VISITS.map((visits) => ({ visits, monthly: NaN, perApp: NaN })),
+      }),
+    });
+    const { violations } = sweep.scanLadderGrid();
+    expect(violations.length).toBeGreaterThan(0);
+    expect(new Set(violations.map((v) => v.check))).toEqual(new Set(['non_finite_price']));
+  });
+
+  test('partially costed COGS is unverified — it must not vouch for the material budget', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => ({ available: true }),
+      // status 'warning' = some mapped rows priced at $0; the positive total
+      // UNDERSTATES the annual lower bound.
+      inventoryCostFromRows: () => ({
+        status: 'warning',
+        totalPerVisit: 42.5,
+        warnings: ['Prodiamine 65 WDG has no normalized cost data'],
+      }),
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('unverified');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['material_budget_unverified']);
+    expect(calls.updates).toHaveLength(0); // no false-green resolution
+    expect(calls.inserts).toHaveLength(1);
+    expect(calls.inserts[0].payload.severity).toBe('high'); // data-quality exception, not critical
+  });
+
+  test('repeat alerts keep their first detected_at; only a post-resolution re-fire starts a new episode', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: () => {
+        throw new Error('persistent ladder breakage');
+      },
+    });
+    await sweep.runLawnPricingInvariantSweep();
+    const { mergeArg } = calls.inserts[0];
+    // The conflict-merge must not overwrite detected_at with the new run's
+    // timestamp while the alert is still open.
+    expect(mergeArg.detected_at.__raw).toContain("WHEN admin_alerts.status = 'open' THEN admin_alerts.detected_at");
+    expect(mergeArg.resolved_at).toBeNull();
+    expect(mergeArg.last_seen_at).toBeInstanceOf(Date);
   });
 });

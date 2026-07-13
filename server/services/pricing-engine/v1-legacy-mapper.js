@@ -1034,8 +1034,11 @@ function mapV1ToLegacyShape(v1Result) {
     serviceSpecificDiscounts: summary.serviceSpecificDiscounts || [],
     // Engine version rides the mapped shape so persistence can stamp
     // estimates.pricing_version with the version that actually priced the
-    // estimate (the column otherwise sits at its migration default forever).
-    engineVersion: v1Result.pricingVersion || null,
+    // estimate. The top-level v1Result.pricingVersion is a hardcoded engine
+    // constant ('v4.2' — also the column default, so stamping it alone is a
+    // no-op); when a lawn line priced this estimate, the lawn mechanism token
+    // (e.g. LAWN_PRICING_V2_DENSE_35_FLOOR) is the version that matters.
+    engineVersion: R.lawnMeta?.pricingVersion || v1Result.pricingVersion || null,
     results: R,
     specItems: v1SpecItems,
   };

@@ -75,6 +75,18 @@ function scanLadderGrid() {
       for (let i = 0; i < tiers.length; i++) {
         const t = tiers[i];
         cellsChecked++;
+        // NaN/Infinity from a malformed synced bracket makes every comparison
+        // below evaluate false — the cell would pass as clean while the live
+        // price is unusable. Reject it explicitly and skip the comparisons
+        // (they are meaningless against a non-finite value).
+        if (!Number.isFinite(t.monthly) || t.monthly <= 0) {
+          violations.push({
+            check: 'non_finite_price',
+            cell: cellLabel(track, sqft, t.visits),
+            detail: `monthly is ${t.monthly} — live ladder cell is not a usable price`,
+          });
+          continue;
+        }
         if (programMinimumMonthly > 0 && t.monthly < programMinimumMonthly - 1e-9) {
           violations.push({
             check: 'below_program_minimum',
@@ -145,6 +157,22 @@ async function checkBudgetDrift() {
   if (cogs.status === 'missing_cogs' || !Number(cogs.totalPerVisit)) {
     return { status: 'skipped', reason: 'no live COGS rows mapped for Lawn Care', violations: [] };
   }
+  // status 'warning' = some mapped rows priced at $0 (missing normalized cost
+  // data), which UNDERSTATES the annual lower bound — a partially costed
+  // rotation must not vouch for the budget (or resolve an open alert). It is
+  // a data-quality exception, not a designed skip.
+  if (cogs.status !== 'ok') {
+    const warningText = (cogs.warnings || []).join('; ') || 'unknown COGS warning';
+    return {
+      status: 'unverified',
+      reason: `partial COGS: ${warningText}`,
+      violations: [{
+        check: 'material_budget_unverified',
+        cell: 'inventory_cogs',
+        detail: `mapped Lawn Care rotation is only partially costed (${warningText}) — budget drift cannot be verified until every mapped product carries cost data`,
+      }],
+    };
+  }
   const annualLowerBound = Math.round(Number(cogs.totalPerVisit) * 100) / 100;
 
   const violations = [];
@@ -195,7 +223,9 @@ async function upsertSweepAlert(violations, metadata) {
     dedupe_key: ALERT_DEDUPE_KEY,
     type: ALERT_TYPE,
     status: 'open',
-    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed'].includes(v.check))
+    // material_budget_unverified stays 'high' — a partially costed inventory
+    // rotation is a data-quality exception to fix, not a margin emergency.
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',
@@ -214,7 +244,15 @@ async function upsertSweepAlert(violations, metadata) {
   const [alert] = await db('admin_alerts')
     .insert(payload)
     .onConflict('dedupe_key')
-    .merge({ ...payload, updated_at: now })
+    .merge({
+      ...payload,
+      // A violation persisting across weekly runs keeps its FIRST detection
+      // time (age is the signal); only a re-fire after a resolution starts a
+      // new episode with a fresh detected_at.
+      detected_at: db.raw("CASE WHEN admin_alerts.status = 'open' THEN admin_alerts.detected_at ELSE excluded.detected_at END"),
+      resolved_at: null,
+      updated_at: now,
+    })
     .returning('id');
   return { alertId: alert?.id ?? alert, violations: violations.length };
 }

@@ -487,11 +487,13 @@ function buildEstimatePersistenceFields(body, context = {}) {
     notes: body.notes,
   });
 
-  // Stamp the engine version that actually priced this estimate (varchar(10)
-  // column, NOT NULL with default — only written when the server recompute ran,
-  // so CLIENT_FALLBACK rows keep the default rather than claiming a version).
+  // Stamp the engine version that actually priced this estimate (varchar(80)
+  // since migration 20260713000020 — lawn mechanism tokens like
+  // LAWN_PRICING_V2_DENSE_35_FLOOR don't fit the original 10. Only written
+  // when the server recompute ran, so CLIENT_FALLBACK rows keep the default
+  // rather than claiming a version).
   const pricingVersion = typeof estimateData?.result?.engineVersion === 'string'
-    ? estimateData.result.engineVersion.slice(0, 10)
+    ? estimateData.result.engineVersion.slice(0, 80)
     : null;
 
   return {
