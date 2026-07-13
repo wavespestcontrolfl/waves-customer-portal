@@ -289,7 +289,17 @@ async function buildSummary(service) {
   };
 }
 
+// Same privacy headers as the other tokenized PII routes (prep-public.js,
+// card-public.js): the payload now carries full contact info, so shared
+// browser/proxy caches must never retain it past the request.
+const PRIVACY_HEADERS = {
+  'Cache-Control': 'private, no-store',
+  'X-Robots-Tag': 'noindex, nofollow',
+  'Referrer-Policy': 'no-referrer',
+};
+
 router.get('/:token', async (req, res, next) => {
+  res.set(PRIVACY_HEADERS);
   if (!TOKEN_RE.test(req.params.token || '')) {
     return res.status(404).json({ error: 'Not found' });
   }
