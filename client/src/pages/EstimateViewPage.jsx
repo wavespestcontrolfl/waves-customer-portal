@@ -2546,10 +2546,16 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
           </div>
         ) : null}
         {!usingExistingAppointment ? (
+          // Locked while submitting (Codex #2681 r3 P1): during the inline
+          // card confirmation the phase deliberately stays 'review' — a
+          // Go back here would unmount the Payment Element mid-confirmSetup,
+          // recreating exactly the in-flight Stripe failure inlineConfirmBusy
+          // exists to prevent.
           <button
             type="button"
             onClick={onCancel}
-            style={estimateSecondaryCtaStyle}
+            disabled={submitting}
+            style={submitting ? { ...estimateSecondaryCtaStyle, opacity: 0.65, cursor: 'default' } : estimateSecondaryCtaStyle}
           >Go back</button>
         ) : null}
       </div>
@@ -3394,6 +3400,10 @@ export default function EstimateViewPage() {
   // recurringCardIntent holds the live POST /recurring-card-intent response
   // while the Auto Pay capture modal is open.
   const [recurringCardIntent, setRecurringCardIntent] = useState(null);
+  // Ref mirror for async guards (r3 P2): the inline pre-mint's fetch can
+  // resolve AFTER the customer confirmed via the modal fallback — the
+  // resolve-time check needs the live modal state, not its closure snapshot.
+  const recurringCardIntentOpenRef = useRef(false);
   const recurringCardSetupIntentIdRef = useRef(null);
   // Server said RECURRING_CARD_REQUIRED but our /data snapshot predates the
   // requirement (flag flipped mid-session, or an exemption changed between
@@ -4090,6 +4100,7 @@ export default function EstimateViewPage() {
         } else if (!r.ok) {
           throw new Error(body.error || 'Could not start the card setup. Please try again.');
         } else {
+          recurringCardIntentOpenRef.current = true;
           setRecurringCardIntent(body);
           setCtaPhase('review');
           return; // modal takes over; confirm continues from onSuccess
@@ -4180,12 +4191,16 @@ export default function EstimateViewPage() {
   // re-enter handleConfirm so the deposit preflight runs next.
   const handleRecurringCardSuccess = useCallback(async (setupIntentId) => {
     recurringCardSetupIntentIdRef.current = setupIntentId;
+    recurringCardIntentOpenRef.current = false;
     setRecurringCardIntent(null);
     track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_COMPLETED, { estimate_id: data?.estimate?.id || null });
     await handleConfirm();
   }, [data, handleConfirm]);
 
-  const handleRecurringCardCancel = useCallback(() => setRecurringCardIntent(null), []);
+  const handleRecurringCardCancel = useCallback(() => {
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+  }, []);
 
   // Stable identity (Codex #2681 r2 P1): an inline arrow here re-created the
   // handler every render, and the capture's onStateChange effect re-fired on
@@ -4262,6 +4277,15 @@ export default function EstimateViewPage() {
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
+        // this pre-mint resolved fell back to the modal path with its own
+        // intent — accepting this late response would render the inline
+        // element AND the modal for the same SetupIntent. Refs carry the
+        // live state; the closure's snapshots are stale by definition here.
+        if (recurringCardIntentOpenRef.current
+          || recurringCardSetupIntentIdRef.current
+          || recurringCardForceRef.current
+          || ctaPhaseRef.current !== 'review') return;
         if (r.ok && body?.clientSecret) {
           setInlineCardIntent(body);
           track(FUNNEL_EVENTS.ESTIMATE_CARD_STEP_STARTED, { estimate_id: data?.estimate?.id || null });
@@ -4942,6 +4966,7 @@ export default function EstimateViewPage() {
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
                 glassActive={!!glassContent}
+                busy={inlineConfirmBusy}
                 onStateChange={handleInlineCardState}
               />
             ) : null}
@@ -4957,7 +4982,11 @@ export default function EstimateViewPage() {
                 <button
                   type="button"
                   onClick={() => setPaymentPreference(paymentPreference === 'prepay_annual' ? 'pay_at_visit' : 'prepay_annual')}
-                  disabled={ctaPhase === 'submitting'}
+                  // Also locked during the inline card confirmation (r3 P2):
+                  // the in-flight handleConfirm closure carries the OLD
+                  // preference — a mid-await switch would book against a
+                  // billing choice the customer just changed away from.
+                  disabled={ctaPhase === 'submitting' || inlineConfirmBusy}
                   style={{ background: 'none', border: 'none', padding: 0, fontSize: 14, color: COLORS.navy, textDecoration: 'underline', cursor: 'pointer', justifySelf: 'center' }}
                 >
                   {paymentPreference === 'prepay_annual'

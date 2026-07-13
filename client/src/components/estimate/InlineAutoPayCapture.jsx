@@ -23,7 +23,7 @@ import { CARD_CONSENT_TEXT } from '../../lib/paymentMethodConsentText';
 const NAVY = '#04395E';
 
 const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
-  { intent, loadStripeSdk, glassActive = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', onStateChange },
+  { intent, loadStripeSdk, glassActive = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -138,6 +138,11 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
           type="checkbox"
           checked={agreed}
           onChange={(e) => setAgreed(e.target.checked)}
+          // Locked while confirmSetup is awaiting (Codex #2681 r3 P1): the
+          // in-flight handler proceeds to /accept on the EARLIER click, so an
+          // uncheck landing mid-await would record consent the checkbox no
+          // longer shows.
+          disabled={busy}
           style={{ marginTop: 3, width: 16, height: 16, flex: 'none' }}
         />
         <span style={{ fontSize: 14, color: NAVY, lineHeight: 1.5, fontWeight: 600 }}>
