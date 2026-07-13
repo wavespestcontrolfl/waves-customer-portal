@@ -88,7 +88,7 @@ function isTypedFindingsService(service) {
 // refuse the deep-link (Codex P1): the completion endpoint would accept a
 // re-submission with a fresh idempotency key, minting duplicate
 // artifacts/invoices/SMS.
-const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped"]);
+const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
 function openTypedCompletion(service) {
   const status = String(service?.status || "");
   if (TERMINAL_SERVICE_STATUSES.has(status)) {

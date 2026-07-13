@@ -1405,7 +1405,7 @@ export default function DispatchPageV2({
     const svc = (data.services || []).find((s) => String(s.id) === String(id));
     if (!svc) {
       alert("That appointment isn't on this dispatch date — find it on the schedule to complete it.");
-    } else if (["completed", "cancelled", "skipped"].includes(String(svc.status || ""))) {
+    } else if (["completed", "cancelled", "skipped", "no_show"].includes(String(svc.status || ""))) {
       // Defense in depth for the /tech deep-link (Codex P1): a stale or
       // re-tapped URL must never reopen completion on a terminal visit —
       // the endpoint would accept a duplicate submission.
