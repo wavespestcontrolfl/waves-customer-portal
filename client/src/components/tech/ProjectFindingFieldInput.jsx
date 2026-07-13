@@ -10,17 +10,78 @@ function appendDictation(current, chunk) {
   return base.trim() ? `${base.replace(/\s+$/, '')} ${chunk}` : chunk;
 }
 
-const ESTIMATE_INPUT_STYLE = {
-  minHeight: 48,
-  border: '1px solid #D4D4D8',
-  borderRadius: 10,
-  padding: '12px 14px',
-  fontSize: 15,
-  fontWeight: 500,
-  color: '#09090B',
-  background: '#FFFFFF',
-  outline: 'none',
-};
+/**
+ * C3 — the field renderer is shared by four surfaces (admin Jobs page,
+ * CreateProjectModal in both themes, and the typed CompletionPanel), so its
+ * colors come from a resolved theme instead of hardcoded hexes. Light is the
+ * V2 zinc monochrome (the admin default); dark derives from the caller's
+ * palette (the tech-portal CreateProjectModal) so dark hosts no longer get
+ * light inputs dropped into a dark card. Callers that pass nothing get
+ * light — identical treatment for the Jobs page and CompletionPanel.
+ */
+function resolveFieldTheme(appearance, palette) {
+  if (appearance === 'dark' && palette) {
+    return {
+      inputBg: palette.bg,
+      inputBorder: palette.border,
+      ink: palette.text,
+      muted: palette.muted,
+      hairline: palette.border,
+      wash: palette.card,
+      washSelected: palette.card,
+      selectedBg: palette.accent,
+      selectedFg: palette.accentText || '#fff',
+      popoverBg: palette.card,
+      popoverBorder: palette.border,
+      popoverShadow: '0 12px 28px rgba(0, 0, 0, 0.45)',
+    };
+  }
+  return {
+    inputBg: '#FFFFFF',
+    inputBorder: '#D4D4D8',
+    ink: '#09090B',
+    muted: '#71717A',
+    hairline: '#E4E4E7',
+    wash: '#FAFAFA',
+    washSelected: '#F4F4F5',
+    selectedBg: '#09090B',
+    selectedFg: '#FFFFFF',
+    popoverBg: '#FFFFFF',
+    popoverBorder: '#E4E4E7',
+    popoverShadow: '0 12px 28px rgba(9, 9, 11, 0.12)',
+  };
+}
+
+// Same geometry as before (48px touch targets, mobile-first); colors themed.
+function themedInputStyle(T) {
+  return {
+    minHeight: 48,
+    border: `1px solid ${T.inputBorder}`,
+    borderRadius: 10,
+    padding: '12px 14px',
+    fontSize: 15,
+    fontWeight: 500,
+    color: T.ink,
+    background: T.inputBg,
+    outline: 'none',
+  };
+}
+
+function themedPopoverStyle(T) {
+  return {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 'calc(100% + 6px)',
+    zIndex: 30,
+    background: T.popoverBg,
+    border: `1px solid ${T.popoverBorder}`,
+    borderRadius: 12,
+    boxShadow: T.popoverShadow,
+    maxHeight: 220,
+    overflowY: 'auto',
+  };
+}
 
 function formatAddress(parts) {
   return parts?.formatted || [
@@ -75,6 +136,7 @@ function SearchableProductInput({
   products,
   fallbackOptions,
   onProductSelect,
+  T,
 }) {
   const [focused, setFocused] = useState(false);
   const options = useMemo(
@@ -104,24 +166,10 @@ function SearchableProductInput({
         onBlur={() => setTimeout(() => setFocused(false), 120)}
         placeholder={placeholder || 'Search products...'}
         autoComplete="off"
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
+        style={{ ...inputStyle, ...themedInputStyle(T) }}
       />
       {showOptions && (
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            top: 'calc(100% + 6px)',
-            zIndex: 30,
-            background: '#FFFFFF',
-            border: '1px solid #D7E3EA',
-            borderRadius: 12,
-            boxShadow: '0 12px 28px rgba(27, 44, 91, 0.14)',
-            maxHeight: 220,
-            overflowY: 'auto',
-          }}
-        >
+        <div style={themedPopoverStyle(T)}>
           {filtered.map((option, index) => (
             <button
               key={option.value}
@@ -136,16 +184,16 @@ function SearchableProductInput({
                 display: 'block',
                 textAlign: 'left',
                 border: 0,
-                borderBottom: index === filtered.length - 1 ? 'none' : '1px solid #E7E2D7',
-                background: '#FFFFFF',
-                color: '#1B2C5B',
+                borderBottom: index === filtered.length - 1 ? 'none' : `1px solid ${T.hairline}`,
+                background: T.popoverBg,
+                color: T.ink,
                 padding: '11px 14px',
                 cursor: 'pointer',
               }}
             >
-              <span style={{ display: 'block', fontSize: 14, fontWeight: 800 }}>{option.label}</span>
+              <span style={{ display: 'block', fontSize: 14, fontWeight: 500 }}>{option.label}</span>
               {option.meta && (
-                <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: '#6B7280' }}>
+                <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: T.muted }}>
                   {option.meta}
                 </span>
               )}
@@ -173,7 +221,7 @@ function formatMultiSelectValue(values) {
 
 // Always-visible multi-toggle chips (no dropdown) — built for one-thumb
 // field completion. Same comma-joined storage as multi_select.
-function InlineChipsInput({ id, name, value, onChange, options = [] }) {
+function InlineChipsInput({ id, name, value, onChange, options = [], T }) {
   const selected = useMemo(() => parseMultiSelectValue(value), [value]);
   const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
 
@@ -201,9 +249,9 @@ function InlineChipsInput({ id, name, value, onChange, options = [] }) {
               minHeight: 38,
               padding: '8px 14px',
               borderRadius: 999,
-              border: `1px solid ${isSelected ? '#1B2C5B' : '#CFE7F5'}`,
-              background: isSelected ? '#1B2C5B' : '#F8FCFE',
-              color: isSelected ? '#fff' : '#1B2C5B',
+              border: `1px solid ${isSelected ? T.selectedBg : T.inputBorder}`,
+              background: isSelected ? T.selectedBg : T.wash,
+              color: isSelected ? T.selectedFg : T.ink,
               fontSize: 14,
               fontWeight: 500,
               cursor: 'pointer',
@@ -220,7 +268,7 @@ function InlineChipsInput({ id, name, value, onChange, options = [] }) {
 
 // Integer stepper for quick counts (traps checked, captures). Stores the
 // number as a string; empty string = not recorded (distinct from 0).
-function CountStepperInput({ id, name, value, onChange }) {
+function CountStepperInput({ id, name, value, onChange, T }) {
   const current = String(value ?? '').trim();
   const n = current === '' ? null : Number(current);
   const setCount = (next) => {
@@ -231,11 +279,11 @@ function CountStepperInput({ id, name, value, onChange }) {
     width: 48,
     height: 48,
     borderRadius: 10,
-    border: '1px solid #CFE7F5',
-    background: '#F8FCFE',
-    color: '#1B2C5B',
+    border: `1px solid ${T.inputBorder}`,
+    background: T.wash,
+    color: T.ink,
     fontSize: 20,
-    fontWeight: 600,
+    fontWeight: 500,
     cursor: 'pointer',
   };
   return (
@@ -256,14 +304,14 @@ function CountStepperInput({ id, name, value, onChange }) {
           const parsed = Number(raw);
           if (Number.isInteger(parsed) && parsed >= 0) setCount(parsed);
         }}
-        style={{ ...ESTIMATE_INPUT_STYLE, width: 88, textAlign: 'center' }}
+        style={{ ...themedInputStyle(T), width: 88, textAlign: 'center' }}
       />
       <button type="button" aria-label="Increase" style={buttonStyle} onClick={() => setCount(n == null ? 1 : n + 1)}>+</button>
     </div>
   );
 }
 
-function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] }) {
+function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [], T }) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => parseMultiSelectValue(value), [value]);
   const selectedSet = useMemo(() => new Set(selected.map((item) => item.toLowerCase())), [selected]);
@@ -287,7 +335,7 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
         onBlur={() => setTimeout(() => setOpen(false), 120)}
         style={{
           ...inputStyle,
-          ...ESTIMATE_INPUT_STYLE,
+          ...themedInputStyle(T),
           width: '100%',
           minHeight: 48,
           textAlign: 'left',
@@ -298,28 +346,13 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
           cursor: 'pointer',
         }}
       >
-        <span style={{ flex: 1, color: selected.length ? '#1B2C5B' : '#6B7280', lineHeight: 1.35 }}>
+        <span style={{ flex: 1, color: selected.length ? T.ink : T.muted, lineHeight: 1.35 }}>
           {selected.length ? selected.join(', ') : 'Select one or more...'}
         </span>
-        <span style={{ color: '#6B7280', fontSize: 12, fontWeight: 800 }}>Select</span>
+        <span style={{ color: T.muted, fontSize: 12, fontWeight: 500 }}>Select</span>
       </button>
       {open && (
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            top: 'calc(100% + 6px)',
-            zIndex: 30,
-            background: '#FFFFFF',
-            border: '1px solid #D7E3EA',
-            borderRadius: 12,
-            boxShadow: '0 12px 28px rgba(27, 44, 91, 0.14)',
-            maxHeight: 260,
-            overflowY: 'auto',
-            padding: 6,
-          }}
-        >
+        <div style={{ ...themedPopoverStyle(T), maxHeight: 260, padding: 6 }}>
           {options.map((option) => {
             const checked = selectedSet.has(String(option || '').toLowerCase());
             return (
@@ -336,12 +369,12 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
                   textAlign: 'left',
                   border: 0,
                   borderRadius: 8,
-                  background: checked ? '#EAF6FC' : '#FFFFFF',
-                  color: '#1B2C5B',
+                  background: checked ? T.washSelected : T.popoverBg,
+                  color: T.ink,
                   padding: '10px 10px',
                   cursor: 'pointer',
                   fontSize: 14,
-                  fontWeight: checked ? 800 : 600,
+                  fontWeight: checked ? 500 : 400,
                 }}
               >
                 <span
@@ -350,8 +383,8 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
                     width: 16,
                     height: 16,
                     borderRadius: 4,
-                    border: `1px solid ${checked ? '#1B2C5B' : '#CFE7F5'}`,
-                    background: '#FFFFFF',
+                    border: `1px solid ${checked ? T.selectedBg : T.inputBorder}`,
+                    background: T.popoverBg,
                     display: 'inline-flex',
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -364,7 +397,7 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
                         width: 8,
                         height: 8,
                         borderRadius: 2,
-                        background: '#1B2C5B',
+                        background: T.selectedBg,
                         display: 'block',
                       }}
                     />
@@ -382,14 +415,14 @@ function MultiSelectInput({ id, name, value, onChange, inputStyle, options = [] 
               style={{
                 width: '100%',
                 marginTop: 4,
-                border: '1px solid #D7E3EA',
+                border: `1px solid ${T.hairline}`,
                 borderRadius: 8,
-                background: '#FFFFFF',
-                color: '#6B7280',
+                background: T.popoverBg,
+                color: T.muted,
                 padding: '9px 10px',
                 cursor: 'pointer',
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
               }}
             >
               Clear selections
@@ -460,7 +493,7 @@ function noDictationInputProps(field = {}) {
   };
 }
 
-function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyle, field }) {
+function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyle, field, T }) {
   const [focused, setFocused] = useState(false);
   const [results, setResults] = useState([]);
   const query = String(value || '').trim();
@@ -495,24 +528,10 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
         placeholder={placeholder || 'Search customers or type contractor name'}
         autoComplete="off"
         {...noDictationInputProps(field)}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
+        style={{ ...inputStyle, ...themedInputStyle(T) }}
       />
       {focused && results.length > 0 && (
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            top: 'calc(100% + 6px)',
-            zIndex: 30,
-            background: '#FFFFFF',
-            border: '1px solid #D7E3EA',
-            borderRadius: 12,
-            boxShadow: '0 12px 28px rgba(27, 44, 91, 0.14)',
-            maxHeight: 220,
-            overflowY: 'auto',
-          }}
-        >
+        <div style={themedPopoverStyle(T)}>
           {results.map((customer, index) => {
             const label = customerDisplayName(customer) || 'Customer';
             const meta = customerSearchMeta(customer, field);
@@ -530,16 +549,16 @@ function CustomerSearchInput({ id, name, value, onChange, placeholder, inputStyl
                   display: 'block',
                   textAlign: 'left',
                   border: 0,
-                  borderBottom: index === results.length - 1 ? 'none' : '1px solid #E7E2D7',
-                  background: '#FFFFFF',
-                  color: '#1B2C5B',
+                  borderBottom: index === results.length - 1 ? 'none' : `1px solid ${T.hairline}`,
+                  background: T.popoverBg,
+                  color: T.ink,
                   padding: '11px 14px',
                   cursor: 'pointer',
                 }}
               >
-                <span style={{ display: 'block', fontSize: 14, fontWeight: 800 }}>{label}</span>
+                <span style={{ display: 'block', fontSize: 14, fontWeight: 500 }}>{label}</span>
                 {meta && (
-                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: '#6B7280' }}>
+                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: T.muted }}>
                     {meta}
                   </span>
                 )}
@@ -603,7 +622,7 @@ function applyRowChemistry(prevRow, nextRow) {
 // coverage so a combined job (soil barrier + wood treatment) records one
 // FDACS 5E-14.106 entry per product. Rows live in the findings as an array
 // of objects; the primary application stays in the flat top-level keys.
-function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyle, products, palette }) {
+function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyle, products, palette, appearance, T }) {
   const rows = normalizeApplicationRows(value);
   const subFields = Array.isArray(field.fields) ? field.fields : [];
   const indexOffset = Number(field.itemIndexOffset) || 1;
@@ -640,7 +659,7 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
   return (
     <div id={id} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {field.description && (
-        <div style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.5 }}>{field.description}</div>
+        <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.5 }}>{field.description}</div>
       )}
       {rows.map((row, index) => {
         const chem = computePretreatChemistry(rowChemistryInputs(row));
@@ -648,26 +667,26 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
           <div
             key={index}
             style={{
-              border: '1px solid #D7E3EA',
+              border: `1px solid ${T.hairline}`,
               borderRadius: 12,
-              background: '#F8FCFE',
+              background: T.wash,
               padding: '12px 14px',
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: '#1B2C5B' }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>
                 {itemLabel} {index + indexOffset}
               </div>
               <button
                 type="button"
                 onClick={() => removeRow(index)}
                 style={{
-                  border: '1px solid #D7E3EA',
+                  border: `1px solid ${T.hairline}`,
                   borderRadius: 8,
-                  background: '#FFFFFF',
-                  color: '#6B7280',
+                  background: T.popoverBg,
+                  color: T.muted,
                   fontSize: 12,
-                  fontWeight: 800,
+                  fontWeight: 500,
                   padding: '6px 10px',
                   cursor: 'pointer',
                 }}
@@ -684,7 +703,7 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
                   <div key={subField.key}>
                     <label
                       htmlFor={`${id}-${index}-${subField.key}`}
-                      style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#1B2C5B', marginBottom: 6 }}
+                      style={{ display: 'block', fontSize: 12, fontWeight: 500, color: T.ink, marginBottom: 6 }}
                     >
                       {subField.label}
                     </label>
@@ -698,22 +717,23 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
                       products={products}
                       onProductSelect={(product) => handleRowProductSelect(index, product)}
                       palette={palette}
+                      appearance={appearance}
                     />
                     {subField.key === 'product_name' && chem.status === 'not_applicable' && chem.note && (
-                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>{chem.note}</div>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>{chem.note}</div>
                     )}
                     {subField.key === 'concentration_pct' && chem.status === 'ok' && (
-                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>
                         Auto-filled with the label&apos;s standard pre-construction dilution — overtype to record a different labeled rate.
                       </div>
                     )}
                     {subField.key === 'gallons_applied' && chem.status === 'ok' && chem.note && (
-                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>
                         Auto-calculated: {chem.note}.
                       </div>
                     )}
                     {(subField.key === 'concentration_pct' || subField.key === 'gallons_applied') && chem.status === 'not_applicable' && (
-                      <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                      <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>
                         Not applicable for this product — kept blank on the certificate.
                       </div>
                     )}
@@ -728,12 +748,12 @@ function ApplicationsRepeaterInput({ field, id, name, value, onChange, inputStyl
         type="button"
         onClick={addRow}
         style={{
-          border: '1px dashed #CFE7F5',
+          border: `1px dashed ${T.inputBorder}`,
           borderRadius: 10,
-          background: '#FFFFFF',
-          color: '#1B2C5B',
+          background: T.popoverBg,
+          color: T.ink,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 500,
           padding: '12px 14px',
           cursor: 'pointer',
           textAlign: 'center',
@@ -755,7 +775,9 @@ export default function ProjectFindingFieldInput({
   products = [],
   onProductSelect,
   palette,
+  appearance = 'light',
 }) {
+  const T = resolveFieldTheme(appearance, palette);
   if (field.type === 'applications') {
     return (
       <ApplicationsRepeaterInput
@@ -767,6 +789,8 @@ export default function ProjectFindingFieldInput({
         inputStyle={inputStyle}
         products={products}
         palette={palette}
+        appearance={appearance}
+        T={T}
       />
     );
   }
@@ -780,7 +804,7 @@ export default function ProjectFindingFieldInput({
         onChange={onChange}
         onSelect={(parts) => onChange(formatAddress(parts))}
         placeholder={field.placeholder || 'Start typing the treatment address'}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
+        style={{ ...inputStyle, ...themedInputStyle(T) }}
       />
     );
   }
@@ -797,6 +821,7 @@ export default function ProjectFindingFieldInput({
         products={products}
         fallbackOptions={field.options || []}
         onProductSelect={onProductSelect}
+        T={T}
       />
     );
   }
@@ -811,6 +836,7 @@ export default function ProjectFindingFieldInput({
         placeholder={field.placeholder}
         inputStyle={inputStyle}
         field={field}
+        T={T}
       />
     );
   }
@@ -832,7 +858,7 @@ export default function ProjectFindingFieldInput({
         name={name}
         value={value || ''}
         onChange={(event) => onChange(event.target.value)}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE }}
+        style={{ ...inputStyle, ...themedInputStyle(T) }}
       >
         <option value="">Select...</option>
         {!hasCurrentOption && (
@@ -856,6 +882,7 @@ export default function ProjectFindingFieldInput({
         onChange={onChange}
         inputStyle={inputStyle}
         options={field.options || []}
+        T={T}
       />
     );
   }
@@ -868,6 +895,7 @@ export default function ProjectFindingFieldInput({
         value={value || ''}
         onChange={onChange}
         options={field.options || []}
+        T={T}
       />
     );
   }
@@ -879,6 +907,7 @@ export default function ProjectFindingFieldInput({
         name={name}
         value={value}
         onChange={onChange}
+        T={T}
       />
     );
   }
@@ -898,7 +927,7 @@ export default function ProjectFindingFieldInput({
           {...noDictationProps}
           style={{
             ...inputStyle,
-            ...ESTIMATE_INPUT_STYLE,
+            ...themedInputStyle(T),
             resize: 'vertical',
             minHeight: 92,
             ...(suppressDictation ? {} : { paddingRight: 44 }),
@@ -926,7 +955,7 @@ export default function ProjectFindingFieldInput({
         onChange={(event) => onChange(event.target.value)}
         placeholder={field.placeholder || ''}
         {...noDictationProps}
-        style={{ ...inputStyle, ...ESTIMATE_INPUT_STYLE, ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }) }}
+        style={{ ...inputStyle, ...themedInputStyle(T), ...((isDateOrTime || suppressDictation) ? {} : { paddingRight: 44 }) }}
       />
       {!isDateOrTime && !suppressDictation && (
         <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>
