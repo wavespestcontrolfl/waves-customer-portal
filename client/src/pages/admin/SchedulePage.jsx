@@ -7095,6 +7095,8 @@ export function CompletionPanel({
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [generating, setGenerating] = useState(false);
+  // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
+  const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
   // Completion-screen annual-prepay offer (flag-gated, default off): a post-
@@ -7251,7 +7253,8 @@ export function CompletionPanel({
   const [typedAiError, setTypedAiError] = useState("");
   // Customer calls/texts/emails reach the AI prompt only on explicit opt-in
   // — they can carry PII, so the box starts unchecked.
-  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(false);
+  // Default CHECKED (ratified Q13 — the owner is the only tech and uses it).
+  const [typedAiIncludeComms, setTypedAiIncludeComms] = useState(true);
   const [typedAiDraftUsed, setTypedAiDraftUsed] = useState(false);
   // AI photo analysis (optional, never blocks submit): summary is editable,
   // captions attach to the photo entries. Not draft-persisted — photos
@@ -8650,6 +8653,7 @@ export function CompletionPanel({
       customerConcern: concern,
       pestActivityRating: clientPestRating ?? null,
       photoCount: Array.isArray(servicePhotos) ? servicePhotos.length : 0,
+      includeCustomerComms: aiReportIncludeComms,
     };
     const hasReportInput =
       Boolean(payload.serviceNotes) ||
@@ -10859,6 +10863,27 @@ export function CompletionPanel({
                 from the structured visit data (actions, observations, products,
                 concern), for the tech to review/edit before completing. */}
             {!quickComplete && (
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 13,
+                  color: "#71717A",
+                  cursor: "pointer",
+                  marginBottom: 6,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={aiReportIncludeComms}
+                  onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                  style={{ width: 16, height: 16 }}
+                />
+                Include recent customer calls/texts/emails
+              </label>
+            )}
+            {!quickComplete && (
               <button
                 type="button"
                 onClick={async () => {
@@ -12796,6 +12821,27 @@ export function CompletionPanel({
           {/* AI Service Report — drafts customer-facing visit copy into the
               notes box from the structured visit data, for the tech to
               review/edit before completing. */}
+          {!quickComplete && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 13,
+                color: "#71717A",
+                cursor: "pointer",
+                marginTop: 8,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={aiReportIncludeComms}
+                onChange={(e) => setAiReportIncludeComms(e.target.checked)}
+                style={{ width: 16, height: 16 }}
+              />
+              Include recent customer calls/texts/emails
+            </label>
+          )}
           {!quickComplete && (
             <button
               type="button"
