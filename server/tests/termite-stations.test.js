@@ -16,6 +16,7 @@ const {
   STATION_STATUSES,
   sanitizeStationShape,
   validateStationEntriesBody,
+  profileAllowsStationSync,
   upsertStationsForCustomer,
   syncStationsForCompletion,
   loadStationsForPropertyMap,
@@ -247,6 +248,68 @@ test('a resumed completion replaying an id-less create dedupes to the existing s
   expect(state.stations).toHaveLength(1);
   expect(state.checks).toHaveLength(1);
   expect(state.checks[0].station_id).toBe(state.stations[0].id);
+});
+
+test('retire + new pin in the same hole is a REPLACEMENT (new row), and replaying that payload dedupes to the replacement', async () => {
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.5, 0.5) },
+    ],
+  });
+  const body = {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-1',
+    entries: [
+      { id: 'st-1', retire: true },
+      { shape: pin(0.5, 0.5), status: 'ok' }, // same hole, fresh station
+    ],
+  };
+  const first = await syncStationsForCompletion(db, body);
+  expect(first.retired).toBe(1);
+  expect(first.created).toBe(1);
+  expect(first.deduped).toBe(0);
+  const replacement = state.stations.find((row) => row.id !== 'st-1');
+  expect(replacement.station_number).toBe(2);
+  expect(state.checks).toHaveLength(1);
+  expect(state.checks[0].station_id).toBe(replacement.id);
+  // resume-replay of the same body: retire skips (already inactive), the
+  // create dedupes to the replacement — no third station, check unchanged
+  const replay = await syncStationsForCompletion(db, body);
+  expect(replay.created).toBe(0);
+  expect(replay.deduped).toBe(1);
+  expect(state.stations).toHaveLength(2);
+  expect(state.checks).toHaveLength(1);
+  expect(state.checks[0].station_id).toBe(replacement.id);
+});
+
+test('moving a station vacates its old spot for a genuinely new pin in the same payload', async () => {
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.5, 0.5) },
+    ],
+  });
+  const summary = await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [
+      { id: 'st-1', shape: pin(0.7, 0.7) }, // move away
+      { shape: pin(0.5, 0.5) },             // new station where st-1 used to be
+    ],
+  });
+  expect(summary.moved).toBe(1);
+  expect(summary.created).toBe(1);
+  expect(summary.deduped).toBe(0);
+  expect(state.stations).toHaveLength(2);
+});
+
+test('profileAllowsStationSync: primary or companion termite_bait_station only', () => {
+  expect(profileAllowsStationSync({ findingsType: 'termite_bait_station' })).toBe(true);
+  expect(profileAllowsStationSync({
+    findingsType: null,
+    companions: [{ type: 'termite_bait_station', delivery: 'auto_send' }],
+  })).toBe(true);
+  expect(profileAllowsStationSync({ findingsType: 'rodent_bait_station' })).toBe(false);
+  expect(profileAllowsStationSync({ findingsType: null, companions: [] })).toBe(false);
+  expect(profileAllowsStationSync(null)).toBe(false);
 });
 
 test('check rows upsert on replay (same station + record) instead of duplicating', async () => {

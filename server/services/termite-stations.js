@@ -43,6 +43,19 @@ function isStationMapReportEnabled() {
   return !['0', 'false', 'no', 'off'].includes(String(raw).toLowerCase());
 }
 
+// A completion may write stations only when the SERVER-resolved completion
+// profile carries the termite_bait_station typed flow — as the primary
+// findingsType or a declared companion. The profile is authoritative, never
+// the client payload (same doctrine as the companionFindings authorization):
+// a stale or crafted non-termite completion body must not be able to mutate
+// the customer's station registry or mint check rows.
+function profileAllowsStationSync(profile) {
+  if (!profile || typeof profile !== 'object') return false;
+  if (profile.findingsType === 'termite_bait_station') return true;
+  const companions = Array.isArray(profile.companions) ? profile.companions : [];
+  return companions.some((companion) => companion && companion.type === 'termite_bait_station');
+}
+
 // Station marks are point pins: the circle capture shape only, never rects.
 // Returns the sanitized shape to persist, or null when malformed.
 function sanitizeStationShape(shape) {
@@ -188,6 +201,13 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
       await trx('termite_stations')
         .where({ id: station.id, customer_id: customerId })
         .update({ is_active: false, retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+      // vacate the dedupe index — retiring a damaged station and dropping a
+      // NEW pin in the same hole (later in this payload) is a replacement,
+      // not a replay, and must insert a fresh row
+      const retiredKey = positionKey(station.geometry_image);
+      if (retiredKey && activeByPosition.get(retiredKey) === station) {
+        activeByPosition.delete(retiredKey);
+      }
       activeById.delete(String(station.id));
       activeCount -= 1;
       summary.retired += 1;
@@ -210,6 +230,15 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
           continue;
         }
         patch.geometry_image = JSON.stringify(shape);
+        // re-key the dedupe index — a later create at this station's OLD
+        // spot is a new station, and a create at its NEW spot is a replay
+        const oldKey = positionKey(station.geometry_image);
+        if (oldKey && activeByPosition.get(oldKey) === station) {
+          activeByPosition.delete(oldKey);
+        }
+        station.geometry_image = patch.geometry_image;
+        const newKey = positionKey(shape);
+        if (newKey && !activeByPosition.has(newKey)) activeByPosition.set(newKey, station);
       }
       if (entry.label !== undefined) patch.label = normalizeLabel(entry.label);
       if (Object.keys(patch).length) {
@@ -459,6 +488,7 @@ module.exports = {
   MAX_STATION_ENTRIES,
   sanitizeStationShape,
   validateStationEntriesBody,
+  profileAllowsStationSync,
   upsertStationsForCustomer,
   syncStationsForCompletion,
   loadStationsForPropertyMap,

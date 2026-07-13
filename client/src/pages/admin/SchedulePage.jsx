@@ -7849,6 +7849,13 @@ export function CompletionPanel({
   const stationAutoCountsRef = useRef({});
   useEffect(() => {
     if (!stationFeatureOn) return;
+    // Never auto-write counts for a property whose map was never populated —
+    // the tech may be entering counts by hand for unmapped stations. Once
+    // pins exist (preloaded or dropped), the counts follow the map, INCLUDING
+    // down to zero when every station is retired this session: leaving the
+    // pre-retire totals in place would publish counts for stations the
+    // submit payload just removed.
+    if (!stationPreloads.length && !stationNew.length) return;
     // Drift-hidden ("stale") pins that haven't been re-placed are excluded:
     // the report map cannot render them this visit, so counting them as
     // checked would publish typed counts the customer-visible map can't
@@ -7860,7 +7867,6 @@ export function CompletionPanel({
         .map((station) => station.id),
       ...stationNew.map((station) => station.key),
     ];
-    if (!activeKeys.length) return;
     const statusOf = (key) => stationStatuses[key] || "ok";
     const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
     const counts = {
@@ -8789,10 +8795,16 @@ export function CompletionPanel({
         // Bait station edits survive the billing-409 checkout detour like
         // zone marks (statuses/pins are this visit's data — losing them
         // behind a payment detour would silently publish a wrong map).
+        // Preloads ride along too: the submit payload iterates them, so a
+        // restore that submits BEFORE the /property-map refetch resolves
+        // would otherwise drop every existing-station status/move/retire
+        // while still sending the new pins.
         stationNew,
         stationMoves,
         stationStatuses,
         stationRetired,
+        stationPreloads,
+        stationNumberBase,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
@@ -8862,6 +8874,8 @@ export function CompletionPanel({
     stationMoves,
     stationStatuses,
     stationRetired,
+    stationPreloads,
+    stationNumberBase,
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
@@ -8966,6 +8980,18 @@ export function CompletionPanel({
     setStationRetired(
       Array.isArray(savedDraft.stationRetired) ? savedDraft.stationRetired : [],
     );
+    // Bridge until the /property-map refetch resolves — submit iterates
+    // preloads, so restored existing-station edits need their rows present.
+    // The live fetch overwrites these with fresh (drift-resolved) data.
+    setStationPreloads(
+      Array.isArray(savedDraft.stationPreloads)
+        ? savedDraft.stationPreloads.filter((station) => station
+          && typeof station.id === "string" && station.id)
+        : [],
+    );
+    if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
+      setStationNumberBase(Number(savedDraft.stationNumberBase));
+    }
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
     );

@@ -4336,21 +4336,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Termite bait station sync (station-map-v1): registry writes (new pins /
     // moves / retires) + this visit's per-station check rows. Post-commit +
     // fail-soft for the same reason as zones — station pins are report
-    // presentation data and must never abort a committed completion. The
-    // service no-ops on an empty payload, so non-termite completions are
-    // untouched.
-    try {
-      const stationSync = await TermiteStations.syncStationsForCompletion(db, {
-        customerId: svc.customer_id,
-        serviceRecordId: record.id,
-        entries: Array.isArray(termiteStations) ? termiteStations : [],
-      });
-      if (stationSync.created || stationSync.moved || stationSync.retired
-        || stationSync.checksApplied || stationSync.skipped.length) {
-        logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+    // presentation data and must never abort a committed completion.
+    // AUTHORIZATION: the server-resolved profile must carry the
+    // termite_bait_station flow (primary or companion) — a stale/crafted
+    // non-termite body must not mutate the registry. Incomplete visits skip
+    // the sync entirely (same rule as companion findings): recording the
+    // zero-tap default "ok" checks for a visit that didn't happen would
+    // corrupt the station history future reports and trends read.
+    if (Array.isArray(termiteStations) && termiteStations.length) {
+      if (isIncompleteVisit || !TermiteStations.profileAllowsStationSync(completionProfile)) {
+        logger.warn('[completion] termite stations payload skipped', {
+          serviceId: svc.id,
+          incomplete: isIncompleteVisit,
+          findingsType: completionProfile?.findingsType || null,
+        });
+      } else {
+        try {
+          const stationSync = await TermiteStations.syncStationsForCompletion(db, {
+            customerId: svc.customer_id,
+            serviceRecordId: record.id,
+            entries: termiteStations,
+          });
+          if (stationSync.created || stationSync.moved || stationSync.retired
+            || stationSync.checksApplied || stationSync.deduped || stationSync.skipped.length) {
+            logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+          }
+        } catch (stationErr) {
+          logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
+        }
       }
-    } catch (stationErr) {
-      logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
     }
 
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
