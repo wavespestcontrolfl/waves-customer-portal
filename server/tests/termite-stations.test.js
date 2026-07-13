@@ -18,6 +18,7 @@ const {
   sanitizeStationShape,
   validateStationEntriesBody,
   profileAllowsStationSync,
+  stationProgramForProfile,
   stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,
@@ -29,7 +30,13 @@ const {
 // (where/orderBy/insert.returning/insert.onConflict.merge/update, plus a
 // passthrough transaction), recording writes for assertions.
 function makeFakeDb({ stations = [], checks = [] } = {}) {
-  const state = { stations: [...stations], checks: [...checks], rawCalls: [] };
+  // seeds default to the termite program — the service's program-scoped
+  // where({ program }) must still see legacy-shaped seed rows
+  const state = {
+    stations: stations.map((row) => ({ program: 'termite', ...row })),
+    checks: [...checks],
+    rawCalls: [],
+  };
   let nextId = 0;
   const rowsFor = (table) => {
     if (table === 'termite_stations') return state.stations;
@@ -241,7 +248,7 @@ test('geometry writes (creates AND moves) take the per-customer advisory lock; s
   });
   expect(state.rawCalls).toHaveLength(1);
   expect(state.rawCalls[0].sql).toMatch(/pg_advisory_xact_lock/);
-  expect(state.rawCalls[0].bindings).toEqual([`termite_stations:${CUSTOMER}`]);
+  expect(state.rawCalls[0].bindings).toEqual([`termite_stations:${CUSTOMER}:termite`]);
   // a move-only save relies on the occupancy snapshot — it must serialize too
   await upsertStationsForCustomer(db, {
     customerId: CUSTOMER,
@@ -382,15 +389,92 @@ test('moving a station vacates its old spot for a genuinely new pin in the same 
   expect(state.stations).toHaveLength(2);
 });
 
-test('profileAllowsStationSync: primary or companion termite_bait_station only', () => {
-  expect(profileAllowsStationSync({ findingsType: 'termite_bait_station' })).toBe(true);
-  expect(profileAllowsStationSync({
+test('stationProgramForProfile: termite and rodent typed flows resolve their program, others none', () => {
+  expect(stationProgramForProfile({ findingsType: 'termite_bait_station' })).toBe('termite');
+  expect(stationProgramForProfile({ findingsType: 'rodent_bait_station' })).toBe('rodent');
+  expect(stationProgramForProfile({
     findingsType: null,
     companions: [{ type: 'termite_bait_station', delivery: 'auto_send' }],
-  })).toBe(true);
-  expect(profileAllowsStationSync({ findingsType: 'rodent_bait_station' })).toBe(false);
+  })).toBe('termite');
+  expect(stationProgramForProfile({
+    findingsType: null,
+    companions: [{ type: 'rodent_bait_station', delivery: 'auto_send' }],
+  })).toBe('rodent');
+  expect(stationProgramForProfile({ findingsType: 'pest_inspection' })).toBeNull();
+  expect(stationProgramForProfile(null)).toBeNull();
+  expect(profileAllowsStationSync({ findingsType: 'rodent_bait_station' })).toBe(true);
   expect(profileAllowsStationSync({ findingsType: null, companions: [] })).toBe(false);
-  expect(profileAllowsStationSync(null)).toBe(false);
+});
+
+test('programs are isolated: numbering, cap, and writes are per (customer, program)', async () => {
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-t1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.1, 0.1) },
+      { id: 'st-t2', customer_id: CUSTOMER, station_number: 2, is_active: true, geometry_image: pin(0.2, 0.2) },
+      { id: 'st-r1', customer_id: CUSTOMER, station_number: 1, is_active: true, program: 'rodent', geometry_image: pin(0.8, 0.8) },
+    ],
+  });
+  // a rodent create numbers from the RODENT max (2), not the termite max (3)
+  const summary = await syncStationsForCompletion(db, {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-r1',
+    entries: [
+      { id: 'st-r1', status: 'ok' },
+      { shape: pin(0.6, 0.6), status: 'activity' },
+    ],
+    program: 'rodent',
+  });
+  expect(summary.created).toBe(1);
+  expect(summary.checksApplied).toBe(2);
+  const rodentRows = state.stations.filter((row) => row.program === 'rodent');
+  expect(rodentRows.map((row) => row.station_number).sort((a, b) => a - b)).toEqual([1, 2]);
+  // a rodent entry can never touch a termite station id
+  const crossProgram = await syncStationsForCompletion(db, {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-r2',
+    entries: [{ id: 'st-t1', retire: true }],
+    program: 'rodent',
+  });
+  expect(crossProgram.retired).toBe(0);
+  expect(crossProgram.skipped).toContain('retire:st-t1');
+  expect(state.stations.find((row) => row.id === 'st-t1').is_active).toBe(true);
+});
+
+test('the report map picks the program from the visit type and never co-renders the other program', () => {
+  const rows = [
+    stationRow('st-t1', 1, pin(0.2, 0.3), { program: 'termite' }),
+    stationRow('st-r1', 1, pin(0.7, 0.6), { program: 'rodent' }),
+  ];
+  const rodentContext = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [{ station_id: 'st-r1', status: 'activity' }],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(rodentContext.available).toBe(true);
+  expect(rodentContext.program).toBe('rodent');
+  expect(rodentContext.stations).toHaveLength(1);
+  expect(rodentContext.stations[0].id).toBe('st-r1');
+  const termiteContext = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [{ station_id: 'st-t1', status: 'ok' }],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(termiteContext.program).toBe('termite');
+  expect(termiteContext.stations.map((s) => s.id)).toEqual(['st-t1']);
+  // a rodent-typed visit with only termite rows has no map
+  expect(buildStationMapReportContext({
+    stationRows: [stationRow('st-t1', 1, pin(0.2, 0.3), { program: 'termite' })],
+    checkRows: [],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_bait_station'],
+  })).toMatchObject({ available: false, reason: 'no_stations' });
 });
 
 test('check rows upsert on replay (same station + record) instead of duplicating', async () => {
