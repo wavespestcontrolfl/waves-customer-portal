@@ -658,8 +658,22 @@ const StripeService = {
       try {
         await stripe.paymentMethods.detach(card.stripe_payment_method_id);
       } catch (err) {
-        // If already detached in Stripe, just remove from DB
-        logger.warn(`[stripe] Detach warning (proceeding with DB removal): ${err.message}`);
+        // Only proceed when the PM is GENUINELY no longer attached (Codex
+        // #2706 r2): swallowing a transient detach failure used to delete
+        // the local row while the PM stayed attached at Stripe, and the
+        // requireAttached backstop then treats "attached" as "customer
+        // kept it" — resurrecting a removed pending bank on verification.
+        // Verify, and fail closed when we can't.
+        let stillAttached = true;
+        try {
+          const pmCheck = await stripe.paymentMethods.retrieve(card.stripe_payment_method_id);
+          stillAttached = !!pmCheck.customer;
+        } catch { /* can't verify — fail closed */ }
+        if (stillAttached) {
+          logger.error(`[stripe] Detach failed and PM still attached — refusing removal: ${err.message}`);
+          throw new Error('Could not remove the payment method — please try again.');
+        }
+        logger.warn(`[stripe] Detach warning (PM already detached, proceeding with DB removal): ${err.message}`);
       }
       await db('payment_methods').where({ id: cardId }).del();
       await this._disableAutopayIfMethodRemoved(customerId, card);

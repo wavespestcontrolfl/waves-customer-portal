@@ -54,7 +54,7 @@ jest.mock('../services/payment-method-consents', () => ({
 const mockEnroll = jest.fn(async () => ({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' }));
 jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: (...a) => mockEnroll(...a) }));
 
-const state = { tables: {} };
+const state = { tables: {}, updates: [] };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const rows = () => state.tables[table] || [];
@@ -65,7 +65,7 @@ jest.mock('../models/db', () => {
     q.orderBy = jest.fn(() => q);
     q.select = jest.fn(() => q);
     q.first = jest.fn(async () => rows()[0] || null);
-    q.update = jest.fn(async () => 1);
+    q.update = jest.fn(async (patch) => { state.updates.push({ table, patch }); return 1; });
     q.then = (ok, bad) => Promise.resolve(rows()).then(ok, bad);
     return q;
   });
@@ -101,7 +101,9 @@ async function invoke(handler, { body = {}, params = {}, customerId = 'cust-1' }
 beforeEach(() => {
   jest.clearAllMocks();
   mockIsEnabled.mockReturnValue(false);
+  mockHasConsentFor.mockResolvedValue(false);
   state.tables = {};
+  state.updates = [];
 });
 
 describe('consent v10 (ACH revocation contact aligned to billing@)', () => {
@@ -202,6 +204,22 @@ describe('POST /cards — micro-deposit deferred bank save', () => {
     expect(statusCode).toBe(409);
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
     expect(mockRecordConsent).not.toHaveBeenCalled();
+  });
+
+  test('returned from hosted verification: succeeded SI marks the pending row VERIFIED before enrolling (Codex r2)', async () => {
+    mockIsEnabled.mockReturnValue(true);
+    mockRetrieveSetupIntent.mockResolvedValue({
+      id: 'si_md',
+      status: 'succeeded',
+      payment_method: 'pm_bank_1',
+    });
+    state.tables.payment_methods = [pendingRow];
+    const { statusCode } = await invoke(handler(), { body: { setupIntentId: 'si_md' } });
+    expect(statusCode).toBe(200);
+    // The customer beat the webhook back to the portal — without this the
+    // enrollment runs against a row the autopay routes still refuse.
+    expect(state.updates).toContainEqual({ table: 'payment_methods', patch: { ach_status: 'verified' } });
+    expect(mockEnroll).toHaveBeenCalled();
   });
 
   test('ownership mismatch on the pending row → 409, nothing recorded', async () => {

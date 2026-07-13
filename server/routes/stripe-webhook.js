@@ -2518,7 +2518,29 @@ async function handleSetupIntentSucceeded(setupIntent) {
       if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {
         await db('payment_methods').where({ id: saved.id }).update({ ach_status: 'verified' });
       }
-      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+      // A freshly VERIFIED bank clears a customer-level needs_verification
+      // block (Codex r2): that state asks for exactly this proof, and
+      // without clearing it the replacement bank stays unusable
+      // (enrollConsentedMethod refuses ACH targets while the customer flag
+      // is non-active). 'suspended' is deliberately NOT cleared here — it
+      // was earned by repeated failed debits and keeps its organic exit (a
+      // successful ACH payment clears it in the payment_intent.succeeded
+      // handler). The failure LOG stays authoritative for escalation.
+      if (saved.method_type === 'ach') {
+        await db('customers')
+          .where({ id: wavesCustomerId, ach_status: 'needs_verification' })
+          .update({ ach_status: 'active' });
+      }
+      // Ensure an ENROLLMENT-SCOPED consent exists (Codex r2): the old
+      // hasConsentFor guard suppressed the portal consent whenever ANY row
+      // existed — a hold-scoped-only history (estimate_card_hold) passed
+      // it, so the consent the customer just granted in the locked portal
+      // modal was never written and enrollment silently skipped. Recording
+      // is still suppressed when an enrollment-scoped consent already
+      // exists (backstop re-runs stay deduped), and enrollment stays
+      // consent-gated: the row below is the authority, never SI metadata
+      // (Codex #2507 P1).
+      if (!(await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId))) {
         await ConsentService.recordConsent({
           customerId: wavesCustomerId,
           paymentMethodId: saved.id,
@@ -2528,23 +2550,18 @@ async function handleSetupIntentSucceeded(setupIntent) {
         });
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
-      // Consent-gated enrollment (Codex #2507 P1: the consent row is the
-      // authority, never PI/SI metadata alone) — enrollment-SCOPED, so a
-      // hold-scoped row can't satisfy it.
-      if (await ConsentService.hasEnrollmentScopedConsent(wavesCustomerId, stripePmId)) {
-        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-        const enrollment = await enrollConsentedMethod({
-          customerId: wavesCustomerId,
-          paymentMethodId: saved.id,
-          source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
-          details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
-        });
-        if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
-          // No rethrow: a webhook retry can't change a refused bank state
-          // (ach_blocked); the method stays saved and the customer can
-          // enable Auto Pay from the portal once the state clears.
-          logger.warn(`[stripe-webhook] portal-add-method enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId}`);
-        }
+      const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+      const enrollment = await enrollConsentedMethod({
+        customerId: wavesCustomerId,
+        paymentMethodId: saved.id,
+        source: saved.method_type === 'ach' ? 'portal_add_bank' : 'portal_add_card',
+        details: { via: 'portal_add_method_webhook', setup_intent_id: setupIntent.id },
+      });
+      if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+        // No rethrow: a webhook retry can't change a refused bank state
+        // (ach_blocked); the method stays saved and the customer can
+        // enable Auto Pay from the portal once the state clears.
+        logger.warn(`[stripe-webhook] portal-add-method enrollment refused (${enrollment.reason}) for customer ${wavesCustomerId} pm ${stripePmId}`);
       }
       logger.info(`[stripe-webhook] portal-add-method completed for customer ${wavesCustomerId}: pm ${stripePmId}`);
     } catch (err) {

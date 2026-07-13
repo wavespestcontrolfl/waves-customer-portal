@@ -52,19 +52,19 @@ jest.mock('../services/payment-method-consents', () => ({
 const mockEnroll = jest.fn(async () => ({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' }));
 jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: (...a) => mockEnroll(...a) }));
 
-const state = { paymentMethodRow: null };
-const mockPmUpdate = jest.fn(async () => 1);
+const state = { paymentMethodRow: null, updates: [] };
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
-    const q = {};
-    q.where = jest.fn(() => q);
+    const q = { _wheres: [] };
+    q.where = jest.fn((...a) => { q._wheres.push(a[0]); return q; });
     q.first = jest.fn(async () => (table === 'payment_methods' ? state.paymentMethodRow : null));
-    q.update = (...a) => mockPmUpdate(...a);
+    q.update = jest.fn(async (patch) => { state.updates.push({ table, wheres: q._wheres, patch }); return 1; });
     return q;
   });
   db.transaction = jest.fn();
   return db;
 });
+const updatesFor = (table) => state.updates.filter((u) => u.table === table);
 
 const { _handleSetupIntentSucceeded: handleSetupIntentSucceeded } = require('../routes/stripe-webhook');
 
@@ -80,6 +80,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockHasConsentFor.mockResolvedValue(true);
   mockHasEnrollmentScopedConsent.mockResolvedValue(true);
+  mockEnroll.mockResolvedValue({ enrolled: true, methodId: 'pm-row-1', inChargeMethodId: 'pm-row-1' });
+  state.updates = [];
   state.paymentMethodRow = {
     id: 'pm-row-1',
     customer_id: 'cust-1',
@@ -90,32 +92,43 @@ beforeEach(() => {
 
 test('pending bank verifies: ach_status → verified, consent-gated enrollment fires with the bank source', async () => {
   await handleSetupIntentSucceeded(setupIntent());
-  expect(mockPmUpdate).toHaveBeenCalledWith({ ach_status: 'verified' });
+  expect(updatesFor('payment_methods').map((u) => u.patch)).toContainEqual({ ach_status: 'verified' });
   expect(mockLinkPaymentMethodId).toHaveBeenCalledWith('pm_bank_1', 'pm-row-1');
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({
     customerId: 'cust-1',
     paymentMethodId: 'pm-row-1',
     source: 'portal_add_bank',
   }));
-  // Consent already recorded by the deferred save — no duplicate row.
+  // Enrollment-scoped consent already recorded by the deferred save — no
+  // duplicate row.
   expect(mockRecordConsent).not.toHaveBeenCalled();
 });
 
-test('no enrollment-scoped consent → verification recorded but NO enrollment (metadata is never authority)', async () => {
-  mockHasConsentFor.mockResolvedValue(false);
+test('bank verification clears a customer-level needs_verification block ONLY (Codex r2)', async () => {
+  await handleSetupIntentSucceeded(setupIntent());
+  const customerUpdates = updatesFor('customers');
+  expect(customerUpdates).toHaveLength(1);
+  expect(customerUpdates[0].patch).toEqual({ ach_status: 'active' });
+  // Scoped to needs_verification — a suspended customer (repeated failed
+  // debits) is NOT silently unblocked by adding a new account; that state
+  // keeps its organic exit (a successful ACH payment).
+  expect(customerUpdates[0].wheres).toContainEqual(expect.objectContaining({ ach_status: 'needs_verification' }));
+});
+
+test('hold-scoped-only history: the portal consent the customer just granted is recorded, then enrollment proceeds (Codex r2)', async () => {
+  // hasConsentFor would be true (a hold row exists) — the old guard
+  // suppressed the portal consent and enrollment silently skipped.
+  mockHasConsentFor.mockResolvedValue(true);
   mockHasEnrollmentScopedConsent.mockResolvedValue(false);
   await handleSetupIntentSucceeded(setupIntent());
-  expect(mockPmUpdate).toHaveBeenCalledWith({ ach_status: 'verified' });
-  // Backstop consent (the portal modal always showed the locked copy
-  // before confirm), but enrollment still requires the SCOPED check.
   expect(mockRecordConsent).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_bank', methodType: 'ach' }));
-  expect(mockEnroll).not.toHaveBeenCalled();
+  expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_bank' }));
 });
 
 test('ownership mismatch skips everything', async () => {
   state.paymentMethodRow = { ...state.paymentMethodRow, customer_id: 'cust-OTHER' };
   await handleSetupIntentSucceeded(setupIntent());
-  expect(mockPmUpdate).not.toHaveBeenCalled();
+  expect(state.updates).toHaveLength(0);
   expect(mockRecordConsent).not.toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
 });
@@ -124,8 +137,8 @@ test('re-delivery for a completed CARD save is a benign no-op re-run (already_en
   state.paymentMethodRow = { id: 'pm-row-2', customer_id: 'cust-1', method_type: 'card', ach_status: null };
   mockEnroll.mockResolvedValue({ enrolled: false, reason: 'already_enrolled', methodId: 'pm-row-2' });
   await handleSetupIntentSucceeded(setupIntent({ payment_method: 'pm_card_1' }));
-  // No bank verification update for a card row.
-  expect(mockPmUpdate).not.toHaveBeenCalled();
+  // No bank verification or customer ACH-state writes for a card row.
+  expect(state.updates).toHaveLength(0);
   expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
 });
 
@@ -135,7 +148,7 @@ test('browser died before POST /cards: webhook saves the method itself (attached
     state.paymentMethodRow = { id: 'pm-row-3', customer_id: 'cust-1', method_type: 'ach', ach_status: 'verified' };
     return state.paymentMethodRow;
   });
-  mockHasConsentFor.mockResolvedValue(false);
+  mockHasEnrollmentScopedConsent.mockResolvedValueOnce(false);
   await handleSetupIntentSucceeded(setupIntent());
   expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_bank_1', {
     enableAutopay: false,
@@ -154,5 +167,5 @@ test('a REMOVED pending method is never resurrected: detached PM skips the backs
   await expect(handleSetupIntentSucceeded(setupIntent())).resolves.toBeUndefined();
   expect(mockRecordConsent).not.toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
-  expect(mockPmUpdate).not.toHaveBeenCalled();
+  expect(state.updates).toHaveLength(0);
 });

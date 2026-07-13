@@ -312,6 +312,16 @@ router.post('/cards', async (req, res, next) => {
       });
     }
 
+    // Returned-from-hosted-verification (Codex #2706 r2): the SetupIntent
+    // is succeeded, so a micro-deposit row still marked pending is now
+    // VERIFIED — the customer beat the setup_intent.succeeded webhook back
+    // to the portal. Without this mirror of the webhook's update, the
+    // enrollment below runs against a row the autopay routes still refuse.
+    if (card.method_type === 'ach' && card.ach_status !== 'verified') {
+      await db('payment_methods').where({ id: card.id }).update({ ach_status: 'verified' });
+      card.ach_status = 'verified';
+    }
+
     // Record consent — the portal add-card modal shows SaveCardConsent
     // as locked + checked because saving is the whole point of the
     // modal. Arriving here means the customer saw the copy. Enrollment is
