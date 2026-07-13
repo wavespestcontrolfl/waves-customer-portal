@@ -319,6 +319,47 @@ describe('scrubPans — round 7/8 hardening', () => {
   });
 });
 
+describe('scrubPans — round 9 hardening', () => {
+  const W9 = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const say9 = (digits) => digits.split('').map((d) => W9[Number(d)]).join(' ');
+
+  it('a CVV/expiry read into the NEXT diarized segment is absorbed with the PAN (round-9)', () => {
+    const r = scrubSegments([{ text: '4242 4242 4242 4242' }, { text: '123' }]);
+    expect(r.segments[0].text).toBe('[card ending 4242] [code removed]');
+    expect(r.segments[1].text).toBe('');
+    expect(r.count).toBe(1);
+  });
+
+  it('an unrelated digit segment after a masked line is NOT consumed', () => {
+    const r = scrubSegments([{ text: 'cvv is 123' }, { text: 'my address is 456 Oak' }]);
+    expect(r.segments[0].text).toBe('cvv is [code removed]');
+    expect(r.segments[1].text).toBe('my address is 456 Oak');
+  });
+
+  it('comma-spelled CVV acronyms match (round-9)', () => {
+    expect(scrubPans('C, V, V is 123')).toBe('C, V, V is [code removed]');
+    expect(scrubPans('C, V, C, is 4 5 6')).toBe('C, V, C, is [code removed]');
+  });
+
+  it('a current-year but already-expired month is not a live expiry — phones keep winning (round-9)', () => {
+    const now = new Date();
+    const mm = now.getMonth() + 1;
+    const yy = String(now.getFullYear() % 100).padStart(2, '0');
+    if (mm > 1) {
+      const pastMm = String(mm - 1).padStart(2, '0');
+      const phonesWithStaleTail = `${say9('2222000000200202')} ${say9(pastMm)} ${say9(yy)}`;
+      expect(scrubPans(phonesWithStaleTail)).toBe(phonesWithStaleTail);
+    }
+    if (mm < 12) {
+      const futureMm = String(mm + 1).padStart(2, '0');
+      const cardWithLiveTail = `${say9('2222000000200202')} ${say9(futureMm)} ${say9(yy)}`;
+      const r = scrubPansDetailed(cardWithLiveTail);
+      expect(r.count).toBe(1);
+      expect(r.text).toBe('[card ending 0202] [code removed]');
+    }
+  });
+});
+
 describe('scrubPans — safety', () => {
   it('passes non-strings and empties through untouched', () => {
     expect(scrubPansDetailed(null)).toEqual({ text: null, count: 0 });

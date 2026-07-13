@@ -295,8 +295,16 @@ function isStrictFutureExpiryTail(tail) {
   const mm = Number(tail.slice(0, 2));
   if (!(mm >= 1 && mm <= 12)) return false;
   const yy = Number(tail.slice(2, 4));
-  const nowYY = new Date().getFullYear() % 100;
+  const now = new Date();
+  const nowYY = now.getFullYear() % 100;
   const ahead = (yy - nowYY + 100) % 100;
+  if (ahead === 0) {
+    // Current year: an already-expired month is NOT a live card expiry —
+    // a dictated phone tail like "01 26" after January 2026 keeps losing
+    // to the phone decomposition (round-9 P2). Cards stay valid through
+    // the end of their expiry month.
+    return mm >= now.getMonth() + 1;
+  }
   return ahead <= 15; // cards expire ≤ ~10y out; 15 leaves slack, past years fail
 }
 
@@ -365,34 +373,54 @@ function scrubSpokenRun(run) {
 function scrubSegments(segments) {
   if (!Array.isArray(segments)) return { segments, count: 0 };
   let count = 0;
-  const out = segments.map((seg) => {
-    if (!seg || typeof seg.text !== 'string') return seg;
-    const s = scrubPansDetailed(seg.text);
-    count += s.count;
-    return s.count ? { ...seg, text: s.text } : seg;
-  });
-  // Sliding multi-segment window (round-7/8 P1): a readback split one
-  // 4-digit chunk per segment never reaches the 13-digit floor in any
-  // PAIR — keep extending the joined window (bounded at 8 hops) until a
-  // scrub hits, then mask in the first segment and empty the rest of the
-  // window. Windows only START at a segment that carries digit content.
+  const out = segments.map((seg) => (seg && typeof seg.text === 'string' ? { ...seg } : seg));
   const DIGITISH_RE = /\d|\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i;
+  // A follow segment that is NOTHING but 1–4 short digit groups (numeric or
+  // spoken) — the shape of an expiry/CVV read into the next diarized chunk.
+  const CODE_TAIL_SEG_RE = /^[\s,./:-]*(?:(?:\d{1,4}|zero|oh|one|two|three|four|five|six|seven|eight|nine)[\s,./:-]*){1,4}$/i;
+  // Window pass over ORIGINAL segment text (round-9 P1: per-segment
+  // pre-scrubbing hid a PAN completed in one segment from its CVV/expiry in
+  // the next — the joined re-scrub saw only the mask and left the code
+  // raw). Windows start at any digit-bearing segment and grow (bounded)
+  // until a scrub hits; after a hit, short code-shaped follow segments are
+  // pulled in while doing so actually changes the rendered tail (i.e. the
+  // absorb rule swallowed them) — an unrelated digit segment renders
+  // verbatim and stops the growth. The hit masks in the window's first
+  // segment and empties the rest.
   for (let i = 0; i < out.length; i += 1) {
     const a = out[i];
     if (!a || typeof a.text !== 'string' || !DIGITISH_RE.test(a.text)) continue;
     let joined = a.text;
-    for (let j = i + 1; j < out.length && j - i <= 8; j += 1) {
-      const b = out[j];
-      if (!b || typeof b.text !== 'string') break;
-      joined = `${joined}\n${b.text}`;
+    let hit = null;
+    for (let j = i; j < out.length && j - i <= 8; j += 1) {
+      if (j > i) {
+        const b = out[j];
+        if (!b || typeof b.text !== 'string') break;
+        joined = `${joined}\n${b.text}`;
+      }
       const r = scrubPansDetailed(joined);
       if (r.count > 0) {
-        out[i] = { ...a, text: r.text };
-        for (let k = i + 1; k <= j; k += 1) out[k] = { ...out[k], text: '' };
-        count += r.count;
-        i = j;
+        hit = { j, r };
+        for (let k = j + 1; k < out.length && k - i <= 10; k += 1) {
+          const c = out[k];
+          if (!c || typeof c.text !== 'string' || !CODE_TAIL_SEG_RE.test(c.text)) break;
+          joined = `${joined}\n${c.text}`;
+          const wider = scrubPansDetailed(joined);
+          const verbatim = `${hit.r.text}\n${c.text}`;
+          if (wider.count >= hit.r.count && wider.text !== verbatim) {
+            hit = { j: k, r: wider };
+          } else {
+            break;
+          }
+        }
         break;
       }
+    }
+    if (hit) {
+      out[i] = { ...out[i], text: hit.r.text };
+      for (let k = i + 1; k <= hit.j; k += 1) out[k] = { ...out[k], text: '' };
+      count += hit.r.count;
+      i = hit.j;
     }
   }
   return { segments: out, count };
@@ -402,7 +430,7 @@ function scrubSegments(segments) {
 // Bare 3–4 digit runs stay untouched — context is what disambiguates.
 // Providers spell the acronym out ("C V V", "C.V.V.") — spaced/punctuated
 // forms must match or the keyword check never runs (round-7 P1).
-const CVV_ACRONYM = '(?:c[\\s.]{0,2}v[\\s.]{0,2}v2?|c[\\s.]{0,2}v[\\s.]{0,2}c|c[\\s.]{0,2}s[\\s.]{0,2}c)';
+const CVV_ACRONYM = '(?:c[\\s,.]{0,3}v[\\s,.]{0,3}v2?|c[\\s,.]{0,3}v[\\s,.]{0,3}c|c[\\s,.]{0,3}s[\\s,.]{0,3}c)';
 const CVV_KEYWORD = `(?:${CVV_ACRONYM}|card\\s+(?:security\\s+)?code|verification\\s+(?:code|number))`;
 // Bare "security code" is context-gated (round-7/8 P2): in a pest-service
 // call it usually means a GATE/lockbox/access code — an artifact the call
@@ -411,7 +439,7 @@ const CVV_KEYWORD = `(?:${CVV_ACRONYM}|card\\s+(?:security\\s+)?code|verificatio
 // zero card data. It only scrubs when card wording appears nearby AND no
 // access wording does; "card security code" stays in the always-on set.
 const BARE_SECURITY_CODE = 'security\\s+code';
-const CARD_CONTEXT_RE = /\b(?:card|visa|master\s*card|amex|american\s+express|discover|debit|credit|c[\s.]{0,2}v[\s.]{0,2}[vc]|expir)/i;
+const CARD_CONTEXT_RE = /\b(?:card|visa|master\s*card|amex|american\s+express|discover|debit|credit|c[\s,.]{0,3}v[\s,.]{0,3}[vc]|expir)/i;
 const ACCESS_CONTEXT_RE = /\b(?:gate|door|garage|lock\s*box|community|entry|access|alarm|building|call\s*box|keypad|pool|fence|hoa)\b/i;
 // Digit separators mirror the PAN path — providers punctuate pauses, so
 // "cvv is 1, 2, 3" must match as readily as "cvv 123" (round-3 P1).

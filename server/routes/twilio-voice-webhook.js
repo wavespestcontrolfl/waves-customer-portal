@@ -1011,6 +1011,14 @@ router.post('/recording-status', async (req, res) => {
           },
           { source: 'recording_status_post_quarantine' },
         ).catch((e) => logger.error(`[recording-status] post-quarantine recording delete failed: ${e.message}`));
+        // The masked transcript is still a REAL transcript — extraction /
+        // lead / appointment processing must run for this call (Codex #2676
+        // round-9 P1). The auto-process block below keys on matchedSid, and
+        // the 5-minute sweep skips null-recording_url rows, so without this
+        // the quarantined call would never be processed at all.
+        // processRecording handles the null recording_url by falling back to
+        // the stored (masked) transcription.
+        matchedSid = quarantinedMatch.twilio_call_sid;
       } else if (!ParentCallSid) {
         const primaryCallSid = CallSid;
         try {

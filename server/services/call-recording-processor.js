@@ -259,6 +259,36 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
   return { quarantined: true, twilioDeleted, alreadyQuarantined };
 }
 
+// PAN-quarantine stamps are DURABLE (Codex #2676 round-9 P1): the recovery
+// sweep and the recording-status webhook key off
+// transcription_metadata.pan_detected, so any later metadata overwrite
+// (fallback provenance, the implausible-rejection sentinel) must carry the
+// stamps forward — a provider-return quarantine followed by a Twilio
+// fallback write would otherwise erase the stamp and let a delayed
+// callback reattach the card audio. Read-merge just before the write; on a
+// read failure the metadata is written as-is (quarantine re-runs are
+// idempotent and re-stamp on the next touch).
+async function withPanStamps(callId, metadata) {
+  const out = { ...(metadata || {}) };
+  try {
+    const row = await db('call_log').where({ id: callId }).first('transcription_metadata');
+    const raw = row?.transcription_metadata;
+    let prior = {};
+    try {
+      prior = typeof raw === 'string' ? JSON.parse(raw) : (raw && typeof raw === 'object' ? raw : {});
+    } catch { prior = {}; }
+    if (prior.pan_detected === true) {
+      out.pan_detected = true;
+      if (prior.recording_quarantined === true) out.recording_quarantined = true;
+      if (prior.quarantine_source && !out.quarantine_source) out.quarantine_source = prior.quarantine_source;
+      if (prior.pan_count && !out.pan_count) out.pan_count = prior.pan_count;
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] pan-stamp merge failed for call ${callId}: ${err.message}`);
+  }
+  return out;
+}
+
 // Spoken-content length only: strip diarization speaker labels and collapse
 // whitespace so a valid short diarized call's formatting overhead ("Agent:",
 // "Caller:", newlines) can't push it over the ceiling. Labels first (line-
@@ -3890,7 +3920,7 @@ const CallRecordingProcessor = {
           transcription_status: 'completed',
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: transcriptionProvenance.model,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         };
         if (result.structuredSegments || contactPassTranscript) {
@@ -3946,7 +3976,7 @@ const CallRecordingProcessor = {
           ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         });
         if (fallbackScrub.count + structuredScrub.count > 0) {
@@ -3973,7 +4003,7 @@ const CallRecordingProcessor = {
           ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
-          transcription_metadata: JSON.stringify(transcriptionProvenance.metadata),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, transcriptionProvenance.metadata)),
           updated_at: new Date(),
         });
         if (cachedScrub.count + cachedStructuredScrub.count > 0) {
@@ -4005,7 +4035,10 @@ const CallRecordingProcessor = {
         : null;
       logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
-      try { priorMeta = call.transcription_metadata ? JSON.parse(call.transcription_metadata) : {}; } catch { priorMeta = {}; }
+      try {
+        const rawPrior = call.transcription_metadata;
+        priorMeta = typeof rawPrior === 'string' ? JSON.parse(rawPrior) : (rawPrior && typeof rawPrior === 'object' ? rawPrior : {});
+      } catch { priorMeta = {}; }
       // Fence on processing_token like the finalization write: if a peer
       // reclaimed the stale lock, this matches 0 rows and we bail without
       // overwriting the peer's state. Clear disposition + enriched extraction
@@ -4019,7 +4052,7 @@ const CallRecordingProcessor = {
           answered_by: 'voicemail',
           call_outcome: 'voicemail',
           transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-          transcription_metadata: JSON.stringify({ ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }),
+          transcription_metadata: JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps })),
           ai_extraction: null,
           ai_extraction_enriched: null,
           v2_extraction_status: null,
