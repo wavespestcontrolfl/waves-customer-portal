@@ -215,9 +215,15 @@ export default function CreateProjectModal({
   allowedProjectTypes = null,
   allowAiDraft = false,
   theme = 'dark',
+  // 'modal' = the floating ad-hoc dialog. 'sheet' = the Complete Service
+  // frame (owner ask 2026-07-13): full-height edge-docked sheet, visit
+  // context locked (no type/customer pickers, no title field) — the exact
+  // same fields and save behavior, presented like the pest completion.
+  presentation = 'modal',
 }) {
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
+  const isSheet = presentation === 'sheet';
   // V2 zinc restricts admin type to weights 400/500; the tech-portal dark
   // theme keeps its heavier Montserrat-era weights.
   const wStrong = isEstimateStyle ? 500 : 800;
@@ -960,7 +966,13 @@ export default function CreateProjectModal({
     <div
       role="dialog"
       aria-modal="true"
-      style={{
+      style={isSheet ? {
+        // Complete Service frame: scrim + full-height sheet docked right
+        // (100% width on phones via maxWidth), body scrolls inside.
+        position: 'fixed', inset: 0, zIndex: 200,
+        background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
+        display: 'flex', alignItems: 'stretch', justifyContent: 'flex-end',
+      } : {
         position: 'fixed', inset: 0, zIndex: 200, background: isEstimateStyle ? 'rgba(9, 9, 11, 0.42)' : 'rgba(0,0,0,0.6)',
         display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
         overflowY: 'auto',
@@ -970,7 +982,14 @@ export default function CreateProjectModal({
       }}
       onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
     >
-      <div style={{
+      <div style={isSheet ? {
+        width: '100%', maxWidth: 640, margin: 0,
+        background: isEstimateStyle ? P.bg : P.card,
+        borderLeft: `1px solid ${P.border}`,
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
+        paddingTop: 'env(safe-area-inset-top, 0px)',
+      } : {
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
         background: isEstimateStyle ? P.bg : P.card,
         border: `1px solid ${P.border}`,
@@ -995,7 +1014,7 @@ export default function CreateProjectModal({
               letterSpacing: 0,
               textTransform: 'none',
             }}>
-              Create Project Report
+              {isSheet ? 'Complete Service Report' : 'Create Project Report'}
             </div>
             <div style={{
               fontSize: isEstimateStyle ? 12 : 11,
@@ -1021,8 +1040,12 @@ export default function CreateProjectModal({
           >×</button>
         </div>
 
-        {/* Body */}
-        <div style={{ padding: isEstimateStyle ? 22 : 16, display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16 }}>
+        {/* Body — in sheet mode this is the scroll region (header/footer pinned) */}
+        <div style={{
+          padding: isEstimateStyle ? 22 : 16,
+          display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
+          ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+        }}>
           {/* Restore saved draft */}
           {showDraftPrompt && (
             <div style={{
@@ -1059,8 +1082,13 @@ export default function CreateProjectModal({
             </div>
           )}
 
-          {/* Project type */}
+          {/* Project type — in sheet mode with the visit-locked single type
+              the picker is redundant chrome (the header names the report);
+              the description + FDACS link stay. A legacy visit that offers
+              both compliance types keeps the picker. */}
           <div>
+            {!(isSheet && visibleTypes.length <= 1 && projectType) && (
+            <>
             <label style={labelStyle}>Project type *</label>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {visibleTypes.map(([key, cfg]) => {
@@ -1083,6 +1111,8 @@ export default function CreateProjectModal({
                 );
               })}
             </div>
+            </>
+            )}
               {typeCfg?.description && (
                 <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{typeCfg.description}</div>
               )}
@@ -1098,7 +1128,9 @@ export default function CreateProjectModal({
               )}
             </div>
 
-          {/* Customer */}
+          {/* Customer — the sheet is opened FROM the visit, so the customer
+              is fixed context (like the pest completion header), not a
+              picker: no Change button in sheet mode. */}
           <div>
             <label style={labelStyle}>Customer *</label>
             {customerId ? (
@@ -1108,11 +1140,13 @@ export default function CreateProjectModal({
                 border: `1px solid ${P.border}`,
               }}>
                 <span style={{ fontSize: 13, color: P.text }}>{customerLabel || customerId}</span>
-                <button
-                  type="button"
-                  onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; clearWdoFindingsFromCustomer(); }}
-                  style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
-                >Change</button>
+                {!(isSheet && defaultCustomerId) && (
+                  <button
+                    type="button"
+                    onClick={() => { setCustomerId(''); setCustomerLabel(''); setCustomerQuery(''); setSelectedCustomer(null); prefillCustomerRef.current = null; clearWdoFindingsFromCustomer(); }}
+                    style={{ background: 'transparent', border: 'none', color: P.muted, fontSize: 12, cursor: 'pointer' }}
+                  >Change</button>
+                )}
               </div>
             ) : (
               <>
@@ -1171,7 +1205,9 @@ export default function CreateProjectModal({
           {/* Type-specific fields */}
           {typeCfg && (
             <>
-              <div>
+              {/* Title is auto-derived context in sheet mode (the visit +
+                  type name it) — the state/default still rides the save. */}
+              <div style={isSheet ? { display: 'none' } : undefined}>
                 <label style={labelStyle}>Title / service performed (optional)</label>
                 <input
                   type="text"
@@ -1429,12 +1465,13 @@ export default function CreateProjectModal({
           )}
         </div>
 
-        {/* Footer */}
+        {/* Footer — pinned action bar in sheet mode, like the completion */}
         <div style={{
           padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
           borderTop: `1px solid ${P.border}`,
           background: P.card,
           display: 'flex', gap: 10, justifyContent: 'flex-end',
+          ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
         }}>
           <button
             type="button"
@@ -1456,7 +1493,7 @@ export default function CreateProjectModal({
             onClick={handleSave}
             disabled={saving || !projectType || !customerId}
             style={{
-              minHeight: isEstimateStyle ? 48 : undefined,
+              minHeight: isEstimateStyle || isSheet ? 48 : undefined,
               padding: isEstimateStyle ? '0 18px' : '10px 18px',
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
@@ -1464,8 +1501,9 @@ export default function CreateProjectModal({
               background: (!projectType || !customerId) ? P.muted : P.accent,
               color: P.accentText, border: 'none',
               cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',
+              ...(isSheet ? { flex: 1 } : {}),
             }}
-          >{saving ? 'Saving…' : 'Save Draft'}</button>
+          >{saving ? 'Saving…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
         </div>
       </div>
     </div>,

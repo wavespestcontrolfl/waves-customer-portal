@@ -637,6 +637,7 @@ export default function TechHomePage() {
 
       {showCreateProject && (
         <CreateProjectModal
+          presentation={projectDefaults?.scheduledServiceId ? 'sheet' : 'modal'}
           defaultCustomerId={projectDefaults?.customerId || ''}
           defaultCustomerLabel={projectDefaults?.customerLabel || ''}
           defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
