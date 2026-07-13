@@ -295,7 +295,7 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
   });
 
   describe('resetEstimateDepositIntentToFace', () => {
-    test('no-ops on a PI mid-3DS (requires_action is not amount-updatable)', async () => {
+    test('mid-3DS residue reports clean:false — the wallet preflight must block (r4)', async () => {
       const StripeService = require('../services/stripe');
       stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
         status: 'requires_action',
@@ -304,14 +304,18 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
       }));
       const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
       expect(result.reset).toBe(false);
+      // requires_action is not reliably amount-updatable and the PI still
+      // carries the surcharged total — a wallet confirm here would pay it.
+      expect(result.clean).toBe(false);
       expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
     });
 
-    test('no-ops on a clean face-value PI (the common wallet path)', async () => {
+    test('clean face-value PI reports clean:true without touching Stripe (the common wallet path)', async () => {
       const StripeService = require('../services/stripe');
       stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
       const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
       expect(result.reset).toBe(false);
+      expect(result.clean).toBe(true);
       expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
     });
 

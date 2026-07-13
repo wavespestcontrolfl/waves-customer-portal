@@ -6324,6 +6324,13 @@ ${shellQuestionsBar()}
           return true;
         };
         const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
+        const proceedExempt = function () {
+          // Deposit gates changed mid-modal (kill switch off / already
+          // accepted) — nothing owed; close and continue to accept (the
+          // server accept gate re-verifies).
+          closeDepositOverlay();
+          resolve({ ok: true });
+        };
 
         // ── Express Checkout — Apple Pay / Google Pay / Link one-tap.
         // Wallets confirm the PI at FACE value: Phase-1 (same rule as the
@@ -6350,28 +6357,37 @@ ${shellQuestionsBar()}
         });
         express.on('confirm', function () {
           if (errEl) errEl.style.display = 'none';
-          // A failed manual-card finalize can leave the PI at the
-          // surcharged total; wallets pay FACE value, so reset first
-          // (best-effort — the server also resets after failed finalizes).
+          // Wallet PREFLIGHT (Codex #2705 r4) — obey the verdict: it
+          // re-checks the live deposit gates AND verifies the PI is at
+          // face value (a failed manual-card finalize can leave it at the
+          // surcharged total; wallets pay face). ok !== true = do NOT
+          // confirm.
           fetch('/api/public/estimates/' + TOKEN + '/deposit-reset', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
-          }).catch(function () {}).then(function () {
-            return stripe.confirmPayment({
-              elements: elements,
-              confirmParams: { return_url: window.location.href },
-              redirect: 'if_required',
+          }).then(function (pre) {
+            return pre.json().catch(function () { return {}; }).then(function (preData) {
+              if (pre.status === 409 && preData.exemptReason) { proceedExempt(); return null; }
+              if (!pre.ok || preData.ok !== true) {
+                showError(preData.error || 'A card verification is still pending on this deposit — finish it, or wait a moment and try again.');
+                return null;
+              }
+              return stripe.confirmPayment({
+                elements: elements,
+                confirmParams: { return_url: window.location.href },
+                redirect: 'if_required',
+              }).then(function (result) {
+                if (result.error) {
+                  showError(result.error.message || 'Payment did not go through. Try another card.');
+                  return;
+                }
+                if (succeedWith(result.paymentIntent)) return;
+                showError(result.paymentIntent && result.paymentIntent.status === 'processing'
+                  ? PROCESSING_MSG
+                  : 'Payment is still pending. Try again in a moment.');
+              });
             });
-          }).then(function (result) {
-            if (result.error) {
-              showError(result.error.message || 'Payment did not go through. Try another card.');
-              return;
-            }
-            if (succeedWith(result.paymentIntent)) return;
-            showError(result.paymentIntent && result.paymentIntent.status === 'processing'
-              ? PROCESSING_MSG
-              : 'Payment is still pending. Try again in a moment.');
           }).catch(function () {
             showError('Payment did not go through. Try again.');
           });
@@ -6400,12 +6416,6 @@ ${shellQuestionsBar()}
         // Any edit invalidates the quote — the priced PaymentMethod is stale.
         paymentElement.on('change', function () { resetQuote(); });
 
-        var proceedExempt = function () {
-          // Deposit gate flipped off mid-modal — nothing owed; close and
-          // continue to accept (the server accept gate re-verifies).
-          closeDepositOverlay();
-          resolve({ ok: true });
-        };
         const finalizeQuoted = function (quote) {
           return fetch('/api/public/estimates/' + TOKEN + '/deposit-finalize', {
             method: 'POST',

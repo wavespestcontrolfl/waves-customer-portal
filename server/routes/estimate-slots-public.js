@@ -791,12 +791,16 @@ router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
   }
 });
 
-// POST /:token/deposit-reset — return the deposit PI to FACE value before a
-// wallet confirm. A failed manual-card finalize leaves the PI at the
-// surcharged total; wallets (Express Checkout) pay face value — Phase-1 —
-// so both deposit UIs call this at the top of the wallet confirm handler
-// (best-effort: the server also resets after a failed finalize). No-ops on
-// PIs that are already at face, in flight, or mid-3DS.
+// POST /:token/deposit-reset — the WALLET PREFLIGHT (Codex #2705 r4): every
+// Express Checkout confirm calls this first and must obey the verdict.
+// It (1) re-checks the same live gates the card path's /deposit-finalize
+// enforces — kill switch, already-accepted, inactive — so a wallet tap
+// can't collect a deposit the accept no longer requires; and (2) returns
+// the PI to FACE value when a failed manual-card finalize left it at the
+// surcharged total (wallets pay face — Phase-1). Responds { ok: true }
+// only when the PI is verified clean and confirmable; { ok: false } means
+// DO NOT confirm (e.g. mid-3DS residue, which clears when the abandoned
+// challenge expires back to requires_payment_method).
 router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -805,18 +809,23 @@ router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
   try {
     const { paymentIntentId } = req.body || {};
     if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted', exemptReason: 'already_accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
     const result = await StripeService.resetEstimateDepositIntentToFace({
       estimateId: estimate.id,
       paymentIntentId,
     });
-    return res.json({ success: true, ...result });
+    return res.json({ success: true, ok: result.clean === true, ...result });
   } catch (err) {
     if (err.statusCode === 400) return res.status(400).json({ error: err.message });
     logger.error(`[estimate-slots-public:deposit-reset] ${err.message}`, { stack: err.stack });
-    return res.status(400).json({ error: 'Could not reset the deposit payment.' });
+    return res.status(400).json({ error: 'Could not verify the deposit payment. Please try again.' });
   }
 });
 

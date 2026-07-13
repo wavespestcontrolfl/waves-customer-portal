@@ -716,11 +716,17 @@ const StripeService = {
    * Reset a deposit PI back to its FACE value and clear the surcharge
    * metadata a failed/abandoned manual-card finalize left behind, so a
    * wallet confirm (Express Checkout pays face value — Phase-1) can never
-   * capture a stale surcharged total. Safe to call unconditionally: a PI
-   * that is already at face, already succeeded/processing, or mid-3DS
-   * (requires_action — Stripe rejects amount updates there; the customer
-   * abandoned a challenge and Stripe expires it) is left untouched.
-   * Returns { reset } — callers treat failure as best-effort.
+   * capture a stale surcharged total.
+   * Returns { reset, clean, status }:
+   *   clean=true  — the PI is at face value with no fee residue (either it
+   *                 already was, or this call just reset it). Safe for a
+   *                 wallet to confirm.
+   *   clean=false — residue remains and this call could NOT clear it
+   *                 (succeeded/processing/canceled, or mid-3DS
+   *                 requires_action where an amount update is not reliably
+   *                 supported). The wallet preflight must NOT proceed —
+   *                 the 3DS challenge expiring returns the PI to
+   *                 requires_payment_method, after which a retry resets it.
    */
   async resetEstimateDepositIntentToFace({ estimateId, paymentIntentId }) {
     const stripe = getStripe();
@@ -729,16 +735,16 @@ const StripeService = {
     // (see quoteEstimateDepositSurcharge).
     const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
     assertDepositIntentForEstimate(pi, estimateId);
-    if (!['requires_payment_method', 'requires_confirmation'].includes(pi.status)) {
-      return { reset: false, status: pi.status };
-    }
     const faceCents = Math.round(depositFaceValueDollars(pi) * 100);
     const staleDetailsCents = Number(pi.amount_details?.surcharge?.amount || 0);
     const hasSurchargeResidue = Number(pi.amount) !== faceCents
       || pi.metadata?.card_surcharge != null
       || staleDetailsCents > 0;
+    if (!['requires_payment_method', 'requires_confirmation'].includes(pi.status)) {
+      return { reset: false, clean: !hasSurchargeResidue, status: pi.status };
+    }
     if (!faceCents || !hasSurchargeResidue) {
-      return { reset: false, status: pi.status };
+      return { reset: false, clean: true, status: pi.status };
     }
     const resetParams = {
       amount: faceCents,
@@ -765,14 +771,14 @@ const StripeService = {
           { apiVersion: SURCHARGE_API_VERSION },
         );
         logger.info(`[stripe] Deposit PI ${paymentIntentId} reset to face value (${faceCents}c, surcharge details cleared) for estimate ${estimateId}`);
-        return { reset: true, status: pi.status };
+        return { reset: true, clean: true, status: pi.status };
       } catch (clearErr) {
         logger.warn(`[stripe] Deposit PI ${paymentIntentId} amount_details unset rejected (${clearErr.message}) — resetting amount/metadata only`);
       }
     }
     await stripe.paymentIntents.update(paymentIntentId, resetParams);
     logger.info(`[stripe] Deposit PI ${paymentIntentId} reset to face value (${faceCents}c) for estimate ${estimateId}`);
-    return { reset: true, status: pi.status };
+    return { reset: true, clean: true, status: pi.status };
   },
 
   /**

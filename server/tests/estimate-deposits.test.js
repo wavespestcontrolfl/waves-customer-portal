@@ -1340,6 +1340,33 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     expect(updates2[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 99 });
   });
 
+  it('a dashboard refund of the FACE amount on a surcharged deposit records the full face (never deflated) — r4', async () => {
+    // $49 deposit captured at $50.42 (card_surcharge 1.42). An operator
+    // refunds "$49.00" from the dashboard, meaning the whole deposit.
+    // Proportional deflation would record ~$47.62 and leave $1.38 able to
+    // satisfy acceptance — the conservative reading records the full face.
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', refunded_amount: null, card_surcharge: '1.42' },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 4900 });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
+
+  it('the echo of OUR prorated sweep refund on a surcharged deposit replays instead of re-recording — r4', async () => {
+    // Sweep refunded a $20 remainder + $0.58 prorated fee = 2058c gross;
+    // the ledger already stamps refunded_amount 20.00. The gross deflates
+    // back to ~2000c and must read as a replay, not a new dashboard refund.
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', amount: '49.00', credited_amount: '29.00', refunded_amount: '20.00', card_surcharge: '1.42' },
+      updates: [],
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 2058 });
+    expect(result).toEqual({ handled: true, replay: true });
+  });
+
   it('an already-credited deposit flips AND flags for manual reconciliation', async () => {
     const updates = [];
     mockDbHandler = reversalDb({

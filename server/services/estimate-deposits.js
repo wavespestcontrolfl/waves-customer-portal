@@ -1337,30 +1337,40 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
 
     const amountCents = Math.round(Number(row.amount || 0) * 100);
     // Stripe's cumulative refund total is GROSS (face + any card surcharge
-    // captured with it); the ledger speaks face value. Deflate the gross to
-    // its face component before every comparison below, or a sweep echo
-    // that returned remainder + prorated fee reads as "larger than what we
-    // stamped" and false-fires the manual-reconciliation alert.
+    // captured with it); the ledger speaks face value. TWO readings of the
+    // gross, used for different jobs (Codex #2705 r4 P2):
+    //   deflated — proportional face share; matches what OUR prorated
+    //     refund paths stamp, so it detects sweep echoes (±1c rounding).
+    //   conservative — min(gross, face); a DASHBOARD refund's intent is
+    //     unknowable (an operator refunding "$49 of $50.42" means the whole
+    //     deposit), so record the LARGER face reduction — refunded money
+    //     must never remain able to satisfy acceptance or credit an
+    //     invoice. Worst case (a fee-only refund) over-deducts toward the
+    //     loud/manual side, never the silent one.
     const rowSurchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
-    const grossToFaceCents = (gross) => {
+    const deflateGrossCents = (gross) => {
       if (gross == null) return null;
       if (rowSurchargeCents <= 0 || amountCents <= 0) return gross;
       return Math.min(amountCents, Math.round((gross * amountCents) / (amountCents + rowSurchargeCents)));
     };
-    const faceRefundedCents = grossToFaceCents(amountRefundedCents);
+    const echoFaceCents = deflateGrossCents(amountRefundedCents);
+    const conservativeFaceCents = amountRefundedCents != null
+      ? Math.min(amountRefundedCents, amountCents)
+      : null;
 
     const recordedRefundCents = Math.round(Number(row.refunded_amount || 0) * 100);
-    if (faceRefundedCents != null && recordedRefundCents > 0 && faceRefundedCents <= recordedRefundCents) {
+    if (echoFaceCents != null && recordedRefundCents > 0 && echoFaceCents <= recordedRefundCents + 1) {
       // Echo of a refund WE issued and stamped (sweep / remainder) — the row
       // already reflects it; a 'credited' row here keeps its credit because
-      // only the unapplied remainder was returned.
+      // only the unapplied remainder was returned. +1c absorbs proration
+      // rounding drift between our stamp and Stripe's cumulative total.
       return { handled: true, replay: true };
     }
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
     // Unknown refund size (dispute path) = treat as a full reversal — fail
     // toward the loud path, never toward silently keeping money available.
-    const refundCents = faceRefundedCents != null
-      ? Math.min(faceRefundedCents, amountCents)
+    const refundCents = conservativeFaceCents != null
+      ? conservativeFaceCents
       : amountCents;
     const fullyRefunded = refundCents >= amountCents;
     // Does the cumulative refund reach past the unapplied remainder into
