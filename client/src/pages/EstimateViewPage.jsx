@@ -2138,6 +2138,10 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
       const stripe = StripeCtor(intent.publishableKey);
       const elements = stripe.elements({
         clientSecret: intent.clientSecret,
+        // Required for the two-step card flow's createPaymentMethod (same
+        // as PayPageV2/StatementPayPage) — without it Stripe won't reliably
+        // create the PM before /deposit-quote (Codex #2705 P1).
+        paymentMethodCreation: 'manual',
         appearance: glassAppearanceActive()
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: '#04395E', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: FONTS.body } },
@@ -2160,6 +2164,14 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
         setError(null);
         setSubmitting(true);
         try {
+          // A failed manual-card finalize can leave the PI at the
+          // surcharged total; wallets pay FACE value, so reset first
+          // (best-effort — the server also resets after failed finalizes).
+          await fetch(`${API_BASE}/public/estimates/${token}/deposit-reset`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
+          }).catch(() => {});
           const result = await stripe.confirmPayment({
             elements,
             confirmParams: { return_url: window.location.href },
@@ -2244,6 +2256,14 @@ function DepositModal({ intent, token, onSuccess, onCancel, creditTarget = 'your
       }
       // First tap — price the entered card (credit funding pays the fee;
       // debit/prepaid quote $0 and finalize on this same tap).
+      // elements.submit() validates + collects the form BEFORE the PM is
+      // created — required for the manual-creation flow (PayPageV2 parity).
+      const { error: submitError } = await elementsRef.current.submit();
+      if (submitError) {
+        setError(submitError.message || 'Check your card details and try again.');
+        setSubmitting(false);
+        return;
+      }
       const pmResult = await stripeRef.current.createPaymentMethod({ elements: elementsRef.current });
       if (pmResult.error) {
         setError(pmResult.error.message || 'Check your card details and try again.');

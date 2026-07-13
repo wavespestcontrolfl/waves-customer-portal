@@ -6304,6 +6304,10 @@ ${shellQuestionsBar()}
         const stripe = StripeCtor(intent.publishableKey);
         const elements = stripe.elements({
           clientSecret: intent.clientSecret,
+          // Required for the two-step card flow's createPaymentMethod (same
+          // as PayPageV2) — without it Stripe won't reliably create the PM
+          // before /deposit-quote (Codex #2705 P1).
+          paymentMethodCreation: 'manual',
           appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: 'Inter, system-ui, sans-serif' } },
         });
         // Accept-gate contract: ensureDepositSatisfied live-verifies the PI
@@ -6346,10 +6350,19 @@ ${shellQuestionsBar()}
         });
         express.on('confirm', function () {
           if (errEl) errEl.style.display = 'none';
-          stripe.confirmPayment({
-            elements: elements,
-            confirmParams: { return_url: window.location.href },
-            redirect: 'if_required',
+          // A failed manual-card finalize can leave the PI at the
+          // surcharged total; wallets pay FACE value, so reset first
+          // (best-effort — the server also resets after failed finalizes).
+          fetch('/api/public/estimates/' + TOKEN + '/deposit-reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
+          }).catch(function () {}).then(function () {
+            return stripe.confirmPayment({
+              elements: elements,
+              confirmParams: { return_url: window.location.href },
+              redirect: 'if_required',
+            });
           }).then(function (result) {
             if (result.error) {
               showError(result.error.message || 'Payment did not go through. Try another card.');
@@ -6425,7 +6438,17 @@ ${shellQuestionsBar()}
                 showError(err.message || 'Payment did not go through. Try again.');
               });
             }
-            return stripe.createPaymentMethod({ elements: elements }).then(function (pmResult) {
+            // elements.submit() validates + collects the form BEFORE the PM
+            // is created — required for the manual-creation flow (PayPageV2
+            // parity).
+            return elements.submit().then(function (submitResult) {
+              if (submitResult && submitResult.error) {
+                showError(submitResult.error.message || 'Check your card details and try again.');
+                return null;
+              }
+              return stripe.createPaymentMethod({ elements: elements });
+            }).then(function (pmResult) {
+              if (!pmResult) return null;
               if (pmResult.error) {
                 showError(pmResult.error.message || 'Check your card details and try again.');
                 return null;

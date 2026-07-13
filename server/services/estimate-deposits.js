@@ -1242,6 +1242,37 @@ async function handleDepositIntentSucceeded(paymentIntent) {
   });
   logger.info('[estimate-deposits] deposit received', { estimateId });
 
+  // Surcharge-bypass audit (mirrors the invoice webhook's quarantine in
+  // spirit): the PI's client secret lets a stale/modified client
+  // confirmPayment directly, skipping /deposit-quote + /deposit-finalize —
+  // a CREDIT card would then pay face value with no fee. Finalize always
+  // stamps card_surcharge (even '0' for debit), and wallet payments carry
+  // card.wallet on the PM — so quote_at_confirm + no card_surcharge key +
+  // credit funding + not-a-wallet = a bypassed manual credit card. The
+  // deposit itself is fully collected and MUST still satisfy the accept
+  // gate (recording already happened above — never strand an acceptance
+  // over our own missing fee); the alert makes the under-collection loud.
+  if (paymentIntent.metadata?.surcharge_policy === 'quote_at_confirm'
+    && paymentIntent.metadata?.card_surcharge == null) {
+    try {
+      const pm = await StripeService.retrievePaymentMethod(
+        typeof paymentIntent.payment_method === 'string'
+          ? paymentIntent.payment_method
+          : paymentIntent.payment_method?.id,
+      );
+      if (pm?.card?.funding === 'credit' && !pm.card.wallet) {
+        logger.error('[estimate-deposits] deposit confirmed OUTSIDE the quote/finalize path with a credit card — surcharge not collected', {
+          estimateId,
+          paymentIntentId: paymentIntent.id,
+        });
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+      }
+    } catch (auditErr) {
+      logger.warn(`[estimate-deposits] surcharge-bypass audit failed for ${paymentIntent.id}: ${auditErr.message}`);
+    }
+  }
+
   // A paid deposit is an acceptance signal — convert the originating lead to
   // won if it's still open. Gated on requireAcceptedEstimate: a succeeded
   // deposit alone isn't a closed deal (the customer can pay then abandon the

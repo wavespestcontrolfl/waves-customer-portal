@@ -778,6 +778,35 @@ router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
   }
 });
 
+// POST /:token/deposit-reset — return the deposit PI to FACE value before a
+// wallet confirm. A failed manual-card finalize leaves the PI at the
+// surcharged total; wallets (Express Checkout) pay face value — Phase-1 —
+// so both deposit UIs call this at the top of the wallet confirm handler
+// (best-effort: the server also resets after a failed finalize). No-ops on
+// PIs that are already at face, in flight, or mid-3DS.
+router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { paymentIntentId } = req.body || {};
+    if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+
+    const result = await StripeService.resetEstimateDepositIntentToFace({
+      estimateId: estimate.id,
+      paymentIntentId,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-reset] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not reset the deposit payment.' });
+  }
+});
+
 // POST /:token/card-hold-intent — Stripe SetupIntent to capture the card that
 // HOLDS a one-time visit (dark until ONE_TIME_CARD_HOLD). No money is taken:
 // the saved card is charged the final total on completion, and a flat no-show

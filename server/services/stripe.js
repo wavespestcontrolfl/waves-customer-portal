@@ -419,6 +419,13 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  async retrievePaymentMethod(paymentMethodId) {
+    if (!paymentMethodId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentMethods.retrieve(paymentMethodId);
+  },
+
   /**
    * Cancel a PaymentIntent. Returns null if Stripe isn't configured.
    * Throws on Stripe errors — including the race where the intent has
@@ -616,8 +623,13 @@ const StripeService = {
           amount: totalCents,
           payment_method: quote.paymentMethodId,
           // Stripe metadata updates MERGE keys: purpose/estimate_id/
-          // base_amount from the create stay intact.
+          // base_amount from the create stay intact. A PENDING PI minted
+          // BEFORE the surcharge revert replays under the unchanged
+          // idempotency key with no base_amount pinned — stamp it here
+          // (from the pre-update amount, which WAS its face value) or a
+          // surcharged capture would credit face + fee (Codex #2705 P2).
           metadata: {
+            ...(pi.metadata?.base_amount ? {} : { base_amount: String(baseAmount) }),
             card_surcharge: String(surchargeCents / 100),
             surcharge_rate_bps: String(rateBps),
             surcharge_policy_version: policyVersion,
@@ -627,6 +639,11 @@ const StripeService = {
         },
         usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
       );
+    } catch (err) {
+      logger.error(`[stripe] Deposit finalize update failed for PI ${quote.paymentIntentId}: ${err.message}`);
+      throw new Error(`Failed to finalize deposit payment: ${err.message}`);
+    }
+    try {
       const confirmed = await stripe.paymentIntents.confirm(
         quote.paymentIntentId,
         {},
@@ -645,9 +662,59 @@ const StripeService = {
         funding,
       };
     } catch (err) {
+      // The PI now carries the surcharged amount but the charge FAILED —
+      // both deposit UIs keep Express Checkout mounted, and a wallet tap
+      // would confirm the poisoned total even though wallets pay face
+      // value (Codex #2705 P1). Best-effort reset back to face before
+      // surfacing the failure; the client-side wallet path also calls
+      // /deposit-reset before confirming as a second layer.
+      await this.resetEstimateDepositIntentToFace({
+        estimateId,
+        paymentIntentId: quote.paymentIntentId,
+      }).catch((resetErr) => {
+        logger.warn(`[stripe] Deposit PI reset after failed finalize also failed for ${quote.paymentIntentId}: ${resetErr.message}`);
+      });
       logger.error(`[stripe] Deposit finalize failed for PI ${quote.paymentIntentId}: ${err.message}`);
       throw new Error(`Failed to finalize deposit payment: ${err.message}`);
     }
+  },
+
+  /**
+   * Reset a deposit PI back to its FACE value and clear the surcharge
+   * metadata a failed/abandoned manual-card finalize left behind, so a
+   * wallet confirm (Express Checkout pays face value — Phase-1) can never
+   * capture a stale surcharged total. Safe to call unconditionally: a PI
+   * that is already at face, already succeeded/processing, or mid-3DS
+   * (requires_action — Stripe rejects amount updates there; the customer
+   * abandoned a challenge and Stripe expires it) is left untouched.
+   * Returns { reset } — callers treat failure as best-effort.
+   */
+  async resetEstimateDepositIntentToFace({ estimateId, paymentIntentId }) {
+    const stripe = getStripe();
+    if (!stripe) throw new Error('Stripe not configured');
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+    assertDepositIntentForEstimate(pi, estimateId);
+    if (!['requires_payment_method', 'requires_confirmation'].includes(pi.status)) {
+      return { reset: false, status: pi.status };
+    }
+    const faceCents = Math.round(depositFaceValueDollars(pi) * 100);
+    const hasSurchargeResidue = Number(pi.amount) !== faceCents || pi.metadata?.card_surcharge != null;
+    if (!faceCents || !hasSurchargeResidue) {
+      return { reset: false, status: pi.status };
+    }
+    await stripe.paymentIntents.update(paymentIntentId, {
+      amount: faceCents,
+      // Empty string DELETES a metadata key on Stripe — the fee facts
+      // belong only to a capture that actually collected the fee.
+      metadata: {
+        card_surcharge: '',
+        surcharge_rate_bps: '',
+        surcharge_policy_version: '',
+        card_funding: '',
+      },
+    });
+    logger.info(`[stripe] Deposit PI ${paymentIntentId} reset to face value (${faceCents}c) for estimate ${estimateId}`);
+    return { reset: true, status: pi.status };
   },
 
   /**
