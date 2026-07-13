@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { Badge, Button, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
@@ -47,10 +48,15 @@ const ESTIMATE_INPUT_BG = "#F8FCFE";
 const ESTIMATE_TEXT = COLORS.blueDeeper;
 const ESTIMATE_MUTED = "#6B7280";
 
+// C1 restyle: the LIST's status pills ride the shared Badge on the zinc
+// ramp — sent is the "done" state (strong), draft/closed stay neutral;
+// alert-fg is reserved for genuine alerts (the stale-WDO-draft line), never
+// status decoration. bg/fg stay for the detail pane's legacy pill until the
+// C2 restyle replaces it.
 const STATUS_STYLES = {
-  draft: { bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
-  sent: { bg: "#DCFCE7", fg: "#166534", label: "Sent" },
-  closed: { bg: "#E4E4E7", fg: "#52525B", label: "Closed" },
+  draft: { tone: "neutral", bg: "#FEF3C7", fg: "#92400E", label: "Draft" },
+  sent: { tone: "strong", bg: "#DCFCE7", fg: "#166534", label: "Sent" },
+  closed: { tone: "neutral", bg: "#E4E4E7", fg: "#52525B", label: "Closed" },
 };
 
 const TYPE_LABELS = {
@@ -1039,37 +1045,19 @@ export default function ProjectsPage() {
   const selected = projects.find((p) => p.id === selectedId);
 
   return (
-    <div
-      style={{
-        maxWidth: 1300,
-        margin: "0 auto",
-        color: D.text,
-        fontFamily: "'Roboto', Arial, sans-serif",
-      }}
-    >
+    <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Projects"
+        title="Jobs"
         icon={ClipboardList}
         action={{
-          label: "New Project",
+          label: "New Job",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
       />
       {/* Filters */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          marginBottom: 12,
-          background: D.card,
-          padding: "10px 12px",
-          borderRadius: 10,
-          border: `1px solid ${D.border}`,
-        }}
-      >
+      <div className="flex flex-wrap gap-2 mb-3 bg-white px-3 py-2.5 rounded-sm border-hairline border-zinc-200">
         <FilterSelect
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
@@ -1115,19 +1103,10 @@ export default function ProjectsPage() {
         >
           {showRegularProjects &&
             (loading ? (
-              <div style={{ padding: 24, color: D.muted }}>Loading…</div>
+              <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
-              <div
-                style={{
-                  padding: 24,
-                  background: D.card,
-                  borderRadius: 10,
-                  border: `1px dashed ${D.border}`,
-                  color: D.muted,
-                  textAlign: "center",
-                }}
-              >
-                No projects match these filters.
+              <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
+                No jobs match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (
@@ -1195,84 +1174,31 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
   }).length;
 
   return (
-    <section
-      style={{
-        marginTop: 18,
-        paddingTop: 16,
-        borderTop: `1px solid ${D.border}`,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-      }}
-    >
+    <section className="mt-4 pt-4 border-t border-hairline border-zinc-200 flex flex-col gap-2">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 10,
-        }}
-      >
+      <div className="flex items-start justify-between gap-2.5">
         {" "}
         <div>
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 800,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-            }}
-          >
+          <div className="text-11 font-medium text-zinc-500 uppercase tracking-label">
             WDO Inspection Reports
           </div>{" "}
-          <div style={{ fontSize: 13, color: D.text, marginTop: 3 }}>
+          <div className="text-13 text-ink-primary mt-1">
             Real-estate reports, realtor sharing, and closing-sensitive
             documentation.
           </div>
           {urgentCount > 0 && (
-            <div
-              style={{
-                fontSize: 11,
-                color: D.amber,
-                marginTop: 4,
-                fontWeight: 700,
-              }}
-            >
+            <div className="text-11 text-alert-fg font-medium mt-1">
               {urgentCount} draft{urgentCount === 1 ? "" : "s"} older than 24h
             </div>
           )}
         </div>{" "}
-        <button
-          type="button"
-          onClick={onCreate}
-          style={{
-            ...btnSecondary,
-            padding: "7px 10px",
-            fontSize: 11,
-            fontWeight: 800,
-            whiteSpace: "nowrap",
-            textTransform: "uppercase",
-            letterSpacing: "0.04em",
-          }}
-        >
+        <Button variant="secondary" size="sm" onClick={onCreate} className="whitespace-nowrap">
           + New WDO
-        </button>{" "}
+        </Button>{" "}
       </div>
       {projects.length === 0 ? (
-        <div
-          style={{
-            padding: 18,
-            background: D.card,
-            borderRadius: 10,
-            border: `1px dashed ${D.border}`,
-            color: D.muted,
-            fontSize: 12,
-            textAlign: "center",
-          }}
-        >
+        <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-12 text-zinc-500 text-center">
           No WDO reports match these filters.
         </div>
       ) : (
@@ -1291,27 +1217,17 @@ function WdoReportsSection({ projects, selectedId, onSelect, onCreate }) {
 }
 
 function FilterSelect({ value, onChange, children }) {
+  // Shared Select primitive (its own caret) — width hugs the content like
+  // the old inline select instead of the primitive's block default.
   return (
-    <select
+    <Select
+      size="sm"
       value={value}
       onChange={onChange}
-      style={{
-        padding: "6px 28px 6px 12px",
-        borderRadius: 8,
-        fontSize: 13,
-        fontWeight: 600,
-        color: value ? D.text : D.muted,
-        background: D.card,
-        border: `1px solid ${D.inputBorder}`,
-        cursor: "pointer",
-        appearance: "none",
-        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717A' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-        backgroundRepeat: "no-repeat",
-        backgroundPosition: "right 10px center",
-      }}
+      className={`sm:!w-auto cursor-pointer ${value ? "text-ink-primary" : "text-zinc-500"}`}
     >
       {children}
-    </select>
+    </Select>
   );
 }
 
@@ -1321,91 +1237,31 @@ function ProjectRow({ project, active, onSelect, compactType }) {
     <button
       type="button"
       onClick={onSelect}
-      style={{
-        textAlign: "left",
-        width: "100%",
-        cursor: "pointer",
-        background: D.card,
-        border: `1px solid ${active ? D.accent : D.border}`,
-        borderRadius: 10,
-        padding: "12px 14px",
-        display: "flex",
-        gap: 12,
-        alignItems: "flex-start",
-      }}
+      className={`text-left w-full cursor-pointer bg-white rounded-sm p-3 flex gap-3 items-start border ${
+        active ? "border-zinc-900 ring-1 ring-zinc-900" : "border-hairline border-zinc-200 hover:border-zinc-400"
+      }`}
     >
       {" "}
-      <div
-        style={{
-          flexShrink: 0,
-          width: 48,
-          height: 48,
-          borderRadius: 8,
-          background: D.pill,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontFamily: MONO,
-          fontSize: 11,
-          fontWeight: 700,
-          color: D.heading,
-        }}
-      >
+      <div className="flex-shrink-0 w-12 h-12 rounded-sm bg-zinc-100 flex items-center justify-center font-mono text-11 font-medium text-ink-primary">
         {compactType || TYPE_LABELS[project.project_type] || "Proj"}
       </div>{" "}
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="flex-1 min-w-0">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-          }}
-        >
+        <div className="flex items-center justify-between gap-2">
           {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
+          <div className="text-14 font-medium text-ink-primary whitespace-nowrap overflow-hidden text-ellipsis">
             {project.customer_name || "Customer"}
           </div>{" "}
-          <span
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              padding: "2px 8px",
-              borderRadius: 999,
-              background: status.bg,
-              color: status.fg,
-              textTransform: "uppercase",
-              letterSpacing: 0.5,
-              whiteSpace: "nowrap",
-            }}
-          >
+          <Badge tone={status.tone} className="whitespace-nowrap">
             {status.label}
-          </span>{" "}
+          </Badge>{" "}
         </div>{" "}
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+        <div className="text-12 text-zinc-500 mt-0.5">
           {project.title ||
             TYPE_LABELS[project.project_type] ||
             project.project_type}
         </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            marginTop: 6,
-            fontSize: 11,
-            color: D.muted,
-          }}
-        >
+        <div className="flex gap-2.5 mt-1.5 text-11 text-zinc-500">
           {" "}
           <span>
             {fmtDate(project.project_date || project.created_at)}
@@ -1489,7 +1345,7 @@ function ProjectDetail({
   }
 
   useEffect(() => {
-    load(); /* eslint-disable-next-line */
+    load();  
   }, [projectId]);
 
   const project = data?.project;
