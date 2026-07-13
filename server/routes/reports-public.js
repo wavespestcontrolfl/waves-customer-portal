@@ -299,6 +299,10 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
         pestPressure: data.pestPressure,
         activity: data.activity,
         forecast,
+        // Tech-reviewed AI report copy (report-data sets summarySource only
+        // for non-typed reports, so the typed Today's Result card and this
+        // hero never show the same text twice).
+        technicianReport: data.summarySource === 'technician_report' ? data.summary : null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }

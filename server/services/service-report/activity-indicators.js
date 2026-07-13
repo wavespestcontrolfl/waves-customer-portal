@@ -28,7 +28,10 @@ const {
 // rendering with their persisted labels.
 const SCHEMA_VERSION = 2;
 const COPY_MAP_VERSION = 2;
-const SUMMARY_TEMPLATE_VERSION = 2;
+// Summary template v3: the generic tail compositions of buildTodaysResult
+// accept the tech-reviewed AI report copy as the body (bodySource
+// 'technician_report'); template-only output is unchanged from v2.
+const SUMMARY_TEMPLATE_VERSION = 3;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -1712,6 +1715,11 @@ function buildTodaysResult({
   chips = [],
   activity = null,
   visitSequence = 1,
+  // Tech-reviewed AI report copy (the completion form's "Generate AI report"
+  // output, parsed + banned-copy-screened by the complete route via
+  // technician-report-copy.js). Only the generic tail compositions below use
+  // it — every owner-specified story branch keeps its approved wording.
+  technicianReportBody = null,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
   // Sectioned-checklist types compose "what we did" from their selections
@@ -2072,15 +2080,22 @@ function buildTodaysResult({
     };
   }
 
-  // Non-gauge types (one-shot treatments + pest inspection).
+  // Non-gauge types (one-shot treatments + pest inspection). These tail
+  // compositions have no owner-mandated body story, so they are the two
+  // places the technician's reviewed AI report copy replaces the template
+  // body (the one-time pest family — re-services, cleanouts, bee/wasp,
+  // tick — all land here). Headlines stay deterministic; bodySource is
+  // stamped only when the AI copy is used so template snapshots stay
+  // byte-identical.
   const zeroSeverity = ['None observed', 'No activity'].includes(
     String(values.severity || values.activity_level || '')
   );
   if (zeroSeverity) {
     return {
       headline: 'No active signs of pest activity observed today.',
-      body: `${whatWeDid} Continue monitoring and contact us if activity returns.`,
+      body: `${technicianReportBody || whatWeDid} Continue monitoring and contact us if activity returns.`,
       nextStep,
+      ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
   return {
@@ -2088,8 +2103,9 @@ function buildTodaysResult({
     // Summary completed today") — the approved golden-fixture style is
     // "Palm Injection Treatment completed today."
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today.`,
-    body: `${whatWeDid} ${nextStep}`,
+    body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
+    ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
   };
 }
 
@@ -2110,6 +2126,7 @@ function buildTypedReportSnapshot({
   visitSequence = 1,
   activity = null,
   photoSummary = null,
+  technicianReportBody = null,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -2159,6 +2176,7 @@ function buildTypedReportSnapshot({
     chips: nextStepChips,
     activity,
     visitSequence,
+    technicianReportBody,
   });
 
   return {
