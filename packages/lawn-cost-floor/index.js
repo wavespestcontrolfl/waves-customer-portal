@@ -18,7 +18,11 @@
 // Default knobs — mirror server constants.js LAWN_PRICING_V2 (+ GLOBAL admin/labor).
 // The server overrides these at runtime from DB config; the client uses them as-is.
 const LAWN_COST_FLOOR_DEFAULTS = {
-  targetCollectedMarginFloor: 0.55,
+  // Mirrors LAWN_PRICING_V2.targetCollectedMarginFloor (35% collected-margin
+  // floor). Callers always pass their own targetGrossMargin; this default is a
+  // documentation anchor, not a live knob. (A stale 0.55 sat here from the
+  // retired 55%-floor-is-price model — never consumed, but regression bait.)
+  targetCollectedMarginFloor: 0.35,
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -70,10 +74,11 @@ function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriv
   );
 }
 
-// The canonical 55% cost-floor arithmetic. All inputs are fully resolved numbers
-// supplied by the caller. Returns the per-component annual breakdown plus
-// minimumCollectedAnnualPriceFor55 (annual is the source of truth; callers derive
-// perApp = ceil(that / visits) and monthly = round(annual/12)).
+// The canonical collected-margin cost-floor arithmetic (the caller's
+// targetGrossMargin — 35% today — sets the floor). All inputs are fully
+// resolved numbers supplied by the caller. Returns the per-component annual
+// breakdown plus minimumCollectedAnnualPrice (annual is the source of truth;
+// callers derive perApp = ceil(that / visits) and monthly = round(annual/12)).
 function computeLawnCostFloor({
   lawnSqFt,
   visits,
@@ -99,7 +104,7 @@ function computeLawnCostFloor({
   const annualEquipment = equipmentReservePerVisit * visits;
   const annualCallbackReserve = callbackReservePerVisit * visits;
   const annualCost = annualMaterial + annualLabor + annualDrive + annualEquipment + annualCallbackReserve + adminAnnual;
-  const minimumCollectedAnnualPriceFor55 = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
+  const minimumCollectedAnnualPrice = Math.round((annualCost / (1 - targetGrossMargin)) * 100) / 100;
 
   return {
     materialCostPerVisit,
@@ -111,7 +116,7 @@ function computeLawnCostFloor({
     annualCallbackReserve,
     annualAdmin: adminAnnual,
     annualCost,
-    minimumCollectedAnnualPriceFor55,
+    minimumCollectedAnnualPrice,
   };
 }
 

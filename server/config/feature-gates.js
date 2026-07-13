@@ -192,6 +192,12 @@ const gates = {
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
   cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
 
+  // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
+  // full track×size×tier grid against LIVE DB config and raises an admin alert
+  // on ladder violations or material-budget drift vs live inventory COGS.
+  // Read-only + one alert upsert; kill = unset GATE_LAWN_PRICING_SWEEP.
+  lawnPricingInvariantSweep: isProd ? process.env.GATE_LAWN_PRICING_SWEEP === 'true' : true,
+
   // Webhooks — process inbound Twilio/Stripe/Lead webhooks
   webhooks: isProd ? process.env.GATE_WEBHOOKS === 'true' : true,
 

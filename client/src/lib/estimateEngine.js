@@ -1062,13 +1062,13 @@ function calcLawnFloorPrice(sf, grassType, visits, opts = {}) {
     adminAnnual: LAWN_PRICING_V2.adminAnnualDefault,
     targetGrossMargin: LAWN_PRICING_V2.targetCollectedMarginFloor,
   });
-  const pa = Math.ceil(floor.minimumCollectedAnnualPriceFor55 / visits);
+  const pa = Math.ceil(floor.minimumCollectedAnnualPrice / visits);
   const ann = pa * visits;
   return {
     pa,
     ann,
     mo: Math.round(ann / 12 * 100) / 100,
-    costFloorAnnual: floor.minimumCollectedAnnualPriceFor55,
+    costFloorAnnual: floor.minimumCollectedAnnualPrice,
     costs: {
       annualMaterial: Math.round(floor.annualMaterial * 100) / 100,
       annualLabor: Math.round(floor.annualLabor * 100) / 100,

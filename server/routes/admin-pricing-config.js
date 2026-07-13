@@ -8,6 +8,23 @@ const { BED_BUG } = require('../services/pricing-engine/constants');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Best-effort audit insert: a failure must never block the pricing edit
+// itself, but it must be visible in logs (a bare catch here previously
+// swallowed every failure silently).
+async function insertPricingAudit({ configKey, oldValue, newValue, changedBy, reason }) {
+  try {
+    await db('pricing_config_audit').insert({
+      config_key: configKey,
+      old_value: oldValue === undefined ? null : JSON.stringify(oldValue),
+      new_value: newValue === undefined ? null : JSON.stringify(newValue),
+      changed_by: changedBy || 'admin',
+      reason: reason || null,
+    });
+  } catch (err) {
+    logger.error('[admin-pricing-config] pricing_config_audit insert failed', { configKey, error: err.message });
+  }
+}
+
 const ESTIMATE_COST_FALLBACKS = {
   pest_control: {
     serviceTypes: ['Quarterly Pest Control', 'Pest Control'],
@@ -308,11 +325,29 @@ router.get('/lawn-brackets', async (req, res, next) => {
 // PUT /lawn-brackets/:track — update brackets for a track
 router.put('/lawn-brackets/:track', async (req, res, next) => {
   try {
-    const { brackets } = req.body; // array of { sqft_bracket, tier, monthly_price }
+    const { brackets, reason } = req.body; // array of { sqft_bracket, tier, monthly_price }
+    const existing = await db('lawn_pricing_brackets').where({ grass_track: req.params.track });
+    const byCell = new Map(existing.map((r) => [`${r.sqft_bracket}:${r.tier}`, r]));
+    const changes = [];
     for (const b of brackets) {
-      await db('lawn_pricing_brackets')
+      const prev = byCell.get(`${b.sqft_bracket}:${b.tier}`);
+      const nextPrice = Number(b.monthly_price);
+      if (prev && Number(prev.monthly_price) === nextPrice) continue; // no-op cell — skip write and audit
+      const updated = await db('lawn_pricing_brackets')
         .where({ grass_track: req.params.track, sqft_bracket: b.sqft_bracket, tier: b.tier })
         .update({ monthly_price: b.monthly_price, updated_at: new Date() });
+      if (updated && prev) {
+        changes.push({ sqft_bracket: b.sqft_bracket, tier: b.tier, old: Number(prev.monthly_price), new: nextPrice });
+      }
+    }
+    if (changes.length) {
+      await insertPricingAudit({
+        configKey: `lawn_brackets:${req.params.track}`,
+        oldValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.old })),
+        newValue: changes.map((c) => ({ sqft_bracket: c.sqft_bracket, tier: c.tier, monthly_price: c.new })),
+        changedBy: req.technician?.name,
+        reason,
+      });
     }
     try {
       const modular = require('../services/pricing-engine');
@@ -346,8 +381,23 @@ router.put('/discount-rules/:serviceKey', async (req, res, next) => {
     for (const k of allowed) {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
     }
+    const existing = await db('service_discount_rules').where({ service_key: req.params.serviceKey }).first();
     updates.updated_at = new Date();
     await db('service_discount_rules').where({ service_key: req.params.serviceKey }).update(updates);
+    if (existing) {
+      const changedFields = Object.keys(updates).filter(
+        (k) => k !== 'updated_at' && String(existing[k]) !== String(updates[k])
+      );
+      if (changedFields.length) {
+        await insertPricingAudit({
+          configKey: `discount_rules:${req.params.serviceKey}`,
+          oldValue: Object.fromEntries(changedFields.map((k) => [k, existing[k]])),
+          newValue: Object.fromEntries(changedFields.map((k) => [k, updates[k]])),
+          changedBy: req.technician?.name,
+          reason: req.body.reason,
+        });
+      }
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -543,15 +593,13 @@ router.put('/:key', async (req, res, next) => {
 
     // Audit log
     if (normalizedData !== undefined) {
-      try {
-        await db('pricing_config_audit').insert({
-          config_key: req.params.key,
-          old_value: JSON.stringify(oldConfig.data),
-          new_value: JSON.stringify(normalizedData),
-          changed_by: req.admin?.name || 'admin',
-          reason: reason || null
-        });
-      } catch { /* audit table may not exist */ }
+      await insertPricingAudit({
+        configKey: req.params.key,
+        oldValue: oldConfig.data,
+        newValue: normalizedData,
+        changedBy: req.technician?.name,
+        reason,
+      });
     }
 
     res.json({ success: true });

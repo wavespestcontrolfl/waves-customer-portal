@@ -453,7 +453,12 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       annualTotal: money(estimate.annual_total),
       onetimeTotal: money(estimate.onetime_total),
       waveguardTier: estimate.waveguard_tier,
-      pricingVersion: result.pricingVersion || data.pricingVersion || null,
+      // The persisted column is authority-gated at save time (SERVER writes
+      // stamp the mechanism token, non-SERVER writes reset to the default),
+      // so it outranks the blob: a CLIENT_FALLBACK row's estimate_data can
+      // still carry a stale engineVersion the server never recomputed. Blob
+      // fields are fallbacks for shapes without the column.
+      pricingVersion: estimate.pricing_version || result.engineVersion || result.pricingVersion || data.pricingVersion || null,
     },
     dimensions,
     totals: {
@@ -562,4 +567,8 @@ module.exports = {
   // Exported for regression tests (turf must map to lawn_care, not fall through
   // to an unmapped key that trips a false "Missing COGS" warning).
   keyFromName,
+  // Live bottom-up COGS primitives — reused by the weekly lawn pricing
+  // invariant sweep to compare hardcoded material budgets against inventory.
+  loadInventoryCostRows,
+  inventoryCostFromRows,
 };

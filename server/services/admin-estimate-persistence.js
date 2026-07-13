@@ -487,7 +487,24 @@ function buildEstimatePersistenceFields(body, context = {}) {
     notes: body.notes,
   });
 
+  // Stamp the engine version that actually priced this estimate (varchar(80)
+  // since migration 20260713000020 — lawn mechanism tokens like
+  // LAWN_PRICING_V2_DENSE_35_FLOOR don't fit the original 10. Gated on the
+  // resolved pricing authority, NOT just the blob: on CLIENT_FALLBACK the
+  // blob is still the caller-supplied payload and may carry a stale
+  // engineVersion from an earlier server price — a row the server did not
+  // recompute must keep the column default rather than claim a version.
+  const pricingVersion = context.pricingAuthority === 'SERVER'
+    && typeof estimateData?.result?.engineVersion === 'string'
+    ? estimateData.result.engineVersion.slice(0, 80)
+    : null;
+
   return {
+    // Always emitted: a non-SERVER rewrite RESETS the column to its migration
+    // default, so a draft first stamped by a server price can't keep claiming
+    // that version after a CLIENT_FALLBACK/quote-required rewrite replaced
+    // its estimate_data (updates spread these fields over the existing row).
+    pricing_version: pricingVersion || 'v4.2',
     customer_id: body.customerId || null,
     estimate_data: estimateData ? JSON.stringify(estimateData) : null,
     address: body.address,
@@ -644,7 +661,7 @@ async function resolveEstimateWritePayload({
   return {
     ...buildEstimatePersistenceFields(
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
-      { technician, technicianId, now },
+      { technician, technicianId, now, pricingAuthority: pricing.audit?.pricing_authority },
     ),
     ...pricing.audit,
   };

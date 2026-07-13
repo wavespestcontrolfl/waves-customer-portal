@@ -5,6 +5,11 @@
 // ============================================================
 const { GLOBAL, WAVEGUARD, URGENCY, TREE_SHRUB, PEST, LAWN_PRICING_V2 } = require('./constants');
 
+// Optional logger — the engine must stay requireable from CLI/test harnesses
+// that don't carry the server logger, so binding events log best-effort.
+let logger = null;
+try { logger = require('../logger'); } catch { /* engine used outside the server */ }
+
 // All-in annual cost (direct + admin) + margin floor for the guarded services,
 // mirroring discount-engine.applyMarginGuard's per-service cost shapes. Returns
 // null for services that don't expose a cost basis.
@@ -683,6 +688,19 @@ function generateEstimate(input) {
       });
       lineItems.push(result);
       activeServiceKeys.push('lawn_care');
+      // Operational visibility: floor/minimum binding and beyond-table
+      // extrapolation were previously invisible at runtime.
+      const nonMarket = (result.tiers || [])
+        .filter((t) => t.pricingSource && t.pricingSource !== 'MARKET_TABLE')
+        .map((t) => `${t.visits}x=${t.pricingSource}`);
+      if (logger && nonMarket.length) {
+        logger.info('[pricing-engine] lawn ladder priced off-market-table', {
+          track: result.track,
+          lawnSqFt: result.lawnSqFt,
+          mechanisms: nonMarket.join(','),
+          selected: `${result.frequency}x=${result.pricingSource}`,
+        });
+      }
     }
   }
 
@@ -1494,6 +1512,13 @@ function generateEstimate(input) {
           ? Math.min(Math.round(minMonthly * 12 * 100) / 100, item.annualBeforeDiscount)
           : 0;
         if (floorAnnual > 0 && discountedAnnual < floorAnnual) {
+          if (logger) {
+            logger.info('[pricing-engine] lawn post-discount program-minimum guard applied', {
+              annualBeforeDiscount: item.annualBeforeDiscount,
+              discountedAnnual,
+              floorAnnual,
+            });
+          }
           item.annualAfterDiscount = floorAnnual;
           item.discountCapped = true;
           item.programMinimumGuardApplied = true;

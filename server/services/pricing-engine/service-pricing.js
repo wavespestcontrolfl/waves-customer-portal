@@ -1820,7 +1820,7 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
     annualCallbackReserve: roundMoney(floor.annualCallbackReserve),
     annualAdmin: roundMoney(floor.annualAdmin),
     annualCost: roundMoney(floor.annualCost),
-    minimumCollectedAnnualPriceFor55: floor.minimumCollectedAnnualPriceFor55,
+    minimumCollectedAnnualPrice: floor.minimumCollectedAnnualPrice,
     laborMinutesPerVisit: roundMoney(floor.laborMinutesPerVisit),
     routeDriveMinutes,
     routeDensity,
@@ -1831,7 +1831,7 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
 }
 
 function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {
-  return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPriceFor55;
+  return calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property, options).minimumCollectedAnnualPrice;
 }
 
 function priceLawnCare(property, options = {}) {
@@ -1899,7 +1899,7 @@ function priceLawnCare(property, options = {}) {
       costFloorOpts.annualMaterialBudget = tierAnnualBudget;
     }
     const costFloorDetails = calcLawnAnnualCostFloorDetails(lawnSqFt, normalizedTrack, tc.freq, property, costFloorOpts);
-    const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPriceFor55;
+    const costFloorAnnual = costFloorDetails.minimumCollectedAnnualPrice;
     const costFloorApplied = !!useLawnCostFloor && costFloorAnnual > marketAnnual;
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
@@ -1929,7 +1929,7 @@ function priceLawnCare(property, options = {}) {
       costFloorAnnual,
       costFloorApplied,
       costFloorDetails,
-      minimumCollectedAnnualPriceFor55: costFloorAnnual,
+      minimumCollectedAnnualPrice: costFloorAnnual,
     };
   }).filter(Boolean);
   const tiers = includeHiddenTiers
@@ -1993,7 +1993,7 @@ function priceLawnCare(property, options = {}) {
       annualAdmin: roundMoney(selectedCosts.annualAdmin ?? GLOBAL.ADMIN_ANNUAL),
       total: roundMoney(selectedAnnualCost),
     },
-    minimumCollectedAnnualPriceFor55: selected.minimumCollectedAnnualPriceFor55,
+    minimumCollectedAnnualPrice: selected.minimumCollectedAnnualPrice,
     pricingMode: selectedCosts.pricingMode || (selected.costFloorApplied ? LAWN_PRICING_V2.pricingMode : undefined),
     pricingVersion: selectedCosts.pricingVersion || (selected.costFloorApplied ? LAWN_PRICING_V2.pricingVersion : undefined),
     margin: Math.round(margin * 1000) / 1000,
@@ -2471,7 +2471,7 @@ function priceCommercialLawn(property = {}, options = {}) {
     targetGrossMargin: cfg.targetGrossMargin,
   });
 
-  const computedAnnual = floor.minimumCollectedAnnualPriceFor55;
+  const computedAnnual = floor.minimumCollectedAnnualPrice;
   const minApplied = computedAnnual < cfg.minAnnual;
   const annual = roundMoney(Math.max(cfg.minAnnual, computedAnnual));
   const monthly = roundMoney(annual / 12);

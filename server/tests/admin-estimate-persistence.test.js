@@ -105,6 +105,28 @@ describe('admin estimate persistence', () => {
     expect(fields.service_interest).toBe('Lawn Care + Pest Control');
   });
 
+  test('pricing_version stamps only on SERVER authority - fallback rows keep the column default', () => {
+    // On CLIENT_FALLBACK the estimateData blob is still the caller-supplied
+    // payload; a stale engineVersion riding it (e.g. from an earlier server
+    // price) must not claim the column (Codex #2667 r5).
+    const bodyWithVersion = {
+      ...baseBody,
+      estimateData: {
+        inputs: { address: '123 Palm Ave' },
+        result: { engineVersion: 'LAWN_PRICING_V2_DENSE_35_FLOOR', total: 125 },
+      },
+    };
+    const stamped = buildEstimatePersistenceFields(bodyWithVersion, { pricingAuthority: 'SERVER' });
+    expect(stamped.pricing_version).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    // Non-SERVER writes RESET to the column default (updates spread these
+    // fields over the existing row - omitting would preserve a stale stamp
+    // from an earlier server-priced save).
+    const fallback = buildEstimatePersistenceFields(bodyWithVersion, { pricingAuthority: 'CLIENT_FALLBACK' });
+    expect(fallback.pricing_version).toBe('v4.2');
+    const noAuthority = buildEstimatePersistenceFields(bodyWithVersion, {});
+    expect(noAuthority.pricing_version).toBe('v4.2');
+  });
+
   test('preserves full recurring annual totals when legacy annualAfterDiscount excludes add-ons', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
