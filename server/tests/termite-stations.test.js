@@ -186,7 +186,7 @@ test('moves update geometry, retires deactivate, foreign/retired ids are skipped
   expect(foreign.geometry_image).toMatchObject({ cx: 0.5 }); // untouched
 });
 
-test('creates take the per-customer advisory allocation lock; status-only payloads do not', async () => {
+test('geometry writes (creates AND moves) take the per-customer advisory lock; status-only payloads do not', async () => {
   const { db, state } = makeFakeDb({
     stations: [
       { id: 'st-1', customer_id: CUSTOMER, station_number: 1, is_active: true, geometry_image: pin(0.1, 0.1) },
@@ -194,7 +194,7 @@ test('creates take the per-customer advisory allocation lock; status-only payloa
   });
   await upsertStationsForCustomer(db, {
     customerId: CUSTOMER,
-    entries: [{ id: 'st-1', status: 'ok' }],
+    entries: [{ id: 'st-1', status: 'ok' }, { id: 'st-1x', retire: true }],
   });
   expect(state.rawCalls).toHaveLength(0);
   await upsertStationsForCustomer(db, {
@@ -204,6 +204,12 @@ test('creates take the per-customer advisory allocation lock; status-only payloa
   expect(state.rawCalls).toHaveLength(1);
   expect(state.rawCalls[0].sql).toMatch(/pg_advisory_xact_lock/);
   expect(state.rawCalls[0].bindings).toEqual([`termite_stations:${CUSTOMER}`]);
+  // a move-only save relies on the occupancy snapshot — it must serialize too
+  await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [{ id: 'st-1', shape: pin(0.4, 0.4) }],
+  });
+  expect(state.rawCalls).toHaveLength(2);
 });
 
 // ── completion sync (registry + checks) ──────────────────────────────────────

@@ -93,6 +93,37 @@ describe('StationMarkingStep', () => {
     expect(screen.getByText('Done adding')).toBeInTheDocument();
   });
 
+  it('add mode ignores taps on existing pins (no stacked duplicates) and stops at the station cap', () => {
+    const onAddStation = vi.fn();
+    const { container } = render(
+      <StationMarkingStep
+        {...baseProps}
+        stations={[station('st-1', 1, 0.25, 0.5), station('st-2', 2, 0.75, 0.5)]}
+        onAddStation={onAddStation}
+        maxStations={2}
+      />,
+    );
+    stubSvgRect(container);
+    // at the cap the add-mode entry point is disabled outright
+    const capButton = screen.getByRole('button', { name: 'Station cap (2)' });
+    expect(capButton).toBeDisabled();
+
+    const { container: c2 } = render(
+      <StationMarkingStep
+        {...baseProps}
+        stations={[station('st-1', 1, 0.25, 0.5)]}
+        onAddStation={onAddStation}
+        maxStations={2}
+      />,
+    );
+    const svg2 = stubSvgRect(c2);
+    fireEvent.click([...c2.querySelectorAll('button')].find((b) => b.textContent === 'Add stations'));
+    firePointer(svg2, 'pointerup', 160, 170); // dead on station 1 — ignored
+    expect(onAddStation).not.toHaveBeenCalled();
+    firePointer(svg2, 'pointerup', 480, 170); // empty ground — adds
+    expect(onAddStation).toHaveBeenCalledWith({ cx: 0.75, cy: 0.5 });
+  });
+
   it('tapping a pin selects it and status chips report the tapped status', () => {
     const onSetStatus = vi.fn();
     const { container } = render(

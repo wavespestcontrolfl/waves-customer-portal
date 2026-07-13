@@ -145,16 +145,18 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
   };
   if (!customerId || !Array.isArray(entries) || !entries.length) return summary;
 
-  // Number allocation reads max(station_number) below — two concurrent saves
-  // for one customer (office PUT + a field completion) could both read the
-  // same max and collide on the unique (customer_id, station_number), which
-  // in the post-commit completion path would silently drop the new pins.
-  // A per-customer advisory lock serializes allocation; it releases at
-  // transaction end, so this function MUST run inside a transaction (both
-  // callers do). Only taken when the payload actually creates stations.
-  const hasCreates = entries.some((entry) => entry && entry.retire !== true
-    && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null);
-  if (hasCreates) {
+  // Number allocation reads max(station_number) below, and the occupancy /
+  // replay-dedupe guards read a point-in-time position snapshot — two
+  // concurrent geometry writes for one customer (office PUT + a field
+  // completion) could both read pre-write state and collide on the number
+  // unique or stack two active pins in one hole (geometry has no DB
+  // constraint). A per-customer advisory lock serializes every geometry
+  // write (creates AND moves); it releases at transaction end, so this
+  // function MUST run inside a transaction (both callers do). Status-only
+  // payloads skip the lock.
+  const hasGeometryWrites = entries.some((entry) => entry && entry.retire !== true
+    && entry.shape != null);
+  if (hasGeometryWrites) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}`]);
   }
 
@@ -509,6 +511,7 @@ function buildStationMapReportContext({
 module.exports = {
   STATION_STATUSES,
   MAX_STATION_ENTRIES,
+  MAX_ACTIVE_STATIONS,
   sanitizeStationShape,
   validateStationEntriesBody,
   profileAllowsStationSync,

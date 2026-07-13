@@ -2910,6 +2910,7 @@ function TermiteStationsPanel({ customerId }) {
                 onSetStatus={() => {}}
                 onRemoveStation={removePin}
                 showStatuses={false}
+                maxStations={Number(map?.stationCap) || 80}
                 disabled={saving}
               />
               <div className="flex items-center gap-3 mt-2">

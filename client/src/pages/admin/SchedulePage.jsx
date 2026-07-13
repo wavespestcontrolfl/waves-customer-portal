@@ -7077,6 +7077,9 @@ export function StationMarkingStep({
   // false = office desk mode (Customer 360): positions only, no visit to
   // hang statuses on — pins render neutral and the status chips hide.
   showStatuses = true,
+  // server cap (property-map stationCap) — add-mode stops here so the
+  // counts can never claim a pin the registry will refuse
+  maxStations = 80,
   disabled = false,
   dark = false,
 }) {
@@ -7136,6 +7139,12 @@ export function StationMarkingStep({
       return;
     }
     if (addMode) {
+      // A tap landing on an existing pin must NOT stack a duplicate on top
+      // of it (a double-tap would create two stations at one spot, and the
+      // auto counts would claim a pin the server dedupes away). Ignore it —
+      // the tech moves a thumb-width away or exits add mode to select.
+      if (nearestPin(pt)) return;
+      if (pinned.length >= maxStations) return;
       // stay in add mode — installs drop many pins in a row
       onAddStation({ cx: pt.x, cy: pt.y });
       return;
@@ -7236,16 +7245,17 @@ export function StationMarkingStep({
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
         <button
           type="button"
-          disabled={disabled}
+          disabled={disabled || (!addMode && pinned.length >= maxStations)}
           onClick={() => {
             if (disabled) return;
+            if (!addMode && pinned.length >= maxStations) return;
             setAddMode((v) => !v);
             setArmedMoveKey(null);
             setSelectedKey(null);
           }}
           style={chipStyle(addMode, accent)}
         >
-          {addMode ? "Done adding" : "Add stations"}
+          {addMode ? "Done adding" : pinned.length >= maxStations ? `Station cap (${maxStations})` : "Add stations"}
         </button>
         {selected && !addMode && (
           <>
@@ -11896,6 +11906,7 @@ export function CompletionPanel({
                 onMoveStation={moveStationPin}
                 onSetStatus={setStationStatus}
                 onRemoveStation={removeStationPin}
+                maxStations={Number(propertyMap?.stationCap) || 80}
                 disabled={generating || success}
               />
             )}
@@ -13908,6 +13919,7 @@ export function CompletionPanel({
               onMoveStation={moveStationPin}
               onSetStatus={setStationStatus}
               onRemoveStation={removeStationPin}
+              maxStations={Number(propertyMap?.stationCap) || 80}
               dark
               disabled={generating || success}
             />
