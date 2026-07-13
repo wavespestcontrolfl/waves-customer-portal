@@ -47,11 +47,24 @@ function cellLabel(track, sqft, visits) {
 function scanLadderGrid() {
   const { priceLawnCare } = require('./pricing-engine/service-pricing');
   const { LAWN_PRICING_V2 } = require('./pricing-engine/constants');
-  const programMinimumMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly) || 0;
   const shapeChecks = process.env.LAWN_SWEEP_SHAPE_CHECKS === 'true';
 
   const violations = [];
   let cellsChecked = 0;
+
+  // The DB bridge deep-merges lawn config without validating this field, so a
+  // malformed live value must be a violation — `Number(...) || 0` would
+  // silently DISABLE the below-minimum check (and priceLawnCare stops
+  // enforcing the owner-mandated floor) while the sweep reports clean.
+  const rawProgramMinimum = LAWN_PRICING_V2.programMinimumMonthly;
+  const programMinimumMonthly = Number(rawProgramMinimum);
+  if (!Number.isFinite(programMinimumMonthly) || programMinimumMonthly <= 0) {
+    violations.push({
+      check: 'malformed_program_minimum',
+      cell: 'lawn_pricing_v2.programMinimumMonthly',
+      detail: `live config program minimum is ${JSON.stringify(rawProgramMinimum)} — the monthly floor is not being enforced`,
+    });
+  }
 
   for (const track of TRACKS) {
     const prevMonthlyBySizeTier = {};
@@ -154,13 +167,15 @@ async function checkBudgetDrift() {
     return { status: 'skipped', reason: 'inventory COGS tables unavailable', violations: [] };
   }
   const cogs = inventoryCostFromRows('lawn_care', { lawnSqFt: MATERIAL_REFERENCE_SQFT }, inventory);
-  if (cogs.status === 'missing_cogs' || !Number(cogs.totalPerVisit)) {
+  if (cogs.status === 'missing_cogs') {
     return { status: 'skipped', reason: 'no live COGS rows mapped for Lawn Care', violations: [] };
   }
-  // status 'warning' = some mapped rows priced at $0 (missing normalized cost
-  // data), which UNDERSTATES the annual lower bound — a partially costed
-  // rotation must not vouch for the budget (or resolve an open alert). It is
-  // a data-quality exception, not a designed skip.
+  // status 'warning' = some (or ALL — total can be $0) mapped rows priced at
+  // $0 for missing normalized cost data, which UNDERSTATES the annual lower
+  // bound — a partially costed rotation must not vouch for the budget (or
+  // resolve an open alert). Checked BEFORE the zero-total skip so an
+  // all-zero warning rotation lands here, not in the designed skip. It is a
+  // data-quality exception, not a designed skip.
   if (cogs.status !== 'ok') {
     const warningText = (cogs.warnings || []).join('; ') || 'unknown COGS warning';
     return {
@@ -172,6 +187,12 @@ async function checkBudgetDrift() {
         detail: `mapped Lawn Care rotation is only partially costed (${warningText}) — budget drift cannot be verified until every mapped product carries cost data`,
       }],
     };
+  }
+  // status 'ok' with a zero total = every mapped row genuinely costs $0 —
+  // nothing to compare (distinct from the warning path above, where $0 means
+  // MISSING cost data).
+  if (!Number(cogs.totalPerVisit)) {
+    return { status: 'skipped', reason: 'mapped Lawn Care rotation has zero live cost', violations: [] };
   }
   const annualLowerBound = Math.round(Number(cogs.totalPerVisit) * 100) / 100;
 
@@ -225,7 +246,7 @@ async function upsertSweepAlert(violations, metadata) {
     status: 'open',
     // material_budget_unverified stays 'high' — a partially costed inventory
     // rotation is a data-quality exception to fix, not a margin emergency.
-    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price'].includes(v.check))
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price', 'malformed_program_minimum'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',

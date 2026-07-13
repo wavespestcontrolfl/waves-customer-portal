@@ -489,10 +489,13 @@ function buildEstimatePersistenceFields(body, context = {}) {
 
   // Stamp the engine version that actually priced this estimate (varchar(80)
   // since migration 20260713000020 — lawn mechanism tokens like
-  // LAWN_PRICING_V2_DENSE_35_FLOOR don't fit the original 10. Only written
-  // when the server recompute ran, so CLIENT_FALLBACK rows keep the default
-  // rather than claiming a version).
-  const pricingVersion = typeof estimateData?.result?.engineVersion === 'string'
+  // LAWN_PRICING_V2_DENSE_35_FLOOR don't fit the original 10. Gated on the
+  // resolved pricing authority, NOT just the blob: on CLIENT_FALLBACK the
+  // blob is still the caller-supplied payload and may carry a stale
+  // engineVersion from an earlier server price — a row the server did not
+  // recompute must keep the column default rather than claim a version.
+  const pricingVersion = context.pricingAuthority === 'SERVER'
+    && typeof estimateData?.result?.engineVersion === 'string'
     ? estimateData.result.engineVersion.slice(0, 80)
     : null;
 
@@ -654,7 +657,7 @@ async function resolveEstimateWritePayload({
   return {
     ...buildEstimatePersistenceFields(
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
-      { technician, technicianId, now },
+      { technician, technicianId, now, pricingAuthority: pricing.audit?.pricing_authority },
     ),
     ...pricing.audit,
   };

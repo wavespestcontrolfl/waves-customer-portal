@@ -345,6 +345,40 @@ describe('sweep red paths — failures become alert violations, never silent gre
     expect(calls.inserts[0].payload.severity).toBe('high'); // data-quality exception, not critical
   });
 
+  test('an ALL-zero-cost warning rotation is unverified, not a designed skip', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => ({ available: true }),
+      // Every mapped product missing cost data: warning status AND $0 total —
+      // this must hit the unverified branch, not the zero-total skip.
+      inventoryCostFromRows: () => ({
+        status: 'warning',
+        totalPerVisit: 0,
+        warnings: ['every mapped product has no normalized cost data'],
+      }),
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('unverified');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['material_budget_unverified']);
+    expect(calls.updates).toHaveLength(0);
+  });
+
+  test('a malformed live program minimum is a violation, not a silently disabled floor', () => {
+    // Mutate the constants singleton in place (the sweep's lazy require
+    // returns this same object) — mirrors exactly what the DB bridge's
+    // unvalidated deep-merge does to live config.
+    const prior = LAWN_PRICING_V2.programMinimumMonthly;
+    LAWN_PRICING_V2.programMinimumMonthly = 'not-a-number';
+    try {
+      const { sweep } = loadSweep({ priceLawnCare: cleanTiers });
+      const { violations } = sweep.scanLadderGrid();
+      expect(violations.map((v) => v.check)).toEqual(['malformed_program_minimum']);
+      expect(violations[0].detail).toContain('"not-a-number"');
+    } finally {
+      LAWN_PRICING_V2.programMinimumMonthly = prior;
+    }
+  });
+
   test('repeat alerts keep their first detected_at; only a post-resolution re-fire starts a new episode', async () => {
     const { sweep, calls } = loadSweep({
       priceLawnCare: () => {
