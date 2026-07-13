@@ -500,7 +500,11 @@ function buildEstimatePersistenceFields(body, context = {}) {
     : null;
 
   return {
-    ...(pricingVersion ? { pricing_version: pricingVersion } : {}),
+    // Always emitted: a non-SERVER rewrite RESETS the column to its migration
+    // default, so a draft first stamped by a server price can't keep claiming
+    // that version after a CLIENT_FALLBACK/quote-required rewrite replaced
+    // its estimate_data (updates spread these fields over the existing row).
+    pricing_version: pricingVersion || 'v4.2',
     customer_id: body.customerId || null,
     estimate_data: estimateData ? JSON.stringify(estimateData) : null,
     address: body.address,

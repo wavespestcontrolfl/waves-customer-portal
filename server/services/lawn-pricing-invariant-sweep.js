@@ -92,11 +92,23 @@ function scanLadderGrid() {
         // below evaluate false — the cell would pass as clean while the live
         // price is unusable. Reject it explicitly and skip the comparisons
         // (they are meaningless against a non-finite value).
-        if (!Number.isFinite(t.monthly) || t.monthly <= 0) {
+        if (![t.monthly, t.annual, t.perApp].every((n) => Number.isFinite(n) && n > 0)) {
           violations.push({
             check: 'non_finite_price',
             cell: cellLabel(track, sqft, t.visits),
-            detail: `monthly is ${t.monthly} — live ladder cell is not a usable price`,
+            detail: `monthly=${t.monthly} annual=${t.annual} perApp=${t.perApp} — live ladder cell is not a usable price`,
+          });
+          continue;
+        }
+        // The cost-floor output must also be a real dollar amount: a malformed
+        // live margin floor (e.g. bad targetCollectedMarginFloor) yields NaN
+        // costFloorAnnual while market pricing still returns a finite monthly
+        // — floor enforcement silently OFF while the grid reads clean.
+        if (!Number.isFinite(t.costFloorAnnual) || t.costFloorAnnual <= 0) {
+          violations.push({
+            check: 'malformed_cost_floor',
+            cell: cellLabel(track, sqft, t.visits),
+            detail: `costFloorAnnual is ${t.costFloorAnnual} — cost-floor enforcement is not verifiable for this cell`,
           });
           continue;
         }
@@ -167,8 +179,20 @@ async function checkBudgetDrift() {
     return { status: 'skipped', reason: 'inventory COGS tables unavailable', violations: [] };
   }
   const cogs = inventoryCostFromRows('lawn_care', { lawnSqFt: MATERIAL_REFERENCE_SQFT }, inventory);
+  // Tables exist but no Lawn Care usage rows: prod normally carries the
+  // mapped rotation, so a missing mapping means rows were deleted/renamed —
+  // an anomaly that must not vouch for the budget (the infra-absent case is
+  // the `!inventory.available` skip above).
   if (cogs.status === 'missing_cogs') {
-    return { status: 'skipped', reason: 'no live COGS rows mapped for Lawn Care', violations: [] };
+    return {
+      status: 'unverified',
+      reason: 'no live COGS rows mapped for Lawn Care',
+      violations: [{
+        check: 'material_budget_unverified',
+        cell: 'inventory_cogs',
+        detail: 'no Lawn Care rows mapped in inventory COGS (deleted/renamed?) — budget drift cannot be verified',
+      }],
+    };
   }
   // status 'warning' = some (or ALL — total can be $0) mapped rows priced at
   // $0 for missing normalized cost data, which UNDERSTATES the annual lower
@@ -246,7 +270,7 @@ async function upsertSweepAlert(violations, metadata) {
     status: 'open',
     // material_budget_unverified stays 'high' — a partially costed inventory
     // rotation is a data-quality exception to fix, not a margin emergency.
-    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price', 'malformed_program_minimum'].includes(v.check))
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed', 'non_finite_price', 'malformed_program_minimum', 'malformed_cost_floor'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',

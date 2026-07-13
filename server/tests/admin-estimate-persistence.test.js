@@ -118,10 +118,13 @@ describe('admin estimate persistence', () => {
     };
     const stamped = buildEstimatePersistenceFields(bodyWithVersion, { pricingAuthority: 'SERVER' });
     expect(stamped.pricing_version).toBe('LAWN_PRICING_V2_DENSE_35_FLOOR');
+    // Non-SERVER writes RESET to the column default (updates spread these
+    // fields over the existing row - omitting would preserve a stale stamp
+    // from an earlier server-priced save).
     const fallback = buildEstimatePersistenceFields(bodyWithVersion, { pricingAuthority: 'CLIENT_FALLBACK' });
-    expect(fallback.pricing_version).toBeUndefined();
+    expect(fallback.pricing_version).toBe('v4.2');
     const noAuthority = buildEstimatePersistenceFields(bodyWithVersion, {});
-    expect(noAuthority.pricing_version).toBeUndefined();
+    expect(noAuthority.pricing_version).toBe('v4.2');
   });
 
   test('preserves full recurring annual totals when legacy annualAfterDiscount excludes add-ons', () => {

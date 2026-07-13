@@ -453,7 +453,10 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       annualTotal: money(estimate.annual_total),
       onetimeTotal: money(estimate.onetime_total),
       waveguardTier: estimate.waveguard_tier,
-      pricingVersion: result.pricingVersion || data.pricingVersion || null,
+      // engineVersion carries the mechanism token that actually priced the
+      // estimate (e.g. LAWN_PRICING_V2_DENSE_35_FLOOR); the bare
+      // pricingVersion fields are the hardcoded engine constant.
+      pricingVersion: result.engineVersion || result.pricingVersion || data.pricingVersion || null,
     },
     dimensions,
     totals: {

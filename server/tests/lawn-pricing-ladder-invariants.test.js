@@ -249,11 +249,10 @@ describe('sweep red paths — failures become alert violations, never silent gre
   }
 
   const cleanTiers = ({ lawnSqFt }) => ({
-    tiers: SOLD_VISITS.map((visits) => ({
-      visits,
-      monthly: 100 + visits + lawnSqFt / 1000,
-      perApp: 50,
-    })),
+    tiers: SOLD_VISITS.map((visits) => {
+      const monthly = 100 + visits + lawnSqFt / 1000;
+      return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: 600 };
+    }),
   });
 
   test('a gradual downward slope trips size monotonicity even when every adjacent step is in tolerance', () => {
@@ -261,11 +260,10 @@ describe('sweep red paths — failures become alert violations, never silent gre
       // Each 500sf step drops $0.25 — inside the $0.30 adjacent tolerance,
       // but $4+ cumulative peak-to-valley across the grid.
       priceLawnCare: ({ lawnSqFt }) => ({
-        tiers: SOLD_VISITS.map((visits) => ({
-          visits,
-          monthly: 200 + visits - ((lawnSqFt - 2000) / 500) * 0.25,
-          perApp: 50,
-        })),
+        tiers: SOLD_VISITS.map((visits) => {
+          const monthly = 200 + visits - ((lawnSqFt - 2000) / 500) * 0.25;
+          return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: 600 };
+        }),
       }),
     });
     const { violations } = sweep.scanLadderGrid();
@@ -317,12 +315,45 @@ describe('sweep red paths — failures become alert violations, never silent gre
       // NaN compares false against every invariant threshold — without an
       // explicit finite check this grid reads as perfectly clean.
       priceLawnCare: () => ({
-        tiers: SOLD_VISITS.map((visits) => ({ visits, monthly: NaN, perApp: NaN })),
+        tiers: SOLD_VISITS.map((visits) => ({ visits, monthly: NaN, annual: NaN, perApp: NaN, costFloorAnnual: 600 })),
       }),
     });
     const { violations } = sweep.scanLadderGrid();
     expect(violations.length).toBeGreaterThan(0);
     expect(new Set(violations.map((v) => v.check))).toEqual(new Set(['non_finite_price']));
+  });
+
+  test('a malformed cost floor is a violation even when the market monthly stays finite', () => {
+    const { sweep } = loadSweep({
+      // Bad live targetCollectedMarginFloor: market pricing still yields a
+      // usable monthly while costFloorAnnual is NaN — floor enforcement is
+      // silently OFF and only an explicit check catches it.
+      priceLawnCare: ({ lawnSqFt }) => ({
+        tiers: SOLD_VISITS.map((visits) => {
+          const monthly = 100 + visits + lawnSqFt / 1000;
+          return { visits, monthly, annual: monthly * 12, perApp: 50, costFloorAnnual: NaN };
+        }),
+      }),
+    });
+    const { violations } = sweep.scanLadderGrid();
+    expect(violations.length).toBeGreaterThan(0);
+    expect(new Set(violations.map((v) => v.check))).toEqual(new Set(['malformed_cost_floor']));
+  });
+
+  test('missing Lawn COGS mappings are unverified — prod carries the rotation, absence is an anomaly', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => ({ available: true }),
+      inventoryCostFromRows: () => ({
+        status: 'missing_cogs',
+        totalPerVisit: 0,
+        warnings: ['No inventory COGS rows mapped'],
+      }),
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('unverified');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['material_budget_unverified']);
+    expect(calls.updates).toHaveLength(0);
   });
 
   test('partially costed COGS is unverified — it must not vouch for the material budget', async () => {
