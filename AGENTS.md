@@ -292,6 +292,11 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
   filters email-only blocks, server-side interpolation, generic 404),
+  `/api/public/price-change/:token` (price-change notice page data;
+  32-hex token format gate, 60 req/min rate limit, privacy headers
+  `no-store`/`noindex`/`no-referrer`, generic 404; payload is first name +
+  the price change only — no address/email/PII; view counted for the
+  delivery record),
   `/api/public/products` (read-only export; returns only active +
   customer_visibility=public + content_status=approved_for_public products;
   excludes pricing, vendor, SKU, dilution, MOA, inventory fields),

@@ -98,6 +98,7 @@ const SECTIONS = [
       { path: "/admin/banking", icon: Landmark, label: "Banking" },
       { path: "/admin/tax", icon: Calculator, label: "Taxes" },
       { path: "/admin/pricing-logic", icon: Ruler, label: "Pricing" },
+      { path: "/admin/price-change", icon: Megaphone, label: "Price Notices" },
     ],
   },
   {

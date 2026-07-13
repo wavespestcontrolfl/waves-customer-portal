@@ -51,13 +51,22 @@ function isCardPath(reqPath = '') {
   return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public tokened price-change notice page — 32-hex bearer token
+// (price_change_notices.notice_token) showing the customer's name and
+// billing amounts, so the shell must never be indexed/cached and must not
+// leak the token via Referer. Case-insensitive to match the public API's
+// TOKEN_RE (price-change-public.js), which accepts uppercased tokens.
+function isPriceChangeNoticePath(reqPath = '') {
+  return /^\/price-change\/[a-f0-9]{32}\/?$/i.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -72,4 +81,5 @@ module.exports = {
   isServiceReportPath,
   isEstimatePath,
   isCardPath,
+  isPriceChangeNoticePath,
 };
