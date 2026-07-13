@@ -70,10 +70,17 @@ const PROJECT_TYPES = {
     photoCategories: ['exterior', 'foundation', 'garage', 'attic', 'crawlspace', 'evidence', 'other'],
     findingsFields: [
       { key: 'areas_inspected', label: 'Areas inspected', type: 'textarea' },
+      // FS 482.226 report-content requirements for a for-a-fee inspection
+      // (owner Phase-3 signoff 2026-07-13): the report states visible
+      // accessible areas not inspected (and why) and that the inspection
+      // notice was affixed. The routine-maintenance clause covers the FORM,
+      // not the content.
+      { key: 'areas_not_inspected', label: 'Areas not inspected / why', type: 'textarea', placeholder: 'Visible accessible areas not inspected and why; inaccessible areas (e.g. attic decked over, locked shed)' },
       { key: 'termite_type', label: 'Termite species (if found)', type: 'select', options: ['None observed', 'Eastern subterranean', 'Formosan', 'Drywood', 'Dampwood', 'Unknown — sample collected'] },
       { key: 'activity_status', label: 'Activity status', type: 'select', options: ['No activity', 'Old / inactive damage', 'Active infestation'] },
       { key: 'infestation_extent', label: 'Infestation extent', type: 'textarea' },
       { key: 'treatment_recommendation', label: 'Recommended treatment', type: 'textarea' },
+      { key: 'inspection_notice_affixed', label: 'Inspection notice affixed', type: 'select', options: ['Yes', 'No'] },
     ],
   },
 
@@ -793,8 +800,18 @@ const PROJECT_TYPES = {
       { key: 'areas_treated', label: 'Areas treated', type: 'textarea' },
       { key: 'treatment_method', label: 'Treatment method', type: 'select', options: ['Spot treatment', 'Liquid perimeter', 'Trenching', 'Bait station setup', 'Cartridge replacement', 'Wood treatment', 'Other'] },
       { key: 'products_used', label: 'Products used', type: 'textarea' },
+      // FAC 5E-14 application-record detail (owner Phase-3 signoff
+      // 2026-07-13). The product application log remains the record of
+      // authority; these make the customer-facing report self-contained.
+      // Keys deliberately avoid product_name/concentration_pct so the
+      // pre-construction chemistry auto-fill never engages here.
+      { key: 'percent_solution', label: '% solution', type: 'text', placeholder: 'e.g. 0.06%' },
+      { key: 'epa_registration', label: 'EPA reg. no.', type: 'text', placeholder: 'e.g. 100-1503' },
       { key: 'linear_feet_or_stations', label: 'Linear feet / stations', type: 'textarea' },
       { key: 'gallons_or_amount', label: 'Gallons / amount applied', type: 'textarea' },
+      // FS 482.2265 posted-notice duty on exterior/perimeter applications —
+      // the report asserts field practice was followed (owner Q2 answer).
+      { key: 'posted_notice', label: 'Posted notice placed (exterior / perimeter applications)', type: 'select', options: ['Yes', 'No', 'Not applicable'] },
       { key: 'followup_plan', label: 'Follow-up / warranty plan', type: 'textarea' },
     ],
   },

@@ -281,6 +281,13 @@ const CUSTOMER_FIELD_LABELS = {
   palm_count: 'Palms treated',
   linear_feet_or_stations: 'Linear feet / stations',
   gallons_or_amount: 'Amount applied',
+  // Termite Phase-3 compliance fields (owner signoff 2026-07-13):
+  // FS 482.226 report content + FAC 5E-14 application detail.
+  areas_not_inspected: 'Areas not inspected',
+  inspection_notice_affixed: 'Inspection notice posted',
+  percent_solution: 'Solution strength',
+  epa_registration: 'EPA registration no.',
+  posted_notice: 'Posted notice placed',
   evidence_observed: 'Evidence observed today',
   traps_checked: 'Traps checked',
   captures: 'Captures',
