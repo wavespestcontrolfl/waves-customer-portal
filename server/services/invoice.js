@@ -2805,10 +2805,21 @@ const InvoiceService = {
       // (not the rate stored on the invoice) so its tax preview matches the
       // server retotal when a customer's type changed after invoice creation.
       "customers.property_type",
+      // Any saved method counts as a card on file — cards captured by booking
+      // holds, pay-page saves, and recurring enrollment are deliberately saved
+      // with is_default=false, and the charge sheet + /charge-card endpoint
+      // accept any of the customer's methods. Prefer non-expired (ACH rows
+      // have no expiry), then the default, then the newest — mirroring the
+      // client's chargeableCardOnFile() pick order.
       db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
-          WHERE customer_id = invoices.customer_id AND is_default = true
+          WHERE customer_id = invoices.customer_id
+          ORDER BY
+            (exp_year IS NULL OR exp_month IS NULL
+              OR (make_date(exp_year::int, exp_month::int, 1) + INTERVAL '1 month - 1 day')::date >= CURRENT_DATE) DESC,
+            is_default DESC,
+            created_at DESC
           LIMIT 1
         ) AS card_on_file`),
       db.raw(`(
