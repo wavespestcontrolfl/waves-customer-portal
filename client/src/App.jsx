@@ -77,6 +77,16 @@ function ScheduleRedirect() {
   return <Navigate to={`/admin/dispatch?${params.toString()}`} replace />;
 }
 
+// Field photo-scoring flow is now the "Field Assessment" tab of the
+// consolidated Assessments hub. Old bookmarks/links to
+// /admin/lawn-assessment land on that tab.
+function LawnAssessmentRedirect() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  params.set('tab', 'field');
+  return <Navigate to={`/admin/lawn-assessments?${params.toString()}`} replace />;
+}
+
 function FleetRedirect() {
   const location = useLocation();
   const params = new URLSearchParams(location.search);
@@ -230,7 +240,7 @@ const TechEstimatorPage = lazyWithRetry(() => import('./pages/tech/TechEstimator
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
-const AdminPhotoAssessmentsPage = lazyWithRetry(() => import('./pages/admin/PhotoAssessmentsPage'));
+const AdminAssessmentsHubPage = lazyWithRetry(() => import('./pages/admin/AssessmentsHubPage'));
 const TechLawnDiagnosticPage = lazyWithRetry(() => import('./pages/tech/TechLawnDiagnosticPage'));
 const TechSocialPostPage = lazyWithRetry(() => import('./pages/tech/TechSocialPostPage'));
 const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
@@ -249,7 +259,6 @@ const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealth
 const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
-const AdminLawnAssessmentPage = lazyWithRetry(() => import('./pages/admin/LawnAssessmentPanel'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminEquipmentCalibrationPage = lazyWithRetry(() => import('./pages/admin/EquipmentCalibrationPanel'));
 const AdminLawnProtocolPage = lazyWithRetry(() => import('./pages/admin/LawnProtocolCommandCenterPage'));
@@ -456,8 +465,12 @@ export default function App() {
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
             <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
-            <Route path="lawn-assessment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn assessment...</div>}><AdminLawnAssessmentPage /></Suspense>} />
-            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminPhotoAssessmentsPage /></Suspense>} />
+            {/* /admin/lawn-assessments is the consolidated Assessments hub
+                (Lead Magnets tab + Field Assessment tab). The old standalone
+                /admin/lawn-assessment route redirects to the Field tab so
+                bookmarks and internal links keep working. */}
+            <Route path="lawn-assessment" element={<LawnAssessmentRedirect />} />
+            <Route path="lawn-assessments" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading assessments...</div>}><AdminAssessmentsHubPage /></Suspense>} />
             <Route path="lawn-protocol" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading lawn protocol...</div>}><AdminLawnProtocolPage /></Suspense>} />
             <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment calibration...</div>}><AdminEquipmentCalibrationPage /></Suspense>} />

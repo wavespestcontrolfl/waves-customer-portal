@@ -132,7 +132,7 @@ function readinessIssueAction(issue, appointment) {
     return { type: "link", label: "Customer", to: `/admin/customers?customerId=${encodeURIComponent(appointment.customerId || "")}` };
   }
   if (code.includes("assessment")) {
-    return { type: "link", label: "Assessment", to: "/admin/lawn-assessment" };
+    return { type: "link", label: "Assessment", to: "/admin/lawn-assessments?tab=field" };
   }
   if (code.includes("sop") || code.includes("wiki")) {
     return { type: "tab", label: "SOP Refs", tab: "bridges" };
@@ -345,7 +345,7 @@ export default function LawnProtocolCommandCenterPage() {
 
   useEffect(() => {
     load();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
 
   const protocol = data?.protocol || {};
   const window = protocol.window || {};
