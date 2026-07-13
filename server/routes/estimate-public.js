@@ -8585,6 +8585,14 @@ router.put('/:token/accept', async (req, res, next) => {
         customerId,
         paymentMethodId: cardHoldVerification.paymentMethodId,
       }).catch(() => {});
+      // Hold-confirmation email (owner 2026-07-13; GATED OFF until
+      // GATE_CARD_ENROLLMENT_EMAILS): the customer's copy of the
+      // visit-scoped card authorization — fee/window from the FROZEN hold
+      // row. Fire-and-forget; idempotent per estimate.
+      try {
+        const { sendCardHoldConfirmation } = require('../services/card-enrollment-email');
+        void sendCardHoldConfirmation({ estimateId: estimate.id, customerId });
+      } catch { /* best-effort */ }
     }
     // Recurring card-on-file: attach the captured card, record the consent
     // snapshot, and enroll Auto Pay (post-commit, best-effort — the accept and

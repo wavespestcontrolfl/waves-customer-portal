@@ -329,6 +329,24 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       });
     }
 
+    // Authorization-copy backstop (Codex #2698 r3): a card ENTERING the
+    // in-charge role via the portal — the re-enable toggle or use-this-card
+    // — may never have received its enrollment copy (it was enrolled behind
+    // a healthy incumbent under the in-charge-only rule, or before the gate
+    // flipped). Consent-version-keyed idempotency makes this at-most-once
+    // per agreement; the sender itself skips non-card methods and customers
+    // with no enrollment-scoped consent row. Fire-and-forget; gate off =
+    // total no-op.
+    if (willBeEnabled && activePaymentMethodId && (enabledEvent || methodChangedEvent)) {
+      try {
+        const { sendAutopayEnrollmentConfirmation } = require('../services/card-enrollment-email');
+        void sendAutopayEnrollmentConfirmation({
+          customerId: req.customerId,
+          paymentMethodRowId: activePaymentMethodId,
+        });
+      } catch { /* best-effort */ }
+    }
+
     res.json({ success: true, updated: true, changes: Object.keys(updates) });
   } catch (err) { next(err); }
 });
