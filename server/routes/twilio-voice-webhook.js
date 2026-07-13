@@ -992,6 +992,7 @@ router.post('/recording-status', async (req, res) => {
       }
 
       let quarantinedMatch = null;
+      let stampedRaceRow = null;
       if (updated === 0) {
         quarantinedMatch = await db('call_log')
           .whereIn('twilio_call_sid', [ParentCallSid, CallSid].filter(Boolean))
@@ -1045,10 +1046,18 @@ router.post('/recording-status', async (req, res) => {
 
             const existing = await trx('call_log').where('twilio_call_sid', primaryCallSid).first();
             if (existing) {
-              // Same quarantine guard as the direct updates above.
-              await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
-              matchedSid = primaryCallSid;
-              logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
+              // Same quarantine guard as the direct updates above — and the
+              // same zero-row handling (round-18 P2): a stamp landing
+              // between the earlier lookup and this transaction means the
+              // guarded update silently skips, and the just-arrived
+              // recording must be quarantine-deleted, not left at Twilio.
+              const guardedCount = await trx('call_log').where({ id: existing.id }).where(notQuarantined).update(recordingData);
+              if (guardedCount === 0) {
+                stampedRaceRow = existing;
+              } else {
+                matchedSid = primaryCallSid;
+                logger.info(`[recording-status] Attached recording ${maskSid(RecordingSid)} to existing Studio-originated call ${maskSid(primaryCallSid)}`);
+              }
               return;
             }
 
@@ -1106,6 +1115,29 @@ router.post('/recording-status', async (req, res) => {
         logger.warn(
           `[recording-status] No parent call_log row for CallSid=${maskSid(CallSid)} ParentCallSid=${maskSid(ParentCallSid)}; skipping orphan insert (recording=${maskSid(RecordingSid)})`
         );
+      }
+
+      if (stampedRaceRow) {
+        // The Studio-branch race resolved to a PAN-stamped row — same
+        // handling as quarantinedMatch: delete the just-arrived recording
+        // and process the masked transcript immediately (round-18 P2).
+        logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-stamped call ${maskSid(stampedRaceRow.twilio_call_sid)} (guarded update raced) — deleting instead of attaching`);
+        await require('../services/call-recording-processor').quarantineCardRecording(
+          {
+            ...stampedRaceRow,
+            recording_sid: RecordingSid || stampedRaceRow.recording_sid,
+            recording_url: RecordingUrl ? `${RecordingUrl}.mp3` : stampedRaceRow.recording_url,
+          },
+          { source: 'recording_status_post_quarantine' },
+        ).catch((e) => logger.error(`[recording-status] raced post-quarantine delete failed: ${e.message}`));
+        try {
+          const rProcessor = require('../services/call-recording-processor');
+          void rProcessor.processRecording(stampedRaceRow.twilio_call_sid)
+            .catch((e) => logger.error(`[recording-status] raced quarantined-transcript processing failed: ${e.message}`));
+          queueVoiceMessageSync(stampedRaceRow.twilio_call_sid);
+        } catch (e) {
+          logger.error(`[recording-status] raced quarantined processing setup failed: ${e.message}`);
+        }
       }
 
       // Auto-process recording when ready. Use the SID we actually

@@ -47,7 +47,10 @@ describe('recoverRecordingForCall — PAN quarantine guard', () => {
       id: 'c-quarantined',
       recording_url: null,
       // jsonb comes back as an OBJECT from Postgres — the guard handles both.
-      transcription_metadata: { pan_detected: true, recording_quarantined: true },
+      // Fully complete: delete done AND alert delivered — the one state
+      // with nothing left to retry (round-18: a missing pan_notified now
+      // re-runs the quarantine to resend the office alert).
+      transcription_metadata: { pan_detected: true, recording_quarantined: true, pan_notified: true },
     };
     const out = await processor.recoverRecordingForCall('CAtest0000000000000000000000000001');
     expect(out).toMatchObject({ success: true, skipped: true, reason: 'pan_quarantined' });

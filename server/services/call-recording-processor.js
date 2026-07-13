@@ -2849,6 +2849,22 @@ async function transcribeRecording(mp3Url, opts = {}) {
     // (processRecording, the retranscription backfill, bounce reverify)
     // pass quarantine: true; diagnostic/replay callers stay pure reads.
     if (panCount > 0 && opts.quarantine === true && opts.call?.id) {
+      // Persist the MASKED transcript before the audio is stripped
+      // (round-18 P2): a crash between this quarantine and the caller's
+      // transcript write would otherwise leave pan_detected + no audio +
+      // no transcription — unrecoverable (the text existed only in
+      // memory) and invisible to the quarantined backstop. The caller's
+      // later provenance write overwrites this with the same content.
+      if (typeof result?.transcription === 'string' && result.transcription.length) {
+        try {
+          await db('call_log').where({ id: opts.call.id }).update({
+            transcription: result.transcription,
+            updated_at: new Date(),
+          });
+        } catch (preErr) {
+          logger.warn(`[call-proc] pre-quarantine transcript persist failed: ${preErr.message}`);
+        }
+      }
       const q = await quarantineCardRecording(opts.call, { source: 'transcription' });
       if (result.metadata) {
         result.metadata.pan_detected = true;
@@ -7627,7 +7643,12 @@ const CallRecordingProcessor = {
         // the old audio and never retried the fresh one). Complete
         // quarantines just skip.
         const retrySid = meta.quarantine_recording_sid || call.recording_sid || null;
-        if (meta.recording_quarantined !== true && (retrySid || call.recording_url)) {
+        // Retry when the DELETE is incomplete — or when the delete finished
+        // but the office ALERT never delivered (pan_notified missing,
+        // round-18 P2): quarantineCardRecording is idempotent on the strip
+        // and re-sends the alert via the pan_notified guard.
+        if ((meta.recording_quarantined !== true && (retrySid || call.recording_url))
+          || meta.pan_notified !== true) {
           try {
             await quarantineCardRecording({ ...call, recording_sid: retrySid }, { source: 'recovery_quarantine_retry' });
           } catch (qErr) {
@@ -7699,7 +7720,9 @@ const CallRecordingProcessor = {
         .select('twilio_call_sid')
         .whereNotNull('twilio_call_sid')
         .whereRaw("(transcription_metadata::jsonb ->> 'pan_detected') = 'true'")
-        .whereRaw("COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true'")
+        // Incomplete delete OR undelivered office alert (round-18 P2) —
+        // both are quarantine work the retry path finishes.
+        .whereRaw("(COALESCE(transcription_metadata::jsonb ->> 'recording_quarantined', 'false') <> 'true' OR COALESCE(transcription_metadata::jsonb ->> 'pan_notified', 'false') <> 'true')")
         .orderBy('created_at', 'desc')
         .limit(10);
     } catch (qErr) {
