@@ -6818,7 +6818,7 @@ function RecapCapture({ serviceId }) {
 
   const refresh = () => adminFetch(`/admin/dispatch/${serviceId}/recap-media`)
     .then((d) => setItems(d?.items || [])).catch(() => {});
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [serviceId]);
+  useEffect(() => { refresh();   }, [serviceId]);
 
   const onPick = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -8730,13 +8730,23 @@ export function CompletionPanel({
       !dryFormProduct &&
       applicationMethod === "perimeter_spray" &&
       serviceLineFromType(serviceTypeForArea) === "pest";
+    // Dilution products carry their verified label rate in the legacy display
+    // fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal"). When there
+    // is no per-1k rate and the pest 4-oz house default doesn't apply, start
+    // the tech at the label band's LOW end in the label's own /gal unit —
+    // parseFloat reads the low bound out of an "X-Y" band.
+    const dilutionRate = defaultUnit.endsWith("/gal")
+      ? parseFloat(String(product.default_rate ?? product.defaultRate ?? ""))
+      : NaN;
     // DB numerics arrive as strings with trailing zeros ("0.5000") — show the
     // tech a clean number.
     const prefillRate = usePestSprayDefault
       ? 4
-      : catalogRate === "" || !Number.isFinite(Number(catalogRate))
-        ? catalogRate
-        : Number(catalogRate);
+      : catalogRate !== "" && Number.isFinite(Number(catalogRate))
+        ? Number(catalogRate)
+        : Number.isFinite(dilutionRate)
+          ? dilutionRate
+          : catalogRate;
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
     // rate × area / 1,000 in the rate's own unit. Both stay editable; a
