@@ -813,10 +813,48 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
   }
 }
 
+// A reminder-registration failure used to be logger.error-only, so the
+// customer silently got NO confirmation and NO 72h/24h reminder texts.
+// Surface it on the admin notification feed, deduped per visit so replays
+// (regenerate-brief, sweeps) don't stack cards. Best-effort by contract:
+// an alert failure must never throw back into the registration path.
+async function alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage }) {
+  try {
+    const NotificationService = require('./notification-service');
+    const dedupeKey = `reminder-registration-failed:${scheduledServiceId || customerId || 'unknown'}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '72 hours'"))
+      .first('id');
+    if (existing) return;
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Appointment reminders not registered',
+      `Reminder registration failed for visit ${scheduledServiceId || '(unknown)'}${source ? ` (${source})` : ''} — the customer will get no confirmation or 72h/24h reminder texts unless the visit is re-saved.${errorMessage ? ` Error: ${errorMessage}` : ''}`,
+      {
+        link: '/admin/dispatch',
+        metadata: {
+          dedupeKey,
+          scheduled_service_id: scheduledServiceId || null,
+          customer_id: customerId || null,
+          source: source || null,
+        },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[appt-remind] registration-failure alert failed: ${err.message}`);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 const AppointmentReminders = {
+
+  // Exposed for route-level registration wrappers (spawned-visit path in
+  // admin-schedule) that catch their own errors outside registerAppointment.
+  alertRegistrationFailure,
 
   /**
    * Durably register a reminder row for a freshly-created visit using the
@@ -1051,6 +1089,7 @@ const AppointmentReminders = {
       return record;
     } catch (err) {
       logger.error(`[appt-remind] registerAppointment failed: ${err.message}`);
+      await alertRegistrationFailure({ scheduledServiceId, customerId, source, errorMessage: err.message });
       return null;
     }
   },
