@@ -39,7 +39,16 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // (Codex #2681 r1 P2).
   const [loadFailed, setLoadFailed] = useState(false);
 
+  // Emit only when the VALUES change (Codex #2681 r2 P1): keying the emit on
+  // onStateChange identity alone re-fired with a fresh object every time an
+  // unmemoized parent handler was re-created, and the parent setState from
+  // that emit re-rendered the parent — a loop to max update depth. The ref
+  // makes the emit value-gated regardless of the parent handler's identity.
+  const lastEmitRef = useRef(null);
   useEffect(() => {
+    const last = lastEmitRef.current;
+    if (last && last.ready === ready && last.agreed === agreed && last.loadFailed === loadFailed) return;
+    lastEmitRef.current = { ready, agreed, loadFailed };
     onStateChange?.({ ready, agreed, loadFailed });
   }, [ready, agreed, loadFailed, onStateChange]);
 

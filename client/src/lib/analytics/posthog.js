@@ -44,6 +44,26 @@ export function isPublicFunnelPath(pathname) {
   return SERVICE_ESTIMATE_SLUGS.has(seg);
 }
 
+/** Tokenized customer estimate page (/estimate/<token> where the segment is
+ *  NOT a known marketing slug). Deliberately excluded from the cookie-based
+ *  funnel boot (the URL itself is a bearer credential), but the seamless
+ *  accept flow's EXPLICIT funnel events must still count (Codex #2681 r2) —
+ *  these pages get a COOKIELESS boot: persistence:'memory', no pageview/
+ *  replay/autocapture, token redacted from every URL-ish property, explicit
+ *  events only. No cookies or persisted identifiers are set, so the
+ *  cookie-consent contract (which governs cookie-based tracking) does not
+ *  attach; each pageload is its own anonymous distinct_id. */
+export function isTokenizedEstimatePath(pathname) {
+  const p = typeof pathname === 'string'
+    ? pathname
+    : (typeof window !== 'undefined' ? window.location.pathname : '');
+  const m = p.match(/^\/estimate\/([^/]+)\/?$/);
+  if (!m) return false;
+  let seg;
+  try { seg = decodeURIComponent(m[1]).toLowerCase(); } catch { return false; }
+  return !SERVICE_ESTIMATE_SLUGS.has(seg);
+}
+
 /** True once the visitor has accepted cookies (set here or on the marketing
  *  site — the cookie is shared across the .wavespestcontrol.com family). */
 export function hasConsent() {
@@ -66,7 +86,8 @@ export function grantConsent() {
  *  on Accept). */
 export function bootPostHog() {
   if (booted || !KEY || typeof window === 'undefined') return;
-  if (!isPublicFunnelPath(window.location.pathname)) return;
+  const tokenizedBoot = isTokenizedEstimatePath(window.location.pathname);
+  if (!isPublicFunnelPath(window.location.pathname) && !tokenizedBoot) return;
   booted = true;
   // -- Official PostHog array-stub loader -------------------------------------
   !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
@@ -77,7 +98,11 @@ export function bootPostHog() {
     // capture if the asset load is slow and the page unloads first.
     loaded: () => { window.__wavesPhReady = true; window.dispatchEvent(new Event('posthog-ready')); },
     person_profiles: 'identified_only',
-    capture_pageview: true,
+    // Tokenized estimate pages: cookieless + explicit-events-only (see
+    // isTokenizedEstimatePath). No automatic $pageview (its $current_url is
+    // the bearer URL), no replay, nothing persisted.
+    ...(tokenizedBoot ? { persistence: 'memory', disable_session_recording: true } : {}),
+    capture_pageview: !tokenizedBoot,
     // The booking flow is PII-dense (name/phone/address text + Google Places
     // address suggestions). Autocapture records clicked-element text, so it is
     // OFF here — the explicit funnel events carry the signal we need.
@@ -112,9 +137,27 @@ export function bootPostHog() {
     // query string / hash from the URL + referrer so a lead id or token carried
     // in /book?…&lead=… never reaches PostHog's automatic $pageview.
     before_send: (event) => {
-      if (!isPublicFunnelPath()) return null;
+      const onTokenized = isTokenizedEstimatePath();
+      if (!isPublicFunnelPath() && !onTokenized) return null;
       if (!event) return event;
-      const strip = (u) => (typeof u === 'string' ? u.split('?')[0].split('#')[0] : u);
+      // Tokenized estimate pages are explicit-events-only: no pageview/
+      // pageleave/replay/autocapture frames, however they got triggered.
+      if (onTokenized && ['$pageview', '$pageleave', '$snapshot', '$autocapture', '$rageclick'].includes(event.event)) {
+        return null;
+      }
+      const strip = (u) => {
+        if (typeof u !== 'string') return u;
+        const bare = u.split('?')[0].split('#')[0];
+        // The estimate token is a bearer credential — redact it from every
+        // URL-ish property (path kept for funnel context, token never leaves
+        // the browser). Known marketing slugs (/estimate/pest-control) are
+        // NOT tokens and keep their real path.
+        return bare.replace(/\/estimate\/([^/?#]+)/i, (full, seg) => {
+          let dec;
+          try { dec = decodeURIComponent(seg).toLowerCase(); } catch { return '/estimate/[token]'; }
+          return SERVICE_ESTIMATE_SLUGS.has(dec) ? full : '/estimate/[token]';
+        });
+      };
       // Referrers can be a tokenized customer page the visitor came from (e.g.
       // /estimate/<token>), so reduce them to ORIGIN — drop the path entirely.
       // Our own funnel URLs keep their path (it's the funnel page, not PII) but
@@ -123,7 +166,7 @@ export function bootPostHog() {
         if (typeof u !== 'string') return u;
         try { return new URL(u).origin; } catch (e) { return strip(u); }
       };
-      const URL_KEYS = ['$current_url', '$initial_current_url', '$session_entry_url'];
+      const URL_KEYS = ['$current_url', '$initial_current_url', '$session_entry_url', '$pathname', '$initial_pathname', '$session_entry_pathname'];
       const REFERRER_KEYS = ['$referrer', '$initial_referrer', '$session_entry_referrer'];
       // PostHog auto-copies UTM / click-id params onto events + person props, so
       // a crafted /book?utm_campaign=<email> would carry PII. Drop campaign

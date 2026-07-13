@@ -3409,6 +3409,11 @@ export default function EstimateViewPage() {
   const [inlineCardState, setInlineCardState] = useState({ ready: false, agreed: false });
   const inlineCaptureRef = useRef(null);
   const inlineIntentMintRef = useRef(false);
+  // Inline confirmSetup in flight: drives the CTA's submitting state WITHOUT
+  // leaving the 'review' phase (leaving it would unmount the Payment
+  // Element mid-confirm). Ref = synchronous double-tap latch.
+  const [inlineConfirmBusy, setInlineConfirmBusy] = useState(false);
+  const inlineConfirmBusyRef = useRef(false);
   // One review_viewed event per review entry, not per re-render.
   const reviewViewedRef = useRef(false);
   // One auto-advance per slot selection: going Back from review must land on
@@ -4032,12 +4037,24 @@ export default function EstimateViewPage() {
         setError('Enter your card details and check the Auto Pay authorization to confirm your booking.');
         return;
       }
-      setCtaPhase('submitting');
+      // The phase STAYS 'review' while Stripe confirms (Codex #2681 r2 P1):
+      // flipping to 'submitting' here unmounts the review branch and the
+      // mounted Payment Element mid-confirmSetup. inlineConfirmBusy drives
+      // the CTA's disabled/label state instead; the ref is the synchronous
+      // double-tap latch (ctaPhaseRef still reads 'review' during the await).
+      if (inlineConfirmBusyRef.current) return;
+      inlineConfirmBusyRef.current = true;
+      setInlineConfirmBusy(true);
       setError(null);
-      const cardResult = await inlineCaptureRef.current.confirmSetup();
+      let cardResult;
+      try {
+        cardResult = await inlineCaptureRef.current.confirmSetup();
+      } finally {
+        inlineConfirmBusyRef.current = false;
+        setInlineConfirmBusy(false);
+      }
       if (!cardResult.ok) {
         setError(cardResult.error || 'We could not save that card. Try another card.');
-        setCtaPhase('review');
         return;
       }
       recurringCardSetupIntentIdRef.current = cardResult.setupIntentId;
@@ -4169,6 +4186,23 @@ export default function EstimateViewPage() {
   }, [data, handleConfirm]);
 
   const handleRecurringCardCancel = useCallback(() => setRecurringCardIntent(null), []);
+
+  // Stable identity (Codex #2681 r2 P1): an inline arrow here re-created the
+  // handler every render, and the capture's onStateChange effect re-fired on
+  // that new identity with a fresh state object — render loop to max depth.
+  // Functional bail-out keeps identical states from re-rendering at all.
+  const handleInlineCardState = useCallback((st) => {
+    setInlineCardState((prev) => (
+      prev.ready === st.ready && prev.agreed === st.agreed && !!prev.loadFailed === !!st.loadFailed
+        ? prev
+        : st
+    ));
+    // Stripe.js load failure: drop the inline capture so the CTA reverts to
+    // the plain confirm — handleConfirm's modal branch then mints fresh and
+    // opens RecurringCardModal, which has its own retry UX. The mint guard
+    // ref stays set, so the inline form never thrashes.
+    if (st.loadFailed) setInlineCardIntent(null);
+  }, []);
 
   const handleReviewCancel = useCallback(() => {
     setCtaPhase('configure');
@@ -4878,7 +4912,7 @@ export default function EstimateViewPage() {
             secondsRemaining={countdownSeconds}
             onConfirm={handleConfirm}
             onCancel={handleReviewCancel}
-            submitting={ctaPhase === 'submitting'}
+            submitting={ctaPhase === 'submitting' || inlineConfirmBusy}
             invoiceMode={!!estimate.billByInvoice}
             invoiceOnly={invoiceOnlyAccept}
             siteConfirmationHold={!!estimate.siteConfirmationHold}
@@ -4908,15 +4942,7 @@ export default function EstimateViewPage() {
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
                 glassActive={!!glassContent}
-                onStateChange={(st) => {
-                  setInlineCardState(st);
-                  // Stripe.js load failure: drop the inline capture so the
-                  // CTA reverts to the plain confirm — handleConfirm's modal
-                  // branch then mints fresh and opens RecurringCardModal,
-                  // which has its own retry UX (Codex #2681 r1 P2). The mint
-                  // guard ref stays set, so the inline form never thrashes.
-                  if (st.loadFailed) setInlineCardIntent(null);
-                }}
+                onStateChange={handleInlineCardState}
               />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent ? 'Confirm booking & save card' : null}

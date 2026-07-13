@@ -1,4 +1,4 @@
-import { hasConsent } from './posthog';
+import { hasConsent, isTokenizedEstimatePath } from './posthog';
 
 // =============================================================================
 // Funnel analytics — event taxonomy (portal / booking half)
@@ -75,8 +75,11 @@ export function track(event, props) {
   // No-op until the visitor has granted consent — never queue/replay pre-consent
   // activity (matches GA/Meta on the marketing side and the no-op-until-consent
   // contract). Portal consent is the shared waves_cookies_accepted cookie (set on
-  // the hub, or by PublicFunnelTracking's own accept).
-  if (!hasConsent()) return;
+  // the hub, or by PublicFunnelTracking's own accept). EXCEPTION: tokenized
+  // estimate pages boot COOKIELESS (persistence:'memory', nothing stored, token
+  // redacted) — the cookie-consent contract governs cookie-based tracking, so
+  // their explicit funnel events fire without it (Codex #2681 r2).
+  if (!hasConsent() && !isTokenizedEstimatePath(window.location.pathname)) return;
   const clean = cleanProps(props);
   const ph = window.posthog;
   if (phReady && ph && typeof ph.capture === 'function') {
