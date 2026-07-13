@@ -2275,18 +2275,6 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
-// D1 (universal one-time services): presentation-only heuristic — a
-// customer value that is a comma-joined list of short phrases (the chips
-// fields persist selections that way) renders as pills; sentences and free
-// text stay as prose. Content is IDENTICAL either way (the pills are the
-// same comma-separated parts), so the contract's copy/order guarantees hold.
-function typedFindingChips(text) {
-  const parts = String(text).split(', ').map((part) => part.trim()).filter(Boolean);
-  if (parts.length < 2) return null;
-  if (parts.some((part) => part.length > 42 || /[.!?]/.test(part))) return null;
-  return parts;
-}
-
 /**
  * D1: designed finding tiles (the pestV2/lawnV2 visual standard) replacing
  * the bare definition list. Same section, same title, same snapshot items in
@@ -2309,7 +2297,14 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
           const text = item.customerValueLabel != null && item.customerValueLabel !== ''
             ? String(item.customerValueLabel)
             : String(item.value);
-          const chips = typedFindingChips(text);
+          // Chips render ONLY from the snapshot's authoritative mapped
+          // parts (multi-select fields persist them at completion) — never
+          // from splitting the display text, which would shred customer
+          // labels containing commas (Codex P2). Legacy snapshots without
+          // the array render as prose, exactly the pre-D1 presentation.
+          const chips = Array.isArray(item.customerValueParts) && item.customerValueParts.length > 1
+            ? item.customerValueParts
+            : null;
           return (
             <div
               key={item.fieldKey}
