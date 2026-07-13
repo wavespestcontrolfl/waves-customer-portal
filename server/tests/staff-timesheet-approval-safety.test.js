@@ -17,6 +17,7 @@ jest.mock('../services/time-tracking', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const approval = require('../services/timesheet-approval');
 const WEEK_CLOCK_IN = new Date('2020-01-06T14:00:00.000Z');
@@ -122,6 +123,7 @@ describe('weekly timesheet approval safety', () => {
   beforeEach(() => {
     db.mockReset();
     db.transaction.mockReset();
+    logger.info.mockReset();
     timeTracking.computeWeeklySummary.mockReset();
     timeTracking.computeDailySummaryInTransaction.mockReset();
     timeTracking.computeWeeklySummaryInTransaction.mockReset();
@@ -326,6 +328,42 @@ describe('weekly timesheet approval safety', () => {
       reviewToken: approval._test.reviewSnapshotToken({ weekly, dailies, entries }),
     })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/disputed/) });
     expect(events).not.toContain('signUpdate.update');
+  });
+
+  test('locks entries and rejects an active timer before computing or signing', async () => {
+    const events = [];
+    const activeEntry = {
+      id: 'shift-1',
+      technician_id: 'tech-1',
+      entry_type: 'shift',
+      status: 'active',
+      approval_status: 'pending',
+      clock_in: WEEK_CLOCK_IN,
+    };
+    installDatabase([
+      { table: 'time_entries', label: 'entries', thenValue: [activeEntry] },
+    ], [], events);
+    timeTracking.lockStaffWeek.mockImplementation(async () => events.push('week.lock'));
+
+    await expect(approval.signWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      signature: 'Tech One',
+      reviewToken: 'reviewed-snapshot',
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      isOperational: true,
+      message: expect.stringMatching(/active timer/),
+    });
+
+    expectOrdered(events, [
+      'transaction.begin',
+      'week.lock',
+      'entries.forUpdate',
+      'transaction.rollback',
+    ]);
+    expect(timeTracking.computeDailySummaryInTransaction).not.toHaveBeenCalled();
+    expect(timeTracking.computeWeeklySummaryInTransaction).not.toHaveBeenCalled();
   });
 
   test('locks entries and rejects an active timer before computing or approving', async () => {
@@ -929,6 +967,96 @@ describe('weekly timesheet approval safety', () => {
     expect(events).not.toContain('weeklyUpdate.update');
   });
 
+  test('unlocks a reviewed snapshot without logging its free-form reason', async () => {
+    const events = [];
+    const reason = 'private payroll correction details';
+    const approvedWeekly = {
+      id: 'weekly-1',
+      technician_id: 'tech-1',
+      week_start: '2020-01-06',
+      status: 'approved',
+      approved_by: 'admin-1',
+      approved_at: new Date('2020-01-13T12:00:00.000Z'),
+    };
+    const approvedDailies = [{
+      id: 'daily-1',
+      technician_id: 'tech-1',
+      work_date: '2020-01-06',
+      status: 'approved',
+      total_shift_minutes: 480,
+    }];
+    const approvedEntries = [{
+      id: 'shift-1',
+      technician_id: 'tech-1',
+      entry_type: 'shift',
+      status: 'completed',
+      approval_status: 'approved',
+      clock_in: WEEK_CLOCK_IN,
+      clock_out: new Date('2020-01-06T22:00:00.000Z'),
+      duration_minutes: 480,
+    }];
+    const pendingWeekly = {
+      ...approvedWeekly,
+      status: 'pending',
+      approved_by: null,
+      approved_at: null,
+    };
+    const pendingDailies = approvedDailies.map(daily => ({
+      ...daily,
+      status: 'pending',
+    }));
+    const pendingEntries = approvedEntries.map(entry => ({
+      ...entry,
+      approval_status: 'pending',
+    }));
+    const transactionSpecs = [
+      { table: 'time_weekly_summary', label: 'weeklyLock', firstValue: approvedWeekly },
+      { table: 'time_entry_daily_summary', label: 'dailyLocks', thenValue: approvedDailies },
+      { table: 'time_entries', label: 'entryLocks', thenValue: approvedEntries },
+      { table: 'time_entries', label: 'entriesUpdate', thenValue: 1 },
+      { table: 'time_entry_daily_summary', label: 'dailyUpdate', thenValue: 1 },
+      { table: 'time_weekly_summary', label: 'weeklyUpdate', thenValue: 1 },
+      { table: 'time_entries', label: 'refreshEntries', thenValue: pendingEntries },
+      {
+        table: 'time_entry_daily_summary',
+        label: 'refreshDailiesBefore',
+        thenValue: pendingDailies,
+      },
+      {
+        table: 'time_entry_daily_summary',
+        label: 'refreshDailiesAfter',
+        thenValue: pendingDailies,
+      },
+    ];
+    installDatabase(transactionSpecs, [
+      { table: 'time_weekly_summary', label: 'initialWeekly', firstValue: pendingWeekly },
+      { table: 'technicians', label: 'detailTech', firstValue: { id: 'tech-1' } },
+    ], events);
+    timeTracking.lockStaffWeek.mockImplementation(async () => events.push('week.lock'));
+    timeTracking.computeWeeklySummaryInTransaction.mockResolvedValue(pendingWeekly);
+
+    const detail = await approval.unlockWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      adminId: 'admin-1',
+      reason,
+      reviewToken: approval._test.reviewSnapshotToken({
+        weekly: approvedWeekly,
+        dailies: approvedDailies,
+        entries: approvedEntries,
+      }),
+    });
+
+    expect(detail.weekly).toMatchObject({ id: 'weekly-1', status: 'pending' });
+    expect(transactionSpecs[3].updatePayload.approval_notes).toBe(`[unlock] ${reason}`);
+    expect(logger.info).toHaveBeenCalledWith('[timesheet-approval] Week unlocked', {
+      weekStart: '2020-01-06',
+      technicianId: 'tech-1',
+      adminId: 'admin-1',
+    });
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain(reason);
+  });
+
   test('requires unlock before disputing an entry in an approved snapshot', async () => {
     const events = [];
     const entry = {
@@ -1024,5 +1152,11 @@ describe('weekly timesheet approval safety', () => {
       tech_signed_at: null,
       tech_signature: null,
     });
+    expect(specs[4].updatePayload.approval_notes).toBe('incorrect stop');
+    expect(logger.info).toHaveBeenCalledWith('[timesheet-approval] Entry disputed', {
+      entryId: 'shift-1',
+      adminId: 'admin-1',
+    });
+    expect(JSON.stringify(logger.info.mock.calls)).not.toContain('incorrect stop');
   });
 });

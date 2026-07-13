@@ -152,6 +152,45 @@ function hasSameTypeOverlap(entries) {
   return false;
 }
 
+function assertEntriesReadyForWeeklyReview(entries, action) {
+  const actionVerb = action === 'approval' ? 'approving' : action;
+  if (!entries.length) {
+    throw approvalHttpError(404, 'No time entries exist for that week.');
+  }
+  if (entries.some(entry => entry.status === 'active')) {
+    throw approvalHttpError(409, `End every active timer before ${actionVerb} the week.`);
+  }
+  if (entries.some(entry => !['completed', 'edited'].includes(entry.status))) {
+    throw approvalHttpError(409, `Week contains an entry that is not ready for ${action}.`);
+  }
+  if (entries.some(entry => !timeTracking.isCompletedEntryIntervalValid(entry))) {
+    throw approvalHttpError(
+      409,
+      `Week contains an invalid time interval; correct it before ${action}.`,
+    );
+  }
+  const shifts = entries.filter(entry => entry.entry_type === 'shift');
+  const orphanChild = entries.find(entry => (
+    ['job', 'break', 'drive', 'admin_time'].includes(entry.entry_type)
+    && !shifts.some(shift => (
+      new Date(entry.clock_in).getTime() >= new Date(shift.clock_in).getTime()
+      && new Date(entry.clock_out).getTime() <= new Date(shift.clock_out).getTime()
+    ))
+  ));
+  if (orphanChild) {
+    throw approvalHttpError(
+      409,
+      `Week contains child time outside a completed shift; correct it before ${action}.`,
+    );
+  }
+  if (hasSameTypeOverlap(entries)) {
+    throw approvalHttpError(
+      409,
+      `Week contains overlapping shift, job, or break time; correct it before ${action}.`,
+    );
+  }
+}
+
 function dailySummaryWorkDate(value) {
   if (typeof value === 'string') return validateWorkDate(value.slice(0, 10));
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -185,6 +224,7 @@ async function signWeek({ technicianId, weekStart, signature, reviewToken, now =
       .where('status', '!=', 'voided')
       .orderBy('clock_in')
       .forUpdate();
+    assertEntriesReadyForWeeklyReview(entries, 'signing');
     let dailies = await trx('time_entry_daily_summary')
       .where({ technician_id: technicianId })
       .where('work_date', '>=', start)
@@ -447,41 +487,7 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
       .orderBy('clock_in')
       .orderBy('id')
       .forUpdate();
-    if (!entries.length) {
-      throw approvalHttpError(404, 'No time entries exist for that week.');
-    }
-    if (entries.some(entry => entry.status === 'active')) {
-      throw approvalHttpError(409, 'End every active timer before approving the week.');
-    }
-    if (entries.some(entry => !['completed', 'edited'].includes(entry.status))) {
-      throw approvalHttpError(409, 'Week contains an entry that is not ready for approval.');
-    }
-    if (entries.some(entry => !timeTracking.isCompletedEntryIntervalValid(entry))) {
-      throw approvalHttpError(
-        409,
-        'Week contains an invalid time interval; correct it before approval.',
-      );
-    }
-    const shifts = entries.filter(entry => entry.entry_type === 'shift');
-    const orphanChild = entries.find(entry => (
-      ['job', 'break', 'drive', 'admin_time'].includes(entry.entry_type)
-      && !shifts.some(shift => (
-        new Date(entry.clock_in).getTime() >= new Date(shift.clock_in).getTime()
-        && new Date(entry.clock_out).getTime() <= new Date(shift.clock_out).getTime()
-      ))
-    ));
-    if (orphanChild) {
-      throw approvalHttpError(
-        409,
-        'Week contains child time outside a completed shift; correct it before approval.',
-      );
-    }
-    if (hasSameTypeOverlap(entries)) {
-      throw approvalHttpError(
-        409,
-        'Week contains overlapping shift, job, or break time; correct it before approval.',
-      );
-    }
+    assertEntriesReadyForWeeklyReview(entries, 'approval');
     if (entries.some(entry => normalizedEntryApprovalStatus(entry) === 'disputed')) {
       throw approvalHttpError(409, 'Resolve every disputed entry before approving the week.');
     }
@@ -705,7 +711,10 @@ async function disputeEntry({ entryId, adminId, reason }) {
     return updated;
   });
 
-  logger.info(`[timesheet-approval] Entry ${entryId} disputed by ${adminId}: ${reason}`);
+  logger.info('[timesheet-approval] Entry disputed', {
+    entryId,
+    adminId: adminId || null,
+  });
   return entry;
 }
 
@@ -787,7 +796,11 @@ async function unlockWeek({ technicianId, weekStart, adminId, reason, reviewToke
     }
   });
 
-  logger.info(`[timesheet-approval] Week ${start} unlocked for tech ${technicianId} by ${adminId}: ${reason || 'no reason'}`);
+  logger.info('[timesheet-approval] Week unlocked', {
+    weekStart: start,
+    technicianId,
+    adminId: adminId || null,
+  });
   return getWeekDetail(technicianId, weekStart);
 }
 
