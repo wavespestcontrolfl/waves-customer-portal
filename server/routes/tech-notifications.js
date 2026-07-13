@@ -9,7 +9,6 @@ const timeTracking = require('../services/time-tracking');
 const matcher = require('../services/geofence-matcher');
 const geofenceHandler = require('../services/geofence-handler');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -120,39 +119,63 @@ router.post('/:id/confirm-start', async (req, res, next) => {
 // POST /:id/undo-stop — tech tapped "Undo" on a timer-stopped toast
 router.post('/:id/undo-stop', async (req, res, next) => {
   try {
-    const row = await db('tech_notifications')
-      .where({ id: req.params.id, technician_id: req.technicianId })
-      .first();
-    if (!row || row.type !== 'geofence_timer_stopped') {
-      return res.status(404).json({ error: 'Stop notification not found' });
+    let reopened;
+    try {
+      reopened = await db.transaction(async (trx) => {
+        // Claim the notification row first and keep that claim in the same
+        // transaction as the timer reopen. A concurrent read/dismiss either
+        // wins before this lock (and makes undo ineligible) or waits until the
+        // handled state commits; it cannot race between eligibility and reopen.
+        const row = await trx('tech_notifications')
+          .where({ id: req.params.id, technician_id: req.technicianId })
+          .forUpdate()
+          .first();
+        if (!row || row.type !== 'geofence_timer_stopped') {
+          throw notificationHttpError(404, 'Stop notification not found');
+        }
+        if (row.read || row.dismissed_at) {
+          throw notificationHttpError(409, 'Stop notification was already handled');
+        }
+        const createdAt = new Date(row.created_at).getTime();
+        if (!Number.isFinite(createdAt) || Date.now() - createdAt > 30 * 60 * 1000) {
+          throw notificationHttpError(410, 'Undo window expired');
+        }
+
+        const payload = parsePayload(row.payload);
+        const stoppedEntryId = payload.time_entry_id;
+        if (!stoppedEntryId) {
+          throw notificationHttpError(400, 'No time entry to restore');
+        }
+
+        const entry = await timeTracking.reopenStoppedEntryInTransaction(
+          trx,
+          req.technicianId,
+          stoppedEntryId,
+        );
+        const claimed = await trx('tech_notifications')
+          .where({ id: row.id, technician_id: req.technicianId, read: false })
+          .whereNull('dismissed_at')
+          .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+        if (claimed !== 1) {
+          throw notificationHttpError(409, 'Stop notification was already handled');
+        }
+        return entry;
+      });
+    } catch (error) {
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      throw error;
     }
 
-    const payload = parsePayload(row.payload);
-    const stoppedEntryId = payload.time_entry_id;
-    if (!stoppedEntryId) return res.status(400).json({ error: 'No time entry to restore' });
-
-    // Reopen the stopped entry
-    await db('time_entries')
-      .where({ id: stoppedEntryId, technician_id: req.technicianId })
-      .update({
-        status: 'active',
-        staff_write_generation: ACTIVE_WRITE_GENERATION,
-        clock_out: null,
-        clock_out_lat: null,
-        clock_out_lng: null,
-        duration_minutes: null,
-        notes: db.raw("COALESCE(notes, '') || ' [undo-stop]'"),
-        updated_at: new Date(),
-      });
-
-    await db('tech_notifications')
-      .where({ id: row.id })
-      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
-
-    const reopened = await db('time_entries').where({ id: stoppedEntryId }).first();
     res.json({ timeEntry: reopened });
   } catch (err) { next(err); }
 });
+
+function notificationHttpError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.isOperational = true;
+  return error;
+}
 
 function parsePayload(v) {
   if (!v) return {};

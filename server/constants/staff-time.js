@@ -6,5 +6,9 @@
 // generations then fail closed if they attempt to start/reopen a timer during
 // Railway's pre-deploy/cutover overlap.
 const ACTIVE_WRITE_GENERATION = 1;
+const WEEKLY_OT_THRESHOLD_MINUTES = 40 * 60;
 
-module.exports = { ACTIVE_WRITE_GENERATION };
+module.exports = {
+  ACTIVE_WRITE_GENERATION,
+  WEEKLY_OT_THRESHOLD_MINUTES,
+};

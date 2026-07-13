@@ -5,6 +5,28 @@ const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
+const {
+  addStaffWorkDays,
+  staffWorkDate,
+  staffWorkDateSql,
+} = require('../utils/staff-time-work-date');
+
+const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
+
+function staffAnalyticsDateRange({ startDate, endDate } = {}, now = new Date()) {
+  const today = staffWorkDate(now);
+  return {
+    start: startDate || addStaffWorkDays(today, -30),
+    end: endDate || today,
+  };
+}
+
+function applyStaffEntryWorkDateRange(query, start, end) {
+  return query.whereRaw(
+    `${STAFF_ENTRY_WORK_DATE_SQL} BETWEEN ?::date AND ?::date`,
+    [start, end],
+  );
+}
 
 // Pure calendar arithmetic on YYYY-MM-DD strings — no timezone enters
 // because we never read hours. Use this anywhere we need a "+ N days
@@ -15,39 +37,6 @@ function addCalendarDaysToYMD(ymd, days) {
   const [y, m, d] = ymd.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d + days));
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
-}
-
-// Convert a SQL DATE column to YYYY-MM-DD WITHOUT going through the
-// ET shift. pg+knex returns DATE as either a Date at UTC midnight or
-// a YYYY-MM-DD string; both yield the same calendar day via
-// toISOString().slice(0,10), unlike etDateString(new Date(d)) which
-// would push UTC midnight back to the prior ET day.
-function dateColumnToYMD(value) {
-  if (value == null) return null;
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return String(value).slice(0, 10);
-}
-
-// When an admin mutates time data on a week the tech has already
-// signed (PUT/DELETE entries, daily reject/reopen, dispute), the
-// previous attestation no longer reflects the on-record hours. Clear
-// the sign-off so the tech has to re-sign after seeing the corrected
-// data. No-ops on already-approved weeks (admin-side approval is the
-// terminal lock; we don't reach into a locked row from here).
-async function clearTechSignoffForWeek(technicianId, ymd, trx) {
-  if (!technicianId || !ymd || !/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return;
-  // ymd MUST be a YYYY-MM-DD string. Callers convert timestamps via
-  // etDateString(new Date(timestamp)) and DATE columns via the
-  // dateColumnToYMD helper — passing a Date directly would re-introduce
-  // the UTC-midnight-vs-ET confusion (Mon UTC-midnight is Sun in ET,
-  // so etDateString would shift the wrong way for a DATE column while
-  // being correct for a real timestamp).
-  const weekStart = etWeekStart(parseETDateTime(`${ymd}T12:00`));
-  await (trx || db)('time_weekly_summary')
-    .where({ technician_id: technicianId, week_start: weekStart })
-    .whereNot({ status: 'approved' })
-    .whereNotNull('tech_signed_at')
-    .update({ tech_signed_at: null, tech_signature: null, updated_at: new Date() });
 }
 
 // Authentication is router-wide; authorization is per-route. The
@@ -256,13 +245,6 @@ router.put('/entries/:id', requireAdmin, async (req, res, next) => {
     const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
     if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
 
-    // Capture the pre-edit clock_in so we can also invalidate the
-    // OLD week's sign-off when an admin moves an entry across week
-    // boundaries — both the source and destination weeks have changed
-    // totals, so neither tech attestation should survive.
-    const prior = await db('time_entries')
-      .where({ id: req.params.id })
-      .first('technician_id', 'clock_in');
     const updated = await timeTracking.adminEditEntry(req.params.id, {
       clock_in,
       clock_out,
@@ -271,24 +253,6 @@ router.put('/entries/:id', requireAdmin, async (req, res, next) => {
       edit_reason,
       edited_by: req.technicianId,
     });
-    if (updated && updated.technician_id) {
-      // clock_in is a TIMESTAMP — convert to its ET calendar day
-      // before passing to the YMD-only helper.
-      const updatedYmd = etDateString(new Date(updated.clock_in));
-      await clearTechSignoffForWeek(updated.technician_id, updatedYmd);
-      // If the entry moved across weeks OR was reassigned to a
-      // different tech, the SOURCE tech's source week also has
-      // changed totals — clear that with the prior tech_id, not the
-      // new one. (Passing updated.technician_id here would clear the
-      // wrong row on a reassignment.)
-      if (prior && prior.clock_in && prior.technician_id && (
-        String(prior.clock_in) !== String(updated.clock_in) ||
-        prior.technician_id !== updated.technician_id
-      )) {
-        const priorYmd = etDateString(new Date(prior.clock_in));
-        await clearTechSignoffForWeek(prior.technician_id, priorYmd);
-      }
-    }
     res.json(updated);
   } catch (err) {
     next(err);
@@ -305,11 +269,6 @@ router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
       reason: reason || 'Admin voided',
       voided_by: req.technicianId,
     });
-    if (voided && voided.technician_id) {
-      // clock_in is a TIMESTAMP — convert to its ET calendar day.
-      const voidedYmd = etDateString(new Date(voided.clock_in));
-      await clearTechSignoffForWeek(voided.technician_id, voidedYmd);
-    }
     res.json(voided);
   } catch (err) {
     next(err);
@@ -329,126 +288,26 @@ router.get('/daily', requireAdmin, async (req, res, next) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Helpers — audit + SMS for approval actions
-// ---------------------------------------------------------------------------
-async function recordApprovalAudit(summary, action, adminId, reason) {
-  try {
-    await db('timesheet_approvals').insert({
-      daily_summary_id: summary.id,
-      technician_id: summary.technician_id,
-      work_date: summary.work_date,
-      action,
-      admin_id: adminId || null,
-      reason: reason || null,
-      prior_status: summary.status || null,
-    });
-  } catch (e) {
-    logger.error(`[timetracking] approval audit failed: ${e.message}`);
-  }
-}
-
-async function notifyTechOfApproval(summary, action, reason) {
-  try {
-    const tech = await db('technicians').where({ id: summary.technician_id }).first();
-    if (!tech?.phone) return;
-    const dateStr = new Date(summary.work_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-    const hrs = ((summary.total_shift_minutes || 0) / 60).toFixed(2);
-    const TwilioService = require('../services/twilio');
-    let body;
-    if (action === 'approved') {
-      body = `Waves: Your timesheet for ${dateStr} (${hrs} hrs) has been approved.`;
-    } else if (action === 'rejected') {
-      body = `Waves: Your timesheet for ${dateStr} needs a correction${reason ? ` — ${reason}` : ''}. Open the tech app to review and resubmit.`;
-    } else {
-      body = `Waves: Your timesheet for ${dateStr} has been reopened.`;
-    }
-    await TwilioService.sendSMS(tech.phone, body);
-  } catch (e) {
-    logger.error(`[timetracking] tech SMS failed: ${e.message}`);
-  }
+function retiredDailyApproval(_req, res) {
+  return res.status(410).json({
+    error: 'Legacy daily approval/export endpoints are retired. Use weekly approved snapshots.',
+  });
 }
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/approve — approve a daily summary
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/approve', requireAdmin, async (req, res, next) => {
-  try {
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'approved',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'approved', req.technicianId, null);
-    notifyTechOfApproval(updated, 'approved');
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/approve', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reject — reject a daily summary with reason
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reject', requireAdmin, async (req, res, next) => {
-  try {
-    const { reason } = req.body || {};
-    if (!reason || !reason.trim()) {
-      return res.status(400).json({ error: 'reason required' });
-    }
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'rejected',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        notes: reason,
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'rejected', req.technicianId, reason);
-    // work_date is a SQL DATE column — format directly as YMD so we
-    // don't shift through ET (UTC midnight Date would drop a day).
-    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
-    notifyTechOfApproval(updated, 'rejected', reason);
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/reject', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // PUT /daily/:id/reopen — return an approved/rejected summary to pending
 // ---------------------------------------------------------------------------
-router.put('/daily/:id/reopen', requireAdmin, async (req, res, next) => {
-  try {
-    const prior = await db('time_entry_daily_summary').where({ id: req.params.id }).first();
-    if (!prior) return res.status(404).json({ error: 'Summary not found' });
-    const [updated] = await db('time_entry_daily_summary')
-      .where({ id: req.params.id })
-      .update({
-        status: 'pending',
-        approved_by: null,
-        approved_at: null,
-        updated_at: new Date(),
-      })
-      .returning('*');
-    await recordApprovalAudit(prior, 'reopened', req.technicianId, req.body?.reason || null);
-    await clearTechSignoffForWeek(updated.technician_id, dateColumnToYMD(updated.work_date));
-    notifyTechOfApproval(updated, 'reopened');
-    res.json(updated);
-  } catch (err) {
-    next(err);
-  }
-});
+router.put('/daily/:id/reopen', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /daily/:id/history — approval audit trail for a summary
@@ -476,33 +335,7 @@ router.get('/daily/:id/history', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /daily/bulk-approve — approve multiple daily summaries
 // ---------------------------------------------------------------------------
-router.post('/daily/bulk-approve', requireAdmin, async (req, res, next) => {
-  try {
-    const { ids } = req.body;
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ error: 'ids array required' });
-    }
-    const priors = await db('time_entry_daily_summary')
-      .whereIn('id', ids).where('status', 'pending').select('*');
-    const count = await db('time_entry_daily_summary')
-      .whereIn('id', ids)
-      .where('status', 'pending')
-      .update({
-        status: 'approved',
-        approved_by: req.technicianId,
-        approved_at: new Date(),
-        updated_at: new Date(),
-      });
-    // Audit + notify each
-    for (const prior of priors) {
-      await recordApprovalAudit(prior, 'approved', req.technicianId, null);
-      notifyTechOfApproval({ ...prior, status: 'approved' }, 'approved');
-    }
-    res.json({ approved: count });
-  } catch (err) {
-    next(err);
-  }
-});
+router.post('/daily/bulk-approve', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /weekly — weekly summaries
@@ -518,54 +351,9 @@ router.get('/weekly', requireAdmin, async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /payroll-export — CSV export for a week
+// GET /payroll-export — retired daily export (weekly approved snapshots only)
 // ---------------------------------------------------------------------------
-router.get('/payroll-export', requireAdmin, async (req, res, next) => {
-  try {
-    const { weekStart } = req.query;
-    if (!weekStart) return res.status(400).json({ error: 'weekStart required (YYYY-MM-DD, Monday)' });
-
-    const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekEnd.getDate() + 6);
-    const weekEndStr = weekEnd.toISOString().split('T')[0];
-
-    const dailies = await db('time_entry_daily_summary')
-      .where('work_date', '>=', weekStart)
-      .where('work_date', '<=', weekEndStr)
-      .leftJoin('technicians', 'time_entry_daily_summary.technician_id', 'technicians.id')
-      .select('time_entry_daily_summary.*', 'technicians.name as tech_name')
-      .orderBy(['technicians.name', 'work_date']);
-
-    // Build CSV
-    const headers = [
-      'Tech Name', 'Date', 'Shift Hours', 'Job Hours', 'Drive Hours', 'Break Hours',
-      'Admin Hours', 'OT Hours', 'Jobs', 'Revenue', 'RPMH', 'Utilization %', 'Status',
-    ];
-    const rows = dailies.map(d => [
-      d.tech_name,
-      d.work_date,
-      (parseFloat(d.total_shift_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_job_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_drive_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_break_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.total_admin_minutes || 0) / 60).toFixed(2),
-      (parseFloat(d.overtime_minutes || 0) / 60).toFixed(2),
-      d.job_count,
-      parseFloat(d.revenue_generated || 0).toFixed(2),
-      parseFloat(d.rpmh_actual || 0).toFixed(2),
-      parseFloat(d.utilization_pct || 0).toFixed(1),
-      d.status,
-    ]);
-
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="payroll_${weekStart}.csv"`);
-    res.send(csv);
-  } catch (err) {
-    next(err);
-  }
-});
+router.get('/payroll-export', requireAdmin, retiredDailyApproval);
 
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
@@ -573,17 +361,19 @@ router.get('/payroll-export', requireAdmin, async (req, res, next) => {
 router.get('/analytics', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate, technicianId } = req.query;
-    const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || etDateString();
+    const now = new Date();
+    const { start, end } = staffAnalyticsDateRange({ startDate, endDate }, now);
 
     // Actual vs estimated by service type
-    let svcQuery = db('time_entries')
-      .where('time_entries.entry_type', 'job')
-      .where('time_entries.status', '!=', 'voided')
-      .whereNotNull('time_entries.duration_minutes')
-      .whereNotNull('time_entries.job_id')
-      .where('time_entries.clock_in', '>=', start)
-      .where('time_entries.clock_in', '<=', end + ' 23:59:59')
+    let svcQuery = applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'job')
+        .where('time_entries.status', '!=', 'voided')
+        .whereNotNull('time_entries.duration_minutes')
+        .whereNotNull('time_entries.job_id'),
+      start,
+      end,
+    )
       .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
       .select(
         db.raw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown') as svc_type"),
@@ -617,7 +407,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
     const utilizationByTech = await utilQuery;
 
     // RPMH by tech (recent weeks)
-    const fourWeeksAgo = new Date(Date.now() - 28 * 24 * 3600 * 1000).toISOString().split('T')[0];
+    const fourWeeksAgo = addStaffWorkDays(staffWorkDate(now), -28);
     const rpmhByTech = await db('time_weekly_summary')
       .where('week_start', '>=', fourWeeksAgo)
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
@@ -634,7 +424,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
 
     // Weekly overtime trend
     const overtimeTrend = await db('time_weekly_summary')
-      .where('week_start', '>=', new Date(Date.now() - 12 * 7 * 24 * 3600 * 1000).toISOString().split('T')[0])
+      .where('week_start', '>=', addStaffWorkDays(staffWorkDate(now), -12 * 7))
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
       .select(
         'technicians.name as tech_name',
@@ -662,15 +452,16 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
 router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
-    const start = startDate || new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString().split('T')[0];
-    const end = endDate || etDateString();
+    const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
-    const comparison = await db('time_entries')
-      .where('time_entries.entry_type', 'job')
-      .where('time_entries.status', '!=', 'voided')
-      .whereNotNull('time_entries.duration_minutes')
-      .where('time_entries.clock_in', '>=', start)
-      .where('time_entries.clock_in', '<=', end + ' 23:59:59')
+    const comparison = await applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'job')
+        .where('time_entries.status', '!=', 'voided')
+        .whereNotNull('time_entries.duration_minutes'),
+      start,
+      end,
+    )
       .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
       .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
       .select(
@@ -1206,5 +997,11 @@ router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+router._test = {
+  STAFF_ENTRY_WORK_DATE_SQL,
+  applyStaffEntryWorkDateRange,
+  staffAnalyticsDateRange,
+};
 
 module.exports = router;

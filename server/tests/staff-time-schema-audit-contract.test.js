@@ -7,12 +7,18 @@ jest.mock('../models/db', () => ({
 }));
 
 const {
+  WEEKLY_OVERTIME_THRESHOLD_MINUTES,
   checks,
+  expectedDailyOvertimeMinutes,
   runCheck,
   runDataCheck,
 } = require('../scripts/audit-staff-rollout-readiness');
 
 describe('Staff time schema rollout audit contract', () => {
+  test('check SQL contains no raw Knex binding markers', () => {
+    for (const check of checks) expect(check.sql).not.toContain('?');
+  });
+
   test('keeps Railway database URL resolution diagnostics off stdout', () => {
     const serverDir = path.join(__dirname, '..');
     const result = spawnSync(
@@ -40,20 +46,105 @@ describe('Staff time schema rollout audit contract', () => {
     expect(result.stderr).toContain('[knexfile] Resolved DATABASE_URL from Railway Postgres vars');
   });
 
+  test('supported silent npm JSON command emits one parseable document on stdout', () => {
+    const repositoryDir = path.join(__dirname, '../..');
+    const preload = path.join(
+      __dirname,
+      'fixtures/staff-rollout-audit-db-preload.js',
+    );
+    const result = spawnSync(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['run', '--silent', 'audit:staff-rollout', '--', '--json'],
+      {
+        cwd: repositoryDir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          FORCE_COLOR: '0',
+          NODE_OPTIONS: [
+            process.env.NODE_OPTIONS,
+            `--require=${preload}`,
+          ].filter(Boolean).join(' '),
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(() => JSON.parse(result.stdout)).not.toThrow();
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      blockers: 0,
+      incomplete: 0,
+      target: {
+        database_name: 'staff_audit_test',
+        server_address: 'mock-db',
+      },
+    });
+    expect(result.stdout).not.toMatch(/>\s+waves-customer-portal@|>\s+audit:staff-rollout/);
+  });
+
+  test.each([
+    [0, 2400, 0],
+    [2399.99, 0.01, 0],
+    [2399.99, 0.02, 0.01],
+    [2400, 60, 60],
+    [2460, 30, 30],
+  ])(
+    'allocates later-day overtime after the 40-hour boundary (%s prior + %s day)',
+    (priorMinutes, dayMinutes, expectedMinutes) => {
+      expect(WEEKLY_OVERTIME_THRESHOLD_MINUTES).toBe(2400);
+      expect(expectedDailyOvertimeMinutes(priorMinutes, dayMinutes)).toBe(expectedMinutes);
+    },
+  );
+
   test('checks schema, writer fencing, active timers, and legacy weekly rows', () => {
     const byKey = Object.fromEntries(checks.map((check) => [check.key, check]));
 
     expect(byKey.staff_time_schema_columns.schema).toBe(true);
     expect(byKey.staff_time_schema_columns.sql).toMatch(/staff_write_generation/);
+    expect(byKey.staff_time_schema_column_shapes.schema).toBe(true);
+    expect(byKey.staff_time_schema_column_shapes.sql).toMatch(
+      /duration_minutes[\s\S]*numeric[\s\S]*10::integer[\s\S]*2::integer/,
+    );
+    expect(byKey.staff_time_schema_column_shapes.sql).toMatch(
+      /approval_status[\s\S]*pending/,
+    );
+    expect(byKey.staff_time_schema_column_shapes.sql).toMatch(
+      /character_maximum_length[\s\S]*numeric_precision[\s\S]*numeric_scale[\s\S]*column_default/,
+    );
     expect(byKey.staff_time_schema_indexes.sql).toMatch(/indisvalid/);
     expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
       /time_entries_staff_active_write_generation_check/,
+    );
+    expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
+      /pg_get_constraintdef\(c\.oid, true\)/,
+    );
+    expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
+      /staff_write_generationisnotdistinctfrom1/,
+    );
+    expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
+      /entry_type=anyarray\[/,
+    );
+    expect(byKey.staff_time_schema_value_constraints.sql).not.toMatch(
+      /entry_type=any\(array/,
     );
     expect(byKey.active_staff_timers.sql).toMatch(/WHERE status = 'active'/);
     expect(byKey.active_staff_timers.sql).not.toMatch(/entry_type IN/);
     expect(byKey.approved_week_total_mismatch.sql).toMatch(/to_jsonb\(summary\)/);
     expect(byKey.approved_week_total_mismatch.sql).not.toMatch(/w\.total_job_minutes/);
     expect(byKey.duplicate_daily_summaries.sql).toMatch(/HAVING COUNT\(\*\) > 1/);
+    expect(byKey.unresolvable_timesheet_review_states.sql).toMatch(
+      /d\.status NOT IN \('pending', 'approved', 'disputed'\)/,
+    );
+    expect(byKey.unresolvable_timesheet_review_states.sql).toMatch(
+      /w\.status NOT IN \('pending', 'approved'\)/,
+    );
+    expect(byKey.unresolvable_timesheet_review_states.sql).toMatch(
+      /to_jsonb\(entry\)[\s\S]*approval_status[\s\S]*= 'disputed'/,
+    );
+    expect(byKey.approved_incomplete_staff_weeks.sql).toMatch(
+      /w\.status = 'approved'[\s\S]*CURRENT_TIMESTAMP AT TIME ZONE 'America\/New_York'/,
+    );
     expect(byKey.daily_summary_total_mismatch.sql).toMatch(
       /AT TIME ZONE 'America\/New_York'/,
     );
@@ -66,6 +157,35 @@ describe('Staff time schema rollout audit contract', () => {
     expect(byKey.daily_summary_total_mismatch.sql).toMatch(
       /status IN \('completed', 'edited'\)[\s\S]*LEFT JOIN[\s\S]*utilization_pct/,
     );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /DATE_TRUNC\('week', summary\.work_date::timestamp\)::date/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /LEAST\([\s\S]*total_shift_minutes[\s\S]*prior_week_shift_minutes[\s\S]*- 2400/,
+    );
+    expect(byKey.daily_summary_total_mismatch.sql).toMatch(
+      /d\.overtime_minutes[\s\S]*IS DISTINCT FROM d\.expected_overtime_minutes/,
+    );
+    expect(byKey.weekly_overtime_payroll_mismatch.sql).toMatch(
+      /GROUP BY technician_id, week_start/,
+    );
+    expect(byKey.weekly_overtime_payroll_mismatch.sql).toMatch(
+      /weekly_overtime_minutes[\s\S]*stored_daily_overtime_minutes[\s\S]*expected_overtime_minutes/,
+    );
+    expect(byKey.weekly_overtime_payroll_mismatch.sql).toMatch(
+      /w\.overtime_minutes[\s\S]*IS DISTINCT FROM COALESCE\(a\.expected_overtime_minutes/,
+    );
+    expect(byKey.weekly_overtime_payroll_mismatch.sql).toMatch(
+      /w\.total_shift_minutes[\s\S]*IS DISTINCT FROM a\.expected_shift_minutes/,
+    );
+    expect(byKey.approved_week_total_mismatch.sql).toMatch(
+      /w\.total_shift_minutes[\s\S]*IS DISTINCT FROM COALESCE\(e\.shift_minutes/,
+    );
+    expect(byKey.weekly_overtime_payroll_mismatch.sql).not.toMatch(/> 0\.02/);
+    expect(byKey.approved_week_total_mismatch.sql).not.toMatch(/> 0\.02/);
     expect(byKey.approved_week_nonapproved_daily_summaries.sql).toMatch(
       /w\.status = 'approved'[\s\S]*d\.status IS DISTINCT FROM 'approved'/,
     );

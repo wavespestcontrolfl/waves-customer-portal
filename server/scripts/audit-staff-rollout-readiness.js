@@ -5,16 +5,60 @@
  *
  * Default output is counts only. `--details` adds structural identifiers and
  * payroll timing metadata, so use it only in a restricted operator terminal.
+ * For machine-readable output, keep npm's own script banner off stdout:
+ * `npm run --silent audit:staff-rollout -- --json`.
  * Run against the intended Railway database before enabling the Staff
  * migration or adding the deferred active-timer partial unique index.
  */
 const db = require('../models/db');
+const {
+  WEEKLY_OT_THRESHOLD_MINUTES: WEEKLY_OVERTIME_THRESHOLD_MINUTES,
+} = require('../constants/staff-time');
+const {
+  AUDITED_COLUMN_SHAPES,
+  normalizeCheckConstraintDefinition,
+  sqlStringLiteral,
+} = require('../models/migrations/20260711000002_staff_time_schema_reconciliation');
 
 const SAMPLE_LIMIT = 25;
 const SCHEMA_DEPENDENCY_ERROR_CODES = new Set(['42P01', '42703']);
 
+const AUDITED_COLUMN_SHAPE_VALUES = AUDITED_COLUMN_SHAPES.map((shape) => `(
+  ${sqlStringLiteral(shape.table)},
+  ${sqlStringLiteral(shape.column)},
+  ${sqlStringLiteral(shape.dataType)},
+  ${shape.characterMaximumLength ?? 'NULL'}::integer,
+  ${shape.numericPrecision ?? 'NULL'}::integer,
+  ${shape.numericScale ?? 'NULL'}::integer,
+  ${shape.nullable}::boolean,
+  ${sqlStringLiteral(shape.defaultKind)},
+  ${shape.defaultValue === undefined ? 'NULL' : sqlStringLiteral(shape.defaultValue)}
+)`).join(',\n');
+
+const EXPECTED_CHECK_DEFINITIONS = {
+  entryType: normalizeCheckConstraintDefinition(`
+    CHECK (entry_type = ANY (ARRAY['shift', 'job', 'break', 'drive', 'admin_time']::text[]))
+  `),
+  status: normalizeCheckConstraintDefinition(`
+    CHECK (status = ANY (ARRAY['active', 'completed', 'edited', 'voided']::text[]))
+  `),
+  activeWriter: normalizeCheckConstraintDefinition(`
+    CHECK (status <> 'active' OR staff_write_generation IS NOT DISTINCT FROM 1)
+  `),
+};
+
 function rowsFrom(result) {
   return Array.isArray(result) ? result : (result?.rows || []);
+}
+
+function expectedDailyOvertimeMinutes(priorWeekShiftMinutes, dayShiftMinutes) {
+  const prior = Number(priorWeekShiftMinutes) || 0;
+  const day = Number(dayShiftMinutes) || 0;
+  const overtime = Math.max(
+    0,
+    Math.min(day, prior + day - WEEKLY_OVERTIME_THRESHOLD_MINUTES),
+  );
+  return Math.round(overtime * 100) / 100;
 }
 
 async function runCheck(trx, check) {
@@ -151,6 +195,209 @@ const checks = [
     `,
   },
   {
+    key: 'staff_time_schema_column_shapes',
+    description: 'Staff time-tracking type, length, precision, nullability, or default differs from the canonical schema',
+    schema: true,
+    sql: `
+      WITH required(
+        table_name,
+        column_name,
+        data_type,
+        character_maximum_length,
+        numeric_precision,
+        numeric_scale,
+        nullable,
+        default_kind,
+        default_value
+      ) AS (
+        VALUES
+          ${AUDITED_COLUMN_SHAPE_VALUES}
+      ), existing AS (
+        SELECT columns.*,
+               REGEXP_REPLACE(
+                 REGEXP_REPLACE(
+                   LOWER(columns.column_default),
+                   '::(character varying|text|numeric|integer|timestamp with time zone)',
+                   '',
+                   'g'
+                 ),
+                 '[[:space:]()]',
+                 '',
+                 'g'
+               ) AS normalized_default
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name IN (
+            'time_entries',
+            'time_entry_daily_summary',
+            'time_weekly_summary'
+          )
+      )
+      SELECT CONCAT(required.table_name, '.', required.column_name) AS column_name,
+             required.data_type AS expected_data_type,
+             existing.data_type AS actual_data_type,
+             required.character_maximum_length AS expected_character_maximum_length,
+             existing.character_maximum_length AS actual_character_maximum_length,
+             required.numeric_precision AS expected_numeric_precision,
+             existing.numeric_precision AS actual_numeric_precision,
+             required.numeric_scale AS expected_numeric_scale,
+             existing.numeric_scale AS actual_numeric_scale,
+             required.nullable AS expected_nullable,
+             existing.is_nullable = 'YES' AS actual_nullable,
+             required.default_kind AS expected_default_kind,
+             existing.column_default AS actual_default
+      FROM required
+      LEFT JOIN existing
+        ON existing.table_name = required.table_name
+       AND existing.column_name = required.column_name
+      WHERE existing.column_name IS NULL
+         OR existing.data_type IS DISTINCT FROM required.data_type
+         OR (
+           required.character_maximum_length IS NOT NULL
+           AND existing.character_maximum_length
+                 IS DISTINCT FROM required.character_maximum_length
+         )
+         OR (
+           required.numeric_precision IS NOT NULL
+           AND existing.numeric_precision IS DISTINCT FROM required.numeric_precision
+         )
+         OR (
+           required.numeric_scale IS NOT NULL
+           AND existing.numeric_scale IS DISTINCT FROM required.numeric_scale
+         )
+         OR (existing.is_nullable = 'YES') IS DISTINCT FROM required.nullable
+         OR CASE required.default_kind
+              WHEN 'none' THEN existing.column_default IS NOT NULL
+              WHEN 'text' THEN existing.normalized_default
+                                  IS DISTINCT FROM QUOTE_LITERAL(required.default_value)
+              WHEN 'current_timestamp' THEN existing.normalized_default IS NULL
+                OR existing.normalized_default NOT IN ('now', 'current_timestamp')
+              WHEN 'zero' THEN NOT CASE
+                WHEN REPLACE(existing.normalized_default, '''', '')
+                       ~ '^[+-]{0,1}[0-9]+([.][0-9]+){0,1}$'
+                  THEN REPLACE(existing.normalized_default, '''', '')::numeric = 0
+                ELSE false
+              END
+              ELSE true
+            END
+      ORDER BY required.table_name, required.column_name
+    `,
+  },
+  {
+    key: 'staff_time_schema_id_generators',
+    description: 'Staff time identifier type or canonical UUID/owned-sequence generator is missing',
+    schema: true,
+    sql: `
+      WITH required(table_name, generator_kind) AS (
+        VALUES
+          ('time_entries', 'uuid'),
+          ('time_entry_daily_summary', 'integer'),
+          ('time_weekly_summary', 'integer')
+      ), columns AS (
+        SELECT required.*,
+               info.data_type,
+               info.is_identity,
+               info.column_default,
+               attrdef.oid AS attrdef_oid,
+               TO_REGCLASS(PG_GET_SERIAL_SEQUENCE(
+                 FORMAT('%I.%I', current_schema(), required.table_name),
+                 'id'
+               )) AS owned_sequence_oid
+        FROM required
+        LEFT JOIN information_schema.columns info
+          ON info.table_schema = current_schema()
+         AND info.table_name = required.table_name
+         AND info.column_name = 'id'
+        LEFT JOIN pg_class table_class
+          ON table_class.relnamespace = TO_REGNAMESPACE(current_schema())
+         AND table_class.relname = required.table_name
+        LEFT JOIN pg_attribute attribute
+          ON attribute.attrelid = table_class.oid
+         AND attribute.attname = 'id'
+         AND NOT attribute.attisdropped
+        LEFT JOIN pg_attrdef attrdef
+          ON attrdef.adrelid = table_class.oid
+         AND attrdef.adnum = attribute.attnum
+      ), integer_maxima(table_name, max_id) AS (
+        SELECT 'time_entry_daily_summary', MAX(id)::bigint
+        FROM time_entry_daily_summary
+        UNION ALL
+        SELECT 'time_weekly_summary', MAX(id)::bigint
+        FROM time_weekly_summary
+      ), generator_shapes AS (
+        SELECT columns.*,
+               sequence_dependency.refobjid AS default_sequence_oid,
+               maxima.max_id,
+               sequence_catalog.start_value,
+               sequence_catalog.increment_by,
+               sequence_catalog.last_value,
+               CASE WHEN sequence_catalog.last_value IS NULL
+                 THEN sequence_catalog.start_value
+                 ELSE sequence_catalog.last_value + sequence_catalog.increment_by
+               END AS next_sequence_value,
+               LOWER(REGEXP_REPLACE(
+                 COALESCE(columns.column_default, ''),
+                 '["[:space:]]',
+                 '',
+                 'g'
+               )) AS normalized_default
+        FROM columns
+        LEFT JOIN pg_depend sequence_dependency
+          ON sequence_dependency.classid = 'pg_attrdef'::regclass
+         AND sequence_dependency.objid = columns.attrdef_oid
+         AND sequence_dependency.refclassid = 'pg_class'::regclass
+         AND sequence_dependency.deptype = 'n'
+        LEFT JOIN pg_class sequence_class
+          ON sequence_class.oid = sequence_dependency.refobjid
+         AND sequence_class.relkind = 'S'
+        LEFT JOIN pg_class owned_sequence
+          ON owned_sequence.oid = columns.owned_sequence_oid
+         AND owned_sequence.relkind = 'S'
+        LEFT JOIN pg_namespace owned_namespace
+          ON owned_namespace.oid = owned_sequence.relnamespace
+        LEFT JOIN pg_sequences sequence_catalog
+          ON sequence_catalog.schemaname = owned_namespace.nspname
+         AND sequence_catalog.sequencename = owned_sequence.relname
+        LEFT JOIN integer_maxima maxima ON maxima.table_name = columns.table_name
+        WHERE sequence_class.oid IS NOT NULL
+           OR sequence_dependency.refobjid IS NULL
+      )
+      SELECT table_name, generator_kind, data_type, is_identity,
+             column_default, owned_sequence_oid, default_sequence_oid,
+             max_id, increment_by, next_sequence_value
+      FROM generator_shapes
+      WHERE data_type IS NULL
+         OR (
+           generator_kind = 'uuid'
+           AND (
+             data_type <> 'uuid'
+             OR normalized_default !~
+               '^([a-z_][a-z0-9_]*[.]){0,1}gen_random_uuid[(][)](::uuid){0,1}$'
+           )
+         )
+         OR (
+           generator_kind = 'integer'
+           AND (
+             data_type NOT IN ('smallint', 'integer', 'bigint')
+             OR owned_sequence_oid IS NULL
+             OR NOT (
+               is_identity = 'YES'
+               OR (
+                 default_sequence_oid = owned_sequence_oid
+                 AND normalized_default ~ '^nextval[(].*::regclass[)]$'
+               )
+             )
+             OR increment_by IS DISTINCT FROM 1
+             OR (
+               max_id IS NOT NULL
+               AND next_sequence_value <= max_id
+             )
+           )
+         )
+      ORDER BY table_name
+    `,
+  },
+  {
     key: 'staff_time_schema_indexes',
     description: 'Required Staff time-tracking primary, unique, or lookup index is missing',
     schema: true,
@@ -220,7 +467,7 @@ const checks = [
   },
   {
     key: 'staff_time_schema_value_constraints',
-    description: 'Staff time entry type/status nullability or allowed-value constraint is missing',
+    description: 'Staff time entry nullability or check-constraint semantics differ from the rollout contract',
     schema: true,
     sql: `
       WITH required_not_null(invariant, column_name) AS (
@@ -238,39 +485,83 @@ const checks = [
          AND existing.is_nullable = 'NO'
         WHERE existing.column_name IS NULL
       ),
-      required_checks(invariant, constraint_names) AS (
+      required_checks(invariant, constraint_names, normalized_definition) AS (
         VALUES
           (
             'time entry type allowed values',
-            ARRAY['time_entries_entry_type_check', 'time_entries_staff_entry_type_check']::text[]
+            ARRAY['time_entries_entry_type_check', 'time_entries_staff_entry_type_check']::text[],
+            ${sqlStringLiteral(EXPECTED_CHECK_DEFINITIONS.entryType)}
           ),
           (
             'time entry status allowed values',
-            ARRAY['time_entries_status_check', 'time_entries_staff_status_check']::text[]
+            ARRAY['time_entries_status_check', 'time_entries_staff_status_check']::text[],
+            ${sqlStringLiteral(EXPECTED_CHECK_DEFINITIONS.status)}
           ),
           (
             'active timer writer generation fence',
-            ARRAY['time_entries_staff_active_write_generation_check']::text[]
+            ARRAY['time_entries_staff_active_write_generation_check']::text[],
+            ${sqlStringLiteral(EXPECTED_CHECK_DEFINITIONS.activeWriter)}
           )
+      ),
+      constraint_shapes AS (
+        SELECT c.conname,
+               c.convalidated,
+               c.connoinherit,
+               REGEXP_REPLACE(
+                 REPLACE(
+                   REGEXP_REPLACE(
+                     REGEXP_REPLACE(
+                       LOWER(pg_get_constraintdef(c.oid, true)),
+                       '::(character varying|text|bpchar|smallint|integer|bigint)(\\[\\]){0,1}',
+                       '',
+                       'g'
+                     ),
+                     '["[:space:]()]',
+                     '',
+                     'g'
+                   ),
+                   'check',
+                   ''
+                 ),
+                 'not([a-z_][a-z0-9_.]*)isdistinctfrom',
+                 '\\1isnotdistinctfrom',
+                 'g'
+               ) AS normalized_definition
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = current_schema()
+          AND t.relname = 'time_entries'
+          AND c.contype = 'c'
       ),
       missing_checks AS (
         SELECT required.invariant
         FROM required_checks required
         WHERE NOT EXISTS (
           SELECT 1
-          FROM pg_constraint c
-          JOIN pg_class t ON t.oid = c.conrelid
-          JOIN pg_namespace n ON n.oid = t.relnamespace
-          WHERE n.nspname = current_schema()
-            AND t.relname = 'time_entries'
-            AND c.contype = 'c'
-            AND c.convalidated
-            AND c.conname = ANY(required.constraint_names)
+          FROM constraint_shapes existing
+          WHERE existing.conname = ANY(required.constraint_names)
+            AND existing.convalidated
+            AND NOT existing.connoinherit
+            AND existing.normalized_definition = required.normalized_definition
+        )
+      ),
+      misdefined_owned_checks AS (
+        SELECT CONCAT(required.invariant, ': ', existing.conname) AS invariant
+        FROM required_checks required
+        JOIN constraint_shapes existing
+          ON existing.conname = ANY(required.constraint_names)
+        WHERE NOT (
+          existing.convalidated
+          AND NOT existing.connoinherit
+          AND existing.normalized_definition = required.normalized_definition
         )
       )
       SELECT invariant FROM missing_not_null
       UNION ALL
       SELECT invariant FROM missing_checks
+      UNION ALL
+      SELECT invariant FROM misdefined_owned_checks
       ORDER BY invariant
     `,
   },
@@ -338,6 +629,34 @@ const checks = [
           ) > 0.02
         )
       ORDER BY clock_in, id
+    `,
+  },
+  {
+    key: 'completed_child_without_containing_shift',
+    description: 'Completed child time is not contained by a completed shift in the same ET payroll week',
+    sql: `
+      SELECT child.id AS entry_id, child.technician_id, child.entry_type,
+             child.clock_in, child.clock_out
+      FROM time_entries child
+      WHERE child.status IN ('completed', 'edited')
+        AND child.entry_type IN ('job', 'break', 'drive', 'admin_time')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM time_entries shift
+          WHERE shift.technician_id = child.technician_id
+            AND shift.entry_type = 'shift'
+            AND shift.status IN ('completed', 'edited')
+            AND child.clock_in >= shift.clock_in
+            AND child.clock_out <= shift.clock_out
+            AND DATE_TRUNC(
+              'week',
+              child.clock_in::timestamptz AT TIME ZONE 'America/New_York'
+            )::date = DATE_TRUNC(
+              'week',
+              shift.clock_in::timestamptz AT TIME ZONE 'America/New_York'
+            )::date
+        )
+      ORDER BY child.clock_in, child.id
     `,
   },
   {
@@ -416,22 +735,72 @@ const checks = [
         FROM time_entries
         WHERE status IN ('completed', 'edited')
         GROUP BY technician_id, work_date
+      ), job_revenue AS (
+        SELECT jobs.technician_id, jobs.work_date,
+               COALESCE(SUM(services.price), 0)::numeric AS revenue_generated
+        FROM (
+          SELECT DISTINCT technician_id,
+            (clock_in::timestamptz AT TIME ZONE 'America/New_York')::date AS work_date,
+            job_id
+          FROM time_entries
+          WHERE status IN ('completed', 'edited')
+            AND entry_type = 'job'
+            AND job_id IS NOT NULL
+        ) jobs
+        LEFT JOIN scheduled_services services ON services.id = jobs.job_id
+        GROUP BY jobs.technician_id, jobs.work_date
       ), entry_totals AS (
-        SELECT technician_id, work_date,
-               ROUND(shift_minutes, 2) AS shift_minutes,
-               ROUND(job_minutes, 2) AS job_minutes,
-               ROUND(drive_minutes, 2) AS drive_minutes,
-               ROUND(break_minutes, 2) AS break_minutes,
-               ROUND(admin_minutes, 2) AS admin_minutes,
-               job_count, first_clock_in, last_clock_out,
-               CASE WHEN shift_minutes > 0
-                 THEN ROUND((job_minutes / shift_minutes) * 100, 2)
+        SELECT raw.technician_id, raw.work_date,
+               ROUND(raw.shift_minutes, 2) AS shift_minutes,
+               ROUND(raw.job_minutes, 2) AS job_minutes,
+               ROUND(raw.drive_minutes, 2) AS drive_minutes,
+               ROUND(raw.break_minutes, 2) AS break_minutes,
+               ROUND(raw.admin_minutes, 2) AS admin_minutes,
+               raw.job_count, raw.first_clock_in, raw.last_clock_out,
+               CASE WHEN raw.shift_minutes > 0
+                 THEN ROUND((raw.job_minutes / raw.shift_minutes) * 100, 2)
                  ELSE 0::numeric
-               END AS utilization_pct
-        FROM entry_raw
-      ), daily AS (
-        SELECT summary.*, to_jsonb(summary) AS day_json
+               END AS utilization_pct,
+               ROUND(COALESCE(revenue.revenue_generated, 0), 2) AS revenue_generated,
+               CASE WHEN raw.shift_minutes > 0
+                 THEN ROUND(
+                   COALESCE(revenue.revenue_generated, 0) / (raw.shift_minutes / 60),
+                   2
+                 )
+                 ELSE 0::numeric
+               END AS rpmh_actual
+        FROM entry_raw raw
+        LEFT JOIN job_revenue revenue
+          ON revenue.technician_id = raw.technician_id
+         AND revenue.work_date = raw.work_date
+      ), daily_running AS (
+        SELECT summary.*, to_jsonb(summary) AS day_json,
+               DATE_TRUNC('week', summary.work_date::timestamp)::date AS week_start,
+               COALESCE(
+                 SUM(COALESCE(summary.total_shift_minutes, 0)) OVER (
+                   PARTITION BY summary.technician_id,
+                     DATE_TRUNC('week', summary.work_date::timestamp)::date
+                   ORDER BY summary.work_date, summary.id
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                 ),
+                 0::numeric
+               ) AS prior_week_shift_minutes
         FROM time_entry_daily_summary summary
+      ), daily AS (
+        SELECT daily_running.*,
+               ROUND(
+                 GREATEST(
+                   0::numeric,
+                   LEAST(
+                     COALESCE(total_shift_minutes, 0),
+                     prior_week_shift_minutes
+                       + COALESCE(total_shift_minutes, 0)
+                       - ${WEEKLY_OVERTIME_THRESHOLD_MINUTES}
+                   )
+                 ),
+                 2
+               ) AS expected_overtime_minutes
+        FROM daily_running
       )
       SELECT d.id AS daily_summary_id, d.technician_id, d.work_date,
              d.total_shift_minutes, e.shift_minutes AS entry_shift_minutes,
@@ -445,7 +814,11 @@ const checks = [
              e.first_clock_in AS entry_first_clock_in,
              NULLIF(d.day_json ->> 'last_clock_out', '')::timestamptz AS last_clock_out,
              e.last_clock_out AS entry_last_clock_out,
-             d.utilization_pct, e.utilization_pct AS entry_utilization_pct
+             d.utilization_pct, e.utilization_pct AS entry_utilization_pct,
+             d.revenue_generated, e.revenue_generated AS entry_revenue_generated,
+             d.rpmh_actual, e.rpmh_actual AS entry_rpmh_actual,
+             d.overtime_minutes,
+             d.expected_overtime_minutes
       FROM daily d
       LEFT JOIN entry_totals e
         ON d.technician_id = e.technician_id
@@ -467,7 +840,110 @@ const checks = [
               IS DISTINCT FROM e.last_clock_out
          OR d.utilization_pct
               IS DISTINCT FROM COALESCE(e.utilization_pct, 0::numeric)
+         OR d.revenue_generated
+              IS DISTINCT FROM COALESCE(e.revenue_generated, 0::numeric)
+         OR d.rpmh_actual
+              IS DISTINCT FROM COALESCE(e.rpmh_actual, 0::numeric)
+         OR d.overtime_minutes
+              IS DISTINCT FROM d.expected_overtime_minutes
       ORDER BY d.work_date, d.technician_id, d.id
+    `,
+  },
+  {
+    key: 'weekly_overtime_payroll_mismatch',
+    description: 'Weekly payroll summary is missing, orphaned, stale, or inconsistent with its ET-dated daily summaries',
+    sql: `
+      WITH weekly_allocations AS (
+        SELECT technician_id, week_start,
+               (week_start + INTERVAL '6 days')::date AS expected_week_end,
+               ROUND(SUM(COALESCE(total_shift_minutes, 0)), 2) AS expected_shift_minutes,
+               ROUND(SUM(COALESCE(total_job_minutes, 0)), 2) AS expected_job_minutes,
+               ROUND(SUM(COALESCE(total_drive_minutes, 0)), 2) AS expected_drive_minutes,
+               ROUND(SUM(COALESCE(overtime_minutes, 0)), 2) AS stored_daily_overtime_minutes,
+               LEAST(
+                 ROUND(SUM(COALESCE(total_shift_minutes, 0)), 2),
+                 ${WEEKLY_OVERTIME_THRESHOLD_MINUTES}
+               ) AS expected_regular_minutes,
+               GREATEST(
+                 ROUND(SUM(COALESCE(total_shift_minutes, 0)), 2)
+                   - ${WEEKLY_OVERTIME_THRESHOLD_MINUTES},
+                 0::numeric
+               ) AS expected_overtime_minutes,
+               COUNT(*) FILTER (
+                 WHERE COALESCE(total_shift_minutes, 0) > 0
+               )::integer AS expected_days_worked,
+               SUM(COALESCE(job_count, 0))::integer AS expected_job_count,
+               ROUND(SUM(COALESCE(revenue_generated, 0)), 2) AS expected_revenue,
+               CASE WHEN SUM(COALESCE(total_shift_minutes, 0)) > 0
+                 THEN ROUND(
+                   SUM(COALESCE(revenue_generated, 0))
+                     / (SUM(COALESCE(total_shift_minutes, 0)) / 60),
+                   2
+                 )
+                 ELSE 0::numeric
+               END AS expected_avg_rpmh,
+               CASE WHEN SUM(COALESCE(total_shift_minutes, 0)) > 0
+                 THEN ROUND(
+                   (SUM(COALESCE(total_job_minutes, 0))
+                     / SUM(COALESCE(total_shift_minutes, 0))) * 100,
+                   2
+                 )
+                 ELSE 0::numeric
+               END AS expected_utilization_pct
+        FROM (
+          SELECT summary.*,
+                 DATE_TRUNC('week', summary.work_date::timestamp)::date AS week_start
+          FROM time_entry_daily_summary summary
+        ) daily
+        GROUP BY technician_id, week_start
+      )
+      SELECT w.id AS weekly_summary_id, w.technician_id, w.week_start, w.status,
+             a.technician_id AS daily_technician_id,
+             a.week_start AS daily_week_start,
+             w.week_end, a.expected_week_end,
+             w.total_shift_minutes, a.expected_shift_minutes,
+             w.total_job_minutes, a.expected_job_minutes,
+             w.total_drive_minutes, a.expected_drive_minutes,
+             w.regular_minutes, a.expected_regular_minutes,
+             w.overtime_minutes AS weekly_overtime_minutes,
+             COALESCE(a.stored_daily_overtime_minutes, 0) AS stored_daily_overtime_minutes,
+             COALESCE(a.expected_overtime_minutes, 0) AS expected_overtime_minutes,
+             w.days_worked, a.expected_days_worked,
+             w.job_count, a.expected_job_count,
+             w.total_revenue, a.expected_revenue,
+             w.avg_rpmh, a.expected_avg_rpmh,
+             w.utilization_pct, a.expected_utilization_pct
+      FROM time_weekly_summary w
+      FULL OUTER JOIN weekly_allocations a
+        ON a.technician_id = w.technician_id
+       AND a.week_start = w.week_start
+      WHERE w.id IS NULL
+         OR a.technician_id IS NULL
+         OR w.week_start IS DISTINCT FROM
+              DATE_TRUNC('week', w.week_start::timestamp)::date
+         OR w.week_end IS DISTINCT FROM a.expected_week_end
+         OR COALESCE(w.total_shift_minutes, 0::numeric)
+              IS DISTINCT FROM a.expected_shift_minutes
+         OR COALESCE(w.total_job_minutes, 0::numeric)
+              IS DISTINCT FROM a.expected_job_minutes
+         OR COALESCE(w.total_drive_minutes, 0::numeric)
+              IS DISTINCT FROM a.expected_drive_minutes
+         OR COALESCE(w.regular_minutes, 0::numeric)
+              IS DISTINCT FROM a.expected_regular_minutes
+         OR w.overtime_minutes
+              IS DISTINCT FROM COALESCE(a.expected_overtime_minutes, 0::numeric)
+         OR COALESCE(a.stored_daily_overtime_minutes, 0::numeric)
+              IS DISTINCT FROM COALESCE(a.expected_overtime_minutes, 0::numeric)
+         OR w.days_worked IS DISTINCT FROM a.expected_days_worked
+         OR w.job_count IS DISTINCT FROM a.expected_job_count
+         OR COALESCE(w.total_revenue, 0::numeric)
+              IS DISTINCT FROM a.expected_revenue
+         OR COALESCE(w.avg_rpmh, 0::numeric)
+              IS DISTINCT FROM a.expected_avg_rpmh
+         OR COALESCE(w.utilization_pct, 0::numeric)
+              IS DISTINCT FROM a.expected_utilization_pct
+      ORDER BY COALESCE(w.week_start, a.week_start),
+               COALESCE(w.technician_id, a.technician_id), w.id
     `,
   },
   {
@@ -491,6 +967,70 @@ const checks = [
       GROUP BY technician_id, work_date
       HAVING COUNT(*) > 1
       ORDER BY work_date, technician_id
+    `,
+  },
+  {
+    key: 'unresolvable_timesheet_review_states',
+    description: 'A retired daily/weekly review state has no safe transition in the canonical weekly workflow',
+    sql: `
+      SELECT 'daily'::text AS summary_scope,
+             d.id::text AS summary_id,
+             d.technician_id,
+             d.work_date AS period_start,
+             d.status,
+             CASE
+               WHEN d.status = 'disputed' THEN 'disputed_day_without_disputed_entry'
+               ELSE 'retired_daily_status'
+             END AS reason
+      FROM time_entry_daily_summary d
+      WHERE d.status IS NULL
+         OR d.status NOT IN ('pending', 'approved', 'disputed')
+         OR (
+           d.status = 'disputed'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM (
+               SELECT entry.*, to_jsonb(entry) AS entry_json
+               FROM time_entries entry
+             ) e
+             WHERE e.technician_id = d.technician_id
+               AND e.status <> 'voided'
+               AND (e.clock_in::timestamptz AT TIME ZONE 'America/New_York')::date = d.work_date
+               AND COALESCE(e.entry_json ->> 'approval_status', 'pending') = 'disputed'
+           )
+         )
+      UNION ALL
+      SELECT 'weekly'::text AS summary_scope,
+             w.id::text AS summary_id,
+             w.technician_id,
+             w.week_start AS period_start,
+             w.status,
+             'retired_weekly_status'::text AS reason
+      FROM time_weekly_summary w
+      WHERE w.status IS NULL
+         OR w.status NOT IN ('pending', 'approved')
+      ORDER BY period_start, technician_id, summary_scope, summary_id
+    `,
+  },
+  {
+    key: 'approved_incomplete_staff_weeks',
+    description: 'An approved payroll snapshot covers the current or a future ET week that can still receive time',
+    sql: `
+      SELECT w.id AS weekly_summary_id,
+             w.technician_id,
+             w.week_start,
+             COALESCE(
+               NULLIF(to_jsonb(w) ->> 'week_end', '')::date,
+               (w.week_start + INTERVAL '6 days')::date
+             ) AS week_end,
+             (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AS current_et_date
+      FROM time_weekly_summary w
+      WHERE w.status = 'approved'
+        AND COALESCE(
+          NULLIF(to_jsonb(w) ->> 'week_end', '')::date,
+          (w.week_start + INTERVAL '6 days')::date
+        ) >= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date
+      ORDER BY w.week_start, w.technician_id, w.id
     `,
   },
   {
@@ -590,23 +1130,26 @@ const checks = [
        AND e.week_start = w.week_start
       WHERE w.status = 'approved'
         AND (
-          ABS(COALESCE(w.total_shift_minutes, 0) - COALESCE(e.shift_minutes, 0)) > 0.02
+          COALESCE(w.total_shift_minutes, 0::numeric)
+            IS DISTINCT FROM COALESCE(e.shift_minutes, 0::numeric)
           OR (
             jsonb_exists(w.week_json, 'total_job_minutes')
-            AND ABS(
-              COALESCE(NULLIF(w.week_json ->> 'total_job_minutes', '')::numeric, 0)
-              - COALESCE(e.job_minutes, 0)
-            ) > 0.02
+            AND COALESCE(
+              NULLIF(w.week_json ->> 'total_job_minutes', '')::numeric,
+              0::numeric
+            ) IS DISTINCT FROM COALESCE(e.job_minutes, 0::numeric)
           )
           OR (
             jsonb_exists(w.week_json, 'total_drive_minutes')
-            AND ABS(
-              COALESCE(NULLIF(w.week_json ->> 'total_drive_minutes', '')::numeric, 0)
-              - COALESCE(e.drive_minutes, 0)
-            ) > 0.02
+            AND COALESCE(
+              NULLIF(w.week_json ->> 'total_drive_minutes', '')::numeric,
+              0::numeric
+            ) IS DISTINCT FROM COALESCE(e.drive_minutes, 0::numeric)
           )
-          OR ABS(COALESCE(w.regular_minutes, 0) - LEAST(COALESCE(e.shift_minutes, 0), 2400)) > 0.02
-          OR ABS(COALESCE(w.overtime_minutes, 0) - GREATEST(COALESCE(e.shift_minutes, 0) - 2400, 0)) > 0.02
+          OR COALESCE(w.regular_minutes, 0::numeric) IS DISTINCT FROM
+            LEAST(COALESCE(e.shift_minutes, 0::numeric), 2400::numeric)
+          OR COALESCE(w.overtime_minutes, 0::numeric) IS DISTINCT FROM
+            GREATEST(COALESCE(e.shift_minutes, 0::numeric) - 2400::numeric, 0::numeric)
           OR COALESCE(w.job_count, 0) <> COALESCE(e.job_count, 0)
           OR COALESCE(w.days_worked, 0) <> COALESCE(e.days_worked, 0)
         )
@@ -685,12 +1228,10 @@ async function main() {
     const dataChecks = checks.filter((check) => !check.schema);
     for (const check of schemaChecks) {
       // Deliberately sequential so one repeatable-read snapshot backs the report.
-      // eslint-disable-next-line no-await-in-loop
       results.push(await runCheck(trx, check));
     }
     for (const check of dataChecks) {
       // Deliberately sequential so one repeatable-read snapshot backs the report.
-      // eslint-disable-next-line no-await-in-loop
       results.push(await runDataCheck(trx, check));
     }
     return { target, results };
@@ -751,7 +1292,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  WEEKLY_OVERTIME_THRESHOLD_MINUTES,
   checks,
+  expectedDailyOvertimeMinutes,
   main,
   rowsFrom,
   runCheck,

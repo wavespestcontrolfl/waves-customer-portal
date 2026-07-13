@@ -4,8 +4,10 @@
  *
  * The route-era tables omitted columns now written unconditionally by the
  * time-tracking and payroll services. This migration is deliberately
- * additive and idempotent. Missing derived-summary columns are only safe to
- * add automatically while their table is empty; inventing zero values for an
+ * non-destructive and idempotent: it adds omissions, widens known legacy
+ * columns, and repairs defaults/nullability only after proving the existing
+ * values are safe. Missing derived-summary columns are only safe to add
+ * automatically while their table is empty; inventing zero values for an
  * existing approved payroll snapshot would be data corruption.
  *
  * Keep this migration ordered before staff_auth_hardening. If reconciliation
@@ -27,6 +29,10 @@ const REQUIRED_COLUMNS = {
     'original_clock_in',
     'original_clock_out',
     'staff_write_generation',
+    'approval_status',
+    'approved_by',
+    'approved_at',
+    'approval_notes',
   ],
   time_entry_daily_summary: [
     'total_admin_minutes',
@@ -73,6 +79,65 @@ const SUMMARY_COLUMNS_REQUIRING_EMPTY_TABLE = {
   ],
 };
 
+// Exact shapes owned by this reconciliation. These cover every column added
+// here plus every material difference between the retired runtime DDL and the
+// canonical migration. Base columns whose route-era and canonical definitions
+// already match remain outside this list.
+//
+// `repair` is intentionally narrow. The migration widens the known legacy
+// shapes, but an unrelated type is an operator-visible blocker rather than an
+// invitation to coerce payroll/audit data speculatively.
+const AUDITED_COLUMN_SHAPES = [
+  { table: 'time_entries', column: 'entry_type', dataType: 'text', nullable: false, defaultKind: 'none', repair: 'text' },
+  { table: 'time_entries', column: 'status', dataType: 'text', nullable: false, defaultKind: 'text', defaultValue: 'active', repair: 'text' },
+  { table: 'time_entries', column: 'clock_in', dataType: 'timestamp with time zone', nullable: false, defaultKind: 'current_timestamp' },
+  { table: 'time_entries', column: 'duration_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'none', repair: 'numeric_widen' },
+  { table: 'time_entries', column: 'clock_in_address', dataType: 'text', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'service_type', dataType: 'character varying', characterMaximumLength: 255, nullable: true, defaultKind: 'none', repair: 'varchar_widen' },
+  { table: 'time_entries', column: 'pay_type', dataType: 'character varying', characterMaximumLength: 255, nullable: true, defaultKind: 'text', defaultValue: 'hourly', repair: 'varchar_widen' },
+  { table: 'time_entries', column: 'edited_by', dataType: 'uuid', nullable: true, defaultKind: 'none', repair: 'edited_by_uuid' },
+  { table: 'time_entries', column: 'edited_at', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'original_clock_in', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'original_clock_out', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'source', dataType: 'character varying', characterMaximumLength: 255, nullable: true, defaultKind: 'text', defaultValue: 'app', repair: 'varchar_widen' },
+  { table: 'time_entries', column: 'staff_write_generation', dataType: 'integer', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'approval_status', dataType: 'character varying', characterMaximumLength: 20, nullable: true, defaultKind: 'text', defaultValue: 'pending' },
+  { table: 'time_entries', column: 'approved_by', dataType: 'uuid', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'approved_at', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entries', column: 'approval_notes', dataType: 'text', nullable: true, defaultKind: 'none' },
+
+  { table: 'time_entry_daily_summary', column: 'total_shift_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'total_job_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'total_drive_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'total_break_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'total_admin_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'first_clock_in', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entry_daily_summary', column: 'last_clock_out', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entry_daily_summary', column: 'overtime_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'utilization_pct', dataType: 'numeric', numericPrecision: 5, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'revenue_generated', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'rpmh_actual', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_entry_daily_summary', column: 'status', dataType: 'character varying', characterMaximumLength: 20, nullable: false, defaultKind: 'text', defaultValue: 'pending' },
+  { table: 'time_entry_daily_summary', column: 'approved_by', dataType: 'uuid', nullable: true, defaultKind: 'none' },
+  { table: 'time_entry_daily_summary', column: 'approved_at', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_entry_daily_summary', column: 'notes', dataType: 'text', nullable: true, defaultKind: 'none' },
+
+  { table: 'time_weekly_summary', column: 'total_shift_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'total_job_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'total_drive_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'regular_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'overtime_minutes', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'total_revenue', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'avg_rpmh', dataType: 'numeric', numericPrecision: 10, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'utilization_pct', dataType: 'numeric', numericPrecision: 5, numericScale: 2, nullable: true, defaultKind: 'zero', repair: 'numeric_widen' },
+  { table: 'time_weekly_summary', column: 'status', dataType: 'character varying', characterMaximumLength: 20, nullable: false, defaultKind: 'text', defaultValue: 'pending' },
+  { table: 'time_weekly_summary', column: 'approved_by', dataType: 'uuid', nullable: true, defaultKind: 'none' },
+  { table: 'time_weekly_summary', column: 'approved_at', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_weekly_summary', column: 'approval_notes', dataType: 'text', nullable: true, defaultKind: 'none' },
+  { table: 'time_weekly_summary', column: 'tech_signed_at', dataType: 'timestamp with time zone', nullable: true, defaultKind: 'none' },
+  { table: 'time_weekly_summary', column: 'tech_signature', dataType: 'character varying', characterMaximumLength: 200, nullable: true, defaultKind: 'none' },
+];
+
 const REQUIRED_ENTRY_INDEXES = [
   {
     columns: ['technician_id'],
@@ -101,6 +166,190 @@ function rowsFrom(result) {
 
 function sqlStringLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function columnShapeKey(table, column) {
+  return `${table}.${column}`;
+}
+
+function normalizeColumnDefault(value) {
+  if (value === null || value === undefined) return null;
+  return String(value)
+    .toLowerCase()
+    .replace(/::(?:character varying|text|numeric|integer|timestamp with time zone)/g, '')
+    .replace(/[\s()]/g, '');
+}
+
+function columnDefaultMatches(actual, expected) {
+  const normalized = normalizeColumnDefault(actual);
+  if (expected.defaultKind === 'none') return normalized === null;
+  if (expected.defaultKind === 'current_timestamp') {
+    return normalized === 'now' || normalized === 'current_timestamp';
+  }
+  if (expected.defaultKind === 'zero') {
+    const numericLiteral = normalized?.replace(/^'([^']+)'$/, '$1');
+    return numericLiteral !== null
+      && /^[+-]?\d+(?:\.\d+)?$/.test(numericLiteral)
+      && Number(numericLiteral) === 0;
+  }
+  if (expected.defaultKind === 'text') {
+    return normalized === normalizeColumnDefault(sqlStringLiteral(expected.defaultValue));
+  }
+  throw new Error(`Unknown Staff schema default kind: ${expected.defaultKind}`);
+}
+
+function columnTypeMatches(actual, expected) {
+  if (actual.data_type !== expected.dataType) return false;
+  if (expected.characterMaximumLength !== undefined) {
+    if (Number(actual.character_maximum_length) !== expected.characterMaximumLength) return false;
+  }
+  if (expected.numericPrecision !== undefined) {
+    if (Number(actual.numeric_precision) !== expected.numericPrecision) return false;
+  }
+  if (expected.numericScale !== undefined) {
+    if (Number(actual.numeric_scale) !== expected.numericScale) return false;
+  }
+  return true;
+}
+
+function expectedTypeSql(expected) {
+  if (expected.dataType === 'character varying') {
+    return `varchar(${expected.characterMaximumLength})`;
+  }
+  if (expected.dataType === 'numeric') {
+    return `numeric(${expected.numericPrecision}, ${expected.numericScale})`;
+  }
+  if (expected.dataType === 'timestamp with time zone') return 'timestamptz';
+  return expected.dataType;
+}
+
+function canRepairColumnType(actual, expected) {
+  if (expected.repair === 'text') {
+    return actual.data_type === 'character varying';
+  }
+  if (expected.repair === 'varchar_widen') {
+    return actual.data_type === 'character varying'
+      && actual.character_maximum_length !== null
+      && Number(actual.character_maximum_length) <= expected.characterMaximumLength;
+  }
+  if (expected.repair === 'numeric_widen') {
+    return actual.data_type === 'numeric'
+      && actual.numeric_precision !== null
+      && Number(actual.numeric_precision) <= expected.numericPrecision
+      && Number(actual.numeric_scale) === expected.numericScale;
+  }
+  if (expected.repair === 'edited_by_uuid') {
+    return actual.data_type === 'character varying' || actual.data_type === 'text';
+  }
+  return false;
+}
+
+async function loadAuditedColumnShapes(knex) {
+  const result = await knex.raw(`
+    SELECT table_name,
+           column_name,
+           data_type,
+           character_maximum_length,
+           numeric_precision,
+           numeric_scale,
+           is_nullable,
+           column_default
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = ANY(?::text[])
+  `, [TABLES]);
+  return new Map(rowsFrom(result).map((row) => [
+    columnShapeKey(row.table_name, row.column_name),
+    row,
+  ]));
+}
+
+async function assertColumnHasNoNulls(knex, expected) {
+  const result = await knex.raw(`
+    SELECT COUNT(*)::integer AS null_count
+    FROM ${expected.table}
+    WHERE ${expected.column} IS NULL
+  `);
+  const nullCount = Number(rowsFrom(result)[0]?.null_count || 0);
+  if (nullCount > 0) {
+    throw new Error(
+      `${expected.table}.${expected.column} contains ${nullCount} NULL value(s); `
+      + 'backfill an operator-approved value before Staff schema reconciliation',
+    );
+  }
+}
+
+async function assertEditedByValuesAreUuid(knex) {
+  const result = await knex.raw(`
+    SELECT COUNT(*)::integer AS invalid_count
+    FROM time_entries
+    WHERE edited_by IS NOT NULL
+      AND NOT pg_input_is_valid(BTRIM(edited_by::text), 'uuid')
+  `);
+  const invalidCount = Number(rowsFrom(result)[0]?.invalid_count || 0);
+  if (invalidCount > 0) {
+    throw new Error(
+      `time_entries.edited_by contains ${invalidCount} non-UUID value(s); `
+      + 'map them to technician UUIDs before Staff schema reconciliation',
+    );
+  }
+}
+
+async function repairColumnType(knex, actual, expected) {
+  if (expected.repair === 'edited_by_uuid') await assertEditedByValuesAreUuid(knex);
+  const typeSql = expectedTypeSql(expected);
+  await knex.raw(`
+    ALTER TABLE ${expected.table}
+    ALTER COLUMN ${expected.column} TYPE ${typeSql}
+    USING ${expected.column}::${typeSql}
+  `);
+}
+
+async function reconcileAuditedColumnShapes(knex) {
+  const actualShapes = await loadAuditedColumnShapes(knex);
+  for (const expected of AUDITED_COLUMN_SHAPES) {
+    const key = columnShapeKey(expected.table, expected.column);
+    const actual = actualShapes.get(key);
+    if (!actual) {
+      throw new Error(`${key} is missing after Staff schema column reconciliation`);
+    }
+
+    if (!columnTypeMatches(actual, expected)) {
+      if (!canRepairColumnType(actual, expected)) {
+        throw new Error(
+          `${key} has unsupported type ${actual.data_type}; expected ${expectedTypeSql(expected)}`,
+        );
+      }
+      await repairColumnType(knex, actual, expected);
+    }
+
+    const isNullable = actual.is_nullable === 'YES';
+    if (!expected.nullable && isNullable) {
+      await assertColumnHasNoNulls(knex, expected);
+      await knex.raw(`
+        ALTER TABLE ${expected.table}
+        ALTER COLUMN ${expected.column} SET NOT NULL
+      `);
+    } else if (expected.nullable && !isNullable) {
+      // Widening nullability cannot invalidate or rewrite an existing value.
+      await knex.raw(`
+        ALTER TABLE ${expected.table}
+        ALTER COLUMN ${expected.column} DROP NOT NULL
+      `);
+    }
+
+    if (!columnDefaultMatches(actual.column_default, expected)) {
+      const defaultClause = expected.defaultKind === 'none'
+        ? 'DROP DEFAULT'
+        : `SET DEFAULT ${expected.defaultKind === 'text'
+          ? sqlStringLiteral(expected.defaultValue)
+          : (expected.defaultKind === 'zero' ? '0' : 'CURRENT_TIMESTAMP')}`;
+      await knex.raw(`
+        ALTER TABLE ${expected.table}
+        ALTER COLUMN ${expected.column} ${defaultClause}
+      `);
+    }
+  }
 }
 
 async function loadColumnNames(knex) {
@@ -227,10 +476,12 @@ async function ensureGeneratedIntegerId(knex, table, sequenceName) {
     await knex.raw(`ALTER SEQUENCE ${sequenceName} OWNED BY ${table}.id`);
     ownedSequence = sequenceName;
   }
-  if (!identity.column_default && identity.is_identity !== 'YES') {
+  if (identity.is_identity !== 'YES') {
     // PostgreSQL utility statements do not accept bind parameters in a column
     // default. `ownedSequence` comes from pg_get_serial_sequence (or the fixed
-    // internal name above); escape it as a regclass string literal.
+    // internal name above); escape it as a regclass string literal. Always set
+    // the canonical generator: retaining an unrelated pre-existing default can
+    // make inserts collide even though the sequence itself was repaired.
     await knex.raw(`
       ALTER TABLE ${table}
       ALTER COLUMN id SET DEFAULT nextval(${sqlStringLiteral(ownedSequence)}::regclass)
@@ -268,74 +519,111 @@ async function ensureGeneratedUuidId(knex, table) {
       AND table_name = ?
       AND column_name = 'id'
   `, [table]);
-  if (rowsFrom(result)[0]?.column_default) return;
+  const defaultExpression = String(rowsFrom(result)[0]?.column_default || '')
+    .toLowerCase()
+    .replace(/["\s]/g, '');
+  if (/^(?:[a-z_][a-z0-9_]*[.]){0,1}gen_random_uuid[(][)](?:::uuid)?$/.test(defaultExpression)) {
+    return;
+  }
   await knex.raw(`ALTER TABLE ${table} ALTER COLUMN id SET DEFAULT gen_random_uuid()`);
 }
 
-async function namedCheckConstraintExists(knex, table, names) {
-  const result = await knex.raw(`
-    SELECT EXISTS (
-      SELECT 1
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      JOIN pg_namespace n ON n.oid = t.relnamespace
-      WHERE n.nspname = current_schema()
-        AND t.relname = ?
-        AND c.contype = 'c'
-        AND c.convalidated
-        AND c.conname = ANY(?::text[])
-    ) AS exists
-  `, [table, names]);
-  return rowsFrom(result)[0]?.exists === true;
+function normalizeCheckConstraintDefinition(definition) {
+  return String(definition || '')
+    .toLowerCase()
+    .replace(/::(?:character varying|text|bpchar|smallint|integer|bigint)(?:\[\])?/g, '')
+    .replace(/\bcheck\b/g, '')
+    .replace(/["\s()]/g, '')
+    // PostgreSQL renders `x IS NOT DISTINCT FROM y` from pg_get_constraintdef
+    // as the equivalent `NOT x IS DISTINCT FROM y`. Canonicalize that server
+    // spelling so an idempotent rerun does not replace a correct constraint.
+    .replace(/not([a-z_][a-z0-9_.]*)isdistinctfrom/g, '$1isnotdistinctfrom');
 }
 
-async function columnIsNotNull(knex, table, column) {
+async function loadNamedCheckConstraints(knex, table, names) {
   const result = await knex.raw(`
-    SELECT is_nullable = 'NO' AS is_not_null
-    FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = ?
-      AND column_name = ?
-  `, [table, column]);
-  return rowsFrom(result)[0]?.is_not_null === true;
+    SELECT c.conname,
+           c.convalidated,
+           c.connoinherit,
+           pg_get_constraintdef(c.oid, true) AS definition
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = current_schema()
+      AND t.relname = ?
+      AND c.contype = 'c'
+      AND c.conname = ANY(?::text[])
+  `, [table, names]);
+  return rowsFrom(result);
+}
+
+function exactCheckConstraint(constraint, expectedDefinition) {
+  return constraint.convalidated === true
+    && constraint.connoinherit !== true
+    && normalizeCheckConstraintDefinition(constraint.definition)
+      === normalizeCheckConstraintDefinition(expectedDefinition);
+}
+
+async function reconcileNamedCheckConstraint(
+  knex,
+  { table, names, reconcileName, expectedDefinition, expression },
+) {
+  const constraints = await loadNamedCheckConstraints(knex, table, names);
+  let hasExactConstraint = false;
+  for (const constraint of constraints) {
+    if (exactCheckConstraint(constraint, expectedDefinition)) {
+      hasExactConstraint = true;
+      continue;
+    }
+    // A familiar name is not evidence of familiar semantics. Remove only the
+    // two owned names, under the migration's exclusive lock, before adding the
+    // exact canonical predicate.
+    await knex.raw(`ALTER TABLE ${table} DROP CONSTRAINT ${constraint.conname}`);
+  }
+  if (!hasExactConstraint) {
+    await knex.raw(`
+      ALTER TABLE ${table}
+      ADD CONSTRAINT ${reconcileName} CHECK (${expression})
+    `);
+  }
 }
 
 async function ensureAllowedTimeEntryValues(knex, column, allowedValues) {
   const canonicalName = `time_entries_${column}_check`;
   const reconcileName = `time_entries_staff_${column}_check`;
-  const hasCheck = await namedCheckConstraintExists(
-    knex,
-    'time_entries',
-    [canonicalName, reconcileName],
+  const literals = allowedValues.map((value) => sqlStringLiteral(value)).join(', ');
+  const expectedDefinition = `CHECK (${column} = ANY (ARRAY[${literals}]::text[]))`;
+  const constraints = await loadNamedCheckConstraints(
+    knex, 'time_entries', [canonicalName, reconcileName],
   );
-  const hasNotNull = await columnIsNotNull(knex, 'time_entries', column);
-  if (hasCheck && hasNotNull) return;
+  const hasExactConstraint = constraints.some((constraint) => (
+    exactCheckConstraint(constraint, expectedDefinition)
+  ));
 
-  const placeholders = allowedValues.map(() => '?').join(', ');
-  const invalidResult = await knex.raw(`
-    SELECT EXISTS (
-      SELECT 1
-      FROM time_entries
-      WHERE ${column} IS NULL
-         OR ${column} NOT IN (${placeholders})
-    ) AS exists
-  `, allowedValues);
-  if (rowsFrom(invalidResult)[0]?.exists) {
-    throw new Error(
-      `time_entries.${column} contains values outside the Staff payroll contract; reconcile them manually`,
-    );
+  if (!hasExactConstraint) {
+    const placeholders = allowedValues.map(() => '?').join(', ');
+    const invalidResult = await knex.raw(`
+      SELECT EXISTS (
+        SELECT 1
+        FROM time_entries
+        WHERE ${column} IS NULL
+           OR ${column} NOT IN (${placeholders})
+      ) AS exists
+    `, allowedValues);
+    if (rowsFrom(invalidResult)[0]?.exists) {
+      throw new Error(
+        `time_entries.${column} contains values outside the Staff payroll contract; reconcile them manually`,
+      );
+    }
   }
 
-  if (!hasNotNull) {
-    await knex.raw(`ALTER TABLE time_entries ALTER COLUMN ${column} SET NOT NULL`);
-  }
-  if (!hasCheck) {
-    const literals = allowedValues.map((value) => `'${value}'`).join(', ');
-    await knex.raw(`
-      ALTER TABLE time_entries
-      ADD CONSTRAINT ${reconcileName} CHECK (${column} IN (${literals}))
-    `);
-  }
+  await reconcileNamedCheckConstraint(knex, {
+    table: 'time_entries',
+    names: [canonicalName, reconcileName],
+    reconcileName,
+    expectedDefinition,
+    expression: `${column} IN (${literals})`,
+  });
 }
 
 async function ensurePrimaryKey(knex, table, constraintName) {
@@ -362,9 +650,7 @@ async function ensureTimeEntryIndexes(knex) {
   for (const index of REQUIRED_ENTRY_INDEXES) {
     // Semantic inspection avoids accepting a wrong same-named index and also
     // avoids duplicating an equivalent index with a noncanonical legacy name.
-    // eslint-disable-next-line no-await-in-loop
     if (await indexShapeExists(knex, 'time_entries', index.columns)) continue;
-    // eslint-disable-next-line no-await-in-loop
     await knex.raw(`CREATE INDEX ${index.name} ON time_entries ${index.definition}`);
   }
 }
@@ -379,6 +665,15 @@ async function addMissingColumns(knex, missing) {
       if (missing.time_entries.includes('staff_write_generation')) {
         table.integer('staff_write_generation');
       }
+      // Add approval_status without its default first so historical rows keep
+      // an explicit unknown (NULL). Shape reconciliation installs the
+      // canonical 'pending' default only for future inserts.
+      if (missing.time_entries.includes('approval_status')) {
+        table.string('approval_status', 20).nullable();
+      }
+      if (missing.time_entries.includes('approved_by')) table.uuid('approved_by').nullable();
+      if (missing.time_entries.includes('approved_at')) table.timestamp('approved_at').nullable();
+      if (missing.time_entries.includes('approval_notes')) table.text('approval_notes').nullable();
     });
   }
 
@@ -436,38 +731,25 @@ async function addMissingColumns(knex, missing) {
 
 async function ensureActiveWriterGenerationConstraint(knex) {
   const constraintName = 'time_entries_staff_active_write_generation_check';
-  const existsResult = await knex.raw(`
-    SELECT EXISTS (
-      SELECT 1
-      FROM pg_constraint c
-      JOIN pg_class t ON t.oid = c.conrelid
-      JOIN pg_namespace n ON n.oid = t.relnamespace
-      WHERE n.nspname = current_schema()
-        AND t.relname = 'time_entries'
-        AND c.contype = 'c'
-        AND c.convalidated
-        AND c.conname = '${constraintName}'
-    ) AS exists
-  `);
-  if (rowsFrom(existsResult)[0]?.exists) return;
-
   // Completed historical rows may remain NULL. Only a writer from the Phase-A
   // application generation may create/reopen an active timer after this
   // migration commits; the pre-reconciliation application omits the column
   // and therefore fails closed during the cutover gap.
-  await knex.raw(`
-    ALTER TABLE time_entries
-    ADD CONSTRAINT ${constraintName}
-    CHECK (
+  const expression = `
       status <> 'active'
       OR staff_write_generation IS NOT DISTINCT FROM 1
-    )
-  `);
+  `;
+  await reconcileNamedCheckConstraint(knex, {
+    table: 'time_entries',
+    names: [constraintName],
+    reconcileName: constraintName,
+    expectedDefinition: `CHECK (${expression})`,
+    expression,
+  });
 }
 
 exports.up = async function up(knex) {
   for (const table of TABLES) {
-    // eslint-disable-next-line no-await-in-loop
     if (!(await knex.schema.hasTable(table))) {
       throw new Error(`${table} is missing; apply the canonical time-tracking migrations first`);
     }
@@ -528,9 +810,9 @@ exports.up = async function up(knex) {
   }
 
   await addMissingColumns(knex, missing);
+  await reconcileAuditedColumnShapes(knex);
 
   for (const [column, allowedValues] of Object.entries(ALLOWED_TIME_ENTRY_VALUES)) {
-    // eslint-disable-next-line no-await-in-loop
     await ensureAllowedTimeEntryValues(knex, column, allowedValues);
   }
   await ensureActiveWriterGenerationConstraint(knex);
@@ -627,8 +909,13 @@ exports.down = async function down() {
   // destroy payroll/audit data and break the still-supported application.
 };
 
+exports.AUDITED_COLUMN_SHAPES = AUDITED_COLUMN_SHAPES;
 exports.REQUIRED_COLUMNS = REQUIRED_COLUMNS;
 exports.REQUIRED_ENTRY_INDEXES = REQUIRED_ENTRY_INDEXES;
+exports.columnDefaultMatches = columnDefaultMatches;
+exports.columnTypeMatches = columnTypeMatches;
+exports.exactCheckConstraint = exactCheckConstraint;
 exports.indexShapeExists = indexShapeExists;
+exports.normalizeCheckConstraintDefinition = normalizeCheckConstraintDefinition;
 exports.rowsFrom = rowsFrom;
 exports.sqlStringLiteral = sqlStringLiteral;
