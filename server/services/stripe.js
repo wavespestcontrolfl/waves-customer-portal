@@ -496,7 +496,13 @@ const StripeService = {
         // never-quoted confirm at face value.
         surcharge_policy: 'quote_at_confirm',
       },
-    }, { idempotencyKey: `estimate_deposit_${estimateId}_${amountCents}${Number(retryGeneration) > 0 ? `_r${Number(retryGeneration)}` : ''}` });
+    // `_qac1` salts the key for the surcharge revert: the create params
+    // changed (base_amount + quote_at_confirm metadata), and Stripe rejects
+    // a reused idempotency key with different params — an in-flight customer
+    // holding a pre-revert pending PI would 500 on retry instead of getting
+    // a fresh intent (Codex #2705 r2 P2). The old pending PI is simply
+    // abandoned (never confirmed; Stripe expires it).
+    }, { idempotencyKey: `estimate_deposit_${estimateId}_${amountCents}_qac1${Number(retryGeneration) > 0 ? `_r${Number(retryGeneration)}` : ''}` });
   },
 
   /**
@@ -614,34 +620,55 @@ const StripeService = {
       { funding },
     );
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
-    const usePreview = !!surchargeDetails;
+    // A failed surcharged attempt can leave a stale Stripe-side surcharge
+    // breakdown on the PI; a no-fee retry (debit after a declined credit)
+    // must clear it or the face-value settle carries the old fee breakdown
+    // (Codex #2705 r2 P2). Empty string is Stripe's unset form.
+    const staleDetails = !surchargeDetails && Number(pi.amount_details?.surcharge?.amount || 0) > 0;
+    const usePreview = !!surchargeDetails || staleDetails;
 
+    const updateParams = {
+      amount: totalCents,
+      payment_method: quote.paymentMethodId,
+      // Stripe metadata updates MERGE keys: purpose/estimate_id/
+      // base_amount from the create stay intact. A PENDING PI minted
+      // BEFORE the surcharge revert replays under the unchanged
+      // idempotency key with no base_amount pinned — stamp it here
+      // (from the pre-update amount, which WAS its face value) or a
+      // surcharged capture would credit face + fee (Codex #2705 P2).
+      metadata: {
+        ...(pi.metadata?.base_amount ? {} : { base_amount: String(baseAmount) }),
+        card_surcharge: String(surchargeCents / 100),
+        surcharge_rate_bps: String(rateBps),
+        surcharge_policy_version: policyVersion,
+        card_funding: funding || 'unknown',
+      },
+      ...(surchargeDetails ? { amount_details: surchargeDetails } : {}),
+      ...(staleDetails ? { amount_details: '' } : {}),
+    };
     try {
       await stripe.paymentIntents.update(
         quote.paymentIntentId,
-        {
-          amount: totalCents,
-          payment_method: quote.paymentMethodId,
-          // Stripe metadata updates MERGE keys: purpose/estimate_id/
-          // base_amount from the create stay intact. A PENDING PI minted
-          // BEFORE the surcharge revert replays under the unchanged
-          // idempotency key with no base_amount pinned — stamp it here
-          // (from the pre-update amount, which WAS its face value) or a
-          // surcharged capture would credit face + fee (Codex #2705 P2).
-          metadata: {
-            ...(pi.metadata?.base_amount ? {} : { base_amount: String(baseAmount) }),
-            card_surcharge: String(surchargeCents / 100),
-            surcharge_rate_bps: String(rateBps),
-            surcharge_policy_version: policyVersion,
-            card_funding: funding || 'unknown',
-          },
-          ...(surchargeDetails ? { amount_details: surchargeDetails } : {}),
-        },
+        updateParams,
         usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
       );
     } catch (err) {
-      logger.error(`[stripe] Deposit finalize update failed for PI ${quote.paymentIntentId}: ${err.message}`);
-      throw new Error(`Failed to finalize deposit payment: ${err.message}`);
+      // The amount_details unset is a preview param — if this account/
+      // version rejects the empty-string form, retry without it rather
+      // than blocking a valid no-fee payment on breakdown hygiene.
+      if (staleDetails) {
+        logger.warn(`[stripe] Deposit finalize amount_details unset rejected for ${quote.paymentIntentId} (${err.message}) — retrying without`);
+        try {
+          const { amount_details: _drop, ...withoutDetails } = updateParams;
+          await stripe.paymentIntents.update(quote.paymentIntentId, withoutDetails);
+        } catch (retryErr) {
+          logger.error(`[stripe] Deposit finalize update failed for PI ${quote.paymentIntentId}: ${retryErr.message}`);
+          throw new Error(`Failed to finalize deposit payment: ${retryErr.message}`);
+        }
+      } else {
+        logger.error(`[stripe] Deposit finalize update failed for PI ${quote.paymentIntentId}: ${err.message}`);
+        throw new Error(`Failed to finalize deposit payment: ${err.message}`);
+      }
     }
     try {
       const confirmed = await stripe.paymentIntents.confirm(
@@ -698,11 +725,14 @@ const StripeService = {
       return { reset: false, status: pi.status };
     }
     const faceCents = Math.round(depositFaceValueDollars(pi) * 100);
-    const hasSurchargeResidue = Number(pi.amount) !== faceCents || pi.metadata?.card_surcharge != null;
+    const staleDetailsCents = Number(pi.amount_details?.surcharge?.amount || 0);
+    const hasSurchargeResidue = Number(pi.amount) !== faceCents
+      || pi.metadata?.card_surcharge != null
+      || staleDetailsCents > 0;
     if (!faceCents || !hasSurchargeResidue) {
       return { reset: false, status: pi.status };
     }
-    await stripe.paymentIntents.update(paymentIntentId, {
+    const resetParams = {
       amount: faceCents,
       // Empty string DELETES a metadata key on Stripe — the fee facts
       // belong only to a capture that actually collected the fee.
@@ -712,7 +742,27 @@ const StripeService = {
         surcharge_policy_version: '',
         card_funding: '',
       },
-    });
+    };
+    // Clear the Stripe-side surcharge breakdown a failed surcharged attempt
+    // configured (Codex #2705 r2 P2) — otherwise a face-value settle carries
+    // a stale fee breakdown. Empty string is Stripe's documented unset form;
+    // amount_details is a preview param, so if this account/version rejects
+    // the unset, fall back to resetting amount + metadata alone (still
+    // strictly better than leaving the poisoned total).
+    if (staleDetailsCents > 0) {
+      try {
+        await stripe.paymentIntents.update(
+          paymentIntentId,
+          { ...resetParams, amount_details: '' },
+          { apiVersion: SURCHARGE_API_VERSION },
+        );
+        logger.info(`[stripe] Deposit PI ${paymentIntentId} reset to face value (${faceCents}c, surcharge details cleared) for estimate ${estimateId}`);
+        return { reset: true, status: pi.status };
+      } catch (clearErr) {
+        logger.warn(`[stripe] Deposit PI ${paymentIntentId} amount_details unset rejected (${clearErr.message}) — resetting amount/metadata only`);
+      }
+    }
+    await stripe.paymentIntents.update(paymentIntentId, resetParams);
     logger.info(`[stripe] Deposit PI ${paymentIntentId} reset to face value (${faceCents}c) for estimate ${estimateId}`);
     return { reset: true, status: pi.status };
   },

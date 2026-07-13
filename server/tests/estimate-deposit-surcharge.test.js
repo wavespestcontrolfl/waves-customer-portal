@@ -87,9 +87,11 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
         base_amount: '49',
         surcharge_policy: 'quote_at_confirm',
       }));
-      // Same idempotency shape as before the revert — deterministic from
-      // (estimateId, amountCents).
-      expect(opts.idempotencyKey).toBe('estimate_deposit_est-1_4900');
+      // `_qac1` salts the key: the create params changed with the revert,
+      // and Stripe rejects a reused key with different params — a pending
+      // pre-revert PI must not 500 an in-flight customer's retry
+      // (Codex #2705 r2 P2). Still deterministic from (estimateId, cents).
+      expect(opts.idempotencyKey).toBe('estimate_deposit_est-1_4900_qac1');
     });
   });
 
@@ -329,6 +331,61 @@ describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
         surcharge_policy_version: '',
         card_funding: '',
       });
+    });
+
+    test('clears a stale Stripe-side surcharge breakdown with the unset form (Codex #2705 r2 P2)', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        amount_details: { surcharge: { amount: 142 } },
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+      const [, params, opts] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(params.amount_details).toBe('');
+      expect(opts).toEqual({ apiVersion: expect.any(String) });
+    });
+
+    test('falls back to amount+metadata reset when the unset form is rejected', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        amount_details: { surcharge: { amount: 142 } },
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      stripeClient.paymentIntents.update
+        .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+        .mockResolvedValueOnce({});
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+      expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(2);
+      const [, fallbackParams, fallbackOpts] = stripeClient.paymentIntents.update.mock.calls[1];
+      expect(fallbackParams.amount).toBe(4900);
+      expect(fallbackParams.amount_details).toBeUndefined();
+      expect(fallbackOpts).toBeUndefined();
+    });
+
+    test('no-fee finalize retry clears a stale breakdown left by a failed credit attempt', async () => {
+      const StripeService = require('../services/stripe');
+      // PI carries residue from a failed surcharged attempt whose reset
+      // fallback could not clear amount_details; the customer retries with
+      // a DEBIT card.
+      const residuePi = depositPi({
+        amount: 4900,
+        amount_details: { surcharge: { amount: 142 } },
+      });
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(residuePi);
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_debit', type: 'card', card: { funding: 'debit' } });
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1', paymentIntentId: 'pi_deposit', paymentMethodId: 'pm_debit',
+      });
+      expect(quote.surcharge).toBe(0);
+      await StripeService.finalizeEstimateDepositPayment({ estimateId: 'est-1', quoteToken: quote.quoteToken });
+      const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(params.amount).toBe(4900);
+      expect(params.amount_details).toBe('');
+      expect(params.metadata.card_surcharge).toBe('0');
     });
   });
 
