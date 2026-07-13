@@ -108,6 +108,18 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId) {
 
 async function findConsentedChargeableCard(customerId) {
   if (!customerId) return null;
+  // A prior Auto Pay OPT-OUT is sacred (Codex #2681 r6 P1): disabling
+  // keeps the saved card rows, and an old consent row must not silently
+  // re-enroll the customer with no fresh checkbox. The discriminator is
+  // the LATEST enable/disable toggle in autopay_log — never-enrolled
+  // customers have no toggle history and still auto-satisfy. Lookup
+  // errors bubble: every caller fails toward asking for the card.
+  const lastToggle = await db('autopay_log')
+    .where({ customer_id: customerId })
+    .whereIn('event_type', ['autopay_enabled', 'autopay_disabled'])
+    .orderBy('created_at', 'desc')
+    .first('event_type');
+  if (lastToggle?.event_type === 'autopay_disabled') return null;
   const rows = await db('payment_methods')
     .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
     .whereNotNull('stripe_payment_method_id')

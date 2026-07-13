@@ -6,7 +6,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { hasConsentFor, hasEnrollmentScopedConsent, consentVersionQualifiesForEnrollment } = require('../services/payment-method-consents');
+const { hasConsentFor, hasEnrollmentScopedConsent, consentVersionQualifiesForEnrollment, findConsentedChargeableCard } = require('../services/payment-method-consents');
 
 function qb(rows) {
   const q = {};
@@ -97,5 +97,57 @@ describe('hasEnrollmentScopedConsent', () => {
       { consent_text_version: 'v7_2026-01-02', source: 'pay_page' },
     ]));
     expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
+  });
+});
+
+// A prior Auto Pay OPT-OUT blocks the auto-satisfy entirely (Codex #2681
+// r6 P1): disabling keeps the saved cards, so an old consent row must not
+// silently re-enroll the customer. Never-enrolled customers (no toggle
+// history) still flow through to the card/consent checks.
+describe('findConsentedChargeableCard — Auto Pay opt-out is sacred', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function tableDb(map) {
+    db.mockImplementation((table) => {
+      const rows = map[table] || [];
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.whereIn = jest.fn(() => q);
+      q.whereNotNull = jest.fn(() => q);
+      q.orderBy = jest.fn(() => q);
+      q.first = jest.fn(async () => rows[0] || null);
+      q.select = jest.fn(async () => rows);
+      q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+      return q;
+    });
+  }
+
+  test('latest toggle = autopay_disabled -> returns null before touching cards', async () => {
+    tableDb({
+      autopay_log: [{ event_type: 'autopay_disabled' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'pay_page' }],
+    });
+    expect(await findConsentedChargeableCard('cust-1')).toBe(null);
+  });
+
+  test('latest toggle = autopay_enabled -> auto-satisfy proceeds to the card checks', async () => {
+    tableDb({
+      autopay_log: [{ event_type: 'autopay_enabled' }],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'pay_page' }],
+    });
+    const pm = await findConsentedChargeableCard('cust-1');
+    expect(pm).toMatchObject({ id: 'pm-1' });
+  });
+
+  test('no toggle history (never enrolled) -> gate does not block', async () => {
+    tableDb({
+      autopay_log: [],
+      payment_methods: [{ id: 'pm-1', stripe_payment_method_id: 'pm_x' }],
+      payment_method_consents: [{ consent_text_version: 'v9_2026-07-12', source: 'portal_add_card' }],
+    });
+    const pm = await findConsentedChargeableCard('cust-1');
+    expect(pm).toMatchObject({ id: 'pm-1' });
   });
 });

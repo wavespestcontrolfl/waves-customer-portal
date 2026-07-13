@@ -8176,6 +8176,12 @@ router.put('/:token/accept', async (req, res, next) => {
           scheduledServiceId: heldAppointmentId,
           setupIntentId: cardHoldVerification.setupIntentId,
           paymentMethodId: cardHoldVerification.paymentMethodId,
+          // Saved-method holds have no pending row — freeze the terms this
+          // accept RESOLVED (r6 P2); SI paths keep their pending-row terms.
+          frozenTerms: {
+            noShowFeeAmount: cardHoldPolicy.noShowFeeAmount,
+            cancelWindowHours: cardHoldPolicy.cancelWindowHours,
+          },
           trx,
         });
       }

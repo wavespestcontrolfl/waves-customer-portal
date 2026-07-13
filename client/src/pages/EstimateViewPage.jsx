@@ -3424,6 +3424,10 @@ export default function EstimateViewPage() {
   // Element mid-confirm). Ref = synchronous double-tap latch.
   const [inlineConfirmBusy, setInlineConfirmBusy] = useState(false);
   const inlineConfirmBusyRef = useRef(false);
+  // Server said DEPOSIT_REQUIRED while our refs say the card lane owns the
+  // accept — the lane lost (flag kill / exemption change); force the
+  // deposit consult on the next confirm (server 409-exempts if it's wrong).
+  const depositRequiredOverrideRef = useRef(false);
   // One review_viewed event per review entry, not per re-render.
   const reviewViewedRef = useRef(false);
   // One auto-advance per slot selection: going Back from review must land on
@@ -3905,6 +3909,12 @@ export default function EstimateViewPage() {
           // Ledger disagrees with what we collected (refund or partial under
           // us) — drop the cached PI; the next confirm mints a fresh top-up.
           depositPaymentIntentIdRef.current = null;
+          // The server is authoritative: a DEPOSIT_REQUIRED means the card
+          // lane does NOT supersede this accept (kill-switch flip after the
+          // inline capture, exemption change) — the captured SetupIntent ref
+          // must not keep suppressing the deposit consult or every retry
+          // loops on this same 402 (Codex #2681 r6 P2).
+          depositRequiredOverrideRef.current = true;
           throw new Error(body.error || 'A deposit is required to confirm your booking.');
         }
         if (r.status === 402 && body.code === 'CARD_HOLD_REQUIRED') {
@@ -4142,7 +4152,7 @@ export default function EstimateViewPage() {
       || (paymentPreference === 'prepay_annual' && depositPolicy?.requiredForPrepay));
     // Prepay-annual owes the deposit too — it credits against the annual
     // invoice minted at accept; the server accept gate re-verifies either way.
-    if ((depositRequired || depositConsultForced) && !depositPaymentIntentIdRef.current) {
+    if ((depositRequired || depositConsultForced || depositRequiredOverrideRef.current) && !depositPaymentIntentIdRef.current) {
       setCtaPhase('submitting');
       setError(null);
       try {
