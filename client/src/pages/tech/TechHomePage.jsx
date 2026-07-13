@@ -84,8 +84,17 @@ function isTypedFindingsService(service) {
 // the tech to go find the job in Dispatch, deep-link straight into the
 // dispatch completion for this service — DispatchPageV2 consumes
 // ?completeService and opens the typed completion panel (the only tech is
-// the owner, so the admin surface is always reachable).
+// the owner, so the admin surface is always reachable). Terminal visits
+// refuse the deep-link (Codex P1): the completion endpoint would accept a
+// re-submission with a fresh idempotency key, minting duplicate
+// artifacts/invoices/SMS.
+const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped"]);
 function openTypedCompletion(service) {
+  const status = String(service?.status || "");
+  if (TERMINAL_SERVICE_STATUSES.has(status)) {
+    alert(`This visit is already ${status} — nothing to complete.`);
+    return;
+  }
   window.location.assign(`/admin/dispatch?tab=schedule&completeService=${encodeURIComponent(service.id)}`);
 }
 
