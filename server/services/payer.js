@@ -219,6 +219,7 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
   try {
     let payerId = null;
     let poNumber = null;
+    let selfPayOverride = false;
 
     // The owning customer of this invoice; used to scope the per-job lookup so
     // a stale/mismatched scheduledServiceId can never snapshot a DIFFERENT
@@ -230,14 +231,20 @@ async function resolveForInvoice({ database = db, customerId, customer = null, s
       if (ownerCustomerId) ssWhere.customer_id = ownerCustomerId;
       const ss = await softNull(database('scheduled_services')
         .where(ssWhere)
-        .first('payer_id', 'po_number'));
+        .first('payer_id', 'po_number', 'self_pay_override'));
       if (ss) {
         if (ss.payer_id) payerId = ss.payer_id;
         if (clean(ss.po_number)) poNumber = clean(ss.po_number);
+        selfPayOverride = ss.self_pay_override === true;
       }
     }
 
     if (!payerId) {
+      // Explicit per-job self-pay: the visit is pinned to "customer pays
+      // (self)", so the account-default payer must NOT be inherited. A concrete
+      // per-job payer_id above still wins (the write path keeps the two
+      // mutually exclusive), so the flag only blocks the fallback.
+      if (selfPayOverride) return SELF_PAY;
       let cust = customer;
       if (!cust && customerId) {
         cust = await softNull(database('customers').where({ id: customerId }).first('payer_id'));

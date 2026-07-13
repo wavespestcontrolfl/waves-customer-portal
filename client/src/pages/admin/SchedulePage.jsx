@@ -926,9 +926,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     routeOrder: service.routeOrder || "",
     notes: service.notes || "",
     // Per-job third-party Bill-To override + PO. Empty payerId = inherit the
-    // customer's default payer (or self-pay). Round-trips via ...form on save.
+    // customer's default payer (or self-pay). selfPayOverride pins the visit to
+    // "customer pays (self)" so an account default payer is NOT inherited.
+    // Both round-trip via ...form on save (the server admin-gates actual
+    // changes only, so echoing them on every save is required for tech saves).
     payerId: service.payerId != null ? String(service.payerId) : "",
     poNumber: service.poNumber || "",
+    selfPayOverride: service.selfPayOverride === true,
     // The editable primary "Price" must be the primary line price, NOT the
     // whole-visit total. When the appointment has add-on lines, estimatedPrice
     // is the combined total, so prefer the API's primary_line_price; fall back
@@ -1060,6 +1064,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
   const [payers, setPayers] = useState([]);
+  // Inline "New payer" quick-add (admin-only — POST /admin/payers is
+  // requireAdmin, and payer routing changes are admin-gated server-side).
+  const isAdminUser = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "{}")?.role === "admin"; }
+    catch { return false; }
+  })();
+  const [showNewPayer, setShowNewPayer] = useState(false);
+  const [newPayer, setNewPayer] = useState({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+  const [newPayerSaving, setNewPayerSaving] = useState(false);
+  const [newPayerError, setNewPayerError] = useState("");
+  const [newPayerNotice, setNewPayerNotice] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -1131,6 +1146,75 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  // Bill-to select: one control drives payerId + the self-pay pin (mutually
+  // exclusive). "__self__" pins this visit to customer-pays even when the
+  // account has a default payer; "__new__" opens the inline quick-add without
+  // changing the current selection.
+  const handleBillToChange = (value) => {
+    if (value === "__new__") {
+      setNewPayerError("");
+      setNewPayerNotice("");
+      setShowNewPayer(true);
+      return;
+    }
+    setForm((f) => ({
+      ...f,
+      payerId: value === "__self__" ? "" : value,
+      selfPayOverride: value === "__self__",
+    }));
+  };
+  const saveNewPayer = async () => {
+    const displayName = newPayer.displayName.trim();
+    if (!displayName) {
+      setNewPayerError("Payer name is required");
+      return;
+    }
+    const apEmail = newPayer.apEmail.trim().toLowerCase();
+    // Soft dedupe: re-typing a known payer's AP email selects the existing
+    // Bill-To instead of minting a duplicate (AR would split across rows).
+    if (apEmail) {
+      const existing = payers.find(
+        (p) => (p.ap_email || "").toLowerCase() === apEmail,
+      );
+      if (existing) {
+        setForm((f) => ({ ...f, payerId: String(existing.id), selfPayOverride: false }));
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice(`Matched existing payer "${existing.display_name}" by AP email — selected it instead.`);
+        return;
+      }
+    }
+    setNewPayerSaving(true);
+    setNewPayerError("");
+    try {
+      const r = await adminFetch("/admin/payers", {
+        method: "POST",
+        body: JSON.stringify({
+          displayName,
+          companyName: newPayer.companyName.trim() || undefined,
+          apEmail: apEmail || undefined,
+          apPhone: newPayer.apPhone.trim() || undefined,
+        }),
+      });
+      const created = r?.payer;
+      if (created?.id) {
+        setPayers((list) =>
+          [...list, created].sort((a, b) =>
+            String(a.display_name || "").localeCompare(String(b.display_name || "")),
+          ),
+        );
+        setForm((f) => ({ ...f, payerId: String(created.id), selfPayOverride: false }));
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice("");
+      } else {
+        setNewPayerError("Unexpected response — payer not created");
+      }
+    } catch (e) {
+      setNewPayerError(e.message || "Failed to create payer");
+    }
+    setNewPayerSaving(false);
+  };
   // Moving the start time drags the end time with it, preserving the window
   // length (end stays independently editable to resize the window). Clamp at
   // 23:59 — windowEnd is a time-of-day on the same date, so wrapping past
@@ -2754,8 +2838,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               <div style={{ marginTop: 14 }}>
                 <label style={labelStyle}>Bill to (third-party payer)</label>
                 <select
-                  value={form.payerId}
-                  onChange={(e) => update("payerId", e.target.value)}
+                  value={form.selfPayOverride ? "__self__" : form.payerId}
+                  onChange={(e) => handleBillToChange(e.target.value)}
                   className="font-medium"
                   style={inputStyle}
                 >
@@ -2771,6 +2855,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         : "Customer pays (self)";
                     })()}
                   </option>
+                  {customer.payerId && (
+                    <option value="__self__">
+                      Customer pays (self) — override default
+                    </option>
+                  )}
                   {payers.map((p) => (
                     <option key={p.id} value={String(p.id)}>
                       {p.display_name}
@@ -2779,17 +2868,130 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                         : ""}
                     </option>
                   ))}
+                  {isAdminUser && <option value="__new__">＋ New payer…</option>}
                 </select>
+                {showNewPayer && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: 12,
+                      background: "#F9FAFB",
+                      border: `1px solid ${D.border}`,
+                      borderRadius: 4,
+                    }}
+                  >
+                    <div style={{ fontSize: 13, color: "#111827", fontWeight: 600, marginBottom: 8 }}>
+                      New payer
+                    </div>
+                    <label style={labelStyle}>Payer name *</label>
+                    <input
+                      type="text"
+                      value={newPayer.displayName}
+                      onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                      placeholder="e.g. tenant, builder, or property manager name"
+                      className="font-medium"
+                      style={inputStyle}
+                    />
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Company (optional)</label>
+                      <input
+                        type="text"
+                        value={newPayer.companyName}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Invoice email (AP)</label>
+                      <input
+                        type="email"
+                        value={newPayer.apEmail}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                        placeholder="Where this payer's invoices are emailed"
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                      <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance &rarr; Payers.
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 8 }}>
+                      <label style={labelStyle}>Phone (optional)</label>
+                      <input
+                        type="tel"
+                        value={newPayer.apPhone}
+                        onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                        className="font-medium"
+                        style={inputStyle}
+                      />
+                    </div>
+                    {newPayerError && (
+                      <div style={{ fontSize: 12, color: D.red, marginTop: 8 }}>
+                        {newPayerError}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button
+                        type="button"
+                        onClick={saveNewPayer}
+                        disabled={newPayerSaving || !newPayer.displayName.trim()}
+                        style={{
+                          padding: "8px 14px",
+                          background: D.teal,
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: 4,
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: newPayerSaving ? "default" : "pointer",
+                          opacity: newPayerSaving || !newPayer.displayName.trim() ? 0.6 : 1,
+                          minHeight: 44,
+                        }}
+                      >
+                        {newPayerSaving ? "Saving…" : "Create & select"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowNewPayer(false);
+                          setNewPayerError("");
+                        }}
+                        style={{
+                          padding: "8px 14px",
+                          background: "transparent",
+                          color: D.muted,
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 4,
+                          fontSize: 13,
+                          cursor: "pointer",
+                          minHeight: 44,
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {newPayerNotice && (
+                  <div style={{ fontSize: 12, color: D.teal, marginTop: 6 }}>
+                    {newPayerNotice}
+                  </div>
+                )}
                 <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-                  {customer.payerId
+                  {form.selfPayOverride
+                    ? "Pinned to customer pays (self) for this visit — the account default payer is ignored."
+                    : customer.payerId
                     ? "Blank inherits this customer’s default payer; pick a payer to override for just this visit."
                     : "Routes this visit’s invoice to a builder / property manager instead of the customer."}{" "}
                   Manage payers in Finance &rarr; Payers.
                 </div>
-                {(form.payerId || customer.payerId) && (() => {
+                {(form.payerId || (customer.payerId && !form.selfPayOverride)) && (() => {
                   // PO applies to the EFFECTIVE payer — the per-job override if
-                  // set, otherwise the customer's inherited default — so a
-                  // default-payer job can still capture a PO.
+                  // set, otherwise the customer's inherited default (unless the
+                  // visit is pinned to self-pay) — so a default-payer job can
+                  // still capture a PO.
                   const effectivePayerId = form.payerId || customer.payerId;
                   const selectedPayer = payers.find(
                     (p) => String(p.id) === String(effectivePayerId),
@@ -7047,18 +7249,52 @@ export function CompletionPanel({
     setNotes((b) => (b ? `${b} ${text}` : text));
   });
   // Customer email isn't on the schedule payload (only name/phone are), so fetch
-  // it for the header contact card's tap-to-email link.
+  // it for the header contact card's tap-to-email link. The same fetch surfaces
+  // the account's default payer for the third-party-billing banner below.
   const [customerEmail, setCustomerEmail] = useState("");
+  const [customerDefaultPayerId, setCustomerDefaultPayerId] = useState(null);
   useEffect(() => {
     let live = true;
     setCustomerEmail(""); // clear stale email before (re)fetching for a new service
+    setCustomerDefaultPayerId(null);
     const cid = service.customerId || service.customer_id;
     if (!cid) return undefined;
     adminFetch(`/admin/customers/${cid}`)
-      .then((d) => { if (live) setCustomerEmail(d?.customer?.email || ""); })
+      .then((d) => {
+        if (!live) return;
+        setCustomerEmail(d?.customer?.email || "");
+        setCustomerDefaultPayerId(d?.customer?.payerId || null);
+      })
       .catch(() => { if (live) setCustomerEmail(""); });
     return () => { live = false; };
   }, [service.customerId, service.customer_id]);
+  // Third-party Bill-To: when this visit resolves to a payer (per-job override,
+  // else the account default unless the visit is pinned to self-pay), the
+  // invoice routes to the payer's AP inbox and the tech must NOT collect on
+  // site (the server blocks in-person collection for payer-billed visits).
+  // The payer name lookup is best-effort — techs get a generic banner when the
+  // admin-only payers endpoint 403s.
+  const effectivePayerId =
+    service.payerId ||
+    (service.selfPayOverride === true ? null : customerDefaultPayerId) ||
+    null;
+  const [payerBillToName, setPayerBillToName] = useState("");
+  useEffect(() => {
+    let live = true;
+    setPayerBillToName("");
+    if (!effectivePayerId) return undefined;
+    adminFetch(`/admin/payers/${effectivePayerId}`)
+      .then((d) => {
+        if (!live) return;
+        const p = d?.payer || d;
+        setPayerBillToName(p?.display_name || p?.company_name || "");
+      })
+      .catch(() => { /* generic banner */ });
+    return () => { live = false; };
+  }, [effectivePayerId]);
+  const payerBanner = effectivePayerId
+    ? `Billed to ${payerBillToName || "a third-party payer"} — don't collect payment on site. The invoice goes to the payer, and the customer's completion text gets no pay link.`
+    : null;
   // Measured lawn sqft from the turf profile: seeds the Sq ft field (and the
   // derived Total) when a broadcast/granular lawn product is added. No
   // profile / not a lawn visit → the fields stay manual as before.
@@ -7520,7 +7756,10 @@ export function CompletionPanel({
     invoiceAmount > 0;
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
-  const willSendPayLink = willInvoice && includePayLink;
+  // Payer-billed visits never text the homeowner a pay link (the server
+  // suppresses it — the invoice routes to the payer's AP inbox), so the
+  // toggle is hidden and the preview drops the marker.
+  const willSendPayLink = willInvoice && includePayLink && !effectivePayerId;
   const completionSmsTemplateName = willSendPayLink
     ? "Service Complete + Invoice"
     : "Service Complete";
@@ -11560,6 +11799,22 @@ export function CompletionPanel({
             {/* Options */}
             <Field label="Options">
               {" "}
+              {payerBanner && (
+                <div
+                  style={{
+                    padding: "12px 16px",
+                    marginBottom: 8,
+                    background: "#FFF7ED",
+                    border: "1px solid #FDBA74",
+                    borderRadius: 12,
+                    fontFamily: font,
+                    fontSize: 14,
+                    color: "#9A3412",
+                  }}
+                >
+                  {payerBanner}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -11617,7 +11872,7 @@ export function CompletionPanel({
                       : "Send completion SMS to customer"}
                 </span>{" "}
               </label>{" "}
-              {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+              {willInvoice && effectiveSendSms && !oneTimeRecapOnly && !payerBanner && (
                 <label
                   style={{
                     display: "flex",
@@ -13486,6 +13741,21 @@ export function CompletionPanel({
           )}
           {/* Options */}
           <label style={labelStyle}>Options</label>{" "}
+          {payerBanner && (
+            <div
+              style={{
+                padding: "10px 12px",
+                marginBottom: 8,
+                background: "#FFF7ED",
+                border: "1px solid #FDBA74",
+                borderRadius: 8,
+                fontSize: 13,
+                color: "#9A3412",
+              }}
+            >
+              {payerBanner}
+            </div>
+          )}{" "}
           <label
             style={{
               ...checkboxRow,
@@ -13518,7 +13788,7 @@ export function CompletionPanel({
                   : "Send completion SMS to customer"}
             </span>{" "}
           </label>{" "}
-          {willInvoice && effectiveSendSms && !oneTimeRecapOnly && (
+          {willInvoice && effectiveSendSms && !oneTimeRecapOnly && !payerBanner && (
             <label style={{ ...checkboxRow, marginLeft: 24 }}>
               {" "}
               <input

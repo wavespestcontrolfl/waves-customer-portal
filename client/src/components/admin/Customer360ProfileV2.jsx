@@ -2408,7 +2408,6 @@ function PropertyZonesPanel({ customerId }) {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, customerId, loadNonce]);
 
   const zones = map?.zones || [];
@@ -2865,7 +2864,6 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
     setLoadError(false);
     setOpen(false);
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerId]);
 
   // Only treat the ledger as known once a fetch has succeeded AND the latest
@@ -3864,6 +3862,12 @@ export default function Customer360ProfileV2({
   const [deletingCustomer, setDeletingCustomer] = useState(false);
   const [payers, setPayers] = useState([]);
   const [payerSaving, setPayerSaving] = useState(false);
+  // Inline "New payer" quick-add for the default Bill-To select.
+  const [showNewPayer, setShowNewPayer] = useState(false);
+  const [newPayer, setNewPayer] = useState({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+  const [newPayerSaving, setNewPayerSaving] = useState(false);
+  const [newPayerError, setNewPayerError] = useState("");
+  const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
@@ -3894,6 +3898,69 @@ export default function Customer360ProfileV2({
     } finally {
       setPayerSaving(false);
     }
+  };
+
+  const handlePayerSelect = (value) => {
+    if (value === "__new__") {
+      setNewPayerError("");
+      setNewPayerNotice("");
+      setShowNewPayer(true);
+      return;
+    }
+    savePayer(value);
+  };
+
+  const saveNewPayer = async () => {
+    const displayName = newPayer.displayName.trim();
+    if (!displayName) {
+      setNewPayerError("Payer name is required");
+      return;
+    }
+    const apEmail = newPayer.apEmail.trim().toLowerCase();
+    // Soft dedupe: re-typing a known payer's AP email selects the existing
+    // Bill-To instead of minting a duplicate (AR would split across rows).
+    if (apEmail) {
+      const existing = payers.find(
+        (p) => (p.ap_email || "").toLowerCase() === apEmail,
+      );
+      if (existing) {
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice(`Matched existing payer "${existing.display_name}" by AP email — selected it instead.`);
+        await savePayer(String(existing.id));
+        return;
+      }
+    }
+    setNewPayerSaving(true);
+    setNewPayerError("");
+    try {
+      const r = await adminFetch("/admin/payers", {
+        method: "POST",
+        body: JSON.stringify({
+          displayName,
+          companyName: newPayer.companyName.trim() || undefined,
+          apEmail: apEmail || undefined,
+          apPhone: newPayer.apPhone.trim() || undefined,
+        }),
+      });
+      const created = r?.payer;
+      if (created?.id) {
+        setPayers((list) =>
+          [...list, created].sort((a, b) =>
+            String(a.display_name || "").localeCompare(String(b.display_name || "")),
+          ),
+        );
+        setShowNewPayer(false);
+        setNewPayer({ displayName: "", companyName: "", apEmail: "", apPhone: "" });
+        setNewPayerNotice("");
+        await savePayer(String(created.id));
+      } else {
+        setNewPayerError("Unexpected response — payer not created");
+      }
+    } catch (e) {
+      setNewPayerError(e.message || "Failed to create payer");
+    }
+    setNewPayerSaving(false);
   };
 
   useEffect(() => {
@@ -5551,7 +5618,7 @@ export default function Customer360ProfileV2({
                     <select
                       value={c.payerId ? String(c.payerId) : ""}
                       disabled={payerSaving}
-                      onChange={(e) => savePayer(e.target.value)}
+                      onChange={(e) => handlePayerSelect(e.target.value)}
                       className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
                     >
                       <option value="">Customer pays (self)</option>
@@ -5563,11 +5630,97 @@ export default function Customer360ProfileV2({
                             : ""}
                         </option>
                       ))}
+                      <option value="__new__">＋ New payer…</option>
                     </select>
                     {payerSaving && (
                       <span className="text-12 text-ink-tertiary">Saving…</span>
                     )}
                   </div>
+                  {showNewPayer && (
+                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
+                      <div className="text-12 font-medium text-zinc-900 mb-2">
+                        New payer
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Payer name *
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.displayName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                          placeholder="e.g. tenant, builder, or property manager name"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Company (optional)
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.companyName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-1">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Invoice email (AP)
+                        </span>
+                        <input
+                          type="email"
+                          value={newPayer.apEmail}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                          placeholder="Where this payer's invoices are emailed"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <div className="text-12 text-ink-secondary mb-2">
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance → Payers.
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Phone (optional)
+                        </span>
+                        <input
+                          type="tel"
+                          value={newPayer.apPhone}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      {newPayerError && (
+                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={saveNewPayer}
+                          disabled={newPayerSaving || !newPayer.displayName.trim()}
+                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+                        >
+                          {newPayerSaving ? "Saving…" : "Create & select"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNewPayer(false);
+                            setNewPayerError("");
+                          }}
+                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {newPayerNotice && (
+                    <div className="text-12 text-ink-secondary mt-1.5">
+                      {newPayerNotice}
+                    </div>
+                  )}
                   <div className="text-12 text-ink-secondary mt-1.5">
                     Routes every invoice for this account to a builder /
                     property manager instead of the customer. A single job can
