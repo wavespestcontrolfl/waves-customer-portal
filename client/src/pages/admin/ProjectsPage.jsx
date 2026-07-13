@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
@@ -34,27 +34,45 @@ const MONO = "'JetBrains Mono', monospace";
 function useConfirmDialog() {
   const [pending, setPending] = useState(null);
   const [inputValue, setInputValue] = useState("");
+  // The resolver lives in a ref and the close handler is stable —
+  // Dialog's focus effect is keyed on onClose, so an inline handler that
+  // changes identity per keystroke would refocus the panel and blur the
+  // prompt input on every character (Codex P2).
+  const pendingRef = useRef(null);
   const ask = useCallback(
     (message, opts = {}) =>
       new Promise((resolve) => {
         setInputValue("");
-        setPending({ message, ...opts, resolve });
+        pendingRef.current = { message, ...opts, resolve };
+        setPending(pendingRef.current);
       }),
     [],
   );
-  const settle = (result) => {
-    if (pending) pending.resolve(result);
+  const settle = useCallback((result) => {
+    if (pendingRef.current) pendingRef.current.resolve(result);
+    pendingRef.current = null;
     setPending(null);
-  };
+  }, []);
+  const handleCancel = useCallback(() => {
+    settle(pendingRef.current && pendingRef.current.input ? null : false);
+  }, [settle]);
+  // Dialog focuses its panel via setTimeout on open — an autoFocus attribute
+  // loses that race, so the prompt input claims focus just after it.
+  const inputRef = useRef(null);
+  useEffect(() => {
+    if (!pending || !pending.input) return undefined;
+    const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 50);
+    return () => clearTimeout(t);
+  }, [pending]);
   const element = pending ? (
-    <Dialog open size="sm" onClose={() => settle(pending.input ? null : false)}>
+    <Dialog open size="sm" onClose={handleCancel}>
       <DialogBody>
         <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
         </div>
         {pending.input && (
           <input
-            autoFocus
+            ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder={pending.input}
@@ -63,7 +81,7 @@ function useConfirmDialog() {
         )}
       </DialogBody>
       <DialogFooter>
-        <Button variant="secondary" onClick={() => settle(pending.input ? null : false)}>
+        <Button variant="secondary" onClick={handleCancel}>
           Cancel
         </Button>
         <Button
