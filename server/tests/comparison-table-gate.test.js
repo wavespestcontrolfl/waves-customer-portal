@@ -1114,6 +1114,22 @@ describe('educational-prose tone-scan false positives (prod 2026-07-11)', () => 
     expect(r.pass).toBe(true);
   });
 
+  // ── Codex round-48 findings (#2633) ──
+
+  test('Codex r48: provider disclosure, being-form, plan #1, and intrinsic winner claims block', () => {
+    for (const prose of ['Pest control providers do not disclose hidden fees.', 'Pest control providers conceal hidden fees.', 'Rumors about pest control companies being overpriced keep spreading.', 'The #1 pest control plan in Venice.', 'We are second to none.', 'Best in the business for pest control.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => (f.code === 'COMPARISON_DISPARAGEMENT' && f.severity === 'P0') || f.code === 'COMPARISON_RIGGED_RANKING')).toBe(true);
+    }
+  });
+
+  test('Codex r48: recommends/deploys product #1 appositives stay educational', () => {
+    for (const prose of ['Waves recommends Advion, rated #1 by researchers.', 'Waves deploys Advion, rated #1 by researchers.']) {
+      const r = gate.evaluate({ body: `${prose}\n\n${CATEGORY_TABLE}` }, {});
+      expect(r.findings.some((f) => f.code === 'COMPARISON_RIGGED_RANKING')).toBe(false);
+    }
+  });
+
   // ── Codex round-47 findings (#2633) ──
 
   test('Codex r47: negated-disclosure claims, by-sourced accusations, and shared being-forms block', () => {

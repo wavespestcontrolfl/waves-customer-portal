@@ -111,6 +111,10 @@ const ACTIVE_DISPARAGEMENT_SRC = [
   // (Codex r40).
   'r(?:un(?:s|ning)?|an)\\s+(?:a\\s+)?scams?\\b',
   'commit(?:s|ted|ting)?\\s+fraud\\b',
+  // Concealment predicates — "do not disclose hidden fees", "conceal
+  // hidden fees" are accusations (Codex r48).
+  `(?:do(?:es)?\\s+not|don['’]?t|doesn['’]?t|never|won['’]?t|fail(?:s|ed)?\\s+to|refus(?:es?|ed)\\s+to)\\s+(?:disclos(?:e|es)|reveal|itemize|list)\\s+(?:(?:their|its|any|the|all)\\s+)?hidden\\s+fees?`,
+  `(?:conceal(?:s|ed|ing)?|hid(?:es?|den|ing)?|bur(?:y|ies|ied))\\s+(?:(?:their|its|any|the)\\s+)?hidden\\s+fees?`,
   // Verb form with a victim object — "companies bait-and-switch homeowners
   // with teaser prices" (Codex r17 on #2633) — or with an instrumental
   // tail and no victim: "bait-and-switch with teaser prices" (Codex r21).
@@ -200,6 +204,9 @@ const DIRECTED_DISPARAGEMENT_RE = new RegExp([
   // Pronoun-SUBJECT linking insults after a provider antecedent — "Some
   // pest control companies look cheap; they are dishonest." (Codex r40).
   `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}[^.!?\\n]{0,80}?(?:[.!?]\\s+)?\\b(?:they|it)\\s+(?:is|are|was|were|remains?|seems?)\\s+(?:(?:really|pretty|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
+  // Being-form provider-class accusations — "Rumors about pest control
+  // companies being overpriced" (Codex r48).
+  `\\b(?:${PROVIDER_NOUN})\\b${NOT_SERVICE_AREA}\\s+being\\s+(?:(?:really|very|just|a|an|the)\\s+){0,2}(?:${DISPARAGEMENT_RE.source}|\\b(?:${NEG_ADJ})\\b(?!-))`,
   // Accusation-phrase SOURCED at a provider class — "Hidden fees by pest
   // control companies are common" (Codex r47); the iterate-with-guard loop
   // keeps "No hidden fees by companies" a denial.
@@ -448,7 +455,7 @@ const OWN_BRAND_NUM_BEFORE_SRC = `${NUMERIC_ONE_ALT}(?:\\s+(?:spot|overall|choic
 const OWN_BRAND_NUMERIC_SUBJECT_TAIL_RE = new RegExp(
   // The window must not cross that/why clauses — "Waves teaches that the
   // garage threshold is the #1 entry point" ranks the tip (Codex r32).
-  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if|uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installing|carries|stocks?)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
+  `^(?:(?!\\b(?:that|which|why|how|because|where|when|whether|if|uses?|using|used|appl(?:y|ies|ied|ying)|installs?|installing|carries|stocks?|recommends?|sells?|sold|sprays?|deploys?)\\b)[^.!?\\n]){0,120}?\\b(?:is|are|was|were|remains?|rank(?:s|ed)?|rated|voted|earn(?:s|ed)?|w(?:ins?|on)|claim(?:s|ed)?|secur(?:es?|ed)|h(?:olds?|eld)|t(?:akes?|ook)|ha(?:s|ve)\\s+been(?:\\s+(?:ranked|rated|voted|winning|earning|claiming|holding|securing))?)\\s+(?:(?![\\w'’]+ing\\b)${NON_NEGATED_WORD}\\s+){0,2}?(?:(?:the|your|a|an)\\s+)?${NUMERIC_ONE_ALT}`, 'i',
 );
 const OWN_BRAND_MARKETING_TAIL_RE = new RegExp(
   `^[^.!?\\n]{0,120}?\\b(?:advertises?|advertised|markets?|marketed|promotes?|promoted|positions?|positioned|touts?|touted|brands?|branded|bills?|billed|presents?|presented|describes?|described|calls?|called|names?|named)\\s+itself\\s+(?:as\\s+)?(?:(?:the|your|a|an)\\s+){0,2}${NUMERIC_ONE_ALT}`, 'i',
@@ -941,7 +948,7 @@ function scanNameRankingArms(text, names) {
 // Numeric #1 with adjacent provider syntax — shared by both paths
 // (Codex r45): "The #1 pest control company in Venice" declares a winner
 // with or without a table.
-const NUM_ADJACENT_PROVIDER_RE_SRC = `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`;
+const NUM_ADJACENT_PROVIDER_RE_SRC = `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team|plans?|packages?|programs?|treatments?)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`;
 function scanAdjacentProviderNumeric(text) {
   const numRe = new RegExp(NUMERIC_ONE_SRC.join('|'), 'gi');
   const adjRe = new RegExp(NUM_ADJACENT_PROVIDER_RE_SRC, 'i');
@@ -958,6 +965,16 @@ function scanAdjacentProviderNumeric(text) {
 // (Codex r45).
 const INTRINSIC_WINNER_RE = /\b(?:clear\s+winner|hands[-\s]down|best\s+in\s+(?:town|the\s+(?:area|business|region|county))|second\s+to\s+none|unbeatable|unmatched|can'?t\s+be\s+beat)\b/i;
 function scopedSelfRankingMatch(text) {
+  // Intrinsic phrases are scanned DIRECTLY (SELF_RANKING_RE does not
+  // contain them — Codex r48 caught the dead code), negation-guarded but
+  // needing no subject.
+  {
+    const iw = new RegExp(INTRINSIC_WINNER_RE.source, 'gi');
+    let im;
+    while ((im = iw.exec(text)) !== null) {
+      if (!sentenceHasNegator(text, im.index, im[0].length)) return im;
+    }
+  }
   const selfRe = new RegExp(SELF_RANKING_RE.source, 'gi');
   let sm;
   while ((sm = selfRe.exec(text)) !== null) {
@@ -1849,7 +1866,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     // Hyphenated service phrases count too — "#1-rated pest-control
     // company" (Codex r20 on #2633).
     const numAdjacentProviderRe = new RegExp(
-      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
+      `^${NUMERIC_ONE_ALT}(?:[-\\s]+[\\w'’]+){0,2}?[-\\s]+(?:(?:pest[\\s-]+control|lawn[\\s-]+(?:care|service)|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal|service)s?)(?:[\\s-]+(?:compan(?:y|ies)|providers?|services?|choice|option|pick|team|plans?|packages?|programs?|treatments?)|\\s+(?:in|around|near)\\b)|exterminators?|compan(?:y|ies)|providers?|(?:pest|mosquito|termite|rodent|bug|wildlife|lawn)[\\s-]+(?:control|care|removal)[\\s-]+(?:choice|option|pick|company|provider|team|service|program)|(?:choice|pick|option)\\s+(?:in|around|near))\\b`, 'i',
     );
     // Title/meta #1 takes the same winner-syntax requirement (Codex r37):
     // "The #1 hidden breeding site in SWFL homes" is an educational title;
