@@ -63,16 +63,17 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
   });
 
   it.each(TRACKS.map((t) => [t]))('%s: monthly never decreases with lawn size (any sold cadence)', (track) => {
-    const prev = {};
+    const max = {};
     for (let sqft = 2000; sqft <= 22000; sqft += 250) {
       for (const t of soldTiers(track, sqft)) {
-        if (prev[t.visits] !== undefined) {
-          // Same tolerance the sweep uses: ceil-to-per-app re-rounding can dip
-          // monthly by cents between adjacent sizes (e.g. bermuda $50.25 →
-          // $50.00); anything past it is real drift.
-          expect(t.monthly).toBeGreaterThanOrEqual(prev[t.visits] - SIZE_MONOTONE_TOLERANCE);
+        if (max[t.visits] !== undefined) {
+          // Same semantics the sweep uses: tolerance vs the running MAX, not
+          // the adjacent size — ceil-to-per-app re-rounding can dip monthly by
+          // cents (e.g. bermuda $50.25 → $50.00), but a gradual slope must
+          // accumulate against the peak instead of resetting every step.
+          expect(t.monthly).toBeGreaterThanOrEqual(max[t.visits] - SIZE_MONOTONE_TOLERANCE);
         }
-        prev[t.visits] = t.monthly;
+        if (max[t.visits] === undefined || t.monthly > max[t.visits]) max[t.visits] = t.monthly;
       }
     }
   });
@@ -174,5 +175,135 @@ describe('healthy lawn estimate shows all three sold cadences end-to-end', () =>
       expect(f.monthly).toBeGreaterThan(0);
       expect(f.annual).toBeGreaterThan(0);
     }
+  });
+});
+
+
+// Codex #2667 r3: the sweep's failure paths must surface as alert violations,
+// never as silent greens — and gradual size-slope drift must accumulate
+// against the running max instead of resetting at every adjacent step.
+describe('sweep red paths — failures become alert violations, never silent greens', () => {
+  // jest.doMock factories registered inside isolateModules stick to their
+  // first registration, so the factories below proxy through this mutable
+  // holder — each test swaps behavior here instead of re-registering mocks.
+  const current = {};
+
+  function makeDbMock() {
+    const calls = { updates: [], inserts: [] };
+    const dbFn = (table) => {
+      const chain = {
+        where: () => chain,
+        update: async (payload) => {
+          calls.updates.push({ table, payload });
+          return 1;
+        },
+        insert: (payload) => ({
+          onConflict: () => ({
+            merge: () => ({
+              returning: async () => {
+                calls.inserts.push({ table, payload });
+                return [{ id: 42 }];
+              },
+            }),
+          }),
+        }),
+      };
+      return chain;
+    };
+    dbFn.schema = { hasTable: async () => true };
+    return { dbFn, calls };
+  }
+
+  function loadSweep(overrides) {
+    const { dbFn, calls } = makeDbMock();
+    Object.assign(current, {
+      dbFn,
+      syncConstantsFromDB: async () => true,
+      loadInventoryCostRows: async () => ({ available: false }),
+      inventoryCostFromRows: () => ({}),
+    }, overrides);
+    let sweep;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => new Proxy(function () {}, {
+        apply: (_t, _this, args) => current.dbFn(...args),
+        get: (_t, prop) => current.dbFn[prop],
+      }));
+      jest.doMock('../services/pricing-engine/service-pricing', () => ({
+        priceLawnCare: (...args) => current.priceLawnCare(...args),
+      }));
+      jest.doMock('../services/pricing-engine', () => ({
+        syncConstantsFromDB: (...args) => current.syncConstantsFromDB(...args),
+      }));
+      jest.doMock('../services/estimate-pricing-audit', () => ({
+        loadInventoryCostRows: (...args) => current.loadInventoryCostRows(...args),
+        inventoryCostFromRows: (...args) => current.inventoryCostFromRows(...args),
+      }));
+      sweep = require('../services/lawn-pricing-invariant-sweep');
+    });
+    return { sweep, calls };
+  }
+
+  const cleanTiers = ({ lawnSqFt }) => ({
+    tiers: SOLD_VISITS.map((visits) => ({
+      visits,
+      monthly: 100 + visits + lawnSqFt / 1000,
+      perApp: 50,
+    })),
+  });
+
+  test('a gradual downward slope trips size monotonicity even when every adjacent step is in tolerance', () => {
+    const { sweep } = loadSweep({
+      // Each 500sf step drops $0.25 — inside the $0.30 adjacent tolerance,
+      // but $4+ cumulative peak-to-valley across the grid.
+      priceLawnCare: ({ lawnSqFt }) => ({
+        tiers: SOLD_VISITS.map((visits) => ({
+          visits,
+          monthly: 200 + visits - ((lawnSqFt - 2000) / 500) * 0.25,
+          perApp: 50,
+        })),
+      }),
+    });
+    const { violations } = sweep.scanLadderGrid();
+    const sizeInversions = violations.filter((v) => v.check === 'monthly_size_inversion');
+    expect(sizeInversions.length).toBeGreaterThan(0);
+    expect(sizeInversions[0].detail).toContain('running max');
+  });
+
+  test('a ladder scan crash writes a critical alert instead of dying in the cron log', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: () => {
+        throw new Error('bracket table too short for extrapolation');
+      },
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.violationDetails.map((v) => v.check)).toContain('ladder_scan_failed');
+    expect(calls.updates).toHaveLength(0); // no resolution
+    expect(calls.inserts).toHaveLength(1);
+    expect(calls.inserts[0].payload.severity).toBe('critical');
+    expect(calls.inserts[0].payload.description).toContain('bracket table too short');
+  });
+
+  test('a budget-check failure is a violation — it must never resolve an open alert as a false green', async () => {
+    const { sweep, calls } = loadSweep({
+      priceLawnCare: cleanTiers,
+      loadInventoryCostRows: async () => {
+        throw new Error('schema drift: missing selected column');
+      },
+    });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.budgetCheck).toBe('error');
+    expect(result.violationDetails.map((v) => v.check)).toEqual(['budget_check_failed']);
+    expect(calls.updates).toHaveLength(0); // the open material-budget alert must NOT resolve
+    expect(calls.inserts).toHaveLength(1);
+    expect(calls.inserts[0].payload.severity).toBe('critical');
+  });
+
+  test('a clean run still resolves open alerts, and a designed skip stays a skip (control)', async () => {
+    const { sweep, calls } = loadSweep({ priceLawnCare: cleanTiers });
+    const result = await sweep.runLawnPricingInvariantSweep();
+    expect(result.violations).toBe(0);
+    expect(result.budgetCheck).toBe('skipped');
+    expect(calls.inserts).toHaveLength(0);
+    expect(calls.updates).toHaveLength(1); // clean run resolves any open alert
   });
 });

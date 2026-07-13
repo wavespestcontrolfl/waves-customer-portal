@@ -99,15 +99,21 @@ function scanLadderGrid() {
             });
           }
         }
-        const prevSize = prevMonthlyBySizeTier[t.visits];
-        if (prevSize !== undefined && t.monthly < prevSize.monthly - SIZE_MONOTONE_TOLERANCE) {
+        // Compare against the running MAX per cadence, not the adjacent size:
+        // a gradual slope (each step down within tolerance) must accumulate
+        // against the peak, or a 22k lawn can end up dollars below a 10k one
+        // with every adjacent pair "in tolerance".
+        const maxSize = prevMonthlyBySizeTier[t.visits];
+        if (maxSize !== undefined && t.monthly < maxSize.monthly - SIZE_MONOTONE_TOLERANCE) {
           violations.push({
             check: 'monthly_size_inversion',
             cell: cellLabel(track, sqft, t.visits),
-            detail: `monthly $${t.monthly} at ${sqft}sf < $${prevSize.monthly} at ${prevSize.sqft}sf`,
+            detail: `monthly $${t.monthly} at ${sqft}sf < $${maxSize.monthly} at ${maxSize.sqft}sf (running max)`,
           });
         }
-        prevMonthlyBySizeTier[t.visits] = { sqft, monthly: t.monthly };
+        if (maxSize === undefined || t.monthly > maxSize.monthly) {
+          prevMonthlyBySizeTier[t.visits] = { sqft, monthly: t.monthly };
+        }
       }
     }
   }
@@ -189,7 +195,7 @@ async function upsertSweepAlert(violations, metadata) {
     dedupe_key: ALERT_DEDUPE_KEY,
     type: ALERT_TYPE,
     status: 'open',
-    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed'].includes(v.check))
+    severity: violations.some((v) => ['below_program_minimum', 'material_budget_stale_low', 'config_sync_failed', 'ladder_scan_failed', 'budget_check_failed'].includes(v.check))
       ? 'critical'
       : 'high',
     source_record_type: 'lawn_pricing_invariant_sweep',
@@ -251,13 +257,42 @@ async function runLawnPricingInvariantSweep() {
     return { cellsChecked: 0, violations: violations.length, budgetCheck: 'skipped', alert: alertResult, violationDetails: violations };
   }
 
-  const ladder = scanLadderGrid();
+  // A scan crash (e.g. malformed synced brackets making priceLawnCare throw)
+  // must become a red alert like a sync failure — an unguarded reject here
+  // dies in the cron's log and the dashboard never hears about the broken
+  // ladder.
+  let ladder;
+  try {
+    ladder = scanLadderGrid();
+  } catch (err) {
+    logger.error(`[lawn-pricing-sweep] ladder grid scan crashed: ${err.message}`);
+    ladder = {
+      cellsChecked: 0,
+      shapeChecks: process.env.LAWN_SWEEP_SHAPE_CHECKS === 'true',
+      violations: [{
+        check: 'ladder_scan_failed',
+        cell: 'ladder_grid',
+        detail: `live ladder scan crashed before completing: ${err.message}`,
+      }],
+    };
+  }
   let budget;
   try {
     budget = await checkBudgetDrift();
   } catch (err) {
-    logger.warn(`[lawn-pricing-sweep] budget drift check failed: ${err.message}`);
-    budget = { status: 'error', reason: err.message, violations: [] };
+    // A failed check is NOT a clean check — without a violation here, a clean
+    // ladder scan would hand upsertSweepAlert an empty list and RESOLVE an
+    // open material-budget alert that was never actually re-verified.
+    logger.error(`[lawn-pricing-sweep] budget drift check failed: ${err.message}`);
+    budget = {
+      status: 'error',
+      reason: err.message,
+      violations: [{
+        check: 'budget_check_failed',
+        cell: 'inventory_cogs',
+        detail: `live COGS budget check failed before verifying material budgets: ${err.message}`,
+      }],
+    };
   }
   const violations = [...ladder.violations, ...budget.violations];
 
