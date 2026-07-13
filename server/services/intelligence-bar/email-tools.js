@@ -149,6 +149,22 @@ Use for: "block everything from spamsite.com", "block that sender"`,
 ];
 
 
+// Read + reply subset loaded into every admin context (not just the Email
+// page) so any page can read the inbox and respond to an email. The reply
+// writes (send_email_reply, reply_via_sms) stay UI-confirm gated via
+// write-gates.js regardless of context. Inbox management tools (vendor
+// invoices, stats, blocklist) stay email-context-only.
+const EMAIL_SHARED_TOOL_NAMES = new Set([
+  'get_inbox_summary',
+  'search_emails',
+  'get_email_thread',
+  'draft_email_reply',
+  'send_email_reply',
+  'reply_via_sms',
+]);
+const EMAIL_SHARED_TOOLS = EMAIL_TOOLS.filter(t => EMAIL_SHARED_TOOL_NAMES.has(t.name));
+
+
 // ─── Tool implementations ────────────────────────────────────────
 
 async function getInboxSummary({ days = 1 }) {
@@ -664,4 +680,4 @@ async function executeEmailTool(toolName, input) {
   }
 }
 
-module.exports = { EMAIL_TOOLS, executeEmailTool, draftEmailReply };
+module.exports = { EMAIL_TOOLS, EMAIL_SHARED_TOOLS, executeEmailTool, draftEmailReply };

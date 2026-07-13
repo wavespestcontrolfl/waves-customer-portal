@@ -27,7 +27,7 @@ const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-ba
 const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool } = require('../services/intelligence-bar/leads-tools');
-const { EMAIL_TOOLS, executeEmailTool } = require('../services/intelligence-bar/email-tools');
+const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
 const { BANKING_TOOLS, BANKING_QUERY_TOOLS, executeBankingTool } = require('../services/intelligence-bar/banking-tools');
 const { ESTIMATE_TOOLS, executeEstimateTool } = require('../services/intelligence-bar/estimate-tools');
 const { OPS_TOOLS, executeOpsTool } = require('../services/intelligence-bar/ops-tools');
@@ -101,13 +101,21 @@ const INFRA_TOOL_NAMES = new Set(INFRA_TOOLS.map(t => t.name));
 const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.has(t.name));
 
 // Base toolset for every admin context: core customer/schedule/revenue tools
-// plus read-only comms tools, so SMS/call history is visible from any page —
-// not just the Communications page.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS];
+// plus read-only comms tools and the email read+reply subset, so SMS/call
+// history and the inbox are visible from any page — not just the
+// Communications/Email pages.
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS];
 
-// Writes that the REST equivalents guard with requireAdmin — technician
-// tokens must not reach them through the intelligence bar either.
-const ADMIN_ONLY_TOOL_NAMES = new Set(['create_customer']);
+// Tools whose REST equivalents guard with requireAdmin — technician tokens
+// must not reach them through the intelligence bar either. The email surface
+// (/api/admin/email) is requireAdmin, so every email tool is admin-only:
+// this set blocks execution in the /query loop, /execute, and
+// /confirm-action; getToolsForContext additionally hides them from
+// non-admin tool lists.
+const ADMIN_ONLY_TOOL_NAMES = new Set([
+  'create_customer',
+  ...EMAIL_TOOLS.map(t => t.name),
+]);
 
 // Tool calls whose inputs/outputs carry customer PII (names, phones, emails,
 // addresses, SMS bodies). Their params and the surrounding prompt/response
@@ -125,6 +133,14 @@ const PII_TOOL_NAMES = new Set([
   'send_sms',
   'draft_sms_reply',
   'draft_sms',
+  // Email tools return sender names/addresses and message bodies, and reply
+  // inputs carry the drafted body — same class of PII as the comms tools.
+  'get_inbox_summary',
+  'search_emails',
+  'get_email_thread',
+  'draft_email_reply',
+  'send_email_reply',
+  'reply_via_sms',
   'get_stock_movements',
   // Railway runtime logs can echo customer identifiers from app logging —
   // redact like any other PII-bearing tool result.
@@ -791,48 +807,53 @@ RESPONSE STYLE:
 - For instant payouts, ALWAYS show the fee calculation and ask for explicit confirmation. Do not execute payouts from the query flow.`,
 };
 
-function getToolsForContext(context) {
+function getToolsForContext(context, isAdmin = false) {
+  // Email tools mirror the requireAdmin /api/admin/email surface — never
+  // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
+  // regardless; this keeps them out of the model's tool list too.
+  const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
   if (context === 'schedule' || context === 'dispatch') {
-    return [...BASE_TOOLS, ...SCHEDULE_TOOLS];
+    return [...base, ...SCHEDULE_TOOLS];
   }
   if (context === 'dashboard') {
-    return [...BASE_TOOLS, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
+    return [...base, ...DASHBOARD_TOOLS, ...INFRA_TOOLS];
   }
   if (context === 'seo' || context === 'blog') {
-    return [...BASE_TOOLS, ...SEO_QUERY_TOOLS];
+    return [...base, ...SEO_QUERY_TOOLS];
   }
   if (context === 'procurement' || context === 'inventory') {
-    return [...BASE_TOOLS, ...PROCUREMENT_TOOLS];
+    return [...base, ...PROCUREMENT_TOOLS];
   }
   if (context === 'revenue') {
-    return [...BASE_TOOLS, ...REVENUE_TOOLS];
+    return [...base, ...REVENUE_TOOLS];
   }
   if (context === 'reviews') {
-    return [...BASE_TOOLS, ...REVIEW_TOOLS];
+    return [...base, ...REVIEW_TOOLS];
   }
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load
-    return [...TOOLS, ...COMMS_TOOLS];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : [])];
   }
   if (context === 'tax') {
-    return [...BASE_TOOLS, ...TAX_TOOLS];
+    return [...base, ...TAX_TOOLS];
   }
   if (context === 'leads') {
-    return [...BASE_TOOLS, ...LEADS_TOOLS];
+    return [...base, ...LEADS_TOOLS];
   }
   if (context === 'email') {
-    return [...BASE_TOOLS, ...EMAIL_TOOLS];
+    // Full email set already includes the shared subset — don't double-load
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS] : base;
   }
   if (context === 'banking') {
-    return [...BASE_TOOLS, ...BANKING_QUERY_TOOLS];
+    return [...base, ...BANKING_QUERY_TOOLS];
   }
   if (context === 'estimates') {
-    return [...BASE_TOOLS, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
+    return [...base, ...LEADS_TOOLS, ...ESTIMATE_TOOLS];
   }
   if (context === 'tech') {
     return TECH_TOOLS;
   }
-  return BASE_TOOLS;
+  return base;
 }
 
 // techContext is only set for tech portal calls
@@ -940,6 +961,8 @@ IMAGE ATTACHMENTS:
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
 - You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
+- Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
 
 SCHEDULING INTELLIGENCE:
@@ -1009,8 +1032,8 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       techName: req.technicianName || pageData?.tech_name || null,
     } : null;
 
-    // Select tools based on context
-    const tools = getToolsForContext(context);
+    // Select tools based on context and role (email tools are admin-only)
+    const tools = getToolsForContext(context, req.techRole === 'admin');
 
     // For tech context, use a simpler model to reduce latency in the field
     const model = context === 'tech' ? (process.env.INTELLIGENCE_BAR_TECH_MODEL || MODELS.FLAGSHIP) : MODEL;
