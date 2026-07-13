@@ -71,11 +71,17 @@ function mockDb() {
     }
     if (table === 'scheduled_services') {
       return {
+        leftJoin: jest.fn().mockReturnThis(),
         whereBetween: jest.fn().mockReturnThis(),
         whereNotIn: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
         select: jest.fn().mockResolvedValue([]),
       };
+    }
+    if (table === 'service_zones') {
+      // Zone-capacity parity (estimate-slots-zone-parity.test.js) — no zones
+      // here, so the zone exclusion stays inert in this suite.
+      return { select: jest.fn().mockResolvedValue([]) };
     }
     throw new Error(`unexpected table ${table}`);
   });

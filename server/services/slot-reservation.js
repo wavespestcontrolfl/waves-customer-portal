@@ -34,6 +34,7 @@ const logger = require('./logger');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
+const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -411,22 +412,13 @@ async function reserveSlot({
       // tech lock first, zone lock second.
       let reserveZone = null;
       try {
-        const zones = await trx('service_zones').select('id', 'cities', 'zone_name');
-        if (estimate.customer_id) {
-          const holder = await trx('customers').where({ id: estimate.customer_id }).first('city');
-          const holderCity = String(holder?.city || '').toLowerCase();
-          if (holderCity) {
-            reserveZone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
-          }
-        }
-        if (!reserveZone && estimate.address) {
-          // Unlinked/public estimates carry only a free-text address —
-          // match any zone city appearing in it so these reserves take
-          // the same zone lock the self-booking writers do instead of
-          // falling through to zone:unknown.
-          const addr = String(estimate.address).toLowerCase();
-          reserveZone = zones.find((z) => (z.cities || []).some((c) => c && addr.includes(String(c).toLowerCase()))) || null;
-        }
+        // Shared with the slot generator's colliding-slot filter (slot-zone.js)
+        // so the offer surface and this reserve gate resolve the SAME zone —
+        // a generator/reserve zone mismatch shows customers slots that every
+        // tap 409s. Unlinked/public estimates resolve via their free-text
+        // address so these reserves take the same zone lock the self-booking
+        // writers do instead of falling through to zone:unknown.
+        reserveZone = await resolveEstimateZone(trx, estimate);
       } catch (zoneErr) {
         logger.warn(`[slot-reservation] zone resolution failed for estimate ${estimateId}: ${zoneErr.message}`);
       }
@@ -511,7 +503,7 @@ async function reserveSlot({
       // same zone/time — availability treats the zone as one capacity
       // pool, so an estimate hold must not stack on top of one.
       if (reserveZone) {
-        const zoneSlug = reserveZone.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null;
+        const zoneSlug = zoneSlugOf(reserveZone);
         const zoneCities = reserveZone.cities || [];
         const zoneConflict = await trx('scheduled_services')
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
