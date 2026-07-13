@@ -101,6 +101,13 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
     return `termiteStations supports at most ${MAX_STATION_ENTRIES} entries`;
   }
   const seenIds = new Set();
+  // Two id-less creates at one exact position in a SINGLE payload can only
+  // come from a stale/crafted client (the marking UI ignores taps on
+  // existing pins) — reject rather than silently collapse them, or the
+  // sender's counts would disagree with the registry. Payload-internal
+  // only: a resumed body's creates match EXISTING rows, not each other,
+  // so replays are unaffected.
+  const seenCreatePositions = new Set();
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') {
       return 'each termiteStations entry must be an object';
@@ -118,8 +125,18 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
       // A malformed shape must 400 here, not silently drop in the sync — the
       // completion sync is post-commit fail-soft, so a silent skip would lose
       // the tech's pin behind a successful completion.
-      if (entry.shape != null && !sanitizeStationShape(entry.shape)) {
-        return 'a termiteStations shape must be a circle with coordinates normalized 0-1';
+      if (entry.shape != null) {
+        const cleanShape = sanitizeStationShape(entry.shape);
+        if (!cleanShape) {
+          return 'a termiteStations shape must be a circle with coordinates normalized 0-1';
+        }
+        if (!hasId) {
+          const createKey = positionKey(cleanShape);
+          if (createKey && seenCreatePositions.has(createKey)) {
+            return 'two new stations share the same position — remove the duplicate pin';
+          }
+          if (createKey) seenCreatePositions.add(createKey);
+        }
       }
       if (entry.status != null) {
         if (!allowStatus) return 'station status only applies during a completion — the office save takes positions only';
@@ -237,31 +254,41 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
   // ground in every historical report.
   let nextNumber = existing.reduce((max, row) => Math.max(max, Number(row.station_number) || 0), 0) + 1;
 
+  // Retire intents apply FIRST, regardless of payload order: the client
+  // emits entries in station-number order, so a move onto the hole vacated
+  // by a LATER retire entry would otherwise see the doomed occupant and be
+  // skipped as position-occupied — and the follow-up retire would then
+  // leave the registry with no station where the UI showed the moved pin.
+  // Retires are independent of every other intent, so hoisting them is
+  // side-effect-free.
+  for (const entry of entries) {
+    if (!entry || entry.retire !== true) continue;
+    const hasId = entry.id != null && String(entry.id).trim() !== '';
+    const station = hasId ? activeById.get(String(entry.id)) : null;
+    if (!station) {
+      summary.skipped.push(`retire:${entry.id || 'missing-id'}`);
+      continue;
+    }
+    await trx('termite_stations')
+      .where({ id: station.id, customer_id: customerId })
+      .update({ is_active: false, retired_at: trx.fn.now(), updated_at: trx.fn.now() });
+    // vacate the dedupe index — retiring a damaged station and dropping a
+    // NEW pin in the same hole (in this same payload) is a replacement,
+    // not a replay, and must insert a fresh row
+    const retiredKey = positionKey(station.geometry_image);
+    if (retiredKey && activeByPosition.get(retiredKey) === station) {
+      activeByPosition.delete(retiredKey);
+    }
+    activeById.delete(String(station.id));
+    activeCount -= 1;
+    summary.retired += 1;
+  }
+
   for (let i = 0; i < entries.length; i += 1) {
     const entry = entries[i] || {};
     const hasId = entry.id != null && String(entry.id).trim() !== '';
 
-    if (entry.retire === true) {
-      const station = hasId ? activeById.get(String(entry.id)) : null;
-      if (!station) {
-        summary.skipped.push(`retire:${entry.id || 'missing-id'}`);
-        continue;
-      }
-      await trx('termite_stations')
-        .where({ id: station.id, customer_id: customerId })
-        .update({ is_active: false, retired_at: trx.fn.now(), updated_at: trx.fn.now() });
-      // vacate the dedupe index — retiring a damaged station and dropping a
-      // NEW pin in the same hole (later in this payload) is a replacement,
-      // not a replay, and must insert a fresh row
-      const retiredKey = positionKey(station.geometry_image);
-      if (retiredKey && activeByPosition.get(retiredKey) === station) {
-        activeByPosition.delete(retiredKey);
-      }
-      activeById.delete(String(station.id));
-      activeCount -= 1;
-      summary.retired += 1;
-      continue;
-    }
+    if (entry.retire === true) continue; // applied in the first pass
 
     if (hasId) {
       const station = activeById.get(String(entry.id));

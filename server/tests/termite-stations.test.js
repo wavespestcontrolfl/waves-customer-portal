@@ -326,6 +326,43 @@ test('retire + new pin in the same hole is a REPLACEMENT (new row), and replayin
   expect(state.checks[0].station_id).toBe(replacement.id);
 });
 
+test('retire intents apply FIRST: a move into a hole vacated by a LATER retire entry lands', async () => {
+  // Client emits entries in station-number order, so the move (station 2)
+  // precedes the retire (station 5) in the payload — the occupancy check
+  // must not see the doomed occupant.
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-2', customer_id: CUSTOMER, station_number: 2, is_active: true, geometry_image: pin(0.2, 0.2) },
+      { id: 'st-5', customer_id: CUSTOMER, station_number: 5, is_active: true, geometry_image: pin(0.5, 0.5) },
+    ],
+  });
+  const summary = await upsertStationsForCustomer(db, {
+    customerId: CUSTOMER,
+    entries: [
+      { id: 'st-2', shape: pin(0.5, 0.5) }, // move into st-5's hole
+      { id: 'st-5', retire: true },
+    ],
+  });
+  expect(summary.retired).toBe(1);
+  expect(summary.moved).toBe(1);
+  expect(summary.skipped).toHaveLength(0);
+  const moved = state.stations.find((row) => row.id === 'st-2');
+  expect(JSON.parse(moved.geometry_image)).toMatchObject({ cx: 0.5, cy: 0.5 });
+  expect(state.stations.find((row) => row.id === 'st-5').is_active).toBe(false);
+});
+
+test('two id-less creates at one position in a single payload are rejected, not silently collapsed', () => {
+  expect(validateStationEntriesBody([
+    { shape: pin(0.5, 0.5), status: 'ok' },
+    { shape: pin(0.5, 0.5), status: 'ok' },
+  ])).toMatch(/share the same position/);
+  // distinct positions stay valid
+  expect(validateStationEntriesBody([
+    { shape: pin(0.5, 0.5), status: 'ok' },
+    { shape: pin(0.52, 0.5), status: 'ok' },
+  ])).toBeNull();
+});
+
 test('moving a station vacates its old spot for a genuinely new pin in the same payload', async () => {
   const { db, state } = makeFakeDb({
     stations: [

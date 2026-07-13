@@ -1371,11 +1371,28 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
         customerId: customer.id,
         entries,
       });
+      // Unlike the completion's post-commit sync, this write IS the primary
+      // action and runs inside its own transaction — a cap skip under the
+      // lock (preflight raced another writer) fails loudly and rolls back
+      // rather than persisting a partial save the office view disagrees with.
+      if (result.skipped.includes('new:station-cap')) {
+        const capErr = new Error('station cap exceeded under lock');
+        capErr.code = 'termite_stations_cap';
+        throw capErr;
+      }
       const { stationIdByIndex, ...counts } = result;
       return counts;
     });
     return res.json({ ok: true, summary });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err && err.code === 'termite_stations_cap') {
+      return res.status(409).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — another save landed first; reload the map and retry`,
+        code: 'termite_stations_cap',
+      });
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/dispatch/recap-preview
@@ -4383,8 +4400,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceRecordId: record.id,
             entries: termiteStations,
           });
-          if (stationSync.created || stationSync.moved || stationSync.retired
-            || stationSync.checksApplied || stationSync.deduped || stationSync.skipped.length) {
+          if (stationSync.skipped.length) {
+            // post-commit skips (cap race / foreign id) can't 400 a
+            // committed completion — surface them loudly for the operator
+            logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
+          } else if (stationSync.created || stationSync.moved || stationSync.retired
+            || stationSync.checksApplied || stationSync.deduped) {
             logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
           }
         } catch (stationErr) {
