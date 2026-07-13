@@ -2275,26 +2275,95 @@ function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
  * Zero-state values ("No active signs observed today") are results and
  * render like any other finding.
  */
+// D1 (universal one-time services): presentation-only heuristic — a
+// customer value that is a comma-joined list of short phrases (the chips
+// fields persist selections that way) renders as pills; sentences and free
+// text stay as prose. Content is IDENTICAL either way (the pills are the
+// same comma-separated parts), so the contract's copy/order guarantees hold.
+function typedFindingChips(text) {
+  const parts = String(text).split(', ').map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return null;
+  if (parts.some((part) => part.length > 42 || /[.!?]/.test(part))) return null;
+  return parts;
+}
+
+/**
+ * D1: designed finding tiles (the pestV2/lawnV2 visual standard) replacing
+ * the bare definition list. Same section, same title, same snapshot items in
+ * the same reportPriority order, same customer copy — presentation only.
+ */
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
   const items = typedReport?.findings;
   if (!Array.isArray(items) || !items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
-      <h2>What we found & did</h2>
-      <dl style={{ margin: 0, display: 'grid', gap: 12 }}>
-        {items.map((item) => (
-          <div key={item.fieldKey} style={{ borderBottom: '1px solid #F1F5F9', paddingBottom: 12 }}>
-            <dt style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 700, marginBottom: 2 }}>
-              {item.customerLabel}
-            </dt>
-            <dd className="sr-ink" style={{ margin: 0, fontSize: 14, color: '#04395E', lineHeight: 1.5 }}>
-              {item.customerValueLabel != null && item.customerValueLabel !== ''
-                ? String(item.customerValueLabel)
-                : String(item.value)}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <h2>What we found &amp; did</h2>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
+          gap: 12,
+        }}
+      >
+        {items.map((item) => {
+          const text = item.customerValueLabel != null && item.customerValueLabel !== ''
+            ? String(item.customerValueLabel)
+            : String(item.value);
+          const chips = typedFindingChips(text);
+          return (
+            <div
+              key={item.fieldKey}
+              style={{
+                background: 'var(--wash)',
+                border: '1px solid var(--line)',
+                borderRadius: 12,
+                padding: '14px 16px',
+                // Long prose tiles read better full-width.
+                gridColumn: !chips && text.length > 90 ? '1 / -1' : undefined,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 12,
+                  letterSpacing: '0.06em',
+                  textTransform: 'uppercase',
+                  color: 'var(--muted)',
+                  fontWeight: 500,
+                  marginBottom: 6,
+                }}
+              >
+                {item.customerLabel}
+              </div>
+              {chips ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {chips.map((chip) => (
+                    <span
+                      key={chip}
+                      className="sr-ink"
+                      style={{
+                        display: 'inline-block',
+                        background: 'var(--paper)',
+                        border: '1px solid var(--line)',
+                        borderRadius: 999,
+                        padding: '4px 10px',
+                        fontSize: 14,
+                        color: '#04395E',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      {chip}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="sr-ink" style={{ fontSize: 14, color: '#04395E', lineHeight: 1.5 }}>
+                  {text}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
