@@ -187,13 +187,19 @@ display name, falling back to the type label.
 
 ## 8. Report sections (typed reports)
 
-Order: Today's Result → Activity gauge (trend types only; level word + history
-+ trend chip; no customer rating prompt) → Findings (customer labels,
-reportPriority order) → What we did / products → Photos → Reentry/advisory
-(when products applied) → Review CTA → footer. Never: Pest Pressure card,
-pressure trend, lawn program cards. Metrics band swaps pressure_index for the
-activity level (gauge types) or drops it (non-gauge) and must look intentional
-with few metrics.
+Order (as shipped — ReportViewPage renders Findings ahead of the gauge, and
+this document follows the live artifact): Today's Result → Findings (customer
+labels, reportPriority order) → Activity gauge (trend types only; level word +
+history + trend chip; no customer rating prompt) → Visit timeline (D2
+amendment, owner-directed via `universal-onetime-services-plan.md` — trend
+types with 2+ visits only; dates + each visit's own frozen Today's Result
+headline from the matching customer-visible snapshot, derived from the same
+bounded history series as the gauge; one-shot types and first visits render
+none) → What we did / products → Photos → Reentry/advisory (when products
+applied) → Review CTA → footer. Never: Pest Pressure card, pressure trend,
+lawn program cards. Metrics band swaps pressure_index for the activity level
+(gauge types) or drops it (non-gauge) and must look intentional with few
+metrics.
 
 SMS copy (short, service-specific):
 - Initial: "Hi {first}, your {reportTypeLabel} report is ready: {url}"

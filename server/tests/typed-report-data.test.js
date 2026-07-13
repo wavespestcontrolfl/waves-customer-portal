@@ -25,6 +25,7 @@ function stubKnex(fixtures = {}) {
     const rows = fixtures[table] || [];
     const query = {
       where: () => query,
+      whereIn: () => query,
       orderBy: () => query,
       modify: () => query,
       limit: () => query,
@@ -92,6 +93,10 @@ describe('typed specialty report data (golden fixtures)', () => {
         expect(copy.includes(word)).toBe(false);
       }
 
+      // No cross-visit history in the stub → never a timeline (a one-visit
+      // timeline is noise; one-shot types have no history at all).
+      expect(data.typedVisitTimeline).toBeNull();
+
       if (snapshot.activity) {
         expect(data.activity).toMatchObject({
           indicatorKey: snapshot.activity.indicatorKey,
@@ -147,6 +152,146 @@ describe('typed specialty report data (golden fixtures)', () => {
     });
     expect(data.activity.isBaseline).toBe(false);
     expect(data.activity.levelWord).toBe('Very low activity');
+  });
+
+  test('typed visit timeline hydrates prior headlines and marks the current visit', async () => {
+    const snapshot = fixtures.find((f) => f.fixture === 'cockroach_followup_improving').typedReportSnapshot;
+    const priorSnapshot = (headline) => JSON.stringify({
+      typedReportSnapshot: {
+        activity: { indicatorKey: snapshot.activity.indicatorKey },
+        todaysResult: { headline },
+      },
+    });
+    const data = await buildReportV1Data(
+      serviceRowForSnapshot(snapshot),
+      'token-timeline',
+      stubKnex({
+        service_activity_scores: [
+          { service_record_id: 'service-typed-1', service_date: '2026-06-11', score: 1 },
+          { service_record_id: 'service-prior-2', service_date: '2026-05-28', score: 3 },
+          { service_record_id: 'service-prior-1', service_date: '2026-05-14', score: 4 },
+        ],
+        service_records: [
+          { id: 'service-prior-1', service_data: priorSnapshot('Initial treatment completed.'), structured_notes: '{"typedReportDelivery":"auto_send"}' },
+          { id: 'service-prior-2', service_data: priorSnapshot('Activity is trending down.'), structured_notes: '{}' },
+        ],
+      })
+    );
+    expect(data.typedVisitTimeline).toMatchObject({
+      indicatorKey: snapshot.activity.indicatorKey,
+      label: snapshot.activity.label,
+    });
+    expect(data.typedVisitTimeline.visits).toEqual([
+      expect.objectContaining({
+        serviceRecordId: 'service-prior-1',
+        serviceDate: '2026-05-14',
+        headline: 'Initial treatment completed.',
+        isCurrent: false,
+      }),
+      expect.objectContaining({
+        serviceRecordId: 'service-prior-2',
+        serviceDate: '2026-05-28',
+        headline: 'Activity is trending down.',
+        isCurrent: false,
+      }),
+      expect.objectContaining({
+        serviceRecordId: 'service-typed-1',
+        serviceDate: '2026-06-11',
+        headline: snapshot.todaysResult.headline,
+        isCurrent: true,
+      }),
+    ]);
+  });
+
+  test('suppressed prior report never leaks its headline (level-word fallback)', async () => {
+    const snapshot = fixtures.find((f) => f.fixture === 'cockroach_followup_improving').typedReportSnapshot;
+    const data = await buildReportV1Data(
+      serviceRowForSnapshot(snapshot),
+      'token-timeline-suppressed',
+      stubKnex({
+        service_activity_scores: [
+          { service_record_id: 'service-typed-1', service_date: '2026-06-11', score: 1 },
+          { service_record_id: 'service-prior-hidden', service_date: '2026-05-28', score: 3 },
+        ],
+        service_records: [
+          {
+            id: 'service-prior-hidden',
+            service_data: JSON.stringify({
+              typedReportSnapshot: {
+                activity: { indicatorKey: snapshot.activity.indicatorKey },
+                todaysResult: { headline: 'STAFF ONLY — never sent to the customer' },
+              },
+            }),
+            structured_notes: '{"typedReportDelivery":"internal_only"}',
+          },
+        ],
+      })
+    );
+    const prior = data.typedVisitTimeline.visits[0];
+    expect(prior.headline).toBe(`${snapshot.activity.label}: ${prior.levelWord}`);
+    expect(JSON.stringify(data.typedVisitTimeline)).not.toContain('STAFF ONLY');
+  });
+
+  test('prior companion visit resolves its headline from the matching companion snapshot', async () => {
+    const snapshot = fixtures.find((f) => f.fixture === 'cockroach_followup_improving').typedReportSnapshot;
+    const data = await buildReportV1Data(
+      serviceRowForSnapshot(snapshot),
+      'token-timeline-companion',
+      stubKnex({
+        service_activity_scores: [
+          { service_record_id: 'service-typed-1', service_date: '2026-06-11', score: 1 },
+          { service_record_id: 'service-prior-combined', service_date: '2026-05-28', score: 3 },
+        ],
+        service_records: [
+          {
+            // A combined visit: primary snapshot on a DIFFERENT indicator,
+            // our indicator's content in a companion. The primary headline
+            // must never be borrowed for this trend line, and a non-auto_send
+            // companion must stay hidden.
+            id: 'service-prior-combined',
+            service_data: JSON.stringify({
+              typedReportSnapshot: {
+                activity: { indicatorKey: 'some_other_indicator' },
+                todaysResult: { headline: 'Wrong service headline' },
+              },
+              companionReportSnapshots: [
+                {
+                  activity: { indicatorKey: snapshot.activity.indicatorKey },
+                  todaysResult: { headline: 'Hidden companion headline' },
+                  delivery: 'internal_only',
+                },
+                {
+                  activity: { indicatorKey: snapshot.activity.indicatorKey },
+                  todaysResult: { headline: 'Companion check completed.' },
+                  delivery: 'auto_send',
+                },
+              ],
+            }),
+            structured_notes: '{}',
+          },
+        ],
+      })
+    );
+    const prior = data.typedVisitTimeline.visits[0];
+    expect(prior.headline).toBe('Companion check completed.');
+  });
+
+  test('prior visit without a stored snapshot falls back to the level word', async () => {
+    const snapshot = fixtures.find((f) => f.fixture === 'cockroach_followup_improving').typedReportSnapshot;
+    const data = await buildReportV1Data(
+      serviceRowForSnapshot(snapshot),
+      'token-timeline-fallback',
+      stubKnex({
+        service_activity_scores: [
+          { service_record_id: 'service-typed-1', service_date: '2026-06-11', score: 1 },
+          { service_record_id: 'service-prior-legacy', service_date: '2026-05-28', score: 3 },
+        ],
+        // service_records intentionally empty — legacy visit predates snapshots.
+      })
+    );
+    const prior = data.typedVisitTimeline.visits[0];
+    expect(prior.serviceRecordId).toBe('service-prior-legacy');
+    expect(prior.headline).toBe(`${snapshot.activity.label}: ${prior.levelWord}`);
   });
 
   test('recurring pest report is untouched by the typed path (regression)', async () => {
