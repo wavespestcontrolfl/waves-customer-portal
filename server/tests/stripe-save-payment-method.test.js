@@ -257,3 +257,82 @@ describe('removeCard — detach must actually stick (portal ACH, Codex #2706 r2)
     expect(deleted).toBe(false);
   });
 });
+
+describe('removeCard — pending bank removal cancels its SetupIntent (Codex #2706 r4 P1)', () => {
+  let stripeClient;
+  let dbMock;
+  let deleted;
+  let cancelError;
+  let retrievedSi;
+
+  const pendingBankCard = {
+    id: 'pm_db_123',
+    customer_id: 'cust_123',
+    processor: 'stripe',
+    stripe_payment_method_id: 'pm_stripe_123',
+    stripe_setup_intent_id: 'si_md_123',
+    method_type: 'ach',
+    ach_status: 'pending_verification',
+    autopay_enabled: false,
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    deleted = false;
+    cancelError = null;
+    retrievedSi = { id: 'si_md_123', status: 'requires_action' };
+
+    stripeClient = {
+      paymentMethods: {
+        detach: jest.fn(async () => ({ id: 'pm_stripe_123' })),
+        retrieve: jest.fn(async () => ({ id: 'pm_stripe_123', customer: null })),
+      },
+      setupIntents: {
+        cancel: jest.fn(async () => {
+          if (cancelError) throw cancelError;
+          return { id: 'si_md_123', status: 'canceled' };
+        }),
+        retrieve: jest.fn(async () => retrievedSi),
+      },
+    };
+
+    const pmQuery = {
+      where: jest.fn(() => pmQuery),
+      first: jest.fn().mockResolvedValue(pendingBankCard),
+      del: jest.fn(async () => { deleted = true; return 1; }),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    dbMock = jest.fn(() => pmQuery);
+    dbMock.transaction = jest.fn(async (cb) => cb(dbMock));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+  });
+
+  test('removing a pending bank cancels the SetupIntent BEFORE detach — a canceled SI can never resurrect the account', async () => {
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123')).resolves.toEqual({ success: true });
+    expect(stripeClient.setupIntents.cancel).toHaveBeenCalledWith('si_md_123');
+    expect(deleted).toBe(true);
+  });
+
+  test('cancel fails and the SI is still live → removal FAILS CLOSED', async () => {
+    cancelError = new Error('stripe transient error');
+    retrievedSi = { id: 'si_md_123', status: 'requires_action' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123'))
+      .rejects.toThrow('Could not remove the payment method');
+    expect(deleted).toBe(false);
+  });
+
+  test('cancel fails because the SI already succeeded → removal proceeds (detach + requireAttached cover it)', async () => {
+    cancelError = new Error('You cannot cancel this SetupIntent because it has already succeeded.');
+    retrievedSi = { id: 'si_md_123', status: 'succeeded' };
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.removeCard('cust_123', 'pm_db_123')).resolves.toEqual({ success: true });
+    expect(deleted).toBe(true);
+  });
+});

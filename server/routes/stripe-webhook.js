@@ -2487,10 +2487,25 @@ async function handleSetupIntentSucceeded(setupIntent) {
     try {
       const StripeService = require('../services/stripe');
       const ConsentService = require('../services/payment-method-consents');
+      const gateOn = require('../config/feature-gates').isEnabled('portalAchAutopay');
       let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
       if (saved && saved.customer_id !== wavesCustomerId) {
         logger.warn(`[stripe-webhook] portal-add-method pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);
         return;
+      }
+      // Kill-switch integrity BEFORE any persistence (Codex r4): with the
+      // gate off, the browser-died path must not save a bank row at all —
+      // a persisted verified row would be selectable by the billing routes
+      // even though the lane is closed. No local row means probing the PM
+      // type from Stripe first; a local row carries its own method_type.
+      if (!gateOn) {
+        const bankAlready = saved?.method_type === 'ach';
+        const bankIncoming = !saved
+          && (await StripeService.retrievePaymentMethod(stripePmId))?.type === 'us_bank_account';
+        if (bankAlready || bankIncoming) {
+          logger.info(`[stripe-webhook] portal-add-method bank pm ${stripePmId} skipped — GATE_PORTAL_ACH_AUTOPAY off`);
+          return;
+        }
       }
       if (!saved) {
         // Browser died between confirmSetup and POST /cards. The portal
@@ -2513,15 +2528,6 @@ async function handleSetupIntentSucceeded(setupIntent) {
           }
           throw saveErr;
         }
-      }
-      // Kill-switch integrity (Codex r3): with GATE_PORTAL_ACH_AUTOPAY off,
-      // an in-flight bank SetupIntent must not complete the portal bank
-      // lane through this backstop either. Ack and skip — the row (if any)
-      // stays as-is; banks enrolled through the live pay-page flow are a
-      // different lane and unaffected.
-      if (saved.method_type === 'ach' && !require('../config/feature-gates').isEnabled('portalAchAutopay')) {
-        logger.info(`[stripe-webhook] portal-add-method bank pm ${stripePmId} skipped — GATE_PORTAL_ACH_AUTOPAY off`);
-        return;
       }
       // Verification cleared — a pending bank row becomes chargeable.
       if (saved.method_type === 'ach' && saved.ach_status !== 'verified') {

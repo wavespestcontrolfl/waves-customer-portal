@@ -386,15 +386,19 @@ describe('GET /cards/:id/bank-verification-link — durable resume (Codex r3)', 
     expect(body.url).toBe('https://verify.stripe.com/x');
   });
 
-  test('SI already succeeded → heals the stale pending row (verified + needs_verification clear)', async () => {
+  test('SI already succeeded → heals the stale pending row AND finishes the consent-gated enrollment (Codex r3+r4)', async () => {
     mockIsEnabled.mockReturnValue(true);
-    state.tables.payment_methods = [pendingBankRow];
+    state.tables.payment_methods = [{ ...pendingBankRow, stripe_payment_method_id: 'pm_bank_1' }];
     mockRetrieveSetupIntent.mockResolvedValue({ id: 'si_md', status: 'succeeded' });
     const { statusCode, body } = await invoke(handler(), { params: { id: 'pm-bank' } });
     expect(statusCode).toBe(200);
     expect(body.verified).toBe(true);
     expect(state.updates).toContainEqual({ table: 'payment_methods', patch: { ach_status: 'verified' } });
     expect(state.updates).toContainEqual({ table: 'customers', patch: { ach_status: 'active' } });
+    // The deferred save recorded the Auto Pay consent but never enrolled —
+    // with the webhook missed, this heal is the last chance to honor it.
+    expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-bank', source: 'portal_add_bank' }));
+    expect(body.enrolled).toBe(true);
   });
 
   test('SI dead (canceled/failed) → row moves to verification_failed instead of pending forever', async () => {

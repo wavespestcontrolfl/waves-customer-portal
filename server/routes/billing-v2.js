@@ -165,16 +165,35 @@ router.get('/cards/:id/bank-verification-link', async (req, res, next) => {
     const si = await StripeService.retrieveSetupIntent(row.stripe_setup_intent_id);
     if (!si) return res.status(404).json({ error: 'No verification in progress for this payment method' });
     if (si.status === 'succeeded') {
-      // Stale pending row (missed webhook) — heal the visible state.
-      // Enrollment keeps its consent-gated webhook/POST path; this only
-      // fixes what the customer sees and what the autopay guards read.
+      // Stale pending row (missed webhook) — heal the visible state AND
+      // finish what the webhook would have done (Codex r4): the deferred
+      // save recorded the Auto Pay consent but deliberately never
+      // enrolled, so without this the customer ends up with a verified
+      // bank that ignores the authorization they accepted. Same
+      // consent-gated enrollment as the webhook; a refusal (ach_blocked)
+      // leaves the method saved and the response still reports verified.
       if (row.ach_status !== 'verified') {
         await db('payment_methods').where({ id: row.id }).update({ ach_status: 'verified' });
         await db('customers')
           .where({ id: req.customerId, ach_status: 'needs_verification' })
           .update({ ach_status: 'active' });
       }
-      return res.json({ verified: true });
+      const ConsentService = require('../services/payment-method-consents');
+      let enrolled = false;
+      if (await ConsentService.hasEnrollmentScopedConsent(req.customerId, row.stripe_payment_method_id)) {
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        const enrollment = await enrollConsentedMethod({
+          customerId: req.customerId,
+          paymentMethodId: row.id,
+          source: 'portal_add_bank',
+          details: { via: 'bank_verification_link_heal', setup_intent_id: row.stripe_setup_intent_id },
+        });
+        enrolled = enrollment.enrolled || enrollment.reason === 'already_enrolled';
+        if (!enrolled) {
+          logger.warn(`[billing-v2] verification-link heal enrollment refused (${enrollment.reason}) for customer ${req.customerId} pm ${row.id}`);
+        }
+      }
+      return res.json({ verified: true, enrolled });
     }
     if (si.status === 'requires_action' && si.next_action?.type === 'verify_with_microdeposits') {
       return res.json({ url: si.next_action.verify_with_microdeposits?.hosted_verification_url || null });

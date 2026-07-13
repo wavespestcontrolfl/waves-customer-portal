@@ -35,8 +35,10 @@ jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayme
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 
 const mockSavePaymentMethod = jest.fn();
+const mockRetrievePaymentMethod = jest.fn(async () => ({ id: 'pm_bank_1', type: 'us_bank_account' }));
 jest.mock('../services/stripe', () => ({
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
+  retrievePaymentMethod: (...a) => mockRetrievePaymentMethod(...a),
 }));
 
 const mockRecordConsent = jest.fn(async () => ({ id: 'consent-1' }));
@@ -181,6 +183,32 @@ test('gate off: an in-flight bank completion is skipped — the kill switch clos
   expect(state.updates).toHaveLength(0);
   expect(mockRecordConsent).not.toHaveBeenCalled();
   expect(mockEnroll).not.toHaveBeenCalled();
+});
+
+test('gate off + browser died (no local row): PM type probed BEFORE persistence, bank never saved (Codex r4 P1)', async () => {
+  mockGateEnabled.mockReturnValue(false);
+  state.paymentMethodRow = null;
+  mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_bank_1', type: 'us_bank_account' });
+  await handleSetupIntentSucceeded(setupIntent());
+  // Nothing persisted at all — a saved verified row would be selectable by
+  // the billing routes even with the lane closed.
+  expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  expect(mockRecordConsent).not.toHaveBeenCalled();
+  expect(mockEnroll).not.toHaveBeenCalled();
+  expect(state.updates).toHaveLength(0);
+});
+
+test('gate off + browser died: a CARD completion still proceeds (card lane unaffected by the ACH gate)', async () => {
+  mockGateEnabled.mockReturnValue(false);
+  state.paymentMethodRow = null;
+  mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_card_1', type: 'card' });
+  mockSavePaymentMethod.mockImplementation(async () => {
+    state.paymentMethodRow = { id: 'pm-row-4', customer_id: 'cust-1', method_type: 'card', ach_status: null };
+    return state.paymentMethodRow;
+  });
+  await handleSetupIntentSucceeded(setupIntent({ payment_method: 'pm_card_1' }));
+  expect(mockSavePaymentMethod).toHaveBeenCalled();
+  expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({ source: 'portal_add_card' }));
 });
 
 test('setup_failed moves a pending bank row to verification_failed (Codex r3)', async () => {

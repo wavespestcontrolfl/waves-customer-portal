@@ -457,6 +457,13 @@ const StripeService = {
     return stripe.setupIntents.retrieve(setupIntentId, options);
   },
 
+  async retrievePaymentMethod(paymentMethodId) {
+    if (!paymentMethodId) return null;
+    const stripe = getStripe();
+    if (!stripe) return null;
+    return stripe.paymentMethods.retrieve(paymentMethodId);
+  },
+
   /**
    * Cancel a PaymentIntent. Returns null if Stripe isn't configured.
    * Throws on Stripe errors — including the race where the intent has
@@ -654,6 +661,28 @@ const StripeService = {
     if (card.processor === 'stripe' && card.stripe_payment_method_id) {
       const stripe = getStripe();
       if (!stripe) throw new Error('Stripe not configured');
+
+      // Removing an UNVERIFIED bank cancels its SetupIntent first (Codex
+      // #2706 r4): Stripe can complete the original hosted micro-deposit
+      // verification even after a detach and RE-ATTACH the payment method,
+      // so attachment state alone can't prove the customer kept it. A
+      // canceled SetupIntent can never succeed → the portal webhook can
+      // never resurrect the removed account. Cancel failure falls back to
+      // reading the SI: already succeeded/canceled → removal proceeds
+      // (the detach + requireAttached pair covers those); anything else →
+      // fail closed and let the customer retry.
+      if (card.method_type === 'ach' && card.ach_status !== 'verified' && card.stripe_setup_intent_id) {
+        try {
+          await stripe.setupIntents.cancel(card.stripe_setup_intent_id);
+        } catch (cancelErr) {
+          let si = null;
+          try { si = await stripe.setupIntents.retrieve(card.stripe_setup_intent_id); } catch { /* fail closed below */ }
+          if (!si || !['canceled', 'succeeded'].includes(si.status)) {
+            logger.error(`[stripe] SetupIntent cancel failed and state unverifiable — refusing removal: ${cancelErr.message}`);
+            throw new Error('Could not remove the payment method — please try again.');
+          }
+        }
+      }
 
       try {
         await stripe.paymentMethods.detach(card.stripe_payment_method_id);
