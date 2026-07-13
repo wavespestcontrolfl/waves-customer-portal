@@ -225,6 +225,13 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // leave a stale appointment time fossilized in the downloadable document.
   if (mode !== 'live') delete data.nextAppointment;
 
+  // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
+  // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a
+  // gate flip would leave already-rendered PDFs stale in either direction.
+  // PDFs keep the plain-text Technician cell, matching the pest-narrative
+  // precedent of PDFs keeping the plain recap.
+  if (mode !== 'live') data.techVisitCard = false;
+
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
   // off, service_line outside allow list, or requireRecurringFrequency

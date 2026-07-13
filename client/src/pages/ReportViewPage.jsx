@@ -1800,10 +1800,14 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             <div className="sr-cell-label">What Waves did today</div>
             <div className="sr-cell-value">{smartStatus.completedLine}</div>
           </div>
-          <div className="sr-cell">
-            <div className="sr-cell-label">Technician</div>
-            <div className="sr-cell-value">{technician}</div>
-          </div>
+          {/* Gate on: the photo card below carries the tech identity, so the
+              plain-text cell would duplicate the name inside the same card. */}
+          {!data.techVisitCard && (
+            <div className="sr-cell">
+              <div className="sr-cell-label">Technician</div>
+              <div className="sr-cell-value">{technician}</div>
+            </div>
+          )}
           <div className="sr-cell">
             <div className="sr-cell-label">Completion status</div>
             <div className="sr-cell-value">{completionStatus}</div>
@@ -1816,6 +1820,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             </div>
           )}
         </div>
+        {data.techVisitCard && <TechnicianVisitLine data={data} />}
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
         <HeroConditions
           conditions={data.conditions || {}}

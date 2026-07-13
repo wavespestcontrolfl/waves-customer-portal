@@ -2763,6 +2763,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       photoUrl: technicianPhotoUrl,
       initials: initialsForCustomerTechnicianName(technicianName),
     },
+    // Dark-ship gate for the photo tech card on the report page. The
+    // technician identity above is already per-visit
+    // (service_records.technician_id, frozen at completion), so past
+    // reports keep the tech who actually performed that visit. Records
+    // with no technician attached keep the legacy plain-text cell —
+    // the card would otherwise show a placeholder identity.
+    techVisitCard: process.env.GATE_REPORT_TECH_PHOTO === 'true'
+      && !!(service.technician_name || service.technician_first_name),
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
