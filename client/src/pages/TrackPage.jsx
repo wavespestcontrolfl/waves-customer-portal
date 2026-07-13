@@ -360,16 +360,17 @@ function TechBlock({ tech, size = 'md' }) {
   );
 }
 
-// Client identity block (owner spec 2026-07-06): replaces the old
-// "Today's visit" service-description/window/address meta — the card
-// shows WHO the visit is for (name, address, email, phone). Accounts with
-// a service contact (tenant / home buyer / property manager) get both full
-// names instead of email/phone — the server sends those as null then.
+// Client identity block (owner spec 2026-07-13): the card shows WHO the
+// visit is for and WHAT it is — account holder's name, any service-contact
+// names under it (tenant / home buyer / property manager), the address,
+// and the service. Never email/phone: this tokenized link is texted to
+// service contacts too, so contact PII stays off it.
 function ClientMeta({ data }) {
   const c = data.customer || {};
   const contactNames = (c.serviceContactNames || []).filter((name) => name && name !== c.name);
   const addrLines = fullAddressLines(data.property);
-  if (!c.name && contactNames.length === 0 && addrLines.length === 0 && !c.email && !c.phone) return null;
+  const serviceLabel = data.service?.type || null;
+  if (!c.name && contactNames.length === 0 && addrLines.length === 0 && !serviceLabel) return null;
   return (
     <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${TRACK_SURFACE.border}` }}>
       {c.name ? (
@@ -383,11 +384,8 @@ function ClientMeta({ data }) {
           {addrLines.map((line, i) => <div key={i}>{line}</div>)}
         </div>
       ) : null}
-      {c.email ? (
-        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{c.email}</div>
-      ) : null}
-      {c.phone ? (
-        <div style={{ fontSize: 14, marginTop: 4, color: TRACK_SURFACE.body }}>{c.phone}</div>
+      {serviceLabel ? (
+        <div style={{ fontSize: 14, marginTop: 6, color: TRACK_SURFACE.body }}>{serviceLabel}</div>
       ) : null}
     </div>
   );
