@@ -60,6 +60,17 @@ describe('annual-prepay year-end notices carry no renewal language', () => {
     expect(blockText).toContain('"url_variable":"customer_portal_url"');
   });
 
+  // The sender passes renewal_date/{term_end} as the LAST covered day of the
+  // current paid year (annual-prepay-renewals.js), so the copy must frame the
+  // date as the year ENDING — "next year starts {date}" would be a day early
+  // (Codex #2702 round 1).
+  test('the date is framed as the plan year ending, never the next year starting', () => {
+    const blockText = JSON.stringify(NEW_EMAIL_VERSION.blocks);
+    expect(blockText).toContain('"label":"Plan year ends","value":"{{renewal_date}}"');
+    expect(blockText).not.toMatch(/start[^"]*\{\{renewal_date\}\}/i);
+    expect(NEW_SMS_BODY).toContain('plan year ends on {term_end}');
+  });
+
   test('the SMS body never says renewal and keeps its variables', () => {
     expect(NEW_SMS_BODY).not.toMatch(/renew/i);
     for (const variable of ['{first_name}', '{term_end}', '{last_service_sentence}']) {

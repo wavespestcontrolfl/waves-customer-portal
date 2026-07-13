@@ -15,7 +15,14 @@
  *      without modification.
  *   2. annual_prepay_renewal_reminder SMS: body reworded (tighten-copy
  *      migration pattern). RENEW/LAPSE/CHANGE were human-triage hints,
- *      not parsed keywords — no inbound handler keys on them.
+ *      not parsed keywords — no inbound handler keys on them. Active A/B
+ *      variants for the key are retired (variant.body renders in place of
+ *      the base body), metadata-marked so down() restores exactly them.
+ *
+ * Date semantics: the sender passes renewal_date/{term_end} as
+ * claimedTerm.term_end — the LAST covered day of the current paid year —
+ * so all copy frames that date as the plan year ENDING, never as the day
+ * the next year starts (Codex #2702: that would read one day early).
  *
  * Internal identifiers (template keys, message_type, workflow names) keep
  * "renewal" — they are not customer-visible and renaming them would churn
@@ -32,7 +39,7 @@ const NEW_EMAIL_VERSION = {
     { type: 'paragraph', content: 'Hello {{first_name}}, your prepaid year with Waves is coming to an end - here is what happens next.' },
     { type: 'details', rows: [
       { label: 'Plan', value: '{{membership_name}}' },
-      { label: 'Next year starts', value: '{{renewal_date}}' },
+      { label: 'Plan year ends', value: '{{renewal_date}}' },
       { label: 'Notice window', value: '{{renewal_notice_window}}' },
       { label: 'Current rate', value: '{{monthly_rate}}' },
       { label: 'Billing cadence', value: '{{billing_cadence}}' },
@@ -46,9 +53,13 @@ const NEW_EMAIL_VERSION = {
 
 const SMS_TEMPLATE_KEY = 'annual_prepay_renewal_reminder';
 
+// metadata flag marking variants THIS migration retired (down() only
+// reactivates rows carrying it, never variants an operator retired).
+const RETIRED_MARKER = 'retired_by_no_renewal_language_migration';
+
 // GSM-7 only; no parsed keywords. Prior body (restored by down()) said
 // "renews on {term_end}" and offered RENEW/LAPSE/CHANGE reply hints.
-const NEW_SMS_BODY = 'Hello {first_name}! Your annual prepaid Waves plan continues for another year on {term_end}.{last_service_sentence}\n\nNo action needed to continue. Want to change or cancel? Just reply and our team will help.\n\nReply STOP to opt out.';
+const NEW_SMS_BODY = 'Hello {first_name}! Your prepaid Waves plan year ends on {term_end}.{last_service_sentence}\n\nNo action needed - your plan continues into the next year. Want to change or cancel? Just reply and our team will help.\n\nReply STOP to opt out.';
 const PRIOR_SMS_BODY = 'Hello {first_name}! Your annual prepaid Waves plan renews on {term_end}.{last_service_sentence}\n\nReply RENEW, LAPSE, or CHANGE and our team will help.\n\nReply STOP to opt out.';
 
 exports.up = async function up(knex) {
@@ -91,6 +102,29 @@ exports.up = async function up(knex) {
       .where({ template_key: SMS_TEMPLATE_KEY })
       .update({ body: NEW_SMS_BODY, updated_at: new Date() });
   }
+
+  // A/B variant bodies render IN PLACE OF the base body (getTemplate prefers
+  // variant.body, selectVariant only serves status 'active'), so an active
+  // variant would keep sending the old "renews"/RENEW/LAPSE/CHANGE copy for
+  // exactly the sends the experiment covers. Variants are distinct authored
+  // copy — a string rewrite can't be verified against the ruling — so retire
+  // them instead, marked in metadata so down() restores only what we retired.
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    const variants = await knex('sms_template_variants')
+      .where({ template_key: SMS_TEMPLATE_KEY, status: 'active' });
+    for (const v of variants) {
+      let metadata = {};
+      try {
+        const parsed = typeof v.metadata === 'string' ? JSON.parse(v.metadata) : v.metadata;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed;
+      } catch { /* start from {} on unparseable shapes */ }
+      await knex('sms_template_variants').where({ id: v.id }).update({
+        status: 'retired',
+        metadata: JSON.stringify({ ...metadata, [RETIRED_MARKER]: true }),
+        updated_at: new Date(),
+      });
+    }
+  }
 };
 
 exports.down = async function down(knex) {
@@ -102,6 +136,25 @@ exports.down = async function down(knex) {
       .where({ template_key: SMS_TEMPLATE_KEY })
       .update({ body: PRIOR_SMS_BODY, updated_at: new Date() });
   }
+
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    const variants = await knex('sms_template_variants')
+      .where({ template_key: SMS_TEMPLATE_KEY, status: 'retired' });
+    for (const v of variants) {
+      let metadata;
+      try {
+        const parsed = typeof v.metadata === 'string' ? JSON.parse(v.metadata) : v.metadata;
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) metadata = parsed;
+      } catch { /* skip rows we can't attribute */ }
+      if (!metadata || metadata[RETIRED_MARKER] !== true) continue;
+      delete metadata[RETIRED_MARKER];
+      await knex('sms_template_variants').where({ id: v.id }).update({
+        status: 'active',
+        metadata: JSON.stringify(metadata),
+        updated_at: new Date(),
+      });
+    }
+  }
 };
 
-exports.__private = { NEW_EMAIL_VERSION, NEW_SMS_BODY, EMAIL_TEMPLATE_KEY, SMS_TEMPLATE_KEY };
+exports.__private = { NEW_EMAIL_VERSION, NEW_SMS_BODY, EMAIL_TEMPLATE_KEY, SMS_TEMPLATE_KEY, RETIRED_MARKER };
