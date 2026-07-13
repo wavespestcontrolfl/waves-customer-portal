@@ -2381,6 +2381,7 @@ export default function DispatchPageV2({
       {projectService && (
         <CreateProjectModal
           theme="light"
+          presentation="sheet"
           defaultCustomerId={projectService.customerId}
           defaultCustomerLabel={projectService.customerName}
           defaultScheduledServiceId={projectService.id}
