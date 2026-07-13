@@ -1507,6 +1507,14 @@ router.get('/week', async (req, res, next) => {
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    // Server-resolved Bill-To, same resolution as the day view (per-job payer,
+    // else the customer default unless pinned self-pay, ACTIVE payers only).
+    // The week payload needs it for the same reason: the checkout sheet must
+    // never present a payer-billed visit's attached invoice as collectible,
+    // and a default-payer visit carries no scheduled_services.payer_id.
+    const effectiveBillToSql = hasSelfPayCol
+      ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
+      : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
 
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
@@ -1519,7 +1527,11 @@ router.get('/week', async (req, res, next) => {
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'bill_to_payer.id as billed_to_payer_id',
+          'bill_to_payer.display_name as billed_to_payer_name',
+          'bill_to_payer.company_name as billed_to_payer_company',
           'scheduled_services.service_id',
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
@@ -1617,6 +1629,14 @@ router.get('/week', async (req, res, next) => {
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
         selfPayOverride: s.self_pay_override === true,
+          // Resolved ACTIVE Bill-To (or null = self-pay) — same shape as the
+          // day payload so the sheets' payer guards work from either view.
+          billedToPayer: s.billed_to_payer_id
+            ? {
+              id: s.billed_to_payer_id,
+              name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
+            }
+            : null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
