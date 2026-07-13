@@ -174,12 +174,16 @@ function buildForecast(forecast) {
  * @param {object}  pestPressure       data.pestPressure (recurring view) | null
  * @param {object}  activity           data.activity (typed view) | null
  * @param {object}  forecast           raw pest-forecast payload (caller-fetched) | null
+ * @param {string}  technicianReport   tech-reviewed AI report copy (caller passes
+ *                                     data.summary only when summarySource is
+ *                                     'technician_report') | null
  */
 function buildPestReportV2({
   premiumExperience,
   pestPressure = null,
   activity = null,
   forecast = null,
+  technicianReport = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -187,7 +191,16 @@ function buildPestReportV2({
   const primaryMove = buildPrimaryMove(premiumExperience.primaryMove);
   const bugFiles = buildBugFiles(premiumExperience.bugFiles);
   const supportingMetric = buildSupportingMetric({ pestPressure, activity });
-  const aiSummary = buildAiSummary(premiumExperience.aiSummaryPersonality);
+  // The tech-reviewed AI report copy is the most visit-specific summary we
+  // have — it takes the hero's summary slot over the deterministic
+  // personality copy. Re-screened here so this pure module never trusts the
+  // caller's validation.
+  const technicianCopy = technicianReport && validateCustomerCopy(String(technicianReport).trim())
+    ? String(technicianReport).trim()
+    : null;
+  const aiSummary = technicianCopy
+    ? { headline: null, body: technicianCopy }
+    : buildAiSummary(premiumExperience.aiSummaryPersonality);
   const forecastCard = buildForecast(forecast);
 
   // Nothing meaningful to show → don't render an empty V2 shell.

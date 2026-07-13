@@ -10,6 +10,7 @@ const {
   reportPdfStorageKey,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
+const { summaryCopySignature } = require('./technician-report-copy');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
@@ -97,6 +98,10 @@ async function renderAndStoreServiceReportPdf(recordId, {
     ? await loadActiveConfig(knex).catch(() => null)
     : providedPestPressureConfig;
   let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
+  // Summary-copy key component (see reports-public direct PDF route): a
+  // technician-report-driven summary changes the storage key so stale
+  // generic-summary PDFs re-render. Immutable per record — no race re-check.
+  const summarySignature = summaryCopySignature(service);
   let pdf;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
@@ -127,7 +132,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
     visibilitySignature = latestVisibilitySignature;
   }
   try {
-    const key = await putReportPdf(recordId, pdf, { visibilitySignature });
+    const key = await putReportPdf(recordId, pdf, {
+      visibilitySignature: visibilitySignature + summarySignature,
+    });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
   } catch (err) {
@@ -146,10 +153,18 @@ async function renderAndStoreServiceReportPdf(recordId, {
 }
 
 async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
-  const service = await knex('service_records').where({ id: recordId }).first('id', 'pdf_storage_key');
+  // technician_notes + service_data ride along for the summary-copy key
+  // component — the expected key must match what renderAndStore writes.
+  const service = await knex('service_records')
+    .where({ id: recordId })
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data');
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
-  const expectedPdfStorageKey = service?.id ? reportPdfStorageKey(service.id, { visibilitySignature }) : null;
+  const expectedPdfStorageKey = service?.id
+    ? reportPdfStorageKey(service.id, {
+      visibilitySignature: visibilitySignature + summaryCopySignature(service),
+    })
+    : null;
   const stored = service?.pdf_storage_key === expectedPdfStorageKey
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;

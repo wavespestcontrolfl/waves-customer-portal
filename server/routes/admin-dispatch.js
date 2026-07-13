@@ -59,6 +59,7 @@ const {
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
+const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const CompanionCompletions = require('../services/service-report/companion-completions');
 const {
   resolveProjectCompletionBilling,
@@ -3221,6 +3222,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
 
+        // Tech-reviewed AI report copy: when the submitted notes are the
+        // "Generate AI report" output (the WHAT WE DID / WHAT WE FOUND shape
+        // the tech reviewed in the notes box), that prose was drafted as
+        // customer-facing copy and becomes the typed snapshot's Today's
+        // Result body. Banned wording introduced by hand edits drops the
+        // copy with a log line — the deterministic template remains the
+        // guaranteed body and the completion is never blocked on it.
+        let technicianReportBody = null;
+        if (!isIncompleteVisit) {
+          const technicianReport = technicianReportCustomerCopy(technicianNotes);
+          if (technicianReport?.violations?.length) {
+            logger.warn(`[completion] technician AI report copy dropped (banned: ${technicianReport.violations.join(', ')})`);
+          }
+          technicianReportBody = technicianReport?.body || null;
+        }
+
         await db.transaction(async (trx) => {
           const completionEndedAt = new Date();
           const completionServiceDate = etDateString(completionEndedAt);
@@ -3338,6 +3355,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               visitSequence: typedVisitSequence,
               activity: typedActivity,
               photoSummary: photoSummaryText || null,
+              // Primary section only — the AI report describes this visit's
+              // primary work; companion sections keep their own typed copy.
+              technicianReportBody,
             });
           }
           // Companion typed sections: one immutable snapshot per validated

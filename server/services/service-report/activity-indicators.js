@@ -28,7 +28,11 @@ const {
 // rendering with their persisted labels.
 const SCHEMA_VERSION = 2;
 const COPY_MAP_VERSION = 2;
-const SUMMARY_TEMPLATE_VERSION = 2;
+// Summary template v3: the generic non-gauge default composition of
+// buildTodaysResult accepts the tech-reviewed AI report copy as the body
+// (bodySource 'technician_report'); zero states and every owner story keep
+// template copy, and template-only output is unchanged from v2.
+const SUMMARY_TEMPLATE_VERSION = 3;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -1712,6 +1716,12 @@ function buildTodaysResult({
   chips = [],
   activity = null,
   visitSequence = 1,
+  // Tech-reviewed AI report copy (the completion form's "Generate AI report"
+  // output, parsed + banned-copy-screened by the complete route via
+  // technician-report-copy.js). Only the generic non-gauge default
+  // composition below uses it — zero states and every owner-specified story
+  // branch keep their approved wording.
+  technicianReportBody = null,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
   // Sectioned-checklist types compose "what we did" from their selections
@@ -2072,7 +2082,11 @@ function buildTodaysResult({
     };
   }
 
-  // Non-gauge types (one-shot treatments + pest inspection).
+  // Non-gauge types (one-shot treatments + pest inspection). The zero state
+  // deliberately keeps the template body even when AI report copy exists
+  // (Codex P2 #2709): the draft can predate a late flip of the activity
+  // select to "None observed", and a body describing activity under the
+  // "No active signs" headline would contradict the tech's typed zero.
   const zeroSeverity = ['None observed', 'No activity'].includes(
     String(values.severity || values.activity_level || '')
   );
@@ -2083,13 +2097,20 @@ function buildTodaysResult({
       nextStep,
     };
   }
+  // The default composition has no owner-mandated body story, so it is the
+  // one place the technician's reviewed AI report copy replaces the template
+  // body (the one-time pest family — re-services, cleanouts, bee/wasp,
+  // tick — lands here on any non-zero activity). Headline stays
+  // deterministic; bodySource is stamped only when the AI copy is used so
+  // template snapshots stay byte-identical.
   return {
     // The label suffix reads awkwardly in a headline ("Palm Injection
     // Summary completed today") — the approved golden-fixture style is
     // "Palm Injection Treatment completed today."
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today.`,
-    body: `${whatWeDid} ${nextStep}`,
+    body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
+    ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
   };
 }
 
@@ -2110,6 +2131,7 @@ function buildTypedReportSnapshot({
   visitSequence = 1,
   activity = null,
   photoSummary = null,
+  technicianReportBody = null,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -2159,6 +2181,7 @@ function buildTypedReportSnapshot({
     chips: nextStepChips,
     activity,
     visitSequence,
+    technicianReportBody,
   });
 
   return {

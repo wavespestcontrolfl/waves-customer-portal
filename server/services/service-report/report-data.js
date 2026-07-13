@@ -12,6 +12,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
+const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { fetchServiceWeekWeather } = require('./application-conditions');
@@ -2705,11 +2706,33 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   //    recap, same as the pressure card.
   // Best-effort: never blocks the report.
   let visitSummary = structured.customerRecap || '';
+  let visitSummarySource = visitSummary ? 'recap' : null;
+  // Tech-reviewed AI report copy ("Generate AI report" → notes, parsed by
+  // its WHAT WE DID / WHAT WE FOUND shape and banned-copy-screened) is the
+  // fullest customer-facing account of the visit — it beats the SMS-style
+  // recap as the report summary. Typed reports switch only when the frozen
+  // snapshot's Today's Result body came from the technician report, so the
+  // legacy Visit Summary section (rendered whenever Pest V2 is absent)
+  // matches the card above it instead of reverting to the generic recap
+  // (Codex P2 #2709) — and a body the snapshot rejected (zero state, old
+  // snapshot) never resurfaces via the summary.
+  {
+    const technicianReport = technicianReportCustomerCopy(service.technician_notes);
+    const drivesSummary = technicianReport?.body
+      && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
+    if (drivesSummary) {
+      visitSummary = technicianReport.body;
+      visitSummarySource = 'technician_report';
+    }
+  }
   if (
     serviceLine === 'pest'
     && !typedSnapshot
     && pestPressure
     && visitSummary
+    // The AI report is already the rich, reviewed version of this visit —
+    // reweaving it through the narrative would only risk distorting it.
+    && visitSummarySource !== 'technician_report'
     && opts.mode === 'live'
     && process.env.PEST_VISIT_SUMMARY_NARRATIVE === 'true'
   ) {
@@ -2777,6 +2800,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       onSiteMinutes: onSiteMin,
     },
     summary: visitSummary,
+    // 'technician_report' when summary is the tech-reviewed AI report copy,
+    // 'recap' for the completion recap — lets response wrappers (Pest V2
+    // hero) surface the reviewed copy without re-parsing the notes.
+    summarySource: visitSummarySource,
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {

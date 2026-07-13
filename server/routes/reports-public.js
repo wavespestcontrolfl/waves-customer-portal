@@ -91,6 +91,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
+const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -299,6 +300,12 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
         pestPressure: data.pestPressure,
         activity: data.activity,
         forecast,
+        // Tech-reviewed AI report copy. Typed reports are gated out here —
+        // their Today's Result card already renders the same copy, so the
+        // hero showing it too would print the text twice on one page.
+        technicianReport: !data.typedReport && data.summarySource === 'technician_report'
+          ? data.summary
+          : null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
@@ -908,7 +915,16 @@ router.get('/:token', async (req, res, next) => {
       // the new visibility decision applied.
       let pestPressureConfig = await loadActiveConfig(db).catch(() => null);
       let visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
-      const expectedPdfStorageKey = reportPdfStorageKey(service.id, { visibilitySignature });
+      // Summary-copy key component: when the technician-report copy drives
+      // the rendered summary, the suffix changes the expected key so a PDF
+      // cached before this feature (generic summary) re-renders instead of
+      // being served stale. Recap-driven records keep their old keys — no
+      // mass cache bust. Derived from the immutable record, so no re-check
+      // is needed in the render race loop below.
+      const summarySignature = summaryCopySignature(service);
+      const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
+        visibilitySignature: visibilitySignature + summarySignature,
+      });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
         : null;
@@ -960,7 +976,9 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        const key = await putReportPdf(service.id, pdf, { visibilitySignature });
+        const key = await putReportPdf(service.id, pdf, {
+          visibilitySignature: visibilitySignature + summarySignature,
+        });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
         logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);

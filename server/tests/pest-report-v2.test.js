@@ -123,3 +123,25 @@ describe('buildPestReportV2 — empty guards', () => {
     expect(buildPestReportV2({ premiumExperience: {} })).toBeNull();
   });
 });
+
+describe('buildPestReportV2 — technician AI report copy in the hero summary slot', () => {
+  const REPORT = 'A non-repellent residual was applied along the foundation line and garage entry. Ant activity was concentrated near the front walkway and should taper over the next one to two weeks.';
+
+  it('uses the tech-reviewed report over the personality copy', () => {
+    const out = buildPestReportV2({ premiumExperience: premium(), technicianReport: REPORT });
+    expect(out.aiSummary).toEqual({ headline: null, body: REPORT });
+  });
+
+  it('rejects unsafe report copy and falls back to the personality copy', () => {
+    const out = buildPestReportV2({
+      premiumExperience: premium(),
+      technicianReport: 'The infestation is eliminated and your home is guaranteed pest-free.',
+    });
+    expect(out.aiSummary.body).toBe('No interior activity documented today.');
+  });
+
+  it('keeps the personality copy when no report is passed', () => {
+    const out = buildPestReportV2({ premiumExperience: premium() });
+    expect(out.aiSummary.body).toBe('No interior activity documented today.');
+  });
+});
