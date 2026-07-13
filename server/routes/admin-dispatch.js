@@ -1357,22 +1357,13 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
     }
     // Same pre-write cap rejection as the completion route — a silently
     // skipped pin would leave the office view claiming a station the
-    // registry never got.
-    const createCount = entries.filter((entry) => entry && entry.retire !== true
-      && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null).length;
-    if (createCount) {
-      const retireCount = entries.filter((entry) => entry && entry.retire === true).length;
-      const activeRow = await db('termite_stations')
-        .where({ customer_id: customer.id, is_active: true })
-        .count('id as count')
-        .first()
-        .catch(() => null);
-      if ((Number(activeRow?.count) || 0) - retireCount + createCount > TermiteStations.MAX_ACTIVE_STATIONS) {
-        return res.status(400).json({
-          error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — retire stations before adding more`,
-          code: 'termite_stations_cap',
-        });
-      }
+    // registry never got. Shared helper keeps the netting arithmetic
+    // aligned with the sync (validated retires only, replay-aware creates).
+    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — retire stations before adding more`,
+        code: 'termite_stations_cap',
+      });
     }
 
     const summary = await db.transaction(async (trx) => {
@@ -2413,27 +2404,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Station cap must reject BEFORE the completion commits: the typed
     // counts were auto-filled from every pin the tech can see, so a pin
     // silently dropped later by the fail-soft sync's cap guard would freeze
-    // findings the registry and customer map contradict. Net of retires in
-    // the same payload (replace-at-cap stays legal). The sync-time skip
-    // remains as the hard guard for crafted payloads.
-    if (Array.isArray(termiteStations) && svc.customer_id) {
-      const stationCreateCount = termiteStations.filter((entry) => entry && entry.retire !== true
-        && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null).length;
-      if (stationCreateCount) {
-        const stationRetireCount = termiteStations.filter((entry) => entry && entry.retire === true).length;
-        const activeStationRow = await db('termite_stations')
-          .where({ customer_id: svc.customer_id, is_active: true })
-          .count('id as count')
-          .first()
-          .catch(() => null);
-        const activeStationCount = Number(activeStationRow?.count) || 0;
-        if (activeStationCount - stationRetireCount + stationCreateCount > TermiteStations.MAX_ACTIVE_STATIONS) {
-          return res.status(400).json({
-            error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
-            code: 'termite_stations_cap',
-          });
-        }
-      }
+    // findings the registry and customer map contradict. The helper nets
+    // the payload exactly the way the sync will (validated retires only,
+    // replay-aware creates), so idempotent resumes of an already-committed
+    // completion pass straight through to the stored-response path.
+    if (Array.isArray(termiteStations) && svc.customer_id
+      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
+        code: 'termite_stations_cap',
+      });
     }
 
     // Stale-recap guard: a live job force-rescheduled to a future day

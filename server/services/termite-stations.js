@@ -29,12 +29,13 @@ const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const STATION_STATUSES = ['ok', 'activity', 'serviced', 'inaccessible'];
-// Must exceed MAX_ACTIVE_STATIONS with headroom: the completion submit sends
-// one status entry for EVERY active station (plus any retires/creates in the
-// same payload), so a cap below the active-station cap would make a fully
-// mapped property impossible to complete (Codex P2, PR #2714).
-const MAX_STATION_ENTRIES = 120;
+// Sized to the worst LEGAL payload, not the active cap: a full relayout of a
+// capped property sends a status for every surviving station plus a retire
+// AND a create for every replaced one — up to 3 × MAX_ACTIVE_STATIONS
+// entries (Codex P2 ×2, PR #2714). This is purely a request-sanity bound;
+// the active cap is enforced by stationCapWouldOverflow + the sync guard.
 const MAX_ACTIVE_STATIONS = 80;
+const MAX_STATION_ENTRIES = MAX_ACTIVE_STATIONS * 3;
 const MAX_ACTION_ENTRIES = 10;
 
 function isStationMapReportEnabled() {
@@ -68,6 +69,17 @@ function normalizeLabel(value) {
   if (value == null) return null;
   const text = String(value).trim().slice(0, 120);
   return text || null;
+}
+
+// Exact-position identity for the replay-dedupe and occupancy guards: a
+// resumed body carries byte-identical shapes, so identical normalized
+// coordinates mean "the same pin", never two stations in one hole.
+function positionKey(shape) {
+  const parsed = typeof shape === 'string'
+    ? (() => { try { return JSON.parse(shape); } catch { return null; } })()
+    : shape;
+  if (!parsed || parsed.cx == null || parsed.cy == null) return null;
+  return `${Number(parsed.cx)}:${Number(parsed.cy)}`;
 }
 
 function sanitizeActions(value) {
@@ -131,6 +143,48 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
 }
 
 /**
+ * Pre-commit active-cap check shared by /complete and the office PUT. Nets
+ * the payload against the customer's ACTIVE rows with the SAME arithmetic
+ * the sync will apply — that alignment is what makes the 400 trustworthy
+ * (anything that passes here cannot be silently cap-skipped post-commit):
+ *  - only retires that target a real active station free a slot (the sync
+ *    skips bogus/foreign ids, so they must not free one here);
+ *  - a create at an exact active position is the sync's replay/occupied
+ *    dedupe and adds no row — EXCEPT when that occupant is itself retired
+ *    in this payload (same-hole replacement), which genuinely inserts.
+ * Never runs before the route's replay machinery needs it to be safe: a
+ * resumed body's creates all match the positions the first pass persisted,
+ * so they net to zero and the retry sails through to the stored-response
+ * path instead of 400ing an already-committed completion.
+ */
+async function stationCapWouldOverflow(db, customerId, entries = []) {
+  const list = Array.isArray(entries) ? entries : [];
+  const creates = list.filter((entry) => entry && entry.retire !== true
+    && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null);
+  if (!creates.length) return false;
+  const activeRows = await db('termite_stations')
+    .where({ customer_id: customerId, is_active: true })
+    .select('id', 'geometry_image')
+    .catch(() => null);
+  if (!activeRows) return false; // pre-migration — the sync no-ops anyway
+  const activeIds = new Set(activeRows.map((row) => String(row.id)));
+  const validRetireIds = new Set(list
+    .filter((entry) => entry && entry.retire === true && entry.id != null
+      && activeIds.has(String(entry.id)))
+    .map((entry) => String(entry.id)));
+  const survivingPositions = new Set(activeRows
+    .filter((row) => !validRetireIds.has(String(row.id)))
+    .map((row) => positionKey(row.geometry_image))
+    .filter(Boolean));
+  const effectiveCreates = creates.filter((entry) => {
+    const clean = sanitizeStationShape(entry.shape);
+    const key = clean ? positionKey(clean) : null;
+    return !key || !survivingPositions.has(key);
+  }).length;
+  return activeRows.length - validRetireIds.size + effectiveCreates > MAX_ACTIVE_STATIONS;
+}
+
+/**
  * Applies station registry writes (create / move / relabel / retire) for a
  * customer. Runs on the provided trx/knex; callers own transaction scope.
  *
@@ -173,13 +227,6 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
   // stations. A resumed body carries byte-identical shapes, so an active
   // station at the exact same normalized position IS that create: reuse it
   // (two physical stations never share one hole in the ground).
-  const positionKey = (shape) => {
-    const parsed = typeof shape === 'string'
-      ? (() => { try { return JSON.parse(shape); } catch { return null; } })()
-      : shape;
-    if (!parsed || parsed.cx == null || parsed.cy == null) return null;
-    return `${Number(parsed.cx)}:${Number(parsed.cy)}`;
-  };
   const activeByPosition = new Map();
   for (const row of activeById.values()) {
     const key = positionKey(row.geometry_image);
@@ -515,6 +562,7 @@ module.exports = {
   sanitizeStationShape,
   validateStationEntriesBody,
   profileAllowsStationSync,
+  stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,
   loadStationsForPropertyMap,

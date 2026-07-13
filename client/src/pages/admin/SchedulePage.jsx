@@ -7133,6 +7133,12 @@ export function StationMarkingStep({
     const pt = svgPointFromEvent(evt);
     if (!pt) return;
     if (armedMoveKey) {
+      // Same occupied-pin rule as add mode: dropping the moved station on
+      // ANOTHER pin would be skipped server-side (position-occupied) while
+      // the tech believes it moved — ignore the tap and stay armed. A tap
+      // back on the station's own pin just re-places it.
+      const occupied = nearestPin(pt);
+      if (occupied && occupied.key !== armedMoveKey) return;
       onMoveStation(armedMoveKey, { cx: pt.x, cy: pt.y });
       setSelectedKey(armedMoveKey);
       setArmedMoveKey(null);
@@ -7144,7 +7150,10 @@ export function StationMarkingStep({
       // auto counts would claim a pin the server dedupes away). Ignore it —
       // the tech moves a thumb-width away or exits add mode to select.
       if (nearestPin(pt)) return;
-      if (pinned.length >= maxStations) return;
+      // Cap gating counts EVERY non-retired station, stale (drift-hidden)
+      // pins included — they hold registry slots even though they don't
+      // render, and an add past the real cap would 400 on save.
+      if (stations.length >= maxStations) return;
       // stay in add mode — installs drop many pins in a row
       onAddStation({ cx: pt.x, cy: pt.y });
       return;
@@ -7245,17 +7254,17 @@ export function StationMarkingStep({
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
         <button
           type="button"
-          disabled={disabled || (!addMode && pinned.length >= maxStations)}
+          disabled={disabled || (!addMode && stations.length >= maxStations)}
           onClick={() => {
             if (disabled) return;
-            if (!addMode && pinned.length >= maxStations) return;
+            if (!addMode && stations.length >= maxStations) return;
             setAddMode((v) => !v);
             setArmedMoveKey(null);
             setSelectedKey(null);
           }}
           style={chipStyle(addMode, accent)}
         >
-          {addMode ? "Done adding" : pinned.length >= maxStations ? `Station cap (${maxStations})` : "Add stations"}
+          {addMode ? "Done adding" : stations.length >= maxStations ? `Station cap (${maxStations})` : "Add stations"}
         </button>
         {selected && !addMode && (
           <>

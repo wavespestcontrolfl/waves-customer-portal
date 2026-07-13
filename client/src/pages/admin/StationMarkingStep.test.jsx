@@ -184,6 +184,38 @@ describe('StationMarkingStep', () => {
     expect(onMoveStation).toHaveBeenCalledWith('st-1', { cx: 0.75, cy: 0.25 });
   });
 
+  it('an armed move ignores taps on OTHER pins (server would skip them as position-occupied)', () => {
+    const onMoveStation = vi.fn();
+    const { container } = render(
+      <StationMarkingStep
+        {...baseProps}
+        stations={[station('st-1', 1, 0.25, 0.5), station('st-2', 2, 0.75, 0.5)]}
+        onMoveStation={onMoveStation}
+      />,
+    );
+    const svg = stubSvgRect(container);
+    firePointer(svg, 'pointerup', 160, 170); // select station 1
+    fireEvent.click(screen.getByRole('button', { name: 'Move pin' }));
+    firePointer(svg, 'pointerup', 480, 170); // dead on station 2 — ignored, stays armed
+    expect(onMoveStation).not.toHaveBeenCalled();
+    firePointer(svg, 'pointerup', 480, 85); // empty ground — moves
+    expect(onMoveStation).toHaveBeenCalledWith('st-1', { cx: 0.75, cy: 0.25 });
+  });
+
+  it('the add-mode cap counts stale (drift-hidden) stations — they hold registry slots', () => {
+    render(
+      <StationMarkingStep
+        {...baseProps}
+        stations={[
+          station('st-1', 1, 0.25, 0.5),
+          { key: 'st-2', id: 'st-2', number: 2, label: null, shape: null, stale: true },
+        ]}
+        maxStations={2}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Station cap (2)' })).toBeDisabled();
+  });
+
   it('stale stations surface a re-pin affordance that places by tap', () => {
     const onMoveStation = vi.fn();
     const { container } = render(

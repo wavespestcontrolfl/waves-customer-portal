@@ -14,9 +14,11 @@
 
 const {
   STATION_STATUSES,
+  MAX_ACTIVE_STATIONS,
   sanitizeStationShape,
   validateStationEntriesBody,
   profileAllowsStationSync,
+  stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,
   loadStationsForPropertyMap,
@@ -45,6 +47,7 @@ function makeFakeDb({ stations = [], checks = [] } = {}) {
         return builder;
       },
       orderBy: () => builder,
+      select: () => builder,
       insert(row) {
         const created = { id: `${table}-${nextId += 1}`, is_active: true, ...row };
         rows.push(created);
@@ -112,19 +115,54 @@ test('validateStationEntriesBody rejects malformed payloads with 400-material me
     { id: 'st-1', status: 'ok' },
     { id: 'st-1', status: 'activity' },
   ])).toMatch(/more than one entry/);
-  const tooMany = Array.from({ length: 121 }, () => ({ shape: pin(0.5, 0.5) }));
-  expect(validateStationEntriesBody(tooMany)).toMatch(/at most 120/);
+  const tooMany = Array.from({ length: 241 }, () => ({ shape: pin(0.5, 0.5) }));
+  expect(validateStationEntriesBody(tooMany)).toMatch(/at most 240/);
 });
 
-test('entry cap covers a fully-mapped property (active cap + retires in one payload)', () => {
-  // 80 active statuses + a retire + a create must fit — the completion
-  // submit sends one status entry per active station.
-  const fullProperty = [
-    ...Array.from({ length: 80 }, (_, i) => ({ id: `st-${i}`, status: 'ok' })),
-    { id: 'st-old', retire: true },
-    { shape: pin(0.5, 0.5), status: 'ok' },
+test('entry cap covers the worst legal payload: a half-relayout of a capped property', () => {
+  // 39 surviving statuses + 41 retires + 41 creates (121 entries) is a
+  // legal cap-neutral replacement save and must validate.
+  const relayout = [
+    ...Array.from({ length: 39 }, (_, i) => ({ id: `st-keep-${i}`, status: 'ok' })),
+    ...Array.from({ length: 41 }, (_, i) => ({ id: `st-old-${i}`, retire: true })),
+    ...Array.from({ length: 41 }, (_, i) => ({ shape: pin(0.01 + i * 0.02, 0.9), status: 'ok' })),
   ];
-  expect(validateStationEntriesBody(fullProperty)).toBeNull();
+  expect(validateStationEntriesBody(relayout)).toBeNull();
+});
+
+test('cap netting: only VALID retires free slots, replay creates net to zero, replacements count', async () => {
+  const atCap = Array.from({ length: MAX_ACTIVE_STATIONS }, (_, i) => ({
+    id: `st-${i}`, customer_id: CUSTOMER, station_number: i + 1, is_active: true, geometry_image: pin(0.01 + (i % 40) * 0.02, i < 40 ? 0.2 : 0.8),
+  }));
+  const { db } = makeFakeDb({ stations: atCap });
+
+  // a fresh 81st pin at a new spot overflows
+  expect(await stationCapWouldOverflow(db, CUSTOMER, [
+    { shape: pin(0.5, 0.55), status: 'ok' },
+  ])).toBe(true);
+  // a bogus/foreign retire must NOT free the slot (the sync will skip it)
+  expect(await stationCapWouldOverflow(db, CUSTOMER, [
+    { id: 'st-ghost', retire: true },
+    { shape: pin(0.5, 0.55), status: 'ok' },
+  ])).toBe(true);
+  // a VALID retire + create (replacement at a new spot) is cap-neutral
+  expect(await stationCapWouldOverflow(db, CUSTOMER, [
+    { id: 'st-0', retire: true },
+    { shape: pin(0.5, 0.55), status: 'ok' },
+  ])).toBe(false);
+  // a resumed body: the create sits at an ACTIVE station's exact position
+  // (the first pass already inserted it) → nets to zero, retry passes
+  expect(await stationCapWouldOverflow(db, CUSTOMER, [
+    { shape: pin(0.01, 0.2), status: 'ok' },
+  ])).toBe(false);
+  // same-hole replacement: the retired station's position does NOT shield
+  // the create — it genuinely inserts, so retire+create at that spot plus
+  // a second new pin overflows
+  expect(await stationCapWouldOverflow(db, CUSTOMER, [
+    { id: 'st-0', retire: true },
+    { shape: pin(0.01, 0.2), status: 'ok' },
+    { shape: pin(0.5, 0.55), status: 'ok' },
+  ])).toBe(true);
 });
 
 test('office mode (allowStatus: false) rejects statuses', () => {
