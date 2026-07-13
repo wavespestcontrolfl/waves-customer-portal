@@ -1166,6 +1166,11 @@ export default function DispatchPageV2({
   // report opens right here in the schedule — the same interaction as the
   // pest CompletionPanel — instead of bouncing to the Jobs page.
   const [continueProjectId, setContinueProjectId] = useState(null);
+  // The visit behind the open report — powers the appointment-details
+  // handoff (cancel/no-show/reschedule/rain-out/price) from the report
+  // surfaces, mirroring the pest CompletionPanel's Details pill. Set and
+  // cleared together with continueProjectId.
+  const [continueProjectService, setContinueProjectService] = useState(null);
   // ProjectDetail needs the types registry for form labels/fields; fetched
   // once on first open, then cached for the session.
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
@@ -1406,6 +1411,7 @@ export default function DispatchPageV2({
       if (service?.linkedProject?.id) {
         // Open the existing report in place — no Jobs-page bounce.
         setContinueProjectId(service.linkedProject.id);
+        setContinueProjectService(service);
         return;
       }
       setProjectService(service);
@@ -2394,13 +2400,29 @@ export default function DispatchPageV2({
               ? [projectService.completionProfile.projectType]
               : null
           }
+          onViewDetails={
+            isMobile
+              ? () => {
+                  // Pest-completion parity: swap the report sheet for the
+                  // appointment detail sheet (cancel / no-show / reschedule /
+                  // rain-out / price edit).
+                  const svc = projectService;
+                  setProjectService(null);
+                  setDetailService(svc);
+                }
+              : undefined
+          }
           onClose={() => setProjectService(null)}
           onCreated={(p) => {
+            const svc = projectService;
             setProjectService(null);
             fetchSchedule(date);
             // Chain straight into the report editor so fill → review → send
             // all happens without leaving the schedule.
-            if (p?.id) setContinueProjectId(p.id);
+            if (p?.id) {
+              setContinueProjectId(p.id);
+              setContinueProjectService(svc);
+            }
           }}
         />
       )}
@@ -2409,6 +2431,7 @@ export default function DispatchPageV2({
           className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
           onClick={() => {
             setContinueProjectId(null);
+            setContinueProjectService(null);
             fetchSchedule(date);
           }}
         >
@@ -2416,11 +2439,31 @@ export default function DispatchPageV2({
             className="max-w-4xl mx-auto my-6 px-4"
             onClick={(e) => e.stopPropagation()}
           >
+            {isMobile && continueProjectService && (
+              <div className="flex justify-end mb-2">
+                <button
+                  type="button"
+                  className="h-9 rounded-full bg-white border border-hairline border-zinc-200 text-13 font-medium text-ink-primary px-4"
+                  onClick={() => {
+                    // Pest-completion parity: appointment actions (cancel /
+                    // no-show / reschedule / rain-out / price edit) for the
+                    // visit behind this report.
+                    const svc = continueProjectService;
+                    setContinueProjectId(null);
+                    setContinueProjectService(null);
+                    setDetailService(svc);
+                  }}
+                >
+                  Details
+                </button>
+              </div>
+            )}
             <ProjectDetail
               projectId={continueProjectId}
               typesRegistry={projectTypesRegistry}
               onClose={() => {
                 setContinueProjectId(null);
+                setContinueProjectService(null);
                 fetchSchedule(date);
               }}
               onChanged={() => fetchSchedule(date)}

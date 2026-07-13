@@ -220,6 +220,11 @@ export default function CreateProjectModal({
   // context locked (no type/customer pickers, no title field) — the exact
   // same fields and save behavior, presented like the pest completion.
   presentation = 'modal',
+  // Sheet-mode parity with the pest CompletionPanel's top-right Details
+  // pill (owner ask 2026-07-13): opens the appointment detail sheet
+  // (cancel / no-show / reschedule / rain-out / price edit) for the linked
+  // visit. Caller-owned, rendered only when provided.
+  onViewDetails = null,
 }) {
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
@@ -1029,15 +1034,29 @@ export default function CreateProjectModal({
                 : 'Inspection or documentation-heavy job'}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => !saving && onClose?.()}
-            aria-label="Close"
-            style={{
-              background: 'transparent', border: 'none', color: P.muted,
-              fontSize: 24, cursor: 'pointer', padding: '4px 10px',
-            }}
-          >×</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {isSheet && onViewDetails && (
+              <button
+                type="button"
+                onClick={() => !saving && onViewDetails()}
+                style={{
+                  height: 36, minWidth: 72, borderRadius: 999,
+                  background: P.card, border: `1px solid ${P.border}`,
+                  color: P.text, fontSize: 13, fontWeight: wMed,
+                  cursor: 'pointer', padding: '0 14px',
+                }}
+              >Details</button>
+            )}
+            <button
+              type="button"
+              onClick={() => !saving && onClose?.()}
+              aria-label="Close"
+              style={{
+                background: 'transparent', border: 'none', color: P.muted,
+                fontSize: 24, cursor: 'pointer', padding: '4px 10px',
+              }}
+            >×</button>
+          </div>
         </div>
 
         {/* Body — in sheet mode this is the scroll region (header/footer pinned) */}
