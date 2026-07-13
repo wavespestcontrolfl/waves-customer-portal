@@ -6,7 +6,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { hasConsentFor, consentVersionQualifiesForEnrollment } = require('../services/payment-method-consents');
+const { hasConsentFor, hasEnrollmentScopedConsent, consentVersionQualifiesForEnrollment } = require('../services/payment-method-consents');
 
 function qb(rows) {
   const q = {};
@@ -60,5 +60,42 @@ describe('hasConsentFor', () => {
     expect(await hasConsentFor('cust-1', 'pm_x')).toBe(false);
     expect(await hasConsentFor(null, 'pm_x')).toBe(false);
     expect(await hasConsentFor('cust-1', null)).toBe(false);
+  });
+});
+
+// The auto-satisfy authority (findConsentedChargeableCard) requires an
+// ENROLLMENT-SCOPED consent: the card-hold capture UI only authorizes the
+// specific visit's completion charge + no-show fee, so its rows must never
+// let a later recurring accept skip the Auto Pay checkbox (Codex #2680 r5).
+describe('hasEnrollmentScopedConsent', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('a v8+ estimate_card_hold row alone does NOT qualify', async () => {
+    db.mockImplementation(() => qb([
+      { consent_text_version: 'v8_2026-06-17', source: 'estimate_card_hold' },
+    ]));
+    expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
+  });
+
+  test('a v8+ consent from any save-and-charge surface qualifies', async () => {
+    for (const source of ['pay_page', 'portal_add_card', 'estimate_accept', 'onboarding']) {
+      db.mockImplementation(() => qb([{ consent_text_version: 'v9_2026-07-12', source }]));
+      expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(true);
+    }
+  });
+
+  test('a hold row does not poison a pm that ALSO carries a real consent', async () => {
+    db.mockImplementation(() => qb([
+      { consent_text_version: 'v8_2026-06-17', source: 'estimate_card_hold' },
+      { consent_text_version: 'v8_2026-06-17', source: 'pay_page' },
+    ]));
+    expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(true);
+  });
+
+  test('legacy versions never qualify regardless of source', async () => {
+    db.mockImplementation(() => qb([
+      { consent_text_version: 'v7_2026-01-02', source: 'pay_page' },
+    ]));
+    expect(await hasEnrollmentScopedConsent('cust-1', 'pm_x')).toBe(false);
   });
 });

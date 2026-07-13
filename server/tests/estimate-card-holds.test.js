@@ -69,6 +69,7 @@ const {
   cardHoldCancelPreview,
   cardHoldReminderLine,
   cardHoldReminderNote,
+  recordCardHoldHeld,
   chargeCardHoldForRecapCompletion,
   settleNoShowFee,
   _private: { cardHoldIntentMatchesEstimate },
@@ -89,7 +90,7 @@ function stubDb(firstResults) {
   const queue = Array.isArray(firstResults) ? [...firstResults] : [firstResults];
   mockDbHandler = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
+    for (const m of ['where', 'whereNot', 'whereNull', 'whereNotNull', 'whereIn', 'andWhere', 'orWhere', 'orderBy', 'modify', 'select']) {
       chain[m] = jest.fn(() => chain);
     }
     chain.first = jest.fn(() => {
@@ -279,6 +280,23 @@ describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Pha
   it("'' on a lookup error — a reminder must never fail on the policy clause", async () => {
     stubDb(new Error('db down'));
     expect(await cardHoldReminderLine('svc1')).toBe('');
+  });
+});
+
+describe('recordCardHoldHeld — saved-method holds carry no SetupIntent (spec §3.2)', () => {
+  it('records a hold with a null SetupIntent (fresh saved-method hold) without throwing', async () => {
+    stubDb([null]); // no existing SI-less held row → insert path
+    await expect(recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    })).resolves.toBeUndefined();
+  });
+  it('updates the existing SI-less held row on a retried accept (no duplicate holds)', async () => {
+    stubDb([{ id: 'hold-existing' }]); // existing SI-less held row → update path
+    await expect(recordCardHoldHeld({
+      estimateId: 'est1', customerId: 'cust1', scheduledServiceId: 'svc1',
+      setupIntentId: null, paymentMethodId: 'pm_saved',
+    })).resolves.toBeUndefined();
   });
 });
 

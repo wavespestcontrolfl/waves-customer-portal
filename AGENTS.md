@@ -313,6 +313,20 @@ finding and warns on P1. Reviewers must return JSON matching
   with metadata-pinned purpose/estimate id, NO money captured at booking —
   the saved card is charged on completion and a flat no-show fee only;
   dark behind ONE_TIME_CARD_HOLD).
+  `/api/public/estimates/:token/recurring-card-intent` (recurring-accept
+  Auto Pay card per docs/card-on-file-booking-build-spec.md — card to book,
+  deposit retired, charge on completion only; estimate token format gate,
+  generic 404, 10 req/min limit, terminal/expired rejection, mirrors the
+  accept-time quote gate, 409 for exempt policies — one-time / invoice-mode
+  / prepay-annual / existing plan member / payer-billed / already-on-Auto-
+  Pay / saved consented card (auto-satisfy: existing customers are never
+  re-asked) — customerless SetupIntent with metadata-pinned purpose
+  `estimate_recurring_card`, NO money captured at booking; accept-time
+  enrollment (consent row + enrollConsentedMethod) turns on Auto Pay so
+  completed applications auto-charge, capped at the accepted per-visit
+  amount (above-quote invoices route to office review instead of
+  auto-charging); dark behind RECURRING_CARD_ON_FILE, and
+  ESTIMATE_DEPOSIT_REQUIRED is unset only AFTER this lights).
   `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
   per-service details-packet PDF for the estimate view's "full details"
   buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —

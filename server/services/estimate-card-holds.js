@@ -221,9 +221,11 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
   // /card-hold-intent minted it. Only fall back to live config if that row is
   // somehow absent, so a pricing_config change between modal-open and accept
   // never moves the fee the customer consented to.
-  const existing = await trx('estimate_card_holds')
-    .where({ stripe_setup_intent_id: setupIntentId })
-    .first('no_show_fee_amount', 'cancel_window_hours');
+  const existing = setupIntentId
+    ? await trx('estimate_card_holds')
+      .where({ stripe_setup_intent_id: setupIntentId })
+      .first('no_show_fee_amount', 'cancel_window_hours')
+    : null;
   const noShowFee = existing?.no_show_fee_amount != null ? Number(existing.no_show_fee_amount) : cardHoldNoShowFee();
   const windowHours = existing?.cancel_window_hours != null ? Number(existing.cancel_window_hours) : cardHoldCancelWindowHours();
   const fields = {
@@ -237,10 +239,27 @@ async function recordCardHoldHeld({ estimateId, customerId, scheduledServiceId =
     status: 'held',
     updated_at: trx.fn.now(),
   };
-  await trx('estimate_card_holds')
-    .insert({ estimate_id: estimateId, stripe_setup_intent_id: setupIntentId, ...fields })
-    .onConflict('stripe_setup_intent_id')
-    .merge(fields);
+  if (setupIntentId) {
+    await trx('estimate_card_holds')
+      .insert({ estimate_id: estimateId, stripe_setup_intent_id: setupIntentId, ...fields })
+      .onConflict('stripe_setup_intent_id')
+      .merge(fields);
+  } else {
+    // Saved-method hold (spec §3.2 auto-satisfy): no SetupIntent exists, so
+    // the unique-SI upsert can't dedupe — Postgres treats NULLs as distinct
+    // and a retried accept would stack held rows. Update the estimate's
+    // existing SI-less held row when present, else insert fresh.
+    const savedMethodRow = await trx('estimate_card_holds')
+      .where({ estimate_id: estimateId, status: 'held' })
+      .whereNull('stripe_setup_intent_id')
+      .orderBy('created_at', 'desc')
+      .first('id');
+    if (savedMethodRow) {
+      await trx('estimate_card_holds').where({ id: savedMethodRow.id }).update(fields);
+    } else {
+      await trx('estimate_card_holds').insert({ estimate_id: estimateId, stripe_setup_intent_id: null, ...fields });
+    }
+  }
   logger.info('[estimate-card-holds] card hold recorded held', { estimateId });
 }
 

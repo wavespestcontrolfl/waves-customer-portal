@@ -14,7 +14,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { CONSENT_VERSION, getConsentText } = require('./payment-method-consent-text');
 
-const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold']);
+const VALID_SOURCES = new Set(['pay_page', 'onboarding', 'portal_add_card', 'admin_tap_to_pay', 'contract_signing', 'backfill', 'estimate_card_hold', 'estimate_accept']);
 
 // methodType selects which authorization copy to snapshot. Omitted/
 // unknown values default to the card variant via getConsentText().
@@ -80,6 +80,46 @@ async function hasConsentFor(customerId, stripePaymentMethodId) {
 }
 
 /**
+ * The customer's best already-saved CARD carrying an enrollment-qualifying
+ * (v8+) consent — the auto-satisfy source for card-on-file bookings (spec
+ * §3.2: existing customers with a saved card are never re-asked). Card-only
+ * by design (booking is card-only; ACH stays a portal action), default
+ * first, newest first. Returns the payment_methods row or null; lookup
+ * errors bubble so callers keep their own fail direction.
+ *
+ * SCOPE (Codex #2680 r5 P1): a consent's VERSION is not its AUTHORITY —
+ * the card-hold capture UI only authorizes the specific visit's completion
+ * charge + no-show fee, so its 'estimate_card_hold' rows must never
+ * auto-satisfy a lane that ends in Auto Pay enrollment (or a hold-only
+ * card from last year's one-time visit would silently start auto-charging
+ * every future visit). Every other source presented the full
+ * save-and-charge card consent text.
+ */
+const NON_ENROLLMENT_CONSENT_SOURCES = new Set(['estimate_card_hold']);
+
+async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const rows = await db('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId })
+    .select('consent_text_version', 'source');
+  return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version)
+    && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
+}
+
+async function findConsentedChargeableCard(customerId) {
+  if (!customerId) return null;
+  const rows = await db('payment_methods')
+    .where({ customer_id: customerId, processor: 'stripe', method_type: 'card' })
+    .whereNotNull('stripe_payment_method_id')
+    .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }]);
+  for (const pm of rows) {
+     
+    if (await hasEnrollmentScopedConsent(customerId, pm.stripe_payment_method_id)) return pm;
+  }
+  return null;
+}
+
+/**
  * Backfill the FK to payment_methods when the webhook finally writes the
  * row. Called from stripe-webhook.js handleSetupIntentSucceeded.
  */
@@ -137,7 +177,9 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 module.exports = {
   recordConsent,
   hasConsentFor,
+  hasEnrollmentScopedConsent,
   consentVersionQualifiesForEnrollment,
+  findConsentedChargeableCard,
   linkPaymentMethodId,
   sweepOrphanConsents,
   VALID_SOURCES: Array.from(VALID_SOURCES),

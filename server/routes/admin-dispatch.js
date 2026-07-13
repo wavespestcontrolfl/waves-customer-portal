@@ -4947,7 +4947,81 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
-      try {
+      // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
+      // CAP): an auto-charge may only collect what the customer accepted —
+      // the per-visit amount stamped at acceptance (visit price, else the
+      // per-application fee) plus its disclosed tax/surcharge. tax_amount
+      // rides the invoice and the surcharge is added by the single
+      // surcharge authority inside chargeInvoiceWithSavedCard, so the
+      // pre-tax SUBTOTAL is the comparator. An over-quote invoice routes to
+      // office review and the customer keeps the normal pay-link flow —
+      // never an unauthorized amount off-session.
+      const acceptedPerVisit = svc.estimated_price != null && Number(svc.estimated_price) > 0
+        ? Number(svc.estimated_price)
+        : (svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+          ? Number(svc.cust_per_application_fee) : null);
+      const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+      // Manual-discount accepts gross the service line up and bring it back
+      // with a negative discount line — invoices.subtotal is the PRE-discount
+      // gross (positive lines only), so the cap comparator is subtotal net of
+      // the recorded discount. Deposit credits are prior payment, never part
+      // of discount_amount, so they don't relax the cap (Codex #2680 r3).
+      const invoiceDiscount = Math.max(0, Number(invoice.discount_amount) || 0);
+      const netInvoiceSubtotal = Math.round((invoiceSubtotal - invoiceDiscount) * 100) / 100;
+      // The setup/first-application invoice minted INSIDE the accept
+      // transaction legitimately exceeds the per-visit amount (setup fee),
+      // but a notes-marker EXEMPTION would survive office edits that
+      // retotal the draft upward (Codex #2680 r2) — so accept-minted
+      // invoices get a bounded ALLOWANCE instead of a free pass, and only
+      // when the invoice actually carries the setup-fee line (a
+      // first-application-only accept invoice gets NO allowance — r3);
+      // everything still fails closed when no accepted amount exists.
+      const acceptMintedInvoice = /Auto-generated from accepted estimate #/.test(String(invoice.notes || ''));
+      const WAVEGUARD_SETUP_FEE_ALLOWANCE = 99;
+      let setupFeeAllowance = 0;
+      if (acceptMintedInvoice) {
+        try {
+          const rawLines = invoice.line_items;
+          const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+          const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+            /one-time setup fee/i.test(String(li?.description || ''))
+            && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
+          ));
+          if (setupLine) {
+            const lineAmt = Number(setupLine.amount ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+            // Cap at the real fee: an office-inflated setup line must not
+            // widen the allowance.
+            setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
+          }
+        } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
+      }
+      const capCeiling = acceptedPerVisit != null
+        ? acceptedPerVisit + setupFeeAllowance
+        : null;
+      if (acceptedPerVisit == null) {
+        // No accepted amount to cap against (multi-service plan with no
+        // row price or customer fee) — never auto-charge uncapped
+        // (Codex #2680): route to office review, keep the pay-link flow.
+        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Auto Pay charge skipped — no accepted amount on file',
+            `A completed visit has an invoice but no per-application amount on file to cap the auto-charge against. Auto Pay was NOT charged — review and bill manually or stamp the amount.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
+          );
+        } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
+      } else if (netInvoiceSubtotal > capCeiling + 0.005) {
+        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'Auto Pay charge above accepted amount — review',
+            `A completed visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the accepted per-application amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
+          );
+        } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
+      } else try {
         const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
         if (isChargeableAutopayMethod(autopayPm)) {
@@ -5039,7 +5113,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
-      }
+      } // end try/catch — paired with the above-quote guard's else
     }
 
     // One-time card-on-file hold: resolve the hold on completion (dark until
