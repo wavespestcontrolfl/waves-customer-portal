@@ -1347,6 +1347,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   };
 
   const customer = customerData?.customer || {};
+  const customerDetailsId =
+    service.customerId || service.customer_id || customer.id || null;
   const customerName =
     service.customerName ||
     `${customer.firstName || ""} ${customer.lastName || ""}`.trim() ||
@@ -1920,23 +1922,29 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <span style={{ color: D.muted }}>No contact details</span>
               )}
             </div>{" "}
-            <button
-              type="button"
-              style={{
-                width: "100%",
-                padding: "10px 12px",
-                borderRadius: 4,
-                border: `1px solid ${D.inputBorder}`,
-                background: "#fff",
-                color: "#111827",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-                marginBottom: 18,
-              }}
-            >
-              Customer details
-            </button>{" "}
+            {customerDetailsId && (
+              <a
+                href={`/admin/customers?customerId=${encodeURIComponent(customerDetailsId)}`}
+                style={{
+                  display: "block",
+                  boxSizing: "border-box",
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 4,
+                  border: `1px solid ${D.inputBorder}`,
+                  background: "#fff",
+                  color: "#111827",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  textAlign: "center",
+                  textDecoration: "none",
+                  cursor: "pointer",
+                  marginBottom: 18,
+                }}
+              >
+                Customer details
+              </a>
+            )}{" "}
             <div
               style={{
                 borderTop: `1px solid ${D.border}`,
