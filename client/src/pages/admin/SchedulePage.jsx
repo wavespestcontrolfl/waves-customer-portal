@@ -7049,6 +7049,272 @@ export function ZoneMarkingStep({
   );
 }
 
+// ── Bait station marking (station-map-v1) ────────────────────────────────────
+// Termite bait stations as individually-numbered pins on the same satellite
+// image the zone step draws on. Unlike zones (areas, all-or-nothing gate),
+// stations are independent point pins that each carry a per-visit status —
+// the tech's zero-tap path is "everything OK": every station defaults to
+// 'ok' and only exceptions (activity / serviced / no access) get a tap.
+// Pins persist as normalized circles so the shared zone-drift re-anchoring
+// applies to them unchanged.
+const STATION_PIN_R = 0.035; // normalized against the SHORT side (~12px @340)
+const STATION_TAP_RADIUS_PX = 22;
+const STATION_STATUS_UI = {
+  ok: { color: "#10b981", label: "OK" },
+  activity: { color: "#ef4444", label: "Activity" },
+  serviced: { color: "#f59e0b", label: "Serviced" },
+  inaccessible: { color: "#94a3b8", label: "No access" },
+};
+
+export function StationMarkingStep({
+  map,
+  stations, // [{ key, id?, number, label?, shape: {cx,cy,r}|null, stale }]
+  statuses, // { key → status } — absent key renders as 'ok'
+  onAddStation, // ({ cx, cy }) — parent appends a provisional-numbered pin
+  onMoveStation, // (key, { cx, cy })
+  onSetStatus, // (key, status)
+  onRemoveStation, // (key) — new pins delete; existing stations retire
+  // false = office desk mode (Customer 360): positions only, no visit to
+  // hang statuses on — pins render neutral and the status chips hide.
+  showStatuses = true,
+  // server cap (property-map stationCap) — add-mode stops here so the
+  // counts can never claim a pin the registry will refuse
+  maxStations = 80,
+  disabled = false,
+  dark = false,
+}) {
+  const [selectedKey, setSelectedKey] = useState(null);
+  const [addMode, setAddMode] = useState(false);
+  const [armedMoveKey, setArmedMoveKey] = useState(null);
+  const svgRef = useRef(null);
+
+  if (!map?.available || !map.image?.url) return null;
+
+  const ink = dark ? "#e2e8f0" : "#1a1a1a";
+  const mutedInk = dark ? "#94a3b8" : "#6b6b6b";
+  const cardBg = dark ? "#1e293b" : "#ffffff";
+  const hairline = dark ? "#334155" : "#e4e4e4";
+  const accent = "#0ea5e9";
+
+  const pinned = stations.filter((station) => station.shape);
+  const stale = stations.filter((station) => !station.shape);
+  const selected = stations.find((station) => station.key === selectedKey) || null;
+  const statusOf = (key) => statuses[key] || "ok";
+  const activityCount = pinned.filter((station) => statusOf(station.key) === "activity").length;
+
+  const svgPointFromEvent = (evt) => {
+    const el = svgRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const nearestPin = (pt) => {
+    let best = null;
+    let bestDist = Infinity;
+    pinned.forEach((station) => {
+      const dx = (station.shape.cx - pt.x) * 640;
+      const dy = (station.shape.cy - pt.y) * 340;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) {
+        best = station;
+        bestDist = dist;
+      }
+    });
+    return bestDist <= STATION_TAP_RADIUS_PX ? best : null;
+  };
+
+  const handlePointerUp = (evt) => {
+    if (disabled) return;
+    const pt = svgPointFromEvent(evt);
+    if (!pt) return;
+    if (armedMoveKey) {
+      // Same occupied-pin rule as add mode: dropping the moved station on
+      // ANOTHER pin would be skipped server-side (position-occupied) while
+      // the tech believes it moved — ignore the tap and stay armed. A tap
+      // back on the station's own pin just re-places it.
+      const occupied = nearestPin(pt);
+      if (occupied && occupied.key !== armedMoveKey) return;
+      onMoveStation(armedMoveKey, { cx: pt.x, cy: pt.y });
+      setSelectedKey(armedMoveKey);
+      setArmedMoveKey(null);
+      return;
+    }
+    if (addMode) {
+      // A tap landing on an existing pin must NOT stack a duplicate on top
+      // of it (a double-tap would create two stations at one spot, and the
+      // auto counts would claim a pin the server dedupes away). Ignore it —
+      // the tech moves a thumb-width away or exits add mode to select.
+      if (nearestPin(pt)) return;
+      // Cap gating counts EVERY non-retired station, stale (drift-hidden)
+      // pins included — they hold registry slots even though they don't
+      // render, and an add past the real cap would 400 on save.
+      if (stations.length >= maxStations) return;
+      // stay in add mode — installs drop many pins in a row
+      onAddStation({ cx: pt.x, cy: pt.y });
+      return;
+    }
+    const hit = nearestPin(pt);
+    setSelectedKey(hit ? hit.key : null);
+  };
+
+  const removeSelected = () => {
+    if (disabled || !selected) return;
+    onRemoveStation(selected.key);
+    setSelectedKey(null);
+    setArmedMoveKey(null);
+  };
+
+  const chipStyle = (active, color) => ({
+    padding: "4px 12px",
+    borderRadius: 999,
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: disabled ? "default" : "pointer",
+    background: active ? color : "transparent",
+    color: active ? "#fff" : ink,
+    border: `1px solid ${active ? color : hairline}`,
+    opacity: disabled ? 0.5 : 1,
+  });
+
+  const renderPin = (station) => {
+    const isSelected = station.key === selectedKey;
+    const meta = STATION_STATUS_UI[statusOf(station.key)] || STATION_STATUS_UI.ok;
+    const fill = showStatuses ? meta.color : "#64748b";
+    const cx = station.shape.cx * 640;
+    const cy = station.shape.cy * 340;
+    return (
+      <g key={station.key}>
+        {isSelected && <circle cx={cx} cy={cy} r={17} fill="none" stroke={accent} strokeWidth={3} />}
+        <circle cx={cx} cy={cy} r={12} fill={fill} stroke="rgba(255,255,255,0.95)" strokeWidth={2.5} />
+        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
+          {station.number}
+        </text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>Bait station map</div>
+        <div style={{ fontSize: 11, color: showStatuses && activityCount ? "#ef4444" : mutedInk, fontWeight: 500 }}>
+          {pinned.length} pinned{showStatuses && activityCount ? ` · ${activityCount} with activity` : ""}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: mutedInk, margin: "2px 0 8px" }}>
+        {addMode
+          ? "Tap the photo where each station sits — one pin per tap."
+          : armedMoveKey
+            ? `Tap the photo to place station ${stations.find((s) => s.key === armedMoveKey)?.number ?? ""}.`
+            : showStatuses
+              ? "Every station starts as OK — tap a pin to flag activity, service, or no access."
+              : "Tap a pin to move or retire it, or add the property's stations from the satellite view."}
+      </div>
+      {stale.length > 0 && !addMode && !armedMoveKey && (
+        <div style={{ fontSize: 11, color: "#f59e0b", fontWeight: 500, margin: "0 0 8px", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span>
+            The satellite image changed — re-pin station{stale.length === 1 ? "" : "s"}{" "}
+            {stale.map((station) => station.number).join(", ")}:
+          </span>
+          {stale.map((station) => (
+            <button
+              key={station.key}
+              type="button"
+              disabled={disabled}
+              onClick={() => { if (!disabled) { setArmedMoveKey(station.key); setSelectedKey(station.key); } }}
+              style={chipStyle(false, accent)}
+            >
+              Place #{station.number}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
+        <svg
+          ref={svgRef}
+          viewBox="0 0 640 340"
+          style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerUp={handlePointerUp}
+        >
+          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          {pinned.filter((station) => station.key !== selectedKey).map(renderPin)}
+          {selected && selected.shape ? renderPin(selected) : null}
+        </svg>
+        {map.image.attributionText ? (
+          <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
+            {map.image.attributionText}
+          </div>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={disabled || (!addMode && stations.length >= maxStations)}
+          onClick={() => {
+            if (disabled) return;
+            if (!addMode && stations.length >= maxStations) return;
+            setAddMode((v) => !v);
+            setArmedMoveKey(null);
+            setSelectedKey(null);
+          }}
+          style={chipStyle(addMode, accent)}
+        >
+          {addMode ? "Done adding" : stations.length >= maxStations ? `Station cap (${maxStations})` : "Add stations"}
+        </button>
+        {selected && !addMode && (
+          <>
+            <span style={{ fontSize: 11, color: mutedInk }}>Station {selected.number}:</span>
+            {showStatuses && Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
+              <button
+                key={status}
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
+                style={chipStyle(statusOf(selected.key) === status, meta.color)}
+              >
+                {meta.label}
+              </button>
+            ))}
+            {selected.shape && (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => { if (!disabled) setArmedMoveKey(selected.key); }}
+                style={chipStyle(armedMoveKey === selected.key, accent)}
+              >
+                Move pin
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={removeSelected}
+              style={{ padding: "4px 12px", borderRadius: 8, fontSize: 12, fontWeight: 500, cursor: disabled ? "default" : "pointer", background: "transparent", color: dark ? "#f87171" : "#b91c1c", border: `1px solid ${dark ? "#7f1d1d" : "#fecaca"}`, opacity: disabled ? 0.5 : 1 }}
+            >
+              {selected.id ? "Retire station" : "Remove pin"}
+            </button>
+          </>
+        )}
+      </div>
+      {showStatuses && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 8 }}>
+          {Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
+            <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
+              {meta.label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RecapCapture({ serviceId }) {
   const [items, setItems] = useState([]);
   const [pendingFile, setPendingFile] = useState(null);
@@ -7443,17 +7709,46 @@ export function CompletionPanel({
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
 
+  // Bait station map (station-map-v1). Only termite-bait-typed completions
+  // (primary or companion) surface the station step — the flag alone must
+  // not put termite pins on lawn/pest completions. Eligibility reads the
+  // service prop directly so the property-map effect below can depend on it.
+  const { enabled: stationMapFlag } = useFeatureFlagReady("station-map-v1");
+  const stationEligible = service.completionProfile?.findingsType === "termite_bait_station"
+    || (Array.isArray(service.companionSchemas)
+      && service.companionSchemas.some((s) => s?.type === "termite_bait_station"));
+  const stationFeatureOn = stationMapFlag && stationEligible;
+  const [stationPreloads, setStationPreloads] = useState([]); // property's existing stations
+  const [stationNew, setStationNew] = useState([]); // pins dropped this session [{ key, number, shape }]
+  const [stationMoves, setStationMoves] = useState({}); // id → shape re-positioned this session
+  const [stationStatuses, setStationStatuses] = useState({}); // key → status ('ok' when absent)
+  const [stationRetired, setStationRetired] = useState([]); // existing ids retired this session
+  const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
+  const stationNewSeqRef = useRef(0);
+
   // Satellite basemap + the property's existing zone marks. Preloads land in
   // zonePreloads (normalized-label keyed) so visit N+1 is confirm/adjust,
   // never a redraw — and never dirty unless the tech actually touches one.
+  // Station pins ride the same payload; the fetch runs when either marking
+  // surface is on.
   useEffect(() => {
-    if (!zoneMarkingFlag || !service?.id) return undefined;
+    if ((!zoneMarkingFlag && !stationFeatureOn) || !service?.id) return undefined;
     let cancelled = false;
     adminFetch(`/admin/dispatch/${service.id}/property-map`)
       .then((res) => {
         if (cancelled) return;
         setPropertyMap(res || null);
         if (!res?.available) return;
+        setStationPreloads((Array.isArray(res.stations) ? res.stations : []).map((station) => ({
+          id: String(station.id),
+          number: station.number,
+          label: station.label || null,
+          shape: station.geometryImage && station.geometryImage.type === "circle"
+            ? station.geometryImage
+            : null,
+          stale: Boolean(station.staleMark),
+        })));
+        setStationNumberBase(Number(res.nextStationNumber) || 1);
         const preload = {};
         const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
         (res.zones || []).forEach((zone) => {
@@ -7474,7 +7769,7 @@ export function CompletionPanel({
       })
       .catch(() => { if (!cancelled) setPropertyMap(null); });
     return () => { cancelled = true; };
-  }, [zoneMarkingFlag, service?.id]);
+  }, [zoneMarkingFlag, stationFeatureOn, service?.id]);
 
   // What the marking step renders: this session's edit if present (null =
   // cleared), else the property's preloaded shape.
@@ -7503,6 +7798,132 @@ export function CompletionPanel({
     }
     setZoneMarks((prev) => ({ ...prev, [label]: null }));
   };
+
+  // Bait station display list + edit handlers (station-map-v1). Moves
+  // overlay preloaded shapes; retired stations drop from display but submit
+  // a retire intent; new pins get provisional numbers from the server's
+  // nextStationNumber base so what the tech sees matches what persists.
+  const stationDisplay = stationFeatureOn
+    ? [
+      ...stationPreloads
+        .filter((station) => !stationRetired.includes(station.id))
+        .map((station) => ({
+          key: station.id,
+          id: station.id,
+          number: station.number,
+          label: station.label,
+          shape: stationMoves[station.id] || station.shape,
+          stale: station.stale && !stationMoves[station.id],
+        })),
+      ...stationNew.map((station) => ({
+        key: station.key,
+        id: null,
+        number: station.number,
+        label: null,
+        shape: station.shape,
+        stale: false,
+      })),
+    ]
+    : [];
+  const addStationPin = (pt) => {
+    stationNewSeqRef.current += 1;
+    setStationNew((prev) => {
+      const base = Math.max(
+        Number(stationNumberBase) || 1,
+        ...prev.map((station) => (Number(station.number) || 0) + 1),
+      );
+      return [
+        ...prev,
+        {
+          key: `new-${stationNewSeqRef.current}`,
+          number: base,
+          shape: { type: "circle", cx: pt.cx, cy: pt.cy, r: STATION_PIN_R },
+        },
+      ];
+    });
+  };
+  const moveStationPin = (key, pt) => {
+    const shape = { type: "circle", cx: pt.cx, cy: pt.cy, r: STATION_PIN_R };
+    if (stationNew.some((station) => station.key === key)) {
+      setStationNew((prev) => prev.map((station) => (station.key === key ? { ...station, shape } : station)));
+    } else {
+      setStationMoves((prev) => ({ ...prev, [key]: shape }));
+    }
+  };
+  const setStationStatus = (key, status) => {
+    setStationStatuses((prev) => ({ ...prev, [key]: status }));
+  };
+  const removeStationPin = (key) => {
+    if (stationNew.some((station) => station.key === key)) {
+      setStationNew((prev) => prev.filter((station) => station.key !== key));
+    } else {
+      setStationRetired((prev) => (prev.includes(key) ? prev : [...prev, key]));
+    }
+  };
+
+  // Auto-fill the termite station counts from the map so the typed report's
+  // numbers can never contradict the pins. A count field stays auto-owned
+  // while it is empty or still equals the last auto-written value — the
+  // moment the tech hand-edits one, autofill leaves it alone.
+  const stationAutoCountsRef = useRef({});
+  useEffect(() => {
+    if (!stationFeatureOn) return;
+    // Never auto-write counts for a property whose map was never populated —
+    // the tech may be entering counts by hand for unmapped stations. Once
+    // pins exist (preloaded or dropped), the counts follow the map, INCLUDING
+    // down to zero when every station is retired this session: leaving the
+    // pre-retire totals in place would publish counts for stations the
+    // submit payload just removed.
+    if (!stationPreloads.length && !stationNew.length) return;
+    // Drift-hidden ("stale") pins that haven't been re-placed are excluded:
+    // the report map cannot render them this visit, so counting them as
+    // checked would publish typed counts the customer-visible map can't
+    // show. Re-pinning (a move) brings a stale station back into the counts.
+    const activeKeys = [
+      ...stationPreloads
+        .filter((station) => !stationRetired.includes(station.id)
+          && (station.shape || stationMoves[station.id]))
+        .map((station) => station.id),
+      ...stationNew.map((station) => station.key),
+    ];
+    const statusOf = (key) => stationStatuses[key] || "ok";
+    const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
+    const counts = {
+      total_stations: String(activeKeys.length),
+      stations_checked: String(activeKeys.length - inaccessible),
+      stations_inaccessible: String(inaccessible),
+      stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length),
+    };
+    // Snapshot the last auto-written values BEFORE scheduling the state
+    // updates: the updater callbacks run after this effect finishes, so
+    // reading the ref inside them would see the values we're about to
+    // write below and misread every auto-owned field as hand-edited.
+    const lastAuto = { ...stationAutoCountsRef.current };
+    const applyCounts = (values) => {
+      let changed = false;
+      const next = { ...values };
+      for (const [key, value] of Object.entries(counts)) {
+        const current = next[key];
+        const autoOwned = current == null || current === "" || String(current) === String(lastAuto[key]);
+        if (autoOwned && String(current ?? "") !== value) {
+          next[key] = value;
+          changed = true;
+        }
+      }
+      return changed ? next : values;
+    };
+    if (service.completionProfile?.findingsType === "termite_bait_station") {
+      setFindingsValues((prev) => applyCounts(prev));
+    } else {
+      setCompanionState((prev) => {
+        const entry = prev.termite_bait_station || EMPTY_COMPANION_ENTRY;
+        const nextValues = applyCounts(entry.values);
+        if (nextValues === entry.values) return prev;
+        return { ...prev, termite_bait_station: { ...entry, values: nextValues } };
+      });
+    }
+    stationAutoCountsRef.current = counts;
+  }, [stationFeatureOn, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -8390,6 +8811,19 @@ export function CompletionPanel({
             height: propertyMap.image.height || 340,
           }
           : null,
+        // Bait station edits survive the billing-409 checkout detour like
+        // zone marks (statuses/pins are this visit's data — losing them
+        // behind a payment detour would silently publish a wrong map).
+        // Preloads ride along too: the submit payload iterates them, so a
+        // restore that submits BEFORE the /property-map refetch resolves
+        // would otherwise drop every existing-station status/move/retire
+        // while still sending the new pins.
+        stationNew,
+        stationMoves,
+        stationStatuses,
+        stationRetired,
+        stationPreloads,
+        stationNumberBase,
         customerInteraction,
         customerConcern,
         selectedProtocolActionLabels,
@@ -8455,6 +8889,12 @@ export function CompletionPanel({
     recapSource,
     areasServiced,
     zoneMarks,
+    stationNew,
+    stationMoves,
+    stationStatuses,
+    stationRetired,
+    stationPreloads,
+    stationNumberBase,
     customerInteraction,
     customerConcern,
     selectedProtocolActionLabels,
@@ -8534,6 +8974,43 @@ export function CompletionPanel({
         ? savedDraft.zoneMapImage
         : null,
     );
+    const restoredStationNew = Array.isArray(savedDraft.stationNew)
+      ? savedDraft.stationNew.filter((station) => station
+        && typeof station.key === "string"
+        && station.shape && typeof station.shape === "object")
+      : [];
+    setStationNew(restoredStationNew);
+    // keep the key sequence ahead of restored pins so a new add can't
+    // collide with a restored key
+    stationNewSeqRef.current = restoredStationNew.reduce((max, station) => {
+      const n = Number(String(station.key).replace("new-", ""));
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, stationNewSeqRef.current);
+    setStationMoves(
+      savedDraft.stationMoves && typeof savedDraft.stationMoves === "object"
+        ? savedDraft.stationMoves
+        : {},
+    );
+    setStationStatuses(
+      savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
+        ? savedDraft.stationStatuses
+        : {},
+    );
+    setStationRetired(
+      Array.isArray(savedDraft.stationRetired) ? savedDraft.stationRetired : [],
+    );
+    // Bridge until the /property-map refetch resolves — submit iterates
+    // preloads, so restored existing-station edits need their rows present.
+    // The live fetch overwrites these with fresh (drift-resolved) data.
+    setStationPreloads(
+      Array.isArray(savedDraft.stationPreloads)
+        ? savedDraft.stationPreloads.filter((station) => station
+          && typeof station.id === "string" && station.id)
+        : [],
+    );
+    if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
+      setStationNumberBase(Number(savedDraft.stationNumberBase));
+    }
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
     );
@@ -9651,6 +10128,51 @@ export function CompletionPanel({
               .map((label) => ({ areaLabel: label, clear: true }));
             const shapes = [...writes, ...clears];
             return shapes.length ? { zoneShapes: shapes } : {};
+          })()
+          : {}),
+        // Bait station pins + this visit's statuses (station-map-v1).
+        // Statuses post for EVERY active station — 'ok' is the zero-tap
+        // default, so an untouched map still records a full check. Shapes
+        // post only for pins placed or moved THIS session (an untouched
+        // pin must not restamp its drift ref with today's image params);
+        // creates go last so server numbering (payload order) matches the
+        // provisional numbers the tech saw.
+        ...(stationFeatureOn
+          ? (() => {
+            const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
+            const ref = image
+              ? {
+                lat: image.center?.lat,
+                lng: image.center?.lng,
+                zoom: image.zoom,
+                width: image.width || 640,
+                height: image.height || 340,
+                capturedAt: new Date().toISOString(),
+              }
+              : null;
+            const entries = [];
+            stationPreloads.forEach((station) => {
+              if (stationRetired.includes(station.id)) {
+                entries.push({ id: station.id, retire: true });
+                return;
+              }
+              const moved = stationMoves[station.id];
+              const status = stationStatuses[station.id] || "ok";
+              if (moved && ref) entries.push({ id: station.id, shape: { ...moved, ref }, status });
+              // A drift-hidden pin that was never re-placed submits NOTHING:
+              // a status would mint a check row for a station the visit's
+              // map cannot show (mirrors the auto-count exclusion above).
+              else if (station.shape) entries.push({ id: station.id, status });
+            });
+            if (ref) {
+              stationNew.forEach((station) => {
+                entries.push({
+                  shape: { ...station.shape, ref },
+                  status: stationStatuses[station.key] || "ok",
+                });
+              });
+            }
+            return entries.length ? { termiteStations: entries } : {};
           })()
           : {}),
         customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
@@ -11382,6 +11904,20 @@ export function CompletionPanel({
                   </div>
                 )}
               </Field>
+            )}
+            {/* Bait station map — pins + per-visit statuses (station-map-v1) */}
+            {stationFeatureOn && (
+              <StationMarkingStep
+                map={propertyMap}
+                stations={stationDisplay}
+                statuses={stationStatuses}
+                onAddStation={addStationPin}
+                onMoveStation={moveStationPin}
+                onSetStatus={setStationStatus}
+                onRemoveStation={removeStationPin}
+                maxStations={Number(propertyMap?.stationCap) || 80}
+                disabled={generating || success}
+              />
             )}
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
@@ -13381,6 +13917,21 @@ export function CompletionPanel({
                 </div>
               )}
             </div>
+          )}
+          {/* Bait station map — pins + per-visit statuses (station-map-v1) */}
+          {stationFeatureOn && (
+            <StationMarkingStep
+              map={propertyMap}
+              stations={stationDisplay}
+              statuses={stationStatuses}
+              onAddStation={addStationPin}
+              onMoveStation={moveStationPin}
+              onSetStatus={setStationStatus}
+              onRemoveStation={removeStationPin}
+              maxStations={Number(propertyMap?.stationCap) || 80}
+              dark
+              disabled={generating || success}
+            />
           )}
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (

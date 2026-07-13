@@ -2253,6 +2253,103 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  * generated and persisted at completion time (typedReportSnapshot) — what was
  * found, what we did, what happens next — never recomputed client-side.
  */
+// Bait station map (station-map-v1) — numbered station pins over the live
+// satellite image, colored by this visit's per-station checks. Data-driven:
+// the server only marks stationMap available for termite-bait-typed visits
+// on properties with mapped stations, so the card is inert everywhere else.
+// Live web only — the PDF/static render has no satellite basemap (provider
+// ToS), so the render site skips it there rather than painting pins on a
+// blank frame. Copy rule: this card states NUMBERS only; activity claims
+// (including the zero state) belong to the typed report's ratified wording.
+const STATION_STATUS_META = {
+  ok: { color: '#10B981', label: 'Checked — no activity' },
+  activity: { color: '#DC2626', label: 'Termite activity observed' },
+  serviced: { color: '#F59E0B', label: 'Serviced this visit' },
+  inaccessible: { color: '#9CA3AF', label: 'Not accessible this visit' },
+};
+const STATION_ON_FILE_META = { color: '#64748B', label: 'On file (not checked this visit)' };
+
+function stationSummaryLine(summary) {
+  if (!summary || !summary.total) return null;
+  const parts = [];
+  if (summary.checked > 0) {
+    parts.push(`${summary.checked} of ${summary.total} station${summary.total === 1 ? '' : 's'} inspected`);
+  } else {
+    parts.push(`${summary.total} station${summary.total === 1 ? '' : 's'} on file`);
+  }
+  if (summary.activity > 0) parts.push(`${summary.activity} with termite activity`);
+  if (summary.serviced > 0) parts.push(`${summary.serviced} serviced`);
+  if (summary.inaccessible > 0) parts.push(`${summary.inaccessible} not accessible`);
+  return parts.join(' · ');
+}
+
+function StationMapCard({ stationMap, sectionId = 'station-map' }) {
+  const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
+  if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
+  const width = stationMap.image.width || 640;
+  const height = stationMap.image.height || 340;
+  const legendKeys = [];
+  stations.forEach((station) => {
+    const key = STATION_STATUS_META[station.status] ? station.status : 'on_file';
+    if (!legendKeys.includes(key)) legendKeys.push(key);
+  });
+  const legend = legendKeys.map((key) => (key === 'on_file'
+    ? { key, ...STATION_ON_FILE_META }
+    : { key, ...STATION_STATUS_META[key] }));
+  const summaryLine = stationSummaryLine(stationMap.summary);
+  return (
+    <section data-glass="card" className="sr-section" id={sectionId} data-section="station-map">
+      <h2>Bait station map</h2>
+      <p style={{ fontSize: 15, color: 'var(--muted)', lineHeight: 1.5, margin: '0 0 12px' }}>
+        Numbered pins show where your termite bait stations sit around the home.
+        Colors reflect this visit.
+      </p>
+      <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1px solid var(--line)' }}>
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          role="img"
+          aria-label="Termite bait station locations marked on a satellite view of the property"
+          style={{ display: 'block', width: '100%' }}
+        >
+          <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
+          {stations.map((station) => {
+            const meta = STATION_STATUS_META[station.status] || STATION_ON_FILE_META;
+            const cx = station.cx * width;
+            const cy = station.cy * height;
+            return (
+              <g key={station.id}>
+                <title>
+                  {`Station ${station.number}${station.label ? ` — ${station.label}` : ''}: ${meta.label}`}
+                </title>
+                <circle cx={cx} cy={cy} r={12} fill={meta.color} stroke="#fff" strokeWidth={2.5} />
+                <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
+                  {station.number}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+        {stationMap.attributionText && (
+          <div style={{ position: 'absolute', right: 6, bottom: 4, fontSize: 10, color: '#fff', textShadow: '0 1px 2px rgba(0,0,0,0.9)', pointerEvents: 'none' }}>
+            {stationMap.attributionText}
+          </div>
+        )}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginTop: 10 }}>
+        {legend.map((entry) => (
+          <span key={entry.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 14, color: 'var(--muted)' }}>
+            <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: entry.color, flexShrink: 0 }} />
+            {entry.label}
+          </span>
+        ))}
+      </div>
+      {summaryLine && (
+        <p style={{ fontSize: 14, color: 'var(--muted)', margin: '10px 0 0' }}>{summaryLine}</p>
+      )}
+    </section>
+  );
+}
+
 function TodaysResultCard({ typedReport, sectionId = 'todays-result' }) {
   const result = typedReport?.todaysResult;
   if (!result?.headline) return null;
@@ -8267,6 +8364,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             />
           </div>
         ))}
+
+        {/* Bait station map (station-map-v1) — live web only; pdf/static have
+            no satellite basemap to pin against (provider ToS). */}
+        {mode === 'live' && <StationMapCard stationMap={data.stationMap} />}
 
         {/* Lawn: program explainer drops below the factual record, just above
             Ask-Waves. Removed from the V2 report (the visit-specific dashboard

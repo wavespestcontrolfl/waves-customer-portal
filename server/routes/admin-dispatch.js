@@ -14,6 +14,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-add
 const CompletionRecap = require('../services/completion-recap');
 const CompletionAttempts = require('../services/completion-attempts');
 const PropertyZones = require('../services/property-zones');
+const TermiteStations = require('../services/termite-stations');
 const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-drift');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -1164,6 +1165,17 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     height: liveConfig.height || 340,
   });
 
+  // Termite bait station pins ride the same payload (station-map-v1): the
+  // marking surfaces draw stations on the identical image the zones use, so
+  // one payload keeps them pixel-consistent. Fail-soft — a station load
+  // error must not take down zone marking.
+  const stationSlice = await TermiteStations.loadStationsForPropertyMap(db, customerId, {
+    center: liveConfig.center || center,
+    zoom,
+    width: liveConfig.width || 640,
+    height: liveConfig.height || 340,
+  }).catch(() => ({ stations: [], nextStationNumber: 1 }));
+
   return {
     available: true,
     image: {
@@ -1174,6 +1186,9 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       zoom,
       attributionText: liveConfig.attributionText || '',
     },
+    stations: stationSlice.stations,
+    nextStationNumber: stationSlice.nextStationNumber,
+    stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
     zones: resolvedZones.map((zone, i) => ({
       id: zone.id,
       letter: zone.letter,
@@ -1317,6 +1332,67 @@ router.put('/customers/:customerId/property-zones', requireAdmin, async (req, re
     }));
     return res.json({ ok: true, summary });
   } catch (err) { next(err); }
+});
+
+// PUT /api/admin/dispatch/customers/:customerId/termite-stations — office
+// desk flow for the bait station map (station-map-v1): drop/move/retire pins
+// outside a completion. This is how a taken-over account gets its stations
+// on the map before our first visit — Virginia marks them from the satellite
+// view and the tech confirms positions in the field. Statuses are rejected
+// here (no visit to hang a check on); unlike the completion's post-commit
+// fail-soft sync this IS the primary action, so it runs in its own
+// transaction and fails loudly.
+router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.customerId }).select('id').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const entries = req.body?.stations;
+    if (!Array.isArray(entries) || !entries.length) {
+      return res.status(400).json({ error: 'stations must be a non-empty array', code: 'termite_stations_invalid' });
+    }
+    const entriesError = TermiteStations.validateStationEntriesBody(entries, { allowStatus: false });
+    if (entriesError) {
+      return res.status(400).json({ error: entriesError, code: 'termite_stations_invalid' });
+    }
+    // Same pre-write cap rejection as the completion route — a silently
+    // skipped pin would leave the office view claiming a station the
+    // registry never got. Shared helper keeps the netting arithmetic
+    // aligned with the sync (validated retires only, replay-aware creates).
+    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — retire stations before adding more`,
+        code: 'termite_stations_cap',
+      });
+    }
+
+    const summary = await db.transaction(async (trx) => {
+      const result = await TermiteStations.upsertStationsForCustomer(trx, {
+        customerId: customer.id,
+        entries,
+      });
+      // Unlike the completion's post-commit sync, this write IS the primary
+      // action and runs inside its own transaction — a cap skip under the
+      // lock (preflight raced another writer) fails loudly and rolls back
+      // rather than persisting a partial save the office view disagrees with.
+      if (result.skipped.includes('new:station-cap')) {
+        const capErr = new Error('station cap exceeded under lock');
+        capErr.code = 'termite_stations_cap';
+        throw capErr;
+      }
+      const { stationIdByIndex, ...counts } = result;
+      return counts;
+    });
+    return res.json({ ok: true, summary });
+  } catch (err) {
+    if (err && err.code === 'termite_stations_cap') {
+      return res.status(409).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — another save landed first; reload the map and retry`,
+        code: 'termite_stations_cap',
+      });
+    }
+    next(err);
+  }
 });
 
 // POST /api/admin/dispatch/recap-preview
@@ -2206,6 +2282,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionTelemetry = null,
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
+      termiteStations = null,       // bait station pins/status [{ id?, shape?, status?, retire? }] — OPTIONAL
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -2236,6 +2313,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const zoneShapesError = PropertyZones.validateZoneShapesBody(zoneShapes);
     if (zoneShapesError) {
       return res.status(400).json({ error: zoneShapesError, code: 'zone_shapes_invalid' });
+    }
+    // Bait station pins/statuses (station-map-v1) — reject malformed entries
+    // here, not in the post-commit sync: the sync is fail-soft, so a silent
+    // skip there would lose the tech's pins behind a successful completion.
+    const stationEntriesError = TermiteStations.validateStationEntriesBody(termiteStations);
+    if (stationEntriesError) {
+      return res.status(400).json({ error: stationEntriesError, code: 'termite_stations_invalid' });
     }
     if (completionPhotos != null && !Array.isArray(completionPhotos)) {
       return res.status(400).json({
@@ -2333,6 +2417,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       .first();
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Station cap must reject BEFORE the completion commits: the typed
+    // counts were auto-filled from every pin the tech can see, so a pin
+    // silently dropped later by the fail-soft sync's cap guard would freeze
+    // findings the registry and customer map contradict. The helper nets
+    // the payload exactly the way the sync will (validated retires only,
+    // replay-aware creates), so idempotent resumes of an already-committed
+    // completion pass straight through to the stored-response path.
+    if (Array.isArray(termiteStations) && svc.customer_id
+      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
+        code: 'termite_stations_cap',
+      });
+    }
 
     // Stale-recap guard: a live job force-rescheduled to a future day
     // (rebooker allowLive) is rewound to a fresh confirmed appointment —
@@ -4275,6 +4374,44 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     } catch (zoneErr) {
       logger.warn(`[completion] property-zone sync failed (non-blocking): ${zoneErr.message}`);
+    }
+
+    // Termite bait station sync (station-map-v1): registry writes (new pins /
+    // moves / retires) + this visit's per-station check rows. Post-commit +
+    // fail-soft for the same reason as zones — station pins are report
+    // presentation data and must never abort a committed completion.
+    // AUTHORIZATION: the server-resolved profile must carry the
+    // termite_bait_station flow (primary or companion) — a stale/crafted
+    // non-termite body must not mutate the registry. Incomplete visits skip
+    // the sync entirely (same rule as companion findings): recording the
+    // zero-tap default "ok" checks for a visit that didn't happen would
+    // corrupt the station history future reports and trends read.
+    if (Array.isArray(termiteStations) && termiteStations.length) {
+      if (isIncompleteVisit || !TermiteStations.profileAllowsStationSync(completionProfile)) {
+        logger.warn('[completion] termite stations payload skipped', {
+          serviceId: svc.id,
+          incomplete: isIncompleteVisit,
+          findingsType: completionProfile?.findingsType || null,
+        });
+      } else {
+        try {
+          const stationSync = await TermiteStations.syncStationsForCompletion(db, {
+            customerId: svc.customer_id,
+            serviceRecordId: record.id,
+            entries: termiteStations,
+          });
+          if (stationSync.skipped.length) {
+            // post-commit skips (cap race / foreign id) can't 400 a
+            // committed completion — surface them loudly for the operator
+            logger.warn('[completion] termite station entries skipped', { serviceId: svc.id, ...stationSync });
+          } else if (stationSync.created || stationSync.moved || stationSync.retired
+            || stationSync.checksApplied || stationSync.deduped) {
+            logger.info('[completion] termite stations synced', { serviceId: svc.id, ...stationSync });
+          }
+        } catch (stationErr) {
+          logger.warn(`[completion] termite station sync failed (non-blocking): ${stationErr.message}`);
+        }
+      }
     }
 
     // Auto-score the Tree & Shrub visit's photos (dual-vision) and persist a
