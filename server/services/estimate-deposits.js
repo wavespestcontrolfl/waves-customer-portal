@@ -1387,15 +1387,26 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
       // cumulative refund so later echoes are recognized as replays. The
       // refunder's own pending stamp is status='refunding'-guarded, so it
       // no-ops harmlessly after us.
+      // `refunding` means OUR claim is active — this gross is the echo of
+      // our own prorated refund, so it deflates to face (Codex #2705 r5
+      // P1): the conservative reading would count the fee share as face,
+      // trip refundTouchesCredit on a remainder-only refund, and flip a
+      // still-credited row with a false manual-reconciliation alert.
+      const echoRefundCents = echoFaceCents != null
+        ? Math.min(echoFaceCents, amountCents)
+        : amountCents;
+      const echoFullyRefunded = echoRefundCents >= amountCents;
+      const echoTouchesCredit = creditedCents > 0
+        && echoRefundCents > Math.max(amountCents - creditedCents, 0) + 1;
       const flipped = await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
         .update({
-          status: !refundTouchesCredit && creditedCents > 0 ? 'credited' : 'refunded',
-          refunded_amount: refundCents / 100,
+          status: !echoTouchesCredit && creditedCents > 0 ? 'credited' : 'refunded',
+          refunded_amount: echoRefundCents / 100,
           updated_at: db.fn.now(),
         });
       if (!flipped) continue;
-      if (refundTouchesCredit) {
+      if (echoTouchesCredit) {
         logger.error('[estimate-deposits] reversed deposit was ALREADY credited to an invoice — manual reconciliation required', {
           estimateId: row.estimate_id,
           invoiceId: row.credited_invoice_id || null,
@@ -1405,7 +1416,7 @@ async function handleDepositChargeReversed(paymentIntentId, context, { amountRef
         logger.warn('[estimate-deposits] deposit reversal echo landed mid-refund — terminal state stamped for the in-flight refund', {
           context,
           keptCreditedAmount: creditedCents > 0 ? creditedCents / 100 : 0,
-          refundedAmount: refundCents / 100,
+          refundedAmount: echoRefundCents / 100,
         });
       }
       return { handled: true };

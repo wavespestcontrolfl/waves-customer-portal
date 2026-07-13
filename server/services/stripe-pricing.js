@@ -185,7 +185,11 @@ function computeRefundSurcharge({
 function depositFaceValueDollars(paymentIntent) {
   const meta = Number(paymentIntent?.metadata?.base_amount);
   if (Number.isFinite(meta) && meta > 0) return Math.round(meta * 100) / 100;
-  const cents = Number(paymentIntent?.amount_received ?? paymentIntent?.amount ?? 0);
+  // amount_received only once money actually arrived — a PENDING legacy PI
+  // reports amount_received: 0 (not null), and its face is `amount`
+  // (Codex #2705 r5 P2).
+  const received = Number(paymentIntent?.amount_received || 0);
+  const cents = received > 0 ? received : Number(paymentIntent?.amount || 0);
   return Math.round(cents) / 100;
 }
 

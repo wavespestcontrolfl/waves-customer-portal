@@ -648,6 +648,13 @@ const StripeService = {
         surcharge_rate_bps: String(rateBps),
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',
+        // In-flight marker: the public /deposit-reset refuses to strip the
+        // surcharge while a finalize is between this update and its
+        // confirm — a second tab calling reset in that window would confirm
+        // the attached credit card WITHOUT the disclosed fee
+        // (Codex #2705 r5 P2). 120s TTL so an orphaned stamp (crash
+        // mid-finalize) can't brick the wallet path.
+        finalize_started_at: String(Date.now()),
       },
       ...(surchargeDetails ? { amount_details: surchargeDetails } : {}),
       ...(staleDetails ? { amount_details: '' } : {}),
@@ -677,6 +684,15 @@ const StripeService = {
       }
     }
     try {
+      // Verify our update is still what the PI carries before charging —
+      // a concurrent (pre-stamp) reset could have stripped the amount back
+      // to face; confirming then would charge the attached credit card
+      // WITHOUT the disclosed fee. TOCTOU narrows to milliseconds and the
+      // in-flight stamp blocks the practical multi-tab path.
+      const preConfirm = await stripe.paymentIntents.retrieve(quote.paymentIntentId, {}, { apiVersion: SURCHARGE_API_VERSION });
+      if (Number(preConfirm.amount) !== totalCents) {
+        throw new Error('Deposit amount changed during payment — please try again.');
+      }
       const confirmed = await stripe.paymentIntents.confirm(
         quote.paymentIntentId,
         {},
@@ -699,11 +715,13 @@ const StripeService = {
       // both deposit UIs keep Express Checkout mounted, and a wallet tap
       // would confirm the poisoned total even though wallets pay face
       // value (Codex #2705 P1). Best-effort reset back to face before
-      // surfacing the failure; the client-side wallet path also calls
-      // /deposit-reset before confirming as a second layer.
+      // surfacing the failure (force: our own failure-path reset must
+      // clear the in-flight stamp it just wrote); the client-side wallet
+      // preflight is the second layer.
       await this.resetEstimateDepositIntentToFace({
         estimateId,
         paymentIntentId: quote.paymentIntentId,
+        force: true,
       }).catch((resetErr) => {
         logger.warn(`[stripe] Deposit PI reset after failed finalize also failed for ${quote.paymentIntentId}: ${resetErr.message}`);
       });
@@ -728,7 +746,7 @@ const StripeService = {
    *                 the 3DS challenge expiring returns the PI to
    *                 requires_payment_method, after which a retry resets it.
    */
-  async resetEstimateDepositIntentToFace({ estimateId, paymentIntentId }) {
+  async resetEstimateDepositIntentToFace({ estimateId, paymentIntentId, force = false }) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
     // Preview version — amount_details is invisible on the default version
@@ -746,15 +764,28 @@ const StripeService = {
     if (!faceCents || !hasSurchargeResidue) {
       return { reset: false, clean: true, status: pi.status };
     }
+    // A manual-card finalize is IN FLIGHT (between its update and confirm):
+    // a public reset here would strip the disclosed fee off the attached
+    // credit card before the confirm charges it (Codex #2705 r5 P2). Only
+    // the finalize's own failure path (force) may reset through the stamp;
+    // the 120s TTL unbricks an orphaned stamp from a crash mid-finalize —
+    // the surcharge residue then clears on the next preflight.
+    const finalizeStartedAt = Number(pi.metadata?.finalize_started_at || 0);
+    if (!force && finalizeStartedAt > 0 && Date.now() - finalizeStartedAt < 120 * 1000) {
+      return { reset: false, clean: false, status: pi.status, inFlight: true };
+    }
     const resetParams = {
       amount: faceCents,
       // Empty string DELETES a metadata key on Stripe — the fee facts
-      // belong only to a capture that actually collected the fee.
+      // belong only to a capture that actually collected the fee. The
+      // in-flight stamp clears with them: this reset IS the finalize's
+      // terminal state.
       metadata: {
         card_surcharge: '',
         surcharge_rate_bps: '',
         surcharge_policy_version: '',
         card_funding: '',
+        finalize_started_at: '',
       },
     };
     // Clear the Stripe-side surcharge breakdown a failed surcharged attempt
