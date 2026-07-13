@@ -1301,8 +1301,25 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items');
+          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied');
       } catch { /* scheduled_service_id may be absent before migration */ }
+      // Whether the visit's recorded prepayment has ALREADY been consumed by
+      // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
+      // and books a scheduled_service_prepaid payment). The sheets need this
+      // to avoid netting the same prepayment twice in the charge preview.
+      // Same detection the reuse path uses; gated to the rare prepaid+invoice
+      // overlap so the hot day-view stays cheap.
+      let checkoutInvoicePrepaidApplied = false;
+      if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+        try {
+          checkoutInvoicePrepaidApplied = !!(await db('payments')
+            .where({ customer_id: s.customer_id, status: 'paid' })
+            .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+            .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+            .first('id'));
+        } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+      }
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
@@ -1367,6 +1384,8 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
         checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+        checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+        checkoutInvoicePrepaidApplied,
         completionProfile: projectCompletionContext.completionProfile || null,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -1547,8 +1566,21 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items');
+            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied');
         } catch { /* scheduled_service_id may be absent before migration */ }
+        // Mirrors the day-view enrichment: has the visit's prepayment already
+        // been consumed by this invoice? Gated to the prepaid+invoice overlap.
+        let checkoutInvoicePrepaidApplied = false;
+        if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+          try {
+            checkoutInvoicePrepaidApplied = !!(await db('payments')
+              .where({ customer_id: s.customer_id, status: 'paid' })
+              .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+              .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+              .first('id'));
+          } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+        }
         const autopayActive = await customerOnAutopay({
           id: s.customer_id,
           autopay_enabled: s.autopay_enabled,
@@ -1590,6 +1622,8 @@ router.get('/week', async (req, res, next) => {
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
           checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
           checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+          checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+          checkoutInvoicePrepaidApplied,
           completionProfile: projectCompletionContext.completionProfile || null,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,

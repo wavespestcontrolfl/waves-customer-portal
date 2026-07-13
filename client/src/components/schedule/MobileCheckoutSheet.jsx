@@ -121,10 +121,16 @@ export default function MobileCheckoutSheet({
   // the add-service/discount affordances that would silently do nothing.
   const inv = attachedVisitInvoice(service);
   const openVisitInvoice = inv && inv.open && inv.total > 0 ? inv : null;
+  // amountDue (total − credit_applied), never the gross — the charge paths
+  // collect the amount due. And when the recorded prepayment was already
+  // consumed by this invoice (prepaidApplied), its total is already net, so
+  // netting service.prepaidAmount again would understate the button.
   const totalBeforePrepaid = openVisitInvoice
-    ? openVisitInvoice.total
+    ? openVisitInvoice.amountDue
     : Math.max(0, servicesSubtotal + extraDiscountsTotal);
-  const prepaidCredit = Math.min(prepaidAmount, totalBeforePrepaid);
+  const prepaidCredit = openVisitInvoice && openVisitInvoice.prepaidApplied
+    ? 0
+    : Math.min(prepaidAmount, totalBeforePrepaid);
   const total = Math.max(0, totalBeforePrepaid - prepaidCredit);
   // A genuinely $0 visit (e.g. a free callback with no added extras) has nothing
   // to mint — the invoice endpoint rejects a zero charge — so disable the Charge
@@ -346,6 +352,19 @@ export default function MobileCheckoutSheet({
                   </div>
                 </div>
               ))}
+              {openVisitInvoice.creditApplied > 0 && (
+                <div className="flex items-center justify-between gap-3 py-4 border-b border-hairline border-zinc-200">
+                  <span className="text-zinc-900" style={{ fontSize: 15 }}>Account credit applied</span>
+                  <span className="u-nums text-zinc-900 shrink-0" style={{ fontSize: 15 }}>
+                    −${openVisitInvoice.creditApplied.toFixed(2)}
+                  </span>
+                </div>
+              )}
+              {openVisitInvoice.prepaidApplied && (
+                <div className="py-3 text-ink-secondary border-b border-hairline border-zinc-200" style={{ fontSize: 13 }}>
+                  Recorded prepayment already applied to this invoice.
+                </div>
+              )}
             </>
           ) : (
           <>

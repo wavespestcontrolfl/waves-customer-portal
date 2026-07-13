@@ -67,6 +67,19 @@ describe('MobileAppointmentDetailSheet invoice-on-file block', () => {
     expect(screen.getAllByText('$115.00').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('headlines the amount due and shows the credit row when account credit applies', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoiceCreditApplied: 50 }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('$164.00')).toBeInTheDocument();
+    expect(screen.queryByText('$214.00')).not.toBeInTheDocument();
+    expect(screen.getByText('Account credit applied')).toBeInTheDocument();
+    expect(screen.getByText('−$50.00')).toBeInTheDocument();
+  });
+
   it('marks a paid attached invoice as settled', () => {
     render(
       <MobileAppointmentDetailSheet

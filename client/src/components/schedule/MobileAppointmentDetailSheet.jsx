@@ -483,7 +483,7 @@ export default function MobileAppointmentDetailSheet({
                   Invoice on file{visitInvoice.number ? ` · ${visitInvoice.number}` : ''}
                 </span>
                 <span className="u-nums text-zinc-900 font-medium" style={{ fontSize: 13 }}>
-                  ${visitInvoice.total.toFixed(2)}
+                  ${visitInvoice.amountDue.toFixed(2)}
                 </span>
               </div>
               {visitInvoice.lines.map((line, i) => (
@@ -492,6 +492,12 @@ export default function MobileAppointmentDetailSheet({
                   <span className="u-nums text-ink-secondary" style={{ fontSize: 13 }}>${line.amount.toFixed(2)}</span>
                 </div>
               ))}
+              {visitInvoice.creditApplied > 0 && (
+                <div className="flex items-baseline justify-between gap-3" style={{ marginTop: 4 }}>
+                  <span className="text-ink-secondary" style={{ fontSize: 13 }}>Account credit applied</span>
+                  <span className="u-nums text-ink-secondary" style={{ fontSize: 13 }}>−${visitInvoice.creditApplied.toFixed(2)}</span>
+                </div>
+              )}
               <div className="text-ink-secondary" style={{ fontSize: 12, marginTop: 6 }}>
                 {visitInvoiceStatusNote(visitInvoice)}
               </div>

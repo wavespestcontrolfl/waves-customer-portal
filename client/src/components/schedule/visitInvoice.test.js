@@ -46,6 +46,28 @@ describe('attachedVisitInvoice', () => {
       .toMatchObject({ open: true });
   });
 
+  it('treats refunded/cancelled invoices as uncollectible, never open', () => {
+    for (const status of ['refunded', 'canceled', 'cancelled']) {
+      expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: status }))
+        .toMatchObject({ uncollectible: true, open: false, settled: false });
+    }
+  });
+
+  it('promises the amount due (total − credit_applied), never the gross', () => {
+    const inv = attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceCreditApplied: 50 });
+    expect(inv).toMatchObject({ total: 214, creditApplied: 50, amountDue: 164 });
+    // No credit → amount due is the total; negative/garbage credit clamps to 0.
+    expect(attachedVisitInvoice(ACCEPT_MINTED_FIRST_VISIT)).toMatchObject({ creditApplied: 0, amountDue: 214 });
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceCreditApplied: -5 }))
+      .toMatchObject({ creditApplied: 0, amountDue: 214 });
+  });
+
+  it('carries the prepaid-already-applied flag', () => {
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoicePrepaidApplied: true }))
+      .toMatchObject({ prepaidApplied: true });
+    expect(attachedVisitInvoice(ACCEPT_MINTED_FIRST_VISIT)).toMatchObject({ prepaidApplied: false });
+  });
+
   it('drops malformed lines instead of rendering NaN rows', () => {
     const inv = attachedVisitInvoice({
       ...ACCEPT_MINTED_FIRST_VISIT,
@@ -70,5 +92,9 @@ describe('visitInvoiceStatusNote', () => {
       .toBe('Covered by account credit — nothing to collect.');
     expect(visitInvoiceStatusNote(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: 'processing' })))
       .toBe('Payment processing — do not collect again.');
+    expect(visitInvoiceStatusNote(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: 'refunded' })))
+      .toBe('Refunded — not collectible; bill via a new invoice.');
+    expect(visitInvoiceStatusNote(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoiceStatus: 'cancelled' })))
+      .toBe('Canceled — not collectible; bill via a new invoice.');
   });
 });

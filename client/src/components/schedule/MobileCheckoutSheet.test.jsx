@@ -91,4 +91,46 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.getByRole('button', { name: 'Charge $114.00' })).toBeInTheDocument();
     expect(screen.getByText('Prepaid credit')).toBeInTheDocument();
   });
+
+  it('does not net the prepayment twice when the invoice already consumed it', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          prepaidAmount: 100,
+          checkoutInvoicePrepaidApplied: true,
+        }}
+        onClose={() => {}}
+      />,
+    );
+    // Server already reduced the invoice total by the prepayment — the
+    // preview charges the invoice's amount due as-is.
+    expect(screen.getByRole('button', { name: 'Charge $214.00' })).toBeInTheDocument();
+    expect(screen.queryByText('Prepaid credit')).not.toBeInTheDocument();
+    expect(screen.getByText('Recorded prepayment already applied to this invoice.')).toBeInTheDocument();
+  });
+
+  it('charges the amount due when account credit is applied to the invoice', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoiceCreditApplied: 50 }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $164.00' })).toBeInTheDocument();
+    expect(screen.getByText('Account credit applied')).toBeInTheDocument();
+    expect(screen.getByText('−$50.00')).toBeInTheDocument();
+  });
+
+  it('falls back to the standard flow for a refunded attached invoice', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoiceStatus: 'refunded' }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add Service' })).toBeInTheDocument();
+  });
 });
