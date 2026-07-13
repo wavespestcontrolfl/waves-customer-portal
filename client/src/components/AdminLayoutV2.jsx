@@ -189,7 +189,10 @@ export default function AdminLayoutV2() {
   // See lib/tapToPayReturn.js.
   useEffect(() => {
     consumeSnapshotOnMount(navigate);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    // Mount-only by design (react-hooks/exhaustive-deps isn't configured in
+    // the errors-only lint config — a disable directive for it is itself an
+    // unknown-rule error).
+  }, []);
   const paletteRef = useRef(null);
 
   useEffect(() => {
