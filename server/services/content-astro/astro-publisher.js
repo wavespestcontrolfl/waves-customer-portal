@@ -31,6 +31,7 @@ const { assertValidBlogFrontmatter } = require('./schema-validator');
 const contentGuardrails = require('../content/content-guardrails');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
+const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
@@ -1209,6 +1210,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   const agentVerified = await verifiedCommittedHeroSrc(frontmatter?.hero_image?.src);
   if (agentVerified) return { src: agentVerified, buffer: null };
 
+  let generated;
   try {
     const img = await generateHeroBuffer({
       title: frontmatter.title,
@@ -1217,7 +1219,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       slug,
     });
     const buffer = await compressToWebp(img.buffer);
-    return {
+    generated = {
       src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
       repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
       buffer,
@@ -1227,6 +1229,18 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
     throw heroErr;
   }
+
+  // Describe the image we just generated so the stamped alt matches what the
+  // generator actually rendered — the writer authored its alt before any
+  // image existed, and an image/alt mismatch is a recurring Codex P2 that
+  // parks the PR (remediation is body-only and cannot touch frontmatter).
+  // Outside the fail-closed block above: fail-open, null keeps the writer alt.
+  generated.alt = await describeHeroForAlt({
+    buffer: generated.buffer,
+    title: frontmatter.title,
+    keyword: frontmatter.primary_keyword,
+  });
+  return generated;
 }
 
 async function publishOrUpdatePage(draft, brief = {}) {
@@ -1351,7 +1365,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // never a silent hero-less publish. Resolution happens BEFORE the branch is
   // cut so a hero failure can't orphan a branch/PR.
   const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
-  stampAutonomousHero(frontmatter, hero.src, heroAlt);
+  stampAutonomousHero(frontmatter, hero.src, hero.alt || heroAlt);
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.

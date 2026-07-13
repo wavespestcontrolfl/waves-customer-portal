@@ -29,6 +29,9 @@ jest.mock('../services/content/image-generator', () => ({
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
 }));
+jest.mock('../services/content/hero-alt-vision', () => ({
+  describeHeroForAlt: jest.fn().mockResolvedValue(null),
+}));
 
 const db = require('../models/db');
 const factCheckGate = require('../services/content/fact-check-gate');
@@ -39,6 +42,7 @@ const PagesPoll = require('../services/content-astro/pages-poll');
 const AstroPublisher = require('../services/content-astro/astro-publisher');
 const ContentScheduler = require('../services/content-scheduler');
 const heroImageGenerator = require('../services/content/image-generator');
+const heroAltVision = require('../services/content/hero-alt-vision');
 
 // 1x1 transparent PNG — enough for the real sharp compressToWebp step that
 // runs inside the autonomous hero pipeline.
@@ -996,6 +1000,7 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    heroAltVision.describeHeroForAlt.mockResolvedValue(null);
     gh.createBranch.mockResolvedValue({});
     gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 200, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/200' });
@@ -1050,6 +1055,34 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     expect(parsed.data.og_image).toBe('/images/blog/pest-control/dollar-spot-venice/hero.webp');
   });
 
+  test('generated hero: vision-derived alt overrides the writer pre-image alt', async () => {
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    heroAltVision.describeHeroForAlt.mockResolvedValue('Brown patch rings spreading across a St. Augustine lawn');
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    // The vision pass sees the exact bytes we commit, plus the post context.
+    expect(heroAltVision.describeHeroForAlt).toHaveBeenCalledWith(expect.objectContaining({
+      buffer: gh.putBinary.mock.calls[0][0].buffer,
+      title: 'Dollar Spot in Venice',
+    }));
+    const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(parsed.data.hero_image.alt).toBe('Brown patch rings spreading across a St. Augustine lawn');
+  });
+
+  test('vision alt failure falls back to the writer alt and never blocks the publish', async () => {
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    heroAltVision.describeHeroForAlt.mockResolvedValue(null); // fail-open contract
+
+    await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
+
+    const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
+    expect(parsed.data.hero_image.alt).toBe('Dollar spot lesions on a Venice lawn');
+    expect(gh.createPr).toHaveBeenCalled();
+  });
+
   test('existing post with a committed hero: reuses it, no regeneration, no binary commit', async () => {
     const liveMdx = [
       '---',
@@ -1070,6 +1103,8 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
 
     expect(heroImageGenerator.generate).not.toHaveBeenCalled();
     expect(gh.putBinary).not.toHaveBeenCalled();
+    // Reused heroes keep their existing alt — no vision spend on refresh runs.
+    expect(heroAltVision.describeHeroForAlt).not.toHaveBeenCalled();
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/dollar-spot-venice.mdx',
       sha: 'mdx-sha',
