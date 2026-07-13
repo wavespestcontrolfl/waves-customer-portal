@@ -707,90 +707,12 @@ async function buildAiPhotoInputs(photos = []) {
   };
 }
 
-function compactText(value, max = 360) {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  return text.length > max ? `${text.slice(0, max - 3).trim()}...` : text;
-}
-
-function formatContextDate(value) {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toISOString().slice(0, 10);
-}
-
-function contextTimestamp(value) {
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-}
-
-async function getCustomerCommunicationContext(customerId) {
-  if (!customerId) return '';
-  const [calls, sms, emails] = await Promise.all([
-    db('call_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes')
-      .orderBy('created_at', 'desc')
-      .limit(3)
-      .catch((err) => {
-        logger.warn(`[projects] call context unavailable: ${err.message}`);
-        return [];
-      }),
-    db('sms_log')
-      .where({ customer_id: customerId })
-      .select('created_at', 'direction', 'message_body', 'message_type')
-      .orderBy('created_at', 'desc')
-      .limit(4)
-      .catch((err) => {
-        logger.warn(`[projects] sms context unavailable: ${err.message}`);
-        return [];
-      }),
-    db('emails')
-      .where({ customer_id: customerId })
-      .select('received_at', 'subject', 'snippet', 'body_text')
-      .orderBy('received_at', 'desc')
-      .limit(3)
-      .catch((err) => {
-        logger.warn(`[projects] email context unavailable: ${err.message}`);
-        return [];
-      }),
-  ]);
-
-  const entries = [];
-  for (const call of calls) {
-    const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
-    if (summary) {
-      entries.push({
-        ts: contextTimestamp(call.created_at),
-        line: `Call ${formatContextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
-      });
-    }
-  }
-  for (const msg of sms) {
-    const summary = compactText(msg.message_body, 260);
-    if (summary) {
-      entries.push({
-        ts: contextTimestamp(msg.created_at),
-        line: `Text ${formatContextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
-      });
-    }
-  }
-  for (const email of emails) {
-    const summary = compactText(email.snippet || email.body_text, 260);
-    const subject = compactText(email.subject, 120);
-    if (summary || subject) {
-      entries.push({
-        ts: contextTimestamp(email.received_at),
-        line: `Email ${formatContextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
-      });
-    }
-  }
-  return entries
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, 6)
-    .map(entry => entry.line)
-    .join('\n');
-}
+// F1 (universal one-time services, ratified Q13): the comms context now
+// comes from the shared WINDOWED builder in
+// services/completion-comms-context (recurring = since last completed
+// visit of the line, cap 120d; one-time = since job origin, cap 180d).
+// The legacy unbounded builder and its helpers were retired with it.
+const { buildCompletionCommsContext } = require('../services/completion-comms-context');
 
 // Array findings (certificate application rows) flatten to readable
 // "key: value" rows — String() on an object would feed the writer
@@ -1430,7 +1352,7 @@ router.post('/ai-write-preview', requireAdmin, async (req, res, next) => {
     const tech = req.technicianId ? await db('technicians').where({ id: req.technicianId }).first() : null;
     const communicationContext = include_communications === false
       ? ''
-      : await getCustomerCommunicationContext(customer_id);
+      : (await buildCompletionCommsContext({ customerId: customer_id }).catch(() => ({ text: '' }))).text;
     const report = await draftProjectReport({
       typeCfg,
       findings: findings || {},
@@ -3846,7 +3768,11 @@ router.post('/:id/ai-write', requireAdmin, async (req, res, next) => {
     const includeCommunications = req.body.include_communications !== false;
     const includePhotos = req.body.include_photos !== false;
     const communicationContext = includeCommunications
-      ? await getCustomerCommunicationContext(project.customer_id)
+      ? (await buildCompletionCommsContext({
+        customerId: project.customer_id,
+        scheduledServiceId: project.scheduled_service_id || null,
+        originDate: project.project_date || project.created_at || null,
+      }).catch(() => ({ text: '' }))).text
       : '';
     const photos = includePhotos
       ? await db('project_photos')
