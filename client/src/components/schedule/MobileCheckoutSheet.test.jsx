@@ -152,6 +152,34 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
   });
 
+  it('suppresses the branch when the INVOICE itself is payer-billed', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoicePayerBilled: true }}
+        onClose={() => {}}
+      />,
+    );
+    // The reuse endpoint refuses an invoice carrying payer_id even when the
+    // visit currently resolves self-pay.
+    expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Charge $115.00' })).toBeInTheDocument();
+  });
+
+  it('keeps the invoice preview for an INACTIVE per-job payer (raw payerId, no resolved payer)', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, payerId: 'payer-inactive' }}
+        onClose={() => {}}
+      />,
+    );
+    // Inactive payers resolve self-pay server-side (billedToPayer null) and
+    // the mint endpoint reuses this collectible invoice — the preview must
+    // match what the charge actually collects.
+    expect(screen.getByRole('button', { name: 'Charge $214.00' })).toBeInTheDocument();
+    expect(screen.getByText(/Invoice on file · WPC-2099-0001/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Service' })).not.toBeInTheDocument();
+  });
+
   it('blocks charging outright while the attached invoice is processing', () => {
     render(
       <MobileCheckoutSheet

@@ -122,13 +122,17 @@ export default function MobileCheckoutSheet({
   const inv = attachedVisitInvoice(service);
   // Payer-billed visits never collect in person — the Charge-now endpoint
   // refuses them and AR routes to the payer's AP inbox — so an attached
-  // invoice must not be presented as collectible here.
-  const payerBilled = !!(service.billedToPayer || service.payerId);
+  // invoice must not be presented as collectible here. Use the SERVER-
+  // RESOLVED signals only: `billedToPayer` (active payer resolution) and the
+  // invoice's own payer flag (via inv.open). Raw payerId is deliberately NOT
+  // consulted — an inactive per-job payer resolves self-pay and the visit's
+  // invoice IS collectible.
+  const payerBilled = !!service.billedToPayer;
   const openVisitInvoice = !payerBilled && inv && inv.open && inv.total > 0 ? inv : null;
   // A processing invoice is money already in flight (e.g. a pending ACH
   // debit) — the payment routes reject it, so block charging outright
   // instead of falling back to a preview that fails after tender pick.
-  const processingVisitInvoice = !payerBilled && inv && inv.processing ? inv : null;
+  const processingVisitInvoice = !payerBilled && !inv?.payerBilled && inv && inv.processing ? inv : null;
   const invoicePreview = openVisitInvoice || processingVisitInvoice;
   // amountDue (total − credit_applied), never the gross — the charge paths
   // collect the amount due. And when the recorded prepayment was already

@@ -29,6 +29,10 @@ export function attachedVisitInvoice(service) {
   const lines = (Array.isArray(service.checkoutInvoiceLines) ? service.checkoutInvoiceLines : [])
     .map((li) => ({ description: String(li?.description || ''), amount: Number(li?.amount) }))
     .filter((li) => li.description && Number.isFinite(li.amount));
+  // The INVOICE's own Bill-To: a payer-billed invoice survives the visit's
+  // payer being cleared/deactivated, and the Charge-now reuse path refuses
+  // it — never collectible from the homeowner.
+  const payerBilled = !!service.checkoutInvoicePayerBilled;
   return {
     id: service.checkoutInvoiceId,
     number: service.checkoutInvoiceNumber || null,
@@ -42,8 +46,9 @@ export function attachedVisitInvoice(service) {
     settled,
     processing,
     uncollectible,
+    payerBilled,
     // Open = still collectible at/after the visit (draft/sent/overdue).
-    open: !settled && !processing && !uncollectible,
+    open: !settled && !processing && !uncollectible && !payerBilled,
     lines,
   };
 }

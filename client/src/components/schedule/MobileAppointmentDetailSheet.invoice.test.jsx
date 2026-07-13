@@ -110,4 +110,24 @@ describe('MobileAppointmentDetailSheet invoice-on-file block', () => {
     // wording would send the tech after the homeowner.
     expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
   });
+
+  it('suppresses the block when the invoice itself is payer-billed, but not for a raw inactive payerId', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, checkoutInvoicePayerBilled: true }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/Invoice on file/)).not.toBeInTheDocument();
+    cleanup();
+    // Inactive per-job payer resolves self-pay — the invoice IS the visit's
+    // collectible and stays visible.
+    render(
+      <MobileAppointmentDetailSheet
+        service={{ ...BASE_SERVICE, ...ATTACHED_INVOICE_FIELDS, payerId: 'payer-inactive' }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Invoice on file · WPC-2099-0001/)).toBeInTheDocument();
+  });
 });

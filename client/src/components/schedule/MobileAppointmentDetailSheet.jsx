@@ -186,11 +186,14 @@ export default function MobileAppointmentDetailSheet({
   // Charge-now actually collects, so surface its breakdown — the per-visit
   // Total above can legitimately differ (e.g. $115 per application while the
   // first-visit invoice is $214 with the WaveGuard setup fee). Payer-billed
-  // visits are suppressed: their invoice routes to the payer's AP inbox and
-  // "collected at the visit" wording would send the tech after the homeowner.
-  const visitInvoice = (service.billedToPayer || service.payerId)
+  // visits/invoices are suppressed: that AR routes to the payer's AP inbox
+  // and "collected at the visit" wording would send the tech after the
+  // homeowner. Server-resolved signals only — raw payerId deliberately NOT
+  // consulted (an inactive per-job payer resolves self-pay).
+  const attachedInvoice = attachedVisitInvoice(service);
+  const visitInvoice = (service.billedToPayer || attachedInvoice?.payerBilled)
     ? null
-    : attachedVisitInvoice(service);
+    : attachedInvoice;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required

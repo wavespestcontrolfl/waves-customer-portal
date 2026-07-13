@@ -68,6 +68,12 @@ describe('attachedVisitInvoice', () => {
     expect(attachedVisitInvoice(ACCEPT_MINTED_FIRST_VISIT)).toMatchObject({ prepaidApplied: false });
   });
 
+  it('never marks a payer-billed invoice open — its AR routes to the payer', () => {
+    expect(attachedVisitInvoice({ ...ACCEPT_MINTED_FIRST_VISIT, checkoutInvoicePayerBilled: true }))
+      .toMatchObject({ payerBilled: true, open: false });
+    expect(attachedVisitInvoice(ACCEPT_MINTED_FIRST_VISIT)).toMatchObject({ payerBilled: false, open: true });
+  });
+
   it('drops malformed lines instead of rendering NaN rows', () => {
     const inv = attachedVisitInvoice({
       ...ACCEPT_MINTED_FIRST_VISIT,
