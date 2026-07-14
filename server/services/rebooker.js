@@ -636,6 +636,22 @@ class SmartRebooker {
               code: 'SLOT_TAKEN',
             });
           }
+          // Owner blackout days for NON-admin shifts cover every projected
+          // date, not just the anchor — a re-anchored sibling must not land
+          // on a day off either. Sorted probe range, fail-open helper; a
+          // hit aborts so the customer picks a different anchor slot.
+          if (initiatedBy !== 'admin') {
+            const { getBlackoutDates } = require('./scheduling/blackout-dates');
+            const sorted = [...projectedDates].sort();
+            const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1]);
+            if (projectedDates.some((d) => blackout.has(d))) {
+              throw Object.assign(new Error('That schedule would land a visit on an unavailable day — pick a different time'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+          }
         }
       }
 

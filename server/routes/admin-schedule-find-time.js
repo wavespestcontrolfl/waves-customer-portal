@@ -126,6 +126,9 @@ router.post('/', async (req, res) => {
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
       topN: Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100),
+      // Staff tool: blackout days stay visible — admin manual scheduling is
+      // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
+      includeBlackoutDates: true,
     });
 
     res.json({

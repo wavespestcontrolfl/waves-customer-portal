@@ -1359,7 +1359,11 @@ function BlackoutDaysTab() {
 
   const remove = async (id) => {
     try {
-      await adminFetch(`/admin/schedule/blackout-dates/${id}`, { method: "DELETE" });
+      // adminFetch resolves parsed JSON even for non-401 HTTP errors — check
+      // the body before mutating state, or a failed DELETE would show the
+      // date as unblocked while it still blocks prod.
+      const d = await adminFetch(`/admin/schedule/blackout-dates/${id}`, { method: "DELETE" });
+      if (d?.error) throw new Error(d.error);
       setBlackouts((prev) => prev.filter((b) => b.id !== id));
     } catch (e) {
       setError(e.message);
