@@ -328,7 +328,14 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
-        activity: data.activity,
+        // Typed pest reports render the FULL ActivityCard (gauge + score
+        // history + progress chip) ALONGSIDE the dashboard (owner ruling
+        // 2026-07-14 — the dashboard used to suppress the card, which
+        // silently hid the chart and the knockdown progress chip on exactly
+        // the bed bug / roach reports they target). Withholding activity
+        // here drops the hero's compact pill on typed visits so the reading
+        // shows once; recurring reports keep the hero metric as before.
+        activity: data.typedReport ? null : data.activity,
         forecast,
         // Tech-reviewed AI report copy. Typed reports are gated out here —
         // their Today's Result card already renders the same copy, so the

@@ -167,6 +167,71 @@ describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
   });
 });
 
+describe('ReportViewPage — typed pest reports compose Pest V2 WITH the ActivityCard', () => {
+  const PEST_V2 = {
+    status: { key: 'protected', label: 'Protected', tone: 'good' },
+    statusSummary: 'Your property is in a strong position after this visit.',
+    supportingMetric: null, // server withholds the hero pill on typed visits
+    defense: null,
+    primaryMove: null,
+    bugFiles: [],
+    aiSummary: null,
+    forecast: null,
+  };
+  const ACTIVITY = {
+    indicatorKey: 'bed_bug_activity',
+    label: 'Bed Bug Activity',
+    score: 1,
+    maxScore: 5,
+    levelWord: 'Very low activity',
+    trend: 'improving',
+    trendWord: 'decreased since the last visit',
+    isBaseline: false,
+    history: [
+      { serviceRecordId: 'v1', serviceDate: '2026-06-12', score: 4, levelWord: 'High activity', isCurrent: false },
+      { serviceRecordId: 'v3', serviceDate: '2026-07-10', score: 1, levelWord: 'Very low activity', isCurrent: true },
+    ],
+    progress: {
+      baselineScore: 4, baselineLevelWord: 'High activity', baselineDate: '2026-06-12', currentScore: 1, visits: 3,
+    },
+  };
+
+  function typedPestPayload(overrides = {}) {
+    const payload = {
+      ...legacyLawnReport,
+      serviceLine: 'pest',
+      serviceLineDisplay: 'Bed bug service',
+      serviceDisplayName: 'Bed Bug Treatment (Follow-up)',
+      typedReport: { type: 'bed_bug', todaysResult: { headline: 'Follow-up complete.' } },
+      activity: ACTIVITY,
+      pestReportV2: PEST_V2,
+      ...overrides,
+    };
+    delete payload.lawnAssessment;
+    delete payload.lawnProgramOverview;
+    delete payload.reportV2;
+    return payload;
+  }
+
+  it('renders the dashboard AND the gauge/chart/progress chip (owner ruling 2026-07-14)', async () => {
+    renderReport(typedPestPayload());
+    await screen.findByText('Today’s protection status');
+    await screen.findByText('Bed Bug Activity');
+    await screen.findByText(/Down from 4\/5 at your first visit \(Jun 12\)/);
+  });
+
+  it('recurring pest with Pest V2 still suppresses the standalone pressure card', async () => {
+    renderReport(typedPestPayload({
+      typedReport: null,
+      activity: null,
+      pestPressure: { displayScore: '1.4', score: 1.4, maxScore: 5, label: 'Low', showOnCustomerReport: true, enabled: true },
+    }));
+    await screen.findByText('Today’s protection status');
+    expect(screen.queryByText('Bed Bug Activity')).toBeNull();
+    expect(document.querySelector('[data-section="activity"]')).toBeNull();
+  });
+});
+
 describe('ReportViewPage — trapping station map card (program labels)', () => {
   it('renders the trap map with capture labels for program "trapping"', async () => {
     const payload = {
