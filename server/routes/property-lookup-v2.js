@@ -2370,7 +2370,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   // Address itself is suspect — first, because it explains every other
   // missing-data line on the panel. Only set when the county roll ANSWERED
   // (a GIS outage yields no audit at all, see auditAddressHouseNumber).
-  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
+  if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch
+      && Array.isArray(addressAudit.numberInOtherZips) && addressAudit.numberInOtherZips.length) {
+    // The typed number DOES exist on this street — in a different ZIP. Grid
+    // street names repeat across cities, so this usually means the typed
+    // city/ZIP belongs to another premise, not a typo'd house number.
+    const nearest = addressAudit.nearestNumbers.length
+      ? ` — nearest on this street in ${addressAudit.typedZip}: ${addressAudit.nearestNumbers.join(', ')}`
+      : '';
+    flags.push({
+      field: 'address',
+      reason: `${addressAudit.houseNumber} ${addressAudit.streetLabel} is on the ${addressAudit.county} county roll only in ZIP ${addressAudit.numberInOtherZips.join(', ')}, not the typed ${addressAudit.typedZip}${nearest}. The street name repeats across cities — verify the city/ZIP before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
     const nearest = addressAudit.nearestNumbers.length
       ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
       : '';

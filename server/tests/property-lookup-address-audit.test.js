@@ -446,7 +446,7 @@ describe('queryStreetSitusAddresses', () => {
 
     const out = await queryStreetSitusAddresses('Manatee', 'TOBERMORY');
 
-    expect(out).toEqual({ situs: ['100 TOBERMORY WAY'], truncated: true });
+    expect(out).toEqual({ situs: ['100 TOBERMORY WAY'], zips: [null], truncated: true });
   });
 
   test('Charlotte queries and extracts BOTH address fields', async () => {
@@ -517,5 +517,198 @@ describe('buildFieldVerifyFlags address flag', () => {
       streetExists: true, hasExactMatch: true, parcelCount: 111, nearestNumbers: [],
     });
     expect(flags.some((f) => f.field === 'address')).toBe(false);
+  });
+});
+
+describe('auditAddressHouseNumber — ZIP scoping', () => {
+  // Real case this encodes: "2215 51st Ave E, Palmetto, FL 34221" — 2215
+  // 51ST AVE E exists on the Manatee roll, but in Bradenton 34203. SWFL grid
+  // street names repeat across cities, so a county-wide house-number hit
+  // validated the wrong city's premise and the panel showed no address flag.
+  function mockSitusWithZips(rows) {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: rows.map(([s, zip]) => ({
+          attributes: { SITUS_ADDRESS: s, SITUS_POSTAL_ZIP: zip },
+        })),
+      }),
+    });
+  }
+
+  const PALMETTO_LEAD = '2215 51st Ave E, Palmetto, FL 34221, USA';
+
+  test('number found only in a different ZIP → NOT an exact match, carries numberInOtherZips', async () => {
+    mockSitusWithZips([
+      ['2215 51ST AVE E', '34203'],
+      ['6890 51ST AVE E', '34221'],
+    ]);
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(audit).toMatchObject({
+      county: 'Manatee',
+      houseNumber: 2215,
+      streetLabel: '51ST AVE E',
+      streetExists: true,
+      hasExactMatch: false,
+      typedZip: '34221',
+      numberInOtherZips: ['34203'],
+    });
+    // Nearest suggestions come from the typed ZIP, not the other city.
+    expect(audit.nearestNumbers).toEqual([6890]);
+  });
+
+  test('number found in the typed ZIP → clean exact match', async () => {
+    mockSitusWithZips([
+      ['2215 51ST AVE E', '34221'],
+      ['2215 51ST AVE E', '34203'],
+    ]);
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(audit).toMatchObject({ hasExactMatch: true, nearestNumbers: [] });
+    expect(audit.numberInOtherZips).toBeUndefined();
+  });
+
+  test('roll rows without ZIPs stay in scope (fail-open, no manufactured mismatch)', async () => {
+    mockSitusWithZips([['2215 51ST AVE E', null]]);
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(audit).toMatchObject({ hasExactMatch: true });
+  });
+
+  test('no typed ZIP → county-wide audit, exactly the old behavior', async () => {
+    mockSitusWithZips([['2215 51ST AVE E', '34203']]);
+
+    const audit = await auditAddressHouseNumber('2215 51st Ave E, Palmetto, FL, USA');
+
+    expect(audit).toMatchObject({ hasExactMatch: true });
+  });
+
+  test('number missing everywhere → plain missing verdict with in-ZIP nearest numbers', async () => {
+    mockSitusWithZips([
+      ['2215 51ST AVE E', '34203'],
+      ['6890 51ST AVE E', '34221'],
+    ]);
+
+    const audit = await auditAddressHouseNumber('2299 51st Ave E, Palmetto, FL 34221, USA');
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: false });
+    expect(audit.numberInOtherZips).toBeUndefined();
+    expect(audit.nearestNumbers).toEqual([6890]);
+  });
+
+  test('panel flag says the street name repeats across cities', () => {
+    const flags = buildFieldVerifyFlags({}, null, {
+      county: 'Manatee',
+      houseNumber: 2215,
+      streetLabel: '51ST AVE E',
+      streetExists: true,
+      hasExactMatch: false,
+      parcelCount: 12,
+      nearestNumbers: [6890],
+      typedZip: '34221',
+      numberInOtherZips: ['34203'],
+    });
+
+    const addr = flags.find((f) => f.field === 'address');
+    expect(addr).toBeDefined();
+    expect(addr.priority).toBe('HIGH');
+    expect(addr.reason).toContain('only in ZIP 34203');
+    expect(addr.reason).toContain('34221');
+    expect(addr.reason).toContain('repeats across cities');
+    expect(addr.reason).toContain('6890');
+  });
+});
+
+describe('auditAddressHouseNumber — ZIP scoping, codex round-1 hardening', () => {
+  const PALMETTO_LEAD = '2215 51st Ave E, Palmetto, FL 34221, USA';
+
+  test('truncated page showing the number only in another ZIP → targeted recheck finds the in-ZIP row', async () => {
+    // Page 1 (truncated) only surfaced the Bradenton 34203 row; the targeted
+    // `${houseNumber} ${likeText}` query returns the in-ZIP row past the
+    // 2000-row cap — the verdict must be a clean exact match, not wrong-ZIP.
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          features: [
+            { attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } },
+            { attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34221' } },
+          ],
+        }),
+      });
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(audit).toMatchObject({ hasExactMatch: true });
+    expect(audit.numberInOtherZips).toBeUndefined();
+  });
+
+  test('truncated wrong-ZIP page + targeted confirms no in-ZIP row → mismatch verdict stands', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          exceededTransferLimit: true,
+          features: [{ attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } }],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          features: [{ attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } }],
+        }),
+      });
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(audit).toMatchObject({ hasExactMatch: false, numberInOtherZips: ['34203'] });
+  });
+
+  test('typed address WITHOUT a ZIP never inherits the geocoder ZIP (county-wide audit)', async () => {
+    // Customer typed a city-only address; Google's canonical carries 34221.
+    // Scoping to the geocoder's guess would flag a valid Bradenton premise.
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: [{ attributes: { SITUS_ADDRESS: '2215 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } }],
+      }),
+    });
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD, null, {
+      typedAddress: '2215 51st Ave E, Palmetto, FL',
+    });
+
+    expect(audit).toMatchObject({ hasExactMatch: true });
+    expect(audit.numberInOtherZips).toBeUndefined();
+  });
+
+  test('missing number with NO street rows in the typed ZIP → empty nearest list, never other-city numbers', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: [
+          { attributes: { SITUS_ADDRESS: '2210 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } },
+          { attributes: { SITUS_ADDRESS: '2220 51ST AVE E', SITUS_POSTAL_ZIP: '34203' } },
+        ],
+      }),
+    });
+
+    const audit = await auditAddressHouseNumber(PALMETTO_LEAD);
+
+    expect(audit).toMatchObject({ streetExists: true, hasExactMatch: false });
+    expect(audit.nearestNumbers).toEqual([]);
   });
 });

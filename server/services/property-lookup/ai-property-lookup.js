@@ -746,6 +746,67 @@ function dorUcPropertyType(code) {
   return DOR_UC_PROPERTY_TYPES[normalized] || null;
 }
 
+// Building-sqft sanity bounds are TYPE-AWARE. The 15,000 residential cap is a
+// guard against listing-scrape garbage (lot sqft in the living-area field),
+// but commercial buildings routinely exceed it — the commercial pest pricer
+// consumes footprints well past 15k (its own low-confidence flag sits at
+// 30k), so a residential-only cap read every mid-size warehouse/office as
+// "no source" and forced a manual quote the engine could have priced.
+const BUILDING_SQFT_MIN = 500;
+const RESIDENTIAL_BUILDING_SQFT_MAX = 15000;
+const COMMERCIAL_BUILDING_SQFT_MAX = 200_000;
+
+// Property types (normalizeCountyPropertyType / normalizeLookupPropertyType
+// outputs) that price through the commercial lane and may carry a building
+// bigger than any home.
+const COMMERCIAL_BUILDING_PROPERTY_TYPES = new Set([
+  'Commercial', 'Office', 'Retail', 'Warehouse', 'Restaurant', 'Medical Office',
+  'School', 'Industrial', 'Government Municipal', 'Multifamily', 'Apartment',
+  'HOA Common Area',
+]);
+
+function isCommercialBuildingType(propertyType) {
+  return COMMERCIAL_BUILDING_PROPERTY_TYPES.has(String(propertyType || ''));
+}
+
+// County parcels signal commercial through the DOR use code (majors 10-39
+// commercial, 40-49 industrial) or the county land-use description even when
+// neither maps to an estimator property type ("Warehousing, Distribution"
+// returns null from countyUseDescToPropertyType by design).
+function dorCodeLooksCommercial(dorUseCode) {
+  const major = parseInt(dorMajorCategory(dorUseCode), 10);
+  return Number.isFinite(major) && major >= 10 && major <= 49;
+}
+
+function parcelLooksCommercial(parcel) {
+  if (dorCodeLooksCommercial(parcel?.dorUseCode)) return true;
+  return /warehous|industrial|commercial|office|retail|restaurant|store|shop|plaza|medical|clinic|hotel|motel|distribution/i
+    .test(String(parcel?.landUseDescription || ''));
+}
+
+// Residential keeps today's reject-above-cap semantics (an oversized value in
+// a residential record is garbage, not a big house). Commercial CLAMPS at the
+// cap instead — mirroring the lot rule ("verified values above the public
+// quote max are capped, not discarded") so a 270k sf distribution center
+// prices at the cap rather than reading as "no square footage".
+function coerceBuildingSqft(raw, commercial) {
+  if (!commercial) return coerceInt(raw, BUILDING_SQFT_MIN, RESIDENTIAL_BUILDING_SQFT_MAX);
+  if (raw == null) return null;
+  const n = Number(String(raw).replace(/[^\d.]/g, ''));
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded < BUILDING_SQFT_MIN) return null;
+  return Math.min(rounded, COMMERCIAL_BUILDING_SQFT_MAX);
+}
+
+function coerceFirstBuildingSqft(values, commercial) {
+  for (const value of values) {
+    const parsed = coerceBuildingSqft(value, commercial);
+    if (parsed != null) return parsed;
+  }
+  return null;
+}
+
 // Shapes the FDOR cadastral attributes as a merge-ready evidence record.
 // Weight 97 (cadastral): county-grade data on an annual vintage — it joins
 // the merge as supporting evidence but never short-circuits live PAO / AI
@@ -762,12 +823,14 @@ function buildCadastralRecord(parcel, address) {
   const isCountyGis = Boolean(parcel.gisProvider);
   const provider = parcel.gisProvider || 'fdor_cadastral';
   const useDescType = countyUseDescToPropertyType(parcel.landUseDescription);
+  const cadastralType = useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode));
+  const commercialSized = isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
   const parsed = {
-    squareFootage: coerceInt(parcel.livingAreaSqft, 500, 15000),
+    squareFootage: coerceBuildingSqft(parcel.livingAreaSqft, commercialSized),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
     stories: coerceInt(parcel.stories, 1, 4),
-    propertyType: useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)),
+    propertyType: cadastralType,
     // County-assessed pool flag (tri-state). For a new build where county GIS is
     // the only public-record hit, this carries the pool into pest/mosquito
     // pricing instead of leaving it for vision to (maybe) catch.
@@ -803,8 +866,15 @@ function buildCadastralRecord(parcel, address) {
     // county description here so a county-GIS-only record whose use is
     // commercial / municipal / common-area routes to the manual commercial
     // quote path instead of defaulting to Single Family pricing — even when
-    // countyUseDescToPropertyType returned null for it (codex P1).
-    landUse: parcel.landUseDescription || null,
+    // countyUseDescToPropertyType returned null for it (codex P1). When the
+    // parcel has NO description but its DOR major is commercial/industrial
+    // (Sarasota stcd, FDOR cadastral), synthesize the signal — otherwise the
+    // relaxed >15k building sqft rides into a residential/Single Family
+    // profile with no commercial vote (codex P2 #2718).
+    landUse: parcel.landUseDescription
+      || (dorCodeLooksCommercial(parcel.dorUseCode)
+        ? `DOR use code ${String(parcel.dorUseCode)} — commercial/industrial`
+        : null),
     subdivision: parcel.subdivision || null,
     assessmentYear: parcel.assessmentYear ?? parcel.rollYear ?? null,
   };
@@ -1327,6 +1397,10 @@ const LISTING_SLUG_HOSTS = [
   'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
   'coldwellbankerhomes.com', 'coldwellbanker.com', 'movoto.com',
   'apartments.com', 'era.com', 'liveinswflorida.com', 'villageshomefinder.com', 'bradentonhomelocator.com',
+  // Commercial listing sites also slug the address ("/Listing/2216-51st-Ave-E-
+  // Palmetto-FL/…") — live miss: a lead at 2215 was sourced from the 2216
+  // listing across the street and nothing flagged it.
+  'loopnet.com', 'crexi.com', 'commercialcafe.com',
 ];
 
 function isListingSlugHost(url) {
@@ -1980,6 +2054,18 @@ function stripUnitDesignators(street) {
   return s;
 }
 
+// ZIP from the city/state tail of a comma-formed address — never from the
+// street line, where a 5-digit house number ("12345 Main St") would read as a
+// ZIP. No-comma addresses return null and the audit stays county-wide.
+function extractAuditZip(address) {
+  const parts = String(address || '').split(',').map((part) => part.trim());
+  for (let index = parts.length - 1; index > 0; index -= 1) {
+    const m = parts[index].match(/\b(\d{5})(?:-\d{4})?\b/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 // The street suffix alternation shared by the audit's relaxed matcher —
 // derived from the same canonical list as removeStreetSuffix.
 const AUDIT_SUFFIX_ALT = `(?:${COUNTY_STREET_SUFFIXES})`;
@@ -2020,6 +2106,11 @@ function nearestHouseNumbers(numbers, target, count = 3) {
  * null as "no signal", never as evidence. Shape:
  *   { county, houseNumber, streetLabel, streetExists, hasExactMatch,
  *     parcelCount, nearestNumbers }
+ * When the typed address carries a ZIP, the match is scoped to it (roll rows
+ * with no ZIP stay in scope). A number that exists on the street only in a
+ * DIFFERENT ZIP is not an exact match — SWFL grid streets repeat across
+ * cities — and the verdict carries { typedZip, numberInOtherZips } so the
+ * panel can say the address likely belongs to another city.
  */
 async function auditAddressHouseNumber(address, geoContext = null, options = {}) {
   try {
@@ -2049,6 +2140,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     const typedSuffix = extractStreetSuffix(streetLabel);
     const counties = auditCountyCandidates(address, geoContext);
     if (!counties.length) return null;
+    // ZIP scope: the customer-typed ZIP wins over the canonical/geocoded one
+    // (Google can rewrite the ZIP while snapping). When a typed address was
+    // supplied but carries NO ZIP, do NOT fall back to the canonical ZIP —
+    // Google may have snapped a city-only entry to a neighboring ZIP, and
+    // scoping to it would validate/flag against the geocoder's guess (codex
+    // P2 #2718). No ZIP → county-wide audit, exactly the pre-ZIP behavior.
+    const typedZip = options.typedAddress
+      ? extractAuditZip(options.typedAddress)
+      : extractAuditZip(address);
 
     // End-pinned like the relaxed pattern below: `\b` alone would let
     // "123 MAIN ST" prefix-match a "123 MAIN ST CIR" roll row and fake an
@@ -2076,20 +2176,43 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     // out ("123 MAIN STREET", "123 17TH STREET EAST") compares against the
     // same abbreviated form as the typed street — and the end-pinned
     // patterns see one address per piece.
-    const collect = (situs, pattern) => {
-      const numbers = new Set();
-      for (const s of situs) {
+    // number → Set of roll ZIPs it was seen in (null = row ZIP unknown).
+    const collect = (situs, zips, pattern) => {
+      const numbers = new Map();
+      situs.forEach((s, index) => {
+        const zip = (Array.isArray(zips) && zips[index]) || null;
         for (const piece of String(s).split(';')) {
           // Roll rows can carry their own secondary designator ('123 MAIN ST
           // APT 4') — strip it like the typed side, or the end-pinned
           // patterns reject a street that IS on the roll.
           const norm = stripUnitDesignators(normalizeCountyStreetLine(piece));
           if (!norm) continue;
-          for (const hit of norm.matchAll(pattern)) numbers.add(parseInt(hit[1], 10));
+          for (const hit of norm.matchAll(pattern)) {
+            const n = parseInt(hit[1], 10);
+            if (!numbers.has(n)) numbers.set(n, new Set());
+            numbers.get(n).add(zip);
+          }
         }
-      }
+      });
       return numbers;
     };
+    const mergeNumbers = (target, extra) => {
+      for (const [n, zipSet] of extra) {
+        if (!target.has(n)) target.set(n, new Set());
+        for (const z of zipSet) target.get(n).add(z);
+      }
+      return target;
+    };
+    // A row only falls out of scope when it HAS a ZIP and it isn't the typed
+    // one — unknown row ZIPs stay in scope (fail-open, never manufactures a
+    // mismatch out of missing data).
+    const zipCompatible = (zipSet) => !typedZip || !zipSet || [...zipSet].some((z) => !z || z === typedZip);
+    const scopedNumbers = (map) => {
+      const out = new Set();
+      for (const [n, zipSet] of map) if (zipCompatible(zipSet)) out.add(n);
+      return out;
+    };
+    const otherZipsFor = (map, n) => [...(map.get(n) || [])].filter((z) => z && z !== typedZip).sort();
 
     // queryStreetSitusAddresses returns { situs: [] } for "roll answered, no
     // matches" and null for a failure. Fail-open rule: an exact match is
@@ -2100,14 +2223,15 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
     let anyAnswered = false;
     let anyFailed = false;
     let missingVerdict = null;
+    let zipMismatchVerdict = null;
     for (const county of counties) {
       const result = await queryStreetSitusAddresses(county, likeText, options);
       if (result === null) { anyFailed = true; continue; }
       anyAnswered = true;
       if (!result.situs.length) continue;
 
-      let numbers = collect(result.situs, strictPattern);
-      if (!numbers.size) numbers = collect(result.situs, relaxedPattern);
+      let numbers = collect(result.situs, result.zips, strictPattern);
+      if (!numbers.size) numbers = collect(result.situs, result.zips, relaxedPattern);
       if (!numbers.size) {
         // A truncated page with no matched rows proves nothing — the street
         // could live entirely in the unreturned rows. Try the targeted
@@ -2116,18 +2240,34 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
         if (result.truncated) {
           const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
           if (targeted === null) { anyFailed = true; continue; }
-          const tNumbers = collect(targeted.situs, strictPattern);
-          for (const n of collect(targeted.situs, relaxedPattern)) tNumbers.add(n);
+          const tNumbers = mergeNumbers(
+            collect(targeted.situs, targeted.zips, strictPattern),
+            collect(targeted.situs, targeted.zips, relaxedPattern),
+          );
           if (tNumbers.has(houseNumber)) {
-            return {
+            if (zipCompatible(tNumbers.get(houseNumber))) {
+              return {
+                county,
+                houseNumber,
+                streetLabel,
+                streetExists: true,
+                hasExactMatch: true,
+                parcelCount: result.situs.length,
+                nearestNumbers: [],
+              };
+            }
+            zipMismatchVerdict = zipMismatchVerdict || {
               county,
               houseNumber,
               streetLabel,
               streetExists: true,
-              hasExactMatch: true,
+              hasExactMatch: false,
               parcelCount: result.situs.length,
               nearestNumbers: [],
+              typedZip,
+              numberInOtherZips: otherZipsFor(tNumbers, houseNumber),
             };
+            continue;
           }
           anyFailed = true; // inconclusive — not proof the street is missing
         }
@@ -2135,6 +2275,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       }
 
       let hasExactMatch = numbers.has(houseNumber);
+      let targetedRan = false;
       // The 2000-row page cap can hide the real number on a long street — a
       // truncated "missing" is not evidence. Confirm with a targeted query,
       // and only accept it when the collected numbers actually CONTAIN the
@@ -2142,9 +2283,60 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
       if (!hasExactMatch && result.truncated) {
         const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
         if (targeted === null) { anyFailed = true; continue; }
-        const targetedNumbers = collect(targeted.situs, strictPattern);
-        for (const n of collect(targeted.situs, relaxedPattern)) targetedNumbers.add(n);
-        if (targetedNumbers.has(houseNumber)) hasExactMatch = true;
+        targetedRan = true;
+        const targetedNumbers = mergeNumbers(
+          collect(targeted.situs, targeted.zips, strictPattern),
+          collect(targeted.situs, targeted.zips, relaxedPattern),
+        );
+        if (targetedNumbers.has(houseNumber)) {
+          hasExactMatch = true;
+          mergeNumbers(numbers, targetedNumbers);
+        }
+      }
+      // Same page-cap rule for ZIPs: a truncated page that shows the number
+      // ONLY in another ZIP may simply be missing the in-ZIP row past the
+      // 2000-row cap. Confirm with the targeted query (which returns every
+      // row for this number) before a wrong-ZIP verdict can form (codex P2
+      // #2718).
+      if (hasExactMatch && result.truncated && !targetedRan
+          && !zipCompatible(numbers.get(houseNumber))) {
+        const targeted = await queryStreetSitusAddresses(county, `${houseNumber} ${likeText}`, options);
+        if (targeted === null) { anyFailed = true; continue; }
+        mergeNumbers(numbers, mergeNumbers(
+          collect(targeted.situs, targeted.zips, strictPattern),
+          collect(targeted.situs, targeted.zips, relaxedPattern),
+        ));
+      }
+
+      const scoped = scopedNumbers(numbers);
+      if (hasExactMatch && zipCompatible(numbers.get(houseNumber))) {
+        return {
+          county,
+          houseNumber,
+          streetLabel,
+          streetExists: true,
+          hasExactMatch: true,
+          parcelCount: result.situs.length,
+          nearestNumbers: [],
+        };
+      }
+      if (hasExactMatch) {
+        // The number exists on this street — but only in a different ZIP.
+        // Grid street names repeat across cities ("51ST AVE E" lives in both
+        // Bradenton and Palmetto), so a county-wide hit here would validate
+        // the wrong city's premise. Not an exact match; the panel flags it.
+        zipMismatchVerdict = zipMismatchVerdict || {
+          county,
+          houseNumber,
+          streetLabel,
+          streetExists: true,
+          hasExactMatch: false,
+          parcelCount: result.situs.length,
+          nearestNumbers: scoped.size ? nearestHouseNumbers(scoped, houseNumber) : [],
+          typedZip,
+          numberInOtherZips: otherZipsFor(numbers, houseNumber),
+        };
+        continue;
       }
 
       const verdict = {
@@ -2152,14 +2344,19 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
         houseNumber,
         streetLabel,
         streetExists: true,
-        hasExactMatch,
+        hasExactMatch: false,
         parcelCount: result.situs.length,
-        nearestNumbers: hasExactMatch ? [] : nearestHouseNumbers(numbers, houseNumber),
+        // Nearest neighbors from the typed ZIP only — a suggestion from
+        // another city would tell the operator to "fix" the number toward a
+        // premise in the wrong city, the exact miss ZIP scoping exists to
+        // prevent. No ZIP typed → scoped IS the county-wide set (codex P2
+        // #2718).
+        nearestNumbers: scoped.size ? nearestHouseNumbers(scoped, houseNumber) : [],
       };
-      if (hasExactMatch) return verdict;
       missingVerdict = missingVerdict || verdict;
     }
     if (anyFailed) return null;
+    if (zipMismatchVerdict) return zipMismatchVerdict;
     if (missingVerdict) return missingVerdict;
     if (!anyAnswered) return null;
 
@@ -2571,7 +2768,9 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
   const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
 
   return {
-    squareFootage: coerceInt(primaryBuilding.LivBus, 500, 15000),
+    // LivBus = Living/BUSINESS area — Manatee's building rows already cover
+    // commercial; only the residential cap was hiding them.
+    squareFootage: coerceBuildingSqft(primaryBuilding.LivBus, isCommercialBuildingType(propertyType)),
     lotSize,
     yearBuilt: coerceInt(primaryBuilding.Yrblt, 1900, new Date().getFullYear() + 1),
     bedrooms: rooms.bedrooms,
@@ -2599,15 +2798,22 @@ function parseSarasotaPaoRecord({ address, search, detailHtml, buildingDetailHtm
   const source = sarasotaDetailUrl(search.parcelId);
   const situsAddress = search.situsAddress || extractSarasotaSitusAddress(detailHtml);
   const city = search.city || extractCountyResultCity(situsAddress);
+  const propertyType = normalizeCountyPropertyType(detailFacts.propertyType || propertyUse);
+  const commercialSized = isCommercialBuildingType(propertyType);
 
   return {
-    squareFootage: coerceFirstInt([detailFacts.squareFootage, primaryBuilding['Living Area']], 500, 15000),
+    // Commercial buildings often carry only a Gross Area figure (no
+    // living-area line), so the gross column joins the candidates there.
+    squareFootage: coerceFirstBuildingSqft(
+      [detailFacts.squareFootage, primaryBuilding['Living Area'], ...(commercialSized ? [primaryBuilding['Gross Area']] : [])],
+      commercialSized,
+    ),
     lotSize,
     yearBuilt: coerceFirstInt([detailFacts.yearBuilt, primaryBuilding['Year Built']], 1900, new Date().getFullYear() + 1),
     bedrooms: coerceFirstInt([detailFacts.bedrooms, primaryBuilding.Beds], 1, 15),
     bathrooms: detailFacts.bathrooms ?? (baths == null ? null : baths + (halfBaths * 0.5)),
     stories: coerceFirstInt([detailFacts.stories, primaryBuilding.Stories], 1, 4),
-    propertyType: normalizeCountyPropertyType(detailFacts.propertyType || propertyUse),
+    propertyType,
     constructionMaterial: normalizeCountyConstruction(`${detailFacts.frame || ''} ${detailFacts.exteriorWalls || ''}`),
     roofType: normalizeCountyRoof(`${detailFacts.roofMaterial || ''} ${detailFacts.roofStructure || ''}`),
     source,
@@ -2622,9 +2828,13 @@ function parseSarasotaBuildingDetail(html) {
   if (!html) return {};
   const bathrooms = coerceFloat(extractHtmlBulletValue(html, 'Bathrooms'), 0, 15);
   const halfBaths = coerceFloat(extractHtmlBulletValue(html, 'Half Baths'), 0, 15) || 0;
+  const buildingType = extractHtmlBulletValue(html, 'Building Type');
   return {
-    propertyType: extractHtmlBulletValue(html, 'Building Type'),
-    squareFootage: coerceInt(extractHtmlBulletValue(html, 'Finished Area S.F'), 500, 15000),
+    propertyType: buildingType,
+    squareFootage: coerceBuildingSqft(
+      extractHtmlBulletValue(html, 'Finished Area S.F'),
+      isCommercialBuildingType(normalizeCountyPropertyType(buildingType)),
+    ),
     yearBuilt: coerceInt(extractHtmlBulletValue(html, 'Year Built'), 1900, new Date().getFullYear() + 1),
     bedrooms: coerceInt(extractHtmlBulletValue(html, 'Bedrooms'), 1, 15),
     bathrooms: bathrooms == null ? null : bathrooms + (halfBaths * 0.5),
@@ -2647,15 +2857,17 @@ function parseCharlottePaoRecord({ address, search, detailHtml, ownership }) {
   const zipCode = search.zipCode || extractAddressZip(cityZip) || cleanHtmlText(ownershipAttrs.zipcode);
   const currentUse = extractCharlottePairedValue(detailHtml, 'Current Use') || ownershipAttrs.description || ownershipAttrs.landuse;
   const source = charlotteRecordUrl(search.parcelId);
+  const propertyType = normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`);
+  const commercialSized = isCommercialBuildingType(propertyType);
 
   return {
-    squareFootage: coerceFirstInt([primaryBuilding['A/C Area'], primaryBuilding.Area, primaryBuilding['Total Area']], 500, 15000),
+    squareFootage: coerceFirstBuildingSqft([primaryBuilding['A/C Area'], primaryBuilding.Area, primaryBuilding['Total Area']], commercialSized),
     lotSize: coerceCharlotteOwnershipLotSize(ownership),
     yearBuilt: coerceInt(primaryBuilding['Year Built'], 1900, new Date().getFullYear() + 1),
     bedrooms: coerceInt(primaryBuilding.Bedrooms, 1, 15),
     bathrooms: null,
     stories: coerceInt(primaryBuilding.Floors, 1, 4),
-    propertyType: normalizeCountyPropertyType(`${currentUse || ''} ${primaryBuilding.Description || ''}`),
+    propertyType,
     constructionMaterial: normalizeCountyConstruction(findCharlotteComponentDescription(componentRows, 'Exterior Walls')),
     roofType: normalizeCountyRoof(findCharlotteComponentDescription(componentRows, 'Roofing')),
     source,
@@ -2675,7 +2887,10 @@ function pickPrimaryHtmlBuildingIndex(rows, areaFields) {
   let bestIndex = -1;
   let bestArea = -1;
   rows.forEach((row, index) => {
-    const area = coerceFirstInt(areaFields.map((field) => row[field]), 1, 100000) || 0;
+    // Sort key only — generous ceiling so a 100k+ sf commercial main
+    // building still outranks its accessory rows; the record-level
+    // coerceBuildingSqft applies the real type-aware bound afterwards.
+    const area = coerceFirstInt(areaFields.map((field) => row[field]), 1, 1000000) || 0;
     if (area > bestArea) {
       bestArea = area;
       bestIndex = index;
@@ -2716,7 +2931,10 @@ function pickPrimaryManateeBuilding(buildingRows) {
 }
 
 function manateeBuildingArea(row) {
-  return coerceInt(row?.LivBus, 1, 100000) || coerceInt(row?.UnRoof, 1, 100000) || 0;
+  // Sort key only — a generous ceiling so a 100k+ sf commercial building
+  // still outranks its sheds; the record-level coerceBuildingSqft applies
+  // the real type-aware bound afterwards.
+  return coerceInt(row?.LivBus, 1, 1000000) || coerceInt(row?.UnRoof, 1, 1000000) || 0;
 }
 
 function sumPaoLotSqFootage(landRows) {
@@ -2986,6 +3204,7 @@ Output rules:
 - "lotSize" MUST be in square feet. If the exact-property source shows the lot in acres (e.g. "0.25 acres"), CONVERT to square feet by multiplying acres × 43560 before outputting. Example: "0.25 acres" → 10890.
 - Do NOT borrow lot size from a nearby home, comparable, neighborhood median, or builder community page unless it is explicitly for the exact address.
 - If the converted lot size is above 200000 square feet, output 200000 so the public quote flow prices at its maximum lot-size cap instead of defaulting to a small lot.
+- Commercial/industrial properties: also search loopnet.com, crexi.com, and commercialcafe.com listings. "squareFootage" is the building square footage (these run larger than homes — report the true figure). When the address includes a unit/suite number, prefer THAT unit's square footage from the leasing listing over the whole building's.
 - "constructionMaterial" must be one of: "CBS" (concrete block / stucco), "WOOD_FRAME", "BRICK", "METAL", or null.
 - "propertyType" must be one of: "Single Family", "Townhome", "Condo", "Duplex", "Commercial", "Office", "Retail", "Warehouse", "Restaurant", "Medical Office", "School", "Industrial", "Multifamily", "Apartment", "HOA Common Area", or null.
 - The "source" URL must be the exact property page, parcel page, permit page, or builder floorplan/community page used for the facts.
@@ -2994,7 +3213,7 @@ Output rules:
 
 Respond with ONLY a JSON object — no preamble, no explanation, no markdown fences:
 {
-  "squareFootage": <int 500-15000 or null>,
+  "squareFootage": <int 500-15000 for residential; for a commercial/industrial building output the TRUE building square footage up to 200000; or null>,
   "lotSize": <int 1000-200000, in SQUARE FEET for the exact property (convert from acres if needed; cap verified oversized lots at 200000), or null>,
   "yearBuilt": <int 1900-2026 or null>,
   "bedrooms": <int 1-15 or null>,
@@ -3017,8 +3236,9 @@ function parsePropertyJSON(text) {
   if (!match) return null;
   try {
     const raw = JSON.parse(match[0]);
+    const parsedType = normalizeLookupPropertyType(raw.propertyType);
     const out = {
-      squareFootage: coerceFirstInt([
+      squareFootage: coerceFirstBuildingSqft([
         raw.squareFootage,
         raw.square_footage,
         raw.homeSqFt,
@@ -3028,13 +3248,13 @@ function parsePropertyJSON(text) {
         raw.livingAreaSqFt,
         raw.living_area_sqft,
         raw.sqft,
-      ], 500, 15000),
+      ], isCommercialBuildingType(parsedType)),
       lotSize: coerceParsedLotSize(raw),
       yearBuilt: coerceInt(raw.yearBuilt, 1900, new Date().getFullYear() + 1),
       bedrooms: coerceInt(raw.bedrooms, 1, 15),
       bathrooms: coerceFloat(raw.bathrooms, 0.5, 15),
       stories: coerceInt(raw.stories, 1, 4),
-      propertyType: normalizeLookupPropertyType(raw.propertyType),
+      propertyType: parsedType,
       constructionMaterial: coerceEnum(raw.constructionMaterial, ['CBS', 'WOOD_FRAME', 'BRICK', 'METAL']),
       source: typeof raw.source === 'string' ? raw.source : null,
       confidence: typeof raw.confidence === 'string' ? raw.confidence.toLowerCase() : null,
@@ -3587,7 +3807,15 @@ function classifyPropertySource(url) {
   ].some((domain) => host.includes(domain))) {
     return { type: 'builder', weight: SOURCE_TYPE_WEIGHTS.builder };
   }
-  if (['zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com'].some((domain) => host.includes(domain))) {
+  // Commercial listing sites (LoopNet/Crexi/CommercialCafe) ride the same
+  // lane as residential listings — the prompt sends the model there for
+  // warehouse/office leads, and an unknown-classified source would score the
+  // record below the field-verify bar and strip its commercial signal out of
+  // detectCategory (codex P2 #2718).
+  if ([
+    'zillow.com', 'redfin.com', 'homes.com', 'realtor.com', 'trulia.com', 'compass.com',
+    'loopnet.com', 'crexi.com', 'commercialcafe.com',
+  ].some((domain) => host.includes(domain))) {
     if (isGenericListingPath(path)) return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
     return { type: 'listing', weight: SOURCE_TYPE_WEIGHTS.listing };
   }
@@ -3766,6 +3994,12 @@ module.exports = {
     pickSarasotaPrimaryBuildingLink,
     pickSarasotaSearchResult,
     pickCharlotteAddressResult,
+    pickPrimaryHtmlBuilding,
+    classifyPropertySource,
+    coerceBuildingSqft,
+    isCommercialBuildingType,
+    parcelLooksCommercial,
+    extractAuditZip,
     shapeAsPropertyRecord,
     shouldQueryManateePAO,
     shouldQuerySarasotaPAO,
