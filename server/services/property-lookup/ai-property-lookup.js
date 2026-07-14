@@ -836,7 +836,12 @@ function buildCadastralRecord(parcel, address) {
     squareFootage: coerceBuildingSqft(parcel.livingAreaSqft, commercialSized),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
-    stories: coerceInt(parcel.stories, 1, 4),
+    // Association aggregates are mid/high-rise territory — clamping a known
+    // county story count to 4 would discard it and force footprintUnknown
+    // (blank prefills + manual-review pricing) on a building whose stories
+    // the roll actually knew. Cap mirrors the verified-story range; the
+    // residential cap stays 4 (codex P2 #2721).
+    stories: coerceInt(parcel.stories, 1, isAggregate ? 50 : 4),
     propertyType: cadastralType,
     // County-assessed pool flag (tri-state). For a new build where county GIS is
     // the only public-record hit, this carries the pool into pest/mosquito
@@ -1345,11 +1350,20 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 // The optional period covers punctuated designators ("Apt. 101" / "Ste. 200")
 // — without it the raw typed address slips past this guard while the
 // normalized street comparison strips the unit anyway, so a condo-resident
-// lookup would ride the association aggregate (codex P1 #2721).
-const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM)\b\.?\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
+// lookup would ride the association aggregate (codex P1 #2721). The set must
+// cover everything stripUnitDesignators peels (LOT/TRLR included) — a
+// designator that strips but doesn't flag matches the aggregate's base line
+// and keeps the HOA for a unit-level lookup (codex P2 r8 #2721).
+const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM|LOT)\b\.?\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
+// "FL" is both the floor designator and the state abbreviation, so it gets
+// its own pattern: a value must follow AND must not be a zip — otherwise
+// every "Venice FL 34285" would read as "floor 34285" and aggregation would
+// never fire anywhere in Florida.
+const FL_FLOOR_RE = /\bFL\b\.?\s*#?\s*(?!\d{5}(?:-\d{4})?\b)[A-Z0-9-]+/i;
 
 function addressHasSubpremise(address) {
-  return SUBPREMISE_RE.test(String(address || ''));
+  const s = String(address || '');
+  return SUBPREMISE_RE.test(s) || FL_FLOOR_RE.test(s);
 }
 
 function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress) {

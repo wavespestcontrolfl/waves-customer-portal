@@ -2715,9 +2715,14 @@ export default function EstimateToolViewV2({
         // default — deriving a "footprint" here re-arms the fake-slab
         // autofill the lookup suppressed (codex P1 #2721). Manual entry
         // stays possible; the box just never self-fills. A MANUALLY entered
-        // story count supplies the missing datum, so derivation resumes
-        // (codex P2 r7 #2721).
-        if (f._footprintUnknownLookup && !f._storiesEdited) return f;
+        // POSITIVE story count supplies the missing datum, so derivation
+        // resumes — an edited-then-cleared box does not (codex P2 r7+r8
+        // #2721).
+        if (
+          f._footprintUnknownLookup &&
+          !(f._storiesEdited && Number(f.stories) >= 1)
+        )
+          return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -3645,8 +3650,14 @@ export default function EstimateToolViewV2({
       // the lookup suppressed (codex P1 #2721). A story count the operator
       // MANUALLY entered supplies exactly the missing datum, so the flag
       // clears and derivation (and footprint-driven pricing) resumes off the
-      // corrected value (codex P2 r7 #2721).
-      if (profile.footprintUnknown === true && form._storiesEdited)
+      // corrected value (codex P2 r7 #2721). The edit flag alone is not
+      // enough — a cleared/invalid Stories box would fall back to the
+      // default and re-derive the fake slab (codex P2 r8 #2721).
+      if (
+        profile.footprintUnknown === true &&
+        form._storiesEdited &&
+        Number(form.stories) >= 1
+      )
         profile.footprintUnknown = false;
       if (profile.homeSqFt && profile.footprintUnknown !== true)
         profile.footprint = Math.round(

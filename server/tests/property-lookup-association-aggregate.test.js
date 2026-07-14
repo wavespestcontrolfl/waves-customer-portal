@@ -880,3 +880,68 @@ describe('codex round-7 hardening (#2721)', () => {
     expect(sanitizeVerifiedValue('stories', 51)).toBeUndefined();
   });
 });
+
+describe('codex round-8 hardening (#2721)', () => {
+  const { aggregateSitusVerdict, addressHasSubpremise } = aiPrivate;
+
+  test('LOT and FL floor designators read as subpremises — state FL does not', () => {
+    expect(addressHasSubpremise('1555 Main St Lot 12, Venice, FL')).toBe(true);
+    expect(addressHasSubpremise('100 Main St FL 2, Venice, FL 34285')).toBe(true);
+    // The state abbreviation must NEVER read as a floor designator — with
+    // or without commas, with or without the +4 zip.
+    expect(addressHasSubpremise('1555 Tarpon Center Dr, Venice, FL 34285')).toBe(false);
+    expect(addressHasSubpremise('1555 Tarpon Center Dr Venice FL 34285')).toBe(false);
+    expect(addressHasSubpremise('1555 Tarpon Center Dr, Venice, FL 34285-1234')).toBe(false);
+    expect(addressHasSubpremise('1555 Tarpon Center Dr, Venice, FL')).toBe(false);
+
+    const parcel = {
+      aggregated: true,
+      situsHouseNumbers: ['1555'],
+      situsLines: ['1555 MAIN ST'],
+    };
+    expect(aggregateSitusVerdict(parcel, '1555 Main St, Venice, FL 34285', 'rooftop',
+      '1555 Main St Lot 12, Venice, FL 34285')).toBe('drop');
+  });
+
+  test('a known high-rise story count on an aggregate survives the cadastral parse', () => {
+    const parcel = {
+      parcelId: '0000007090',
+      county: 'Sarasota',
+      gisProvider: 'sarasota_gis',
+      situsAddress: '1555 TARPON CENTER DR',
+      situsCity: 'VENICE',
+      situsZip: '34285',
+      lotSqft: 98084,
+      livingAreaSqft: 104096,
+      stories: 8,
+      yearBuilt: 1970,
+      residentialUnits: 118,
+      dorUseCode: '0403',
+      landUseDescription: 'Multifamily condo/HOA association — 118 units, 1 building (county aggregate)',
+      aggregated: true,
+      aggregateUnitParcels: 118,
+      buildingCount: 1,
+    };
+
+    const record = attachParcelMeta(
+      buildCadastralRecord(parcel, '1555 Tarpon Center Dr, Venice, FL 34285'),
+      parcel,
+    );
+    expect(record.stories).toBe(8);
+
+    // With the story count intact the profile derives a real footprint —
+    // no footprintUnknown, prefills present.
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+    expect(profile.footprintUnknown).toBeUndefined();
+    expect(profile.footprint).toBe(Math.round(104096 / 8));
+    expect(profile.estimatedPerimeterLF).toBeGreaterThan(0);
+
+    // Residential parses keep the 1–4 clamp.
+    const house = buildCadastralRecord({
+      parcelId: 'X', gisProvider: 'sarasota_gis', livingAreaSqft: 2400,
+      lotSqft: 10000, stories: 8, dorUseCode: '0100',
+      landUseDescription: 'Single Family Residential',
+    }, '100 Oak St, Venice, FL');
+    expect(house.stories).toBeNull(); // out of residential range → dropped, not trusted
+  });
+});
