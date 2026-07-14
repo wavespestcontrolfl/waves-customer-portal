@@ -357,6 +357,15 @@ async function processDueJobs(now = new Date()) {
 
   const rules = await loadRules();
   const rulesByKey = new Map(rules.map((r) => [r.rule_key, r]));
+  // Same-sweep jobs share a due_at; rule priority breaks the tie so an
+  // urgent rule (expiring, priority 30) wins the spacing/cap budget over a
+  // generic one (gone-quiet, 50) instead of Postgres's arbitrary order
+  // deciding which email the customer gets (codex 2736 r4).
+  jobs.sort((a, b) => {
+    const t = new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
+    if (t) return t;
+    return (rulesByKey.get(a.rule_key)?.priority ?? 100) - (rulesByKey.get(b.rule_key)?.priority ?? 100);
+  });
   let sent = 0;
   let shadow = 0;
 
@@ -490,6 +499,11 @@ async function processDueJobs(now = new Date()) {
         },
       });
       if (ok) {
+        // The email is SENT — the ledger row must survive any bookkeeping
+        // failure below (codex 2736 r4: releasing it would let a retry
+        // re-email the customer). A failed bump/markJob falls to the poison
+        // guard; the retry then loses the claim and marks the job skipped.
+        claimed = false;
         await db('estimates')
           .where({ id: est.id })
           .update({
@@ -498,7 +512,6 @@ async function processDueJobs(now = new Date()) {
           });
         await markJob(job.id, 'done', null);
         sent++;
-        claimed = false;
       } else {
         await followupShared.releaseFollowupSend(est.id, rule.rule_key);
         claimed = false;

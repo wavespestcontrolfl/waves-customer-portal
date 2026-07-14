@@ -81,6 +81,9 @@ function makeBuilder(table, cfg = {}) {
     return b;
   });
   b.then = (resolve, reject) => {
+    if (b._mode === 'update' && cfg.updateError) {
+      return Promise.reject(new Error(cfg.updateError)).then(resolve, reject);
+    }
     const value =
       b._mode === 'insert' ? (cfg.insert ?? [{ id: 'job-1' }])
         : b._mode === 'update' ? (cfg.update ?? 1)
@@ -493,6 +496,46 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(0);
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('a bookkeeping failure AFTER a successful send never releases the claim', async () => {
+    enqueue('estimate_followup_jobs', { rows: [pendingJob()] });     // due scan
+    enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
+    enqueue('estimates', { first: baseEstimate() });
+    enqueue('notification_prefs', { first: { email_enabled: true } });
+    enqueue('estimates', { updateError: 'bump failed mid-transaction' }); // follow_up_count bump throws
+
+    await Engine.processDueJobs(NOW);
+
+    expect(followupShared.sendDualChannel).toHaveBeenCalledTimes(1);
+    // The email went out — the ledger row must survive, or a retry re-emails.
+    expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
+  });
+
+  test('rule priority breaks due_at ties — the expiring email wins the budget', async () => {
+    const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
+    const due = new Date(NOW.getTime() - 5 * MIN);
+    enqueue('estimate_followup_jobs', {
+      rows: [
+        pendingJob({ id: 'job-quiet', rule_key: 'viewed_gone_quiet_72h', estimate_id: 'est-1', due_at: due }),
+        pendingJob({ id: 'job-exp', rule_key: 'expiring_engaged', estimate_id: 'est-2', due_at: due }),
+      ],
+    });
+    enqueue('estimate_followup_rules', { rows: [QUIET_RULE, EXPIRING_RULE, HOT_RULE] });
+    // Processed order after the priority sort: expiring (30) then quiet (50).
+    enqueue('estimates', { first: baseEstimate({ id: 'est-2', expires_at: new Date(NOW.getTime() + 1 * 86400000) }) });
+    enqueue('estimate_followup_sends', { first: undefined }); // expiring sibling check
+    enqueue('notification_prefs', { first: { email_enabled: true } });
+    enqueue('estimates', { update: 1 });
+    enqueue('estimates', { first: baseEstimate({ id: 'est-1' }) });
+    enqueue('notification_prefs', { first: { email_enabled: true } });
+    enqueue('estimates', { update: 1 });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(2);
+    expect(followupShared.claimFollowupSend.mock.calls[0][1]).toBe('expiring_engaged');
+    expect(followupShared.claimFollowupSend.mock.calls[1][1]).toBe('viewed_gone_quiet_72h');
   });
 
   test('an unexpected per-job error defers the job out of the due batch (poison guard)', async () => {

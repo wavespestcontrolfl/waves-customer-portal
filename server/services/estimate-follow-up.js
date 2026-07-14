@@ -789,6 +789,9 @@ async function checkPaymentStepAbandoned(now = new Date()) {
         },
       });
       if (ok) {
+        // The email is SENT — the ledger row must survive a bookkeeping
+        // failure (releasing it would re-email on the next tick).
+        claimed = false;
         await db("estimates")
           .where({ id: est.id })
           .update({
@@ -796,7 +799,6 @@ async function checkPaymentStepAbandoned(now = new Date()) {
             last_follow_up_at: db.fn.now(),
           });
         sent++;
-        claimed = false;
       }
     } catch (e) {
       logger.error(`[est-followup] Payment-step send failed: ${e.message}`);
