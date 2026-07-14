@@ -38,6 +38,18 @@ exports.up = async function up(knex) {
     }
   }
 
+  // Same confirmed-send marker for PROJECT prep guides: sendPrepGuide mints
+  // the project token before the email succeeds, so the tracker's link must
+  // gate on this stamp there too. No backfill needed — zero project prep
+  // tokens exist in prod as of 2026-07-14.
+  if (await knex.schema.hasTable('projects')) {
+    if (!(await knex.schema.hasColumn('projects', 'prep_sent_at'))) {
+      await knex.schema.alterTable('projects', (t) => {
+        t.timestamp('prep_sent_at').nullable();
+      });
+    }
+  }
+
   if (await knex.schema.hasTable('prep_guide_views')) {
     const hasServiceId = await knex.schema.hasColumn('prep_guide_views', 'scheduled_service_id');
     if (!hasServiceId) {
@@ -59,6 +71,14 @@ exports.down = async function down(knex) {
         t.dropIndex(['scheduled_service_id', 'viewed_at']);
         t.dropColumn('scheduled_service_id');
         t.uuid('project_id').notNullable().alter();
+      });
+    }
+  }
+
+  if (await knex.schema.hasTable('projects')) {
+    if (await knex.schema.hasColumn('projects', 'prep_sent_at')) {
+      await knex.schema.alterTable('projects', (t) => {
+        t.dropColumn('prep_sent_at');
       });
     }
   }

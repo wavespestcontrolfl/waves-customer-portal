@@ -232,6 +232,80 @@ describe('automation runner suppression guardrails', () => {
   });
 });
 
+describe('automation runner prep sequence delivery stamp', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    db.fn = { now: jest.fn(() => 'NOW()') };
+  });
+
+  function queuesForSend({ templateKey, stampChain }) {
+    const queues = {
+      automation_enrollments: [
+        chain({
+          first: {
+            id: 'enrollment-1',
+            status: 'active',
+            template_key: templateKey,
+            customer_id: 'cust-1',
+            current_step: 0,
+            email: 'megan@example.com',
+            first_name: 'Megan',
+            last_name: 'Example',
+          },
+        }),
+        chain({}),
+      ],
+      automation_templates: [
+        chain({ first: { key: templateKey, name: templateKey, asm_group: 'service' } }),
+      ],
+      automation_steps: [
+        chain({
+          result: [{
+            id: 'step-1',
+            step_order: 0,
+            subject: 'Your prep guide',
+            html_body: '<p>Prep steps for {{first_name}}</p>',
+            text_body: 'Prep steps',
+            from_email: 'automations@wavespestcontrol.com',
+            enabled: true,
+          }],
+        }),
+      ],
+      automation_step_sends: [
+        chain({ returning: [{ id: 'send-1' }] }),
+        chain({}),
+      ],
+      email_suppressions: [chain({ result: [] })],
+    };
+    if (stampChain) queues.scheduled_services = [stampChain];
+    return queues;
+  }
+
+  test('a delivered step-0 prep guide stamps the token-bearing visit rows', async () => {
+    const stampChain = chain({});
+    setDbQueues(queuesForSend({ templateKey: 'flea', stampChain }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await sendStep('enrollment-1');
+
+    expect(result.sent).toBe(true);
+    expect(stampChain.where).toHaveBeenCalledWith({ customer_id: 'cust-1', prep_template_key: 'prep.flea' });
+    expect(stampChain.update).toHaveBeenCalledWith({ prep_sent_at: 'NOW()' });
+  });
+
+  test('non-prep sequences never touch the visit rows', async () => {
+    // No scheduled_services queue: a stamp attempt would throw
+    // "Unexpected db table" and fail this test.
+    setDbQueues(queuesForSend({ templateKey: 'cold_lead' }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+
+    const result = await sendStep('enrollment-1');
+
+    expect(result.sent).toBe(true);
+  });
+});
+
 describe('automation runner enrollment reactivation', () => {
   beforeEach(() => {
     jest.clearAllMocks();

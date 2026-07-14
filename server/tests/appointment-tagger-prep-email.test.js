@@ -550,6 +550,9 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     priorBookingRow = null;
     priorPrepInteraction = null;
     priorEnrollmentRow = null;
+    servicePrepRow = { prep_token: null, prep_template_key: null };
+    servicePrepUpdateResult = [{}];
+    serviceUpdates = [];
     templateRow = { key: 'bed_bug', enabled: true };
     firstStepRow = { step_order: 0, enabled: true, html_body: '<p>guide</p>', text_body: '' };
     customerRow = {
@@ -595,6 +598,11 @@ describe('treatment automation sequence (one guide email, Automations-tab source
       'auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object),
     );
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Sequence-lane parity: the visit's public prep token is minted at
+    // enroll time (the runner stamps prep_sent_at when step-0 delivers).
+    expect(serviceUpdates.some((p) => p && p.prep_token && p.prep_template_key === 'prep.bed_bug')).toBe(true);
+    // But never the delivery stamp — that belongs to the runner.
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
   });
 
   test('gate off: the transactional prep lane runs unchanged and nothing enrolls', async () => {

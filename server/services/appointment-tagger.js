@@ -390,7 +390,7 @@ class AppointmentTagger {
       // each would send a companion SMS. Everything inside runs on the trx
       // (enrollCustomer takes dbh), so the lock holder needs no second pooled
       // connection.
-      return await db.transaction(async (trx) => {
+      const outcome = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`treatment_enroll:${service.customer_id}:${templateKey}`]);
 
         // Once per customer — but only rows that delivered (or still can):
@@ -428,6 +428,21 @@ class AppointmentTagger {
         // coming from this run, so the SMS stays silent too.
         return { queued: false, reason: 'not_queued' };
       });
+      if (outcome?.queued) {
+        // Sequence-lane parity with the transactional lane: mint the
+        // visit's public prep token now (outside the lock transaction — the
+        // lock holder must not pin a second pooled connection). The
+        // automation-runner stamps prep_sent_at on this row when the
+        // step-0 guide actually sends, which is what lights up the
+        // tracker's prep link. Fail-soft.
+        try {
+          const { ensureServicePrepToken } = require('./project-email');
+          await ensureServicePrepToken(service.id, PREP_AUTOMATION_BY_PEST_TYPE[pestType]);
+        } catch (tokenErr) {
+          logger.warn(`[appointment-tagger] prep token mint failed for service ${service.id}: ${tokenErr.message}`);
+        }
+      }
+      return outcome;
     } catch (err) {
       logger.error(`[appointment-tagger] ${templateKey} sequence enroll failed for service ${service.id}: ${err.message}`);
       return { queued: false, reason: 'error' };

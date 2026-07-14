@@ -236,6 +236,32 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
  * marks the enrollment complete if it was the last step, or failed
  * if SendGrid rejects.
  */
+// Treatment-sequence templates whose FIRST enabled step carries the prep
+// guide. When that step actually sends, the enrolled customer's token-bearing
+// visit rows (minted by the appointment tagger at enroll time) get their
+// prep_sent_at confirmed-delivery stamp — the tracker's prep link gates on
+// it. Fail-soft: a stamp hiccup never fails a step that already sent.
+const PREP_TEMPLATE_BY_SEQUENCE_KEY = Object.freeze({
+  bed_bug: 'prep.bed_bug',
+  cockroach: 'prep.cockroach',
+  flea: 'prep.flea',
+});
+
+async function stampPrepSentForSequence(enrollment, step, steps) {
+  const prepKey = PREP_TEMPLATE_BY_SEQUENCE_KEY[enrollment.template_key];
+  if (!prepKey || !enrollment.customer_id) return;
+  if (!steps.length || step.id !== steps[0].id) return;
+  try {
+    await db('scheduled_services')
+      .where({ customer_id: enrollment.customer_id, prep_template_key: prepKey })
+      .whereNotNull('prep_token')
+      .whereNull('prep_sent_at')
+      .update({ prep_sent_at: db.fn.now() });
+  } catch (err) {
+    logger.warn(`[automation-runner] prep_sent_at stamp failed for enrollment ${enrollment.id}: ${err.message}`);
+  }
+}
+
 async function sendStep(enrollmentId, { testRecipient } = {}) {
   const enrollment = await db('automation_enrollments').where({ id: enrollmentId }).first();
   if (!enrollment) throw new Error('enrollment not found');
@@ -324,6 +350,8 @@ async function sendStep(enrollmentId, { testRecipient } = {}) {
 
     // For test sends we don't advance the enrollment — only real sends do.
     if (testRecipient) return { sent: true, messageId: res.messageId, test: true };
+
+    await stampPrepSentForSequence(enrollment, step, steps);
 
     return advanceEnrollment(enrollment, steps);
   } catch (err) {

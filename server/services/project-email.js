@@ -401,7 +401,7 @@ async function sendPrepGuide({
     await db('projects').where({ id: project.id }).update({ prep_template_key: resolvedTemplateKey });
   }
   const payload = buildProjectPayload({ project, customer });
-  return sendProjectTemplate({
+  const result = await sendProjectTemplate({
     project,
     customer,
     templateKey: resolvedTemplateKey,
@@ -411,6 +411,17 @@ async function sendPrepGuide({
     triggerEventId: `project_prep.ready:${project?.id || 'unknown'}:${resolvedTemplateKey}`,
     idempotencyKey: idempotencyKey || `project.prep:${project?.id || 'unknown'}:${resolvedTemplateKey}:${sendAttemptKey()}`,
   });
+  if (result?.ok && project?.id) {
+    // Confirmed-send marker: the token above is minted BEFORE the send, so
+    // the tracker gates its project prep link on prep_sent_at, not on the
+    // token existing. Fail-soft — a stamp hiccup never fails a sent guide.
+    try {
+      await db('projects').where({ id: project.id }).update({ prep_sent_at: db.fn.now() });
+    } catch (stampErr) {
+      logger.warn(`[project-email] prep_sent_at stamp failed for project ${project.id}: ${stampErr.message}`);
+    }
+  }
+  return result;
 }
 
 async function sendPortalInvite({

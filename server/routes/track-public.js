@@ -456,6 +456,7 @@ router.get('/:token', async (req, res, next) => {
       const linkedProject = await db('projects')
         .where({ scheduled_service_id: row.id })
         .whereNotNull('prep_token')
+        .whereNotNull('prep_sent_at')
         .orderBy('created_at', 'desc')
         .first('prep_token');
       response.prepToken = linkedProject?.prep_token
