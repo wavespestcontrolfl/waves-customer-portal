@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
+import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
@@ -558,6 +559,36 @@ function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, subm
 function V2Styles() {
   return (
     <style>{`
+      /* Hero — mirrors ReportViewPage's .section-eyebrow / .sr-title
+         (same theme-doc tokens + serif face), floating on the scene
+         rather than inside a glass card. */
+      .rsv2-hero { margin: 8px 2px 20px; }
+      .rsv2-eyebrow {
+        color: ${S.muted};
+        font-size: ${FS.caption}px;
+        line-height: ${LH.heading};
+        margin-bottom: ${SP.xs}px;
+        font-weight: ${FW.bold};
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+      .rsv2-title {
+        margin: 0;
+        color: ${S.text};
+        font-family: ${FONTS.serif};
+        font-size: clamp(30px, 5vw, 40px);
+        line-height: 1.1;
+        font-weight: 500;
+        letter-spacing: 0;
+      }
+      .rsv2-hero-meta {
+        margin-top: 12px;
+        color: ${S.body};
+        font-size: 15px;
+        line-height: 1.55;
+      }
+      .rsv2-hero-meta strong { color: ${S.text}; }
+
       .rsv2-ask-wrap { position: sticky; top: 57px; z-index: 8; margin-bottom: 16px; }
       .rsv2-ask-bar {
         position: relative;
@@ -946,24 +977,29 @@ export default function ReschedulePage() {
         <V2FloatingAsk key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
         <div className="rsv2-layout">
           <div className="rsv2-col-left">
-            <Card>
-              <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
-                {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
-              </div>
-              <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-                Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
-                scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
-                {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+            {/* Hero mirrors the service report's header (owner ask
+                2026-07-14): section eyebrow + serif "Hey {first}, …" title
+                floating on the scene, meta line below — same tokens as
+                ReportViewPage's .section-eyebrow / .sr-title. */}
+            <div className="rsv2-hero">
+              <div className="rsv2-eyebrow">Reschedule</div>
+              <h1 className="rsv2-title">
+                Hey {data.customerFirstName || 'there'}, {"let's pick a new time"}
+              </h1>
+              <div className="rsv2-hero-meta">
+                Your <strong>{data.service?.type || 'service'}</strong> visit is currently
+                scheduled for <strong>{formatDateLabel(current.date)}</strong>
+                {current.windowStart ? <>, arrival window <strong>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
               </div>
               {data.isRecurring ? (
                 <div data-glass="soft" style={{
-                  marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
+                  marginTop: 14, background: S.soft, border: `1px solid ${S.softBorder}`,
                   borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
                 }}>
                   Only this visit will move — the rest of your regular service schedule stays the same.
                 </div>
               ) : null}
-            </Card>
+            </div>
             {aiFiltered ? null : (
               <V2BestTimes
                 slots={data?.availability?.slots}
