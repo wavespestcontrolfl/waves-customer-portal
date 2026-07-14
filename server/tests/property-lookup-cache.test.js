@@ -305,7 +305,9 @@ describe('saveVerifiedOverride', () => {
     const merged = await saveVerifiedOverride('100 Main St', {
       squareFootage: -5,
       lotSize: 9999999,
-      stories: 9,
+      // 90 is out of range even for a high-rise; single-digit story counts
+      // are now VALID (mid-rise associations — codex P2 #2721).
+      stories: 90,
       yearBuilt: 'next year',
       hasPool: 'yes',
       propertyType: 'Single Family',

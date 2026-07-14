@@ -87,9 +87,17 @@ function normalizeVerifiedRoof(raw) {
 
 function sanitizeVerifiedValue(field, value) {
   switch (field) {
-    case 'squareFootage': return intInRange(value, 100, 50000);
+    // squareFootage covers association aggregates / commercial buildings —
+    // the enriched profile publishes summed living area up to 200k
+    // (AGGREGATE_DIM_CAP_SQFT), and a 50k cap silently dropped a rep's
+    // downward correction on any complex bigger than that, so the county
+    // aggregate won every re-lookup (codex P2 #2721).
+    case 'squareFootage': return intInRange(value, 100, 200000);
     case 'lotSize': return intInRange(value, 100, 200000);
-    case 'stories': return intInRange(value, 1, 4);
+    // Mid/high-rise condo associations exceed 4 stories, and a verified
+    // story count is exactly how an unknown-stories aggregate resolves —
+    // dropping a tech's "6" here would pin footprintUnknown forever.
+    case 'stories': return intInRange(value, 1, 50);
     case 'yearBuilt': return intInRange(value, 1880, new Date().getFullYear() + 2);
     case 'hasPool': {
       if (typeof value === 'boolean') return value;
@@ -400,6 +408,7 @@ module.exports = {
   attachAddressAuditToCachedLookup,
   saveLookup,
   saveVerifiedOverride,
+  sanitizeVerifiedValue,
   VERIFIABLE_FIELDS,
   VERIFIED_SOURCE_WEIGHT,
 };

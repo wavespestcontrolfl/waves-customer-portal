@@ -71,6 +71,9 @@ const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH',
 // Kill switch: TURF_COUNTY_PRIOR_DISABLED=1 (no deploy).
 const TURF_COUNTY_PRIOR_RATIO = 0.5;
 const TURF_COUNTY_PRIOR_MIN_CEILING_SF = 500;
+// Association-aggregate dimension ceiling — mirrors the lookup's own
+// building/lot caps (COMMERCIAL_BUILDING_SQFT_MAX / LOT_SQFT_MAX = 200k).
+const AGGREGATE_DIM_CAP_SQFT = 200000;
 const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.TURF_COUNTY_PRIOR_DISABLED || '').toLowerCase());
 // Shared-turf residential types whose treatable lawn legitimately spans
 // beyond their own parcel — one pattern for the parcel turf cap and the
@@ -1289,6 +1292,30 @@ function applySatelliteAttachmentType(rc, ai) {
 }
 
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Association aggregate dimensions survive in _parcel even when a
+  // same-weight PAO record (a single condo unit) won the merge — prefer them
+  // for EVERY downstream read (footprint, turf ceiling, termite boxes), not
+  // just unitCount, or the commercial profile prices off one unit while
+  // showing the association's unit count (codex P2 r2 #2721). Capped like
+  // the lookup's own record caps.
+  if (rc?._parcel?.aggregated) {
+    const aggLiving = Math.min(Number(rc._parcel.livingAreaSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    const aggLot = Math.min(Number(rc._parcel.lotSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    // A tech-verified dimension outranks the county aggregate — this runs
+    // AFTER applyVerifiedOverrides, and taking the max here would silently
+    // undo a verified downward correction on every subsequent lookup
+    // (codex P2 #2721).
+    const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
+    rc = {
+      ...rc,
+      squareFootage: isVerified('squareFootage')
+        ? rc.squareFootage
+        : Math.max(Number(rc.squareFootage) || 0, aggLiving) || rc.squareFootage,
+      lotSize: isVerified('lotSize')
+        ? rc.lotSize
+        : Math.max(Number(rc.lotSize) || 0, aggLot) || rc.lotSize,
+    };
+  }
   // Record-bearing lookups carry the audit on the cached record (_addressAudit,
   // like _floodZone); record-less lookups pass it alongside since there is no
   // record to ride.
@@ -1342,13 +1369,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // trustedCountyTurfCeiling. Anything weaker stays on the existing
   // fallback/verify path (codex P2s).
   const countyCeiling = trustedCountyTurfCeiling(rc);
+  // Commercial profiles get the same county-facts prior under the same trust
+  // bar: an association's or warehouse's grounds are the CUSTOMER'S grounds,
+  // and vision-only turf left commercial lawn/mosquito pricing with nothing
+  // when satellite imagery missed. The shared-turf type exclusion is a
+  // residential concern (a condo UNIT doesn't own the lawn) — a commercial
+  // profile IS the association/owner, so it doesn't apply there.
   const countyTurfPriorSf = (
     !visionTurfKnown
-    && !commercialProfile
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
-    && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
+    && (commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase()))
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
@@ -1370,9 +1402,35 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // estimator's Perimeter LF box; a field-measured value overrides it.
   const perimeterLayoutFactor =
     (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
-  const estimatedPerimeterLF = footprintSf > 0
-    ? Math.round(4 * Math.sqrt(footprintSf) * perimeterLayoutFactor)
+  // Multi-building complexes (stacked-parcel association aggregates): N
+  // buildings of footprint/N each have √N × the perimeter of one combined
+  // slab — one 104k sf square is ~1,290 LF, but three separate buildings of
+  // ~35k sf are ~2,235 LF of exterior wall to treat.
+  const buildingCount = Math.max(1, Math.round(Number(rc?._parcel?.buildingCount) || 1));
+  // An aggregate with UNKNOWN stories has footprintSf = the full summed
+  // living area (stories defaulted to 1), which would inflate the perimeter
+  // by ~sqrt(stories) on mid/high-rise associations — leave the box empty
+  // for a field measurement instead of prefilling a wrong number (codex P2
+  // #2721). Aggregates with a known story count (Manatee) still prefill.
+  const aggregateStoriesUnknown = Boolean(rc?._parcel?.aggregated)
+    && !(Number(rc?.stories) >= 1);
+  const estimatedPerimeterLF = footprintSf > 0 && !aggregateStoriesUnknown
+    ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
     : null;
+  if (aggregateStoriesUnknown && footprintSf > 0) {
+    // The profile must not CLAIM a ground-floor footprint it doesn't have —
+    // footprintSf here is the full summed living area (stories unknown), and
+    // profile.footprint feeds pricing's footprintSqFt directly (codex P1 r3
+    // #2721). Interior sqft (homeSqFt) stays: the association's total
+    // interior area is the real interior-treatment work measure regardless
+    // of floor count. Ground-geometry values (footprint / perimeter / attic
+    // / slab) all stay empty for a field measurement, flagged HIGH.
+    fieldVerifyFlags.push({
+      field: 'footprint',
+      reason: `Association aggregate with unknown story count — ground-floor footprint, perimeter, and slab/attic areas are not derivable from the summed ${footprintSf.toLocaleString()} sq ft interior area. Measure on site before termite/perimeter pricing.`,
+      priority: 'HIGH',
+    });
+  }
 
   const profile = {
     // ── ADDRESS ──
@@ -1388,7 +1446,16 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
-    unitCount: rc?.unitCount || 1,
+    // On an aggregate, the association total wins over the merge's
+    // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
+    // so a plain fallback chain never reaches the aggregate figure when a
+    // PAO record won the merge — codex P2 #2721).
+    unitCount: (rc?._parcel?.aggregated
+      ? Math.max(Number(rc?.unitCount) || 0, Number(rc._parcel.residentialUnits) || 0)
+      : rc?.unitCount) || 1,
+    // Stacked-parcel association aggregate: distinct unit street numbers on
+    // the roll (1 when the whole association shares one address).
+    buildingCount,
 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
@@ -1398,7 +1465,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
-    footprint: footprintSf,
+    footprint: aggregateStoriesUnknown ? 0 : footprintSf,
+    // Machine-readable twin of the HIGH footprint flag: BOTH the estimator's
+    // termite autofill and calculatePropertyProfile re-derive a footprint
+    // from homeSqFt/stories when footprint is 0, which would resurrect the
+    // summed-living-area slab this suppression exists to prevent (codex P1
+    // r4 #2721). Consumers skip derivation when this is set.
+    footprintUnknown: aggregateStoriesUnknown || undefined,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
@@ -1408,8 +1481,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // gates for trenching/pre-slab, and these reach pricing only through
     // the operator-visible, editable boxes (manual entries override).
     estimatedPerimeterLF,
-    estimatedAtticSqFt: footprintSf > 0 ? footprintSf : null,
-    estimatedSlabSqFt: footprintSf > 0 ? footprintSf : null,
+    // Same stories guard as the perimeter: an unknown-stories aggregate's
+    // footprintSf is the FULL summed living area — a 100k+ sf attic/slab
+    // prefill in the termite boxes would be wildly wrong (codex P2 r2).
+    estimatedAtticSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
+    estimatedSlabSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,
@@ -3138,7 +3214,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
-    footprintSqFt: p.footprintSqFt ?? p.footprint,
+    // footprintUnknown wins over any explicit footprint in the payload — the
+    // admin client re-derives profile.footprint = homeSqFt / stories when
+    // building the request, and a positive value here would bypass the
+    // pricing-side derivation guard entirely (codex P1 #2721).
+    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprintSqFt ?? p.footprint),
+    footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,

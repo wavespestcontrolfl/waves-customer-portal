@@ -464,6 +464,7 @@ function generateEstimate(input) {
     storiesSource: input.storiesSource,
     lotSqFt: input.lotSqFt,
     footprintSqFt: input.footprintSqFt ?? input.footprint,
+    footprintUnknown: input.footprintUnknown === true,
     perimeterLF: input.perimeterLF ?? input.perimeterLf ?? input.perimeter,
     buildingSqFt: input.buildingSqFt,
     livingAreaSqFt: input.livingAreaSqFt,

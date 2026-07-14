@@ -524,7 +524,12 @@ function resolveMosquitoLotCategory(property = {}, areaResolution = resolveMosqu
 
 function calculatePropertyProfile(input) {
   const explicitFootprint = toPositiveNumber(input.footprintSqFt ?? input.footprint);
-  const footprint = explicitFootprint || calculateFootprint(input.homeSqFt, input.stories || 1);
+  // footprintUnknown = an association aggregate with unknown stories — the
+  // summed living area divided by a defaulted 1 story is NOT a ground-floor
+  // footprint, and deriving one here would re-arm the termite/perimeter
+  // auto-pricing the lookup explicitly suppressed (codex P1 r4 #2721).
+  const footprint = explicitFootprint
+    || (input.footprintUnknown === true ? 0 : calculateFootprint(input.homeSqFt, input.stories || 1));
   const explicitPerimeter = toPositiveNumber(input.perimeterLF ?? input.perimeterLf ?? input.perimeter);
   const normalizedFeatures = normalizeFeatureInputs(input);
   const hardscape = estimateHardscape(input.lotSqFt, input.propertyType, normalizedFeatures);
@@ -623,6 +628,11 @@ function calculatePropertyProfile(input) {
 
   return {
     footprint, hardscape, lawnSqFt, turfSf: lawnSqFt,
+    // Persisted twin of the input flag (false once a real footprint exists):
+    // consumers of the returned property — the admin price-breakdown fallback
+    // included — must not re-derive homeSqFt/stories from a footprint of 0
+    // (codex P1 #2721).
+    footprintUnknown: input.footprintUnknown === true && !(footprint > 0),
     turfEstimated: turfArea.turfEstimated,
     turfConfidence: turfArea.turfConfidence,
     turfBasis: turfArea.turfBasis,

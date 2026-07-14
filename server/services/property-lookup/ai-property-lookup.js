@@ -822,14 +822,26 @@ function buildCadastralRecord(parcel, address) {
   if (!parcel) return null;
   const isCountyGis = Boolean(parcel.gisProvider);
   const provider = parcel.gisProvider || 'fdor_cadastral';
-  const useDescType = countyUseDescToPropertyType(parcel.landUseDescription);
-  const cadastralType = useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode));
-  const commercialSized = isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
+  // A stacked-parcel association aggregate is ALWAYS Multifamily — never let
+  // the "condo" wording in its synthesized land-use map to the residential
+  // Condo type, which would price 100k+ sf of association buildings as one
+  // condo unit.
+  const isAggregate = parcel.aggregated === true;
+  const useDescType = isAggregate ? null : countyUseDescToPropertyType(parcel.landUseDescription);
+  const cadastralType = isAggregate
+    ? 'Multifamily'
+    : (useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)));
+  const commercialSized = isAggregate || isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
   const parsed = {
     squareFootage: coerceBuildingSqft(parcel.livingAreaSqft, commercialSized),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
     yearBuilt: coerceInt(parcel.yearBuilt, 1900, new Date().getFullYear() + 1),
-    stories: coerceInt(parcel.stories, 1, 4),
+    // Association aggregates are mid/high-rise territory — clamping a known
+    // county story count to 4 would discard it and force footprintUnknown
+    // (blank prefills + manual-review pricing) on a building whose stories
+    // the roll actually knew. Cap mirrors the verified-story range; the
+    // residential cap stays 4 (codex P2 #2721).
+    stories: coerceInt(parcel.stories, 1, isAggregate ? 50 : 4),
     propertyType: cadastralType,
     // County-assessed pool flag (tri-state). For a new build where county GIS is
     // the only public-record hit, this carries the pool into pest/mosquito
@@ -884,6 +896,12 @@ function buildCadastralRecord(parcel, address) {
   record.zipCode = parcel.situsZip || '';
   record.county = parcel.county;
   record._aiProviders = [provider];
+  if (isAggregate) {
+    // Association-level unit total (detectCategory's unitCount>4 vote and the
+    // per-unit commercial pricers read this). Bounded: a runaway aggregation
+    // must not claim thousands of units off a bad layer response.
+    record.unitCount = coerceInt(parcel.residentialUnits, 2, 2000) || 1;
+  }
   return record;
 }
 
@@ -927,6 +945,16 @@ function attachParcelMeta(merged, parcel) {
     dorUseCode: parcel.dorUseCode,
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
+    // Stacked-parcel association aggregate extras (buildEnrichedProfile reads
+    // buildingCount for the multi-building perimeter estimate).
+    aggregated: parcel.aggregated === true || undefined,
+    aggregateUnitParcels: parcel.aggregateUnitParcels ?? undefined,
+    buildingCount: parcel.buildingCount ?? undefined,
+    groundAreaSqft: parcel.groundAreaSqft ?? undefined,
+    // Association-level living area — survives a merge a PAO unit record
+    // wins, so the profile can prefer the aggregate dimensions (codex P2 r2).
+    livingAreaSqft: parcel.livingAreaSqft ?? undefined,
+    situsLines: parcel.situsLines ?? undefined,
   };
   return merged;
 }
@@ -1307,6 +1335,80 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
   return searchNumber !== situsNumber;
 }
 
+// Association aggregate counterpart of the situs guards: the aggregate's
+// situs is the MODAL building's address, but a lookup for ANY building in
+// the association is a valid hit (codex P2 #2721: entering 1575 in a
+// 1535/1555/1575 complex must not read as a wrong-building mismatch).
+// Rooftop points keep the parcel unless the typed number is POSITIVELY
+// outside the building set; interpolated points (a guess along the street)
+// additionally require positive membership — mirroring the single-parcel
+// exact-match rule.
+// A typed unit/suite means the customer is ONE unit, not the association —
+// aggregation must step aside so the PAO/address search resolves the unit
+// record (codex P1 r3 #2721: "1555 Tarpon Center Dr #101" is a condo
+// resident, not the commercial HOA).
+// The optional period covers punctuated designators ("Apt. 101" / "Ste. 200")
+// — without it the raw typed address slips past this guard while the
+// normalized street comparison strips the unit anyway, so a condo-resident
+// lookup would ride the association aggregate (codex P1 #2721). The set must
+// cover everything stripUnitDesignators peels (LOT/TRLR included) — a
+// designator that strips but doesn't flag matches the aggregate's base line
+// and keeps the HOA for a unit-level lookup (codex P2 r8 #2721).
+const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM|LOT)\b\.?\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
+// "FL" is both the floor designator and the state abbreviation, so it gets
+// its own pattern: a value must follow AND must not be a zip — otherwise
+// every "Venice FL 34285" would read as "floor 34285" and aggregation would
+// never fire anywhere in Florida.
+const FL_FLOOR_RE = /\bFL\b\.?\s*#?\s*(?!\d{5}(?:-\d{4})?\b)[A-Z0-9-]+/i;
+
+function addressHasSubpremise(address) {
+  const s = String(address || '');
+  return SUBPREMISE_RE.test(s) || FL_FLOOR_RE.test(s);
+}
+
+function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress) {
+  if (addressHasSubpremise(typedAddress) || addressHasSubpremise(searchAddress)) return 'drop';
+  // Anchor to the ORIGINALLY TYPED address when one is supplied — Google can
+  // snap a mistyped number onto one of the association's buildings, and the
+  // canonical (snapped) address would then read as in-association (codex P2
+  // r2 #2721). Same rule as situsHouseNumberExactMatch.
+  const anchored = leadingHouseNumber(typedAddress) ? typedAddress : searchAddress;
+  const typedNumber = leadingHouseNumber(anchored);
+
+  // Membership by full "NUMBER STREET" line, not number alone: "1555 Harbor
+  // Dr" must not ride a 1555 that only exists on Tarpon Center Dr, and a
+  // bare trailing unit token ("1555 Tarpon Center Dr 101") means a UNIT
+  // lookup — both fall back to the address search (codex P2s r4 #2721).
+  const situsLines = Array.isArray(parcel?.situsLines) ? parcel.situsLines : [];
+  if (typedNumber && situsLines.length) {
+    const typedLine = stripUnitDesignators(normalizeCountyStreetLine(anchored));
+    // County situs lines get the same designator strip as the typed side —
+    // a labeled unit ("13510 LUXE AVE APT 101") that rides a cached
+    // aggregate built before the aggregation-side strip must not read as a
+    // different street and drop the association (codex P2 #2721).
+    const lineMatches = situsLines.some((line) => {
+      const norm = stripUnitDesignators(normalizeCountyStreetLine(line));
+      return norm === typedLine;
+    });
+    const extendsAsUnit = situsLines.some((line) => {
+      const norm = stripUnitDesignators(normalizeCountyStreetLine(line));
+      return typedLine.startsWith(`${norm} `) && /^\d[\w-]*$/.test(typedLine.slice(norm.length + 1));
+    });
+    if (extendsAsUnit) return 'drop'; // unit-level lookup, not the HOA
+    if (!lineMatches) return 'drop'; // wrong street or number for this association
+    return 'keep';
+  }
+
+  // No line data (defensive) — legacy number-only membership.
+  const buildingNumbers = Array.isArray(parcel?.situsHouseNumbers)
+    ? parcel.situsHouseNumbers.map(String)
+    : [];
+  const inAssociation = Boolean(typedNumber) && buildingNumbers.includes(String(typedNumber));
+  if (typedNumber && buildingNumbers.length && !inAssociation) return 'drop';
+  if (gisPrecision === 'interpolated' && !inAssociation) return 'drop';
+  return 'keep';
+}
+
 // Positive confirmation — both sides expose a single clean leading house
 // number AND they agree, AND the full street identities agree (unit
 // designators peeled; suffix and any post-direction KEPT — "4506 45th St W"
@@ -1502,7 +1604,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
           .catch(() => null);
       }
     }
-    if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
+    if (parcel && parcel.aggregated === true) {
+      if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address) === 'drop') {
+        logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
+        parcel = null;
+      }
+    } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
       // The rooftop point landed inside a parcel whose situs is a different
       // building (multi-building complex master parcel). Drop the GIS match
       // entirely — by-parcel detail, the cadastral record, and parcel meta
@@ -3969,6 +4076,8 @@ module.exports = {
     leadingHouseNumber,
     parcelGisPrecision,
     situsHouseNumberMismatch,
+    aggregateSitusVerdict,
+    addressHasSubpremise,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
     slugAddressLine,
