@@ -560,6 +560,16 @@ class SmartRebooker {
       }
       const startIdx = droppedIdx;
 
+      // The rows THIS sweep will move — conflict checks below exclude
+      // exactly these (their dates are changing) and nothing else. Cadence
+      // rows BEFORE the anchor stay put and must still register as
+      // conflicts: pulling an Aug 4 weekly to Jul 21 shifts Aug 11 → Jul 28
+      // right onto the untouched Jul 28 occurrence.
+      const sweptIds = siblings
+        .slice(startIdx)
+        .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
+        .map((s) => s.id);
+
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
@@ -652,12 +662,12 @@ class SmartRebooker {
           const clash = await trx('scheduled_services')
             .where('scheduled_date', date)
             .where('technician_id', sib.technician_id)
-            .whereNot('id', sib.id)
-            // Exclude only the rows THIS sweep moves (cadence rows).
-            // Booster extras share recurring_parent_id but stay in place —
-            // a shifted sibling landing on a booster's window is a real
-            // conflict and must still unassign.
-            .whereRaw('NOT (id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+            // Exclude only the rows this sweep is moving (sweptIds — their
+            // dates are changing, so their pre-shift positions are noise).
+            // Everything else counts: boosters, pre-anchor cadence rows
+            // that stayed put, other plans — a shifted sibling landing on
+            // any of their windows is a real conflict and must unassign.
+            .whereNotIn('id', sweptIds)
             .whereNotIn('status', TERMINAL)
             .where((q) => {
               q.whereNull('reservation_expires_at')
@@ -760,6 +770,22 @@ class SmartRebooker {
         }
       }
       emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+    }
+
+    // Same escalation check the single-visit path runs — a series re-anchor
+    // is still a reschedule of this visit, and the manual-review threshold
+    // must not be bypassable by qualifying for the series path.
+    try {
+      const count = await db('reschedule_log')
+        .where({ scheduled_service_id: serviceId })
+        .count('* as count').first();
+      if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
+        logger.warn(`Service ${serviceId} has been rescheduled ${count.count} times (latest as a series re-anchor) — needs manual review`);
+        await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
+          .then((log) => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      }
+    } catch (err) {
+      logger.warn(`[rebooker] series escalation check failed for ${serviceId}: ${err.message}`);
     }
 
     return {

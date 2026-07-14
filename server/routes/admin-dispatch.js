@@ -7000,6 +7000,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     if (scope === 'series') {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+      // The rebooker unassigns any shifted sibling whose kept tech would
+      // double-book its recomputed date (occ.conflicted). Those rows often
+      // land outside the reloaded week view — surface them in the response
+      // AND ring the bell so a dispatcher's series drag can't silently
+      // strand unassigned visits.
+      const unassignedConflicts = occurrences
+        .filter((occ) => occ.conflicted)
+        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+      if (unassignedConflicts.length) {
+        try {
+          const NotificationService = require('../services/notification-service');
+          const notif = await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Series move left visits unassigned',
+            `A series reschedule shifted ${unassignedConflicts.length} future visit(s) onto already-booked windows; they were left UNASSIGNED (${unassignedConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+            { metadata: { scheduledServiceId: req.params.serviceId, conflicts: unassignedConflicts } }
+          );
+          if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${req.params.serviceId}: ${JSON.stringify(unassignedConflicts)}`);
+        } catch (err) {
+          logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
+        }
+      }
       for (const occurrence of occurrences) {
         await syncRescheduleReminder(
           occurrence.id,
@@ -7066,7 +7088,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
 
       const { rescheduledOccurrences, ...response } = result;
-      return res.json({ ...response, notificationSent, notificationError });
+      return res.json({ ...response, notificationSent, notificationError, unassignedConflicts });
     }
 
     // Staff-initiated reschedules may override live lifecycle states

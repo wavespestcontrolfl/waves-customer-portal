@@ -289,12 +289,16 @@ describe('live-status reschedule override (allowLive)', () => {
     db.transaction = jest.fn(async (callback) => callback(trx));
 
     const dbQueries = [anchorLookup, parentLookup];
+    // Post-commit escalation check (mirrors the single path since codex r4
+    // on #2725) reads reschedule_log via db — serve an under-threshold count.
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
       throw new Error(`Unexpected db table ${table}`);
     });
 
-    return { updates, historyInsert, logInsert, siblingsQuery };
+    return { updates, historyInsert, logInsert, siblingsQuery, escalationCount };
   }
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
@@ -521,8 +525,10 @@ describe('live-status reschedule override (allowLive)', () => {
     trx.fn = { now: jest.fn(() => 'NOW()') };
     db.transaction = jest.fn(async (callback) => callback(trx));
     const dbQueries = [anchorLookup, parentLookup];
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
       throw new Error(`Unexpected db table ${table}`);
     });
 
