@@ -507,20 +507,22 @@ const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
 
 // Atomic claim on the estimate_followup_sends ledger: the unique
 // (estimate_id, rule_key) index means exactly one concurrent cron wins the
-// insert. A send failure deletes the row so the next tick retries — the
-// ledger row is the claim AND the attribution record.
+// insert. The INSERT selects FROM estimates gated on archived_at, so an
+// archive landing between the candidate read and this claim blocks the send
+// in the same statement — the same at-claim-time re-check the boolean
+// claimStage path does (codex 2729 r2). A send failure deletes the row so
+// the next tick retries — the ledger row is the claim AND the attribution
+// record.
 async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger) {
-  const rows = await db("estimate_followup_sends")
-    .insert({
-      estimate_id: estimateId,
-      rule_key: ruleKey,
-      template_key: templateKey,
-      trigger: JSON.stringify(trigger || {}),
-    })
-    .onConflict(["estimate_id", "rule_key"])
-    .ignore()
-    .returning("id");
-  return Array.isArray(rows) && rows.length === 1;
+  const result = await db.raw(
+    `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
+     SELECT id, ?, ?, ?::jsonb FROM estimates
+     WHERE id = ? AND archived_at IS NULL
+     ON CONFLICT (estimate_id, rule_key) DO NOTHING
+     RETURNING id`,
+    [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId],
+  );
+  return (result?.rows?.length || 0) === 1;
 }
 
 async function releaseFollowupSend(estimateId, ruleKey) {
@@ -542,6 +544,9 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       isEstimateAcceptActive,
       isStructuralOneTimeOnlyEstimate,
       resolveEstimateInvoiceMode,
+      buildPricingBundle,
+      resolveEstimateQuoteRequirement,
+      estimateTrenchingReviewRequired,
     } = require("../routes/estimate-public");
     const { resolveRecurringCardPolicyForEstimate } = require("./recurring-card-on-file");
     const { resolveCardHoldPolicy } = require("./estimate-card-holds");
@@ -556,6 +561,14 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
     } catch {
       estData = {};
     }
+    // Mirror the intent endpoints' self-serve gates (codex 2729 r2): an
+    // estimate edited into quote-required or trenching-review state after
+    // the customer touched the payment step can no longer be accepted
+    // online — the endpoints 409 before minting, so don't email the
+    // customer back into a card step that's now a dead end.
+    if (estimateTrenchingReviewRequired(estData)) return false;
+    const pricingBundle = await buildPricingBundle(est);
+    if (resolveEstimateQuoteRequirement(pricingBundle, estData).quoteRequired) return false;
     const billByInvoice = resolveEstimateInvoiceMode(est, estData);
     // The event kind records which accept lane the customer was in; a
     // structurally one-time-only estimate can only ever be the hold lane.
@@ -589,6 +602,12 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       }
       return true;
     }
+    // Mirror /recurring-card-intent's contact gate (codex 2729 r2):
+    // accept-time customer resolution is phone-keyed, so an estimate with
+    // no linked customer and no phone can't complete a recurring accept —
+    // the endpoint 400s (CUSTOMER_CONTACT_REQUIRED). Don't nudge an
+    // email-only estimate into a card step that immediately rejects.
+    if (!est.customer_id && !est.customer_phone) return false;
     const membership = await buildEstimateMembershipContext(est);
     const policy = await resolveRecurringCardPolicyForEstimate({
       estimate: est,

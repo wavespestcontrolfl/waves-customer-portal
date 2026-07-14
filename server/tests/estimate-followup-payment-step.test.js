@@ -56,6 +56,9 @@ jest.mock('../routes/estimate-public', () => ({
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   resolveEstimateInvoiceMode: jest.fn(() => false),
   matchAcceptCustomerByPhone: jest.fn(async () => ({ match: null })),
+  buildPricingBundle: jest.fn(async () => ({})),
+  resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
+  estimateTrenchingReviewRequired: jest.fn(() => false),
 }));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: jest.fn(async () => null),
@@ -132,6 +135,13 @@ function enqueue(table, cfg) {
   (queues[table] = queues[table] || []).push(cfg);
 }
 
+// The sends-ledger claim is a raw INSERT ... SELECT gated on
+// estimates.archived_at. Claims are recorded here; results come from
+// claimResults (default = claim won). Non-claim db.raw calls (COALESCE
+// expressions, EXISTS probes) stay pass-through and are never awaited.
+const rawClaims = [];
+let claimResults;
+
 const NOW = new Date('2026-06-10T15:00:00Z');
 
 function baseEstimate(overrides = {}) {
@@ -154,8 +164,8 @@ function baseEstimate(overrides = {}) {
 
 // Standard happy-path queue: checkout-events subquery builder (never
 // awaited — it's passed to join), candidate list, prefs lookup, success
-// bump. The estimate_followup_sends claim insert resolves via the builder's
-// insert default ([one row] = claim won) unless overridden.
+// bump. The raw sends-ledger claim resolves via claimResults (default =
+// claim won) unless overridden.
 function enqueueHappyPath(est) {
   enqueue('estimate_checkout_events', {}); // distinctOn subquery
   enqueue('estimates', { rows: [est] });
@@ -166,14 +176,28 @@ function enqueueHappyPath(est) {
 beforeEach(() => {
   jest.clearAllMocks();
   writes.length = 0;
+  rawClaims.length = 0;
+  claimResults = [];
   queues = {};
   db.mockImplementation((table) =>
     makeBuilder(table, (queues[table] || []).shift() || {}),
   );
+  db.raw.mockImplementation((sql, bindings) => {
+    if (typeof sql === 'string' && sql.includes('INSERT INTO estimate_followup_sends')) {
+      rawClaims.push({ sql, bindings });
+      return Promise.resolve({ rows: claimResults.shift() ?? [{ id: 'send-1' }] });
+    }
+    return sql;
+  });
   isEnabled.mockReturnValue(true);
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
   estimatePublic.isEstimateAcceptActive.mockReturnValue(true);
   estimatePublic.isStructuralOneTimeOnlyEstimate.mockReturnValue(false);
+  estimatePublic.matchAcceptCustomerByPhone.mockResolvedValue({ match: null });
+  estimatePublic.buildPricingBundle.mockResolvedValue({});
+  estimatePublic.resolveEstimateQuoteRequirement.mockReturnValue({ quoteRequired: false });
+  estimatePublic.estimateTrenchingReviewRequired.mockReturnValue(false);
+  findConsentedChargeableCard.mockResolvedValue(null);
   resolveRecurringCardPolicyForEstimate.mockResolvedValue({ required: true });
   resolveCardHoldPolicy.mockReturnValue({ required: true });
 });
@@ -200,17 +224,17 @@ describe('checkPaymentStepAbandoned', () => {
         }),
       }),
     );
-    // Claim row carries the trigger snapshot; success bumps the counters and
-    // the ledger row stays (no delete).
-    const claim = writes.find((w) => w.table === 'estimate_followup_sends' && w.op === 'insert');
-    expect(claim.payload).toEqual(
-      expect.objectContaining({
-        estimate_id: 'est-1',
-        rule_key: 'payment_step_abandoned',
-        template_key: 'estimate.payment_step_abandoned',
-      }),
-    );
-    expect(JSON.parse(claim.payload.trigger)).toEqual(
+    // Claim is the raw INSERT ... SELECT gated on archived_at; it carries the
+    // trigger snapshot. Success bumps the counters and the ledger row stays
+    // (no delete).
+    expect(rawClaims).toHaveLength(1);
+    expect(rawClaims[0].sql).toContain('archived_at IS NULL');
+    expect(rawClaims[0].sql).toContain('ON CONFLICT (estimate_id, rule_key) DO NOTHING');
+    const [ruleKey, templateKey, triggerJson, estimateId] = rawClaims[0].bindings;
+    expect(ruleKey).toBe('payment_step_abandoned');
+    expect(templateKey).toBe('estimate.payment_step_abandoned');
+    expect(estimateId).toBe('est-1');
+    expect(JSON.parse(triggerJson)).toEqual(
       expect.objectContaining({ kind: 'recurring_card' }),
     );
     expect(writes.some((w) => w.table === 'estimate_followup_sends' && w.op === 'del')).toBe(false);
@@ -239,7 +263,7 @@ describe('checkPaymentStepAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 
   test('card_hold events re-check the HOLD policy, not the recurring one', async () => {
@@ -263,7 +287,7 @@ describe('checkPaymentStepAbandoned', () => {
     expect(sent).toBe(0);
     expect(findConsentedChargeableCard).toHaveBeenCalledWith('cust-1');
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 
   test('card_hold on a customerless estimate resolves the customer by phone before the saved-card check', async () => {
@@ -282,6 +306,39 @@ describe('checkPaymentStepAbandoned', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('quote-required estimates skip — accept no longer allows self-serve', async () => {
+    estimatePublic.resolveEstimateQuoteRequirement.mockReturnValue({ quoteRequired: true });
+    enqueueHappyPath(baseEstimate());
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('trenching-review estimates skip — the intent endpoints 409 them', async () => {
+    estimatePublic.estimateTrenchingReviewRequired.mockReturnValue(true);
+    enqueueHappyPath(baseEstimate());
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('recurring events with no linked customer and no phone skip — accept is phone-keyed', async () => {
+    enqueueHappyPath(baseEstimate({ customer_id: null, customer_phone: null }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(resolveRecurringCardPolicyForEstimate).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
   test('inactive (expired) estimates skip without claiming', async () => {
     estimatePublic.isEstimateAcceptActive.mockReturnValue(false);
     enqueueHappyPath(baseEstimate());
@@ -289,7 +346,7 @@ describe('checkPaymentStepAbandoned', () => {
     const sent = await _private.checkPaymentStepAbandoned(NOW);
 
     expect(sent).toBe(0);
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 
   test('policy re-check failure fails CLOSED (no send, no claim)', async () => {
@@ -300,14 +357,14 @@ describe('checkPaymentStepAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 
   test('lost claim (conflict on the ledger) skips the send', async () => {
     enqueue('estimate_checkout_events', {});
     enqueue('estimates', { rows: [baseEstimate()] });
     enqueue('notification_prefs', { first: { email_enabled: true } });
-    enqueue('estimate_followup_sends', { insert: [] }); // conflict: another cron won
+    claimResults.push([]); // conflict or archived-away: claim returns no row
     const sent = await _private.checkPaymentStepAbandoned(NOW);
 
     expect(sent).toBe(0);
@@ -321,7 +378,7 @@ describe('checkPaymentStepAbandoned', () => {
     const sent = await _private.checkPaymentStepAbandoned(NOW);
 
     expect(sent).toBe(0);
-    expect(writes.some((w) => w.table === 'estimate_followup_sends' && w.op === 'insert')).toBe(true);
+    expect(rawClaims).toHaveLength(1);
     expect(writes.some((w) => w.table === 'estimate_followup_sends' && w.op === 'del')).toBe(true);
     // No success bump.
     expect(writes.some((w) => w.table === 'estimates' && w.op === 'update')).toBe(false);
@@ -336,7 +393,7 @@ describe('checkPaymentStepAbandoned', () => {
 
     expect(sent).toBe(0);
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 
   test('recently-opened estimates are deferred by the safety gate', async () => {
@@ -348,6 +405,6 @@ describe('checkPaymentStepAbandoned', () => {
     const sent = await _private.checkPaymentStepAbandoned(NOW);
 
     expect(sent).toBe(0);
-    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+    expect(rawClaims).toHaveLength(0);
   });
 });
