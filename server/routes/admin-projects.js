@@ -1400,17 +1400,27 @@ router.post('/', async (req, res, next) => {
     // One visit, one report (#2717 server hardening): stale client caches
     // (week rows, continue snapshots) repeatedly re-offered the create
     // sheet for already-linked visits, and nothing here prevented a second
-    // row. Return the existing project instead — callers already route
-    // linked projects into the continue editor, so an idempotent create is
-    // transparent to them.
+    // row. This is a CONFLICT, not a silent merge (Codex P2 on #2732): the
+    // submitted body may carry freshly typed findings, and returning the
+    // existing row as a success would let the client discard that draft.
+    // A 409 keeps the client's local draft intact (create-failure path
+    // never clears it) and names the existing report to continue in.
+    // Keeper preference matches migration 20260714000010: strongest report
+    // first (closed > sent > draft), then oldest.
+    const existingByVisit = () => db('projects')
+      .where({ scheduled_service_id: linkedScheduledServiceId })
+      .orderByRaw("CASE status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END")
+      .orderBy('created_at', 'asc')
+      .first();
     if (linkedScheduledServiceId) {
-      const existing = await db('projects')
-        .where({ scheduled_service_id: linkedScheduledServiceId })
-        .orderBy('created_at', 'asc')
-        .first();
+      const existing = await existingByVisit();
       if (existing) {
-        logger.info(`[projects] create for visit ${linkedScheduledServiceId} returned existing project ${existing.id} (idempotent)`);
-        return res.json({ project: existing, existing: true });
+        logger.info(`[projects] create for visit ${linkedScheduledServiceId} refused — existing project ${existing.id}`);
+        return res.status(409).json({
+          error: 'This visit already has a report — open it to continue instead of starting a new one.',
+          code: 'visit_already_reported',
+          project: existing,
+        });
       }
     }
 
@@ -1435,16 +1445,17 @@ router.post('/', async (req, res, next) => {
       }).returning('*');
     } catch (insertErr) {
       // Unique-violation on the partial index (migration 20260714000010) =
-      // we lost a same-visit create race — return the winner, same
-      // idempotent contract as the pre-insert check above.
+      // we lost a same-visit create race — same 409 contract as the
+      // pre-insert check above, naming the winner.
       if (insertErr?.code === '23505' && linkedScheduledServiceId) {
-        const winner = await db('projects')
-          .where({ scheduled_service_id: linkedScheduledServiceId })
-          .orderBy('created_at', 'asc')
-          .first();
+        const winner = await existingByVisit();
         if (winner) {
-          logger.info(`[projects] create race for visit ${linkedScheduledServiceId} resolved to existing project ${winner.id}`);
-          return res.json({ project: winner, existing: true });
+          logger.info(`[projects] create race for visit ${linkedScheduledServiceId} lost to existing project ${winner.id}`);
+          return res.status(409).json({
+            error: 'This visit already has a report — open it to continue instead of starting a new one.',
+            code: 'visit_already_reported',
+            project: winner,
+          });
         }
       }
       throw insertErr;

@@ -1,20 +1,25 @@
 // One visit, one report (#2717 server hardening follow-up): a partial
 // unique index on projects.scheduled_service_id so a double-tap, a stale
 // week-row cache, or a two-device race can never mint a second report for
-// the same scheduled visit. POST /admin/projects is idempotent regardless
-// (it returns the existing linked project); this index is the database
-// backstop that makes the race lose deterministically.
+// the same scheduled visit. POST /admin/projects refuses duplicates with a
+// 409 regardless; this index is the database backstop that makes the race
+// lose deterministically.
 //
-// Duplicate-safe by design: if the environment already holds duplicate
-// links (created by the pre-hardening races this closes), a unique index
-// cannot build — so we detect them first, log the offending visit ids
-// LOUDLY, and skip index creation instead of failing the deploy (a failed
-// migration blocks every Railway deploy). The route-level idempotency
-// still protects new creates in that state. After resolving the logged
-// duplicates (unlink or delete the stray report), re-create the index via
-// a follow-up migration or a manual CREATE UNIQUE INDEX.
+// Legacy duplicates (created by the pre-hardening races this closes) are
+// SELF-HEALED, not skipped — a skipped index would leave the race open for
+// every other visit while knex marks the migration applied (Codex P1 on
+// #2732). For each visit with multiple linked projects, exactly one keeps
+// the link: the most-progressed report first (closed > sent > draft — the
+// operative compliance document), oldest created_at as the tie-break. The
+// others have ONLY their scheduled_service_id cleared — no report content
+// is deleted; they remain intact and visible on the Jobs page as unlinked
+// projects — and every unlink is logged loudly for operator review.
 
 const INDEX_NAME = 'projects_scheduled_service_id_unique';
+
+// Matches the keeper-preference used by POST /admin/projects' duplicate
+// lookup so the migration and the route agree on which row is canonical.
+const STATUS_RANK_SQL = "CASE status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END";
 
 exports.up = async function up(knex) {
   const hasTable = await knex.schema.hasTable('projects');
@@ -28,21 +33,33 @@ exports.up = async function up(knex) {
   );
   if (indexCheck.rows?.[0]?.present) return;
 
-  const dupes = (await knex.raw(`
-    SELECT scheduled_service_id, COUNT(*) AS n
-    FROM projects
-    WHERE scheduled_service_id IS NOT NULL
-    GROUP BY scheduled_service_id
-    HAVING COUNT(*) > 1
-  `)).rows || [];
-  if (dupes.length) {
+  // Deterministic dedup: rank every linked row per visit, clear the link on
+  // everything after the keeper. RETURNING gives the loud audit trail.
+  const unlinked = await knex.raw(`
+    WITH ranked AS (
+      SELECT id,
+             scheduled_service_id,
+             ROW_NUMBER() OVER (
+               PARTITION BY scheduled_service_id
+               ORDER BY ${STATUS_RANK_SQL}, created_at ASC, id ASC
+             ) AS rn
+      FROM projects
+      WHERE scheduled_service_id IS NOT NULL
+    )
+    UPDATE projects p
+    SET scheduled_service_id = NULL, updated_at = NOW()
+    FROM ranked r
+    WHERE p.id = r.id AND r.rn > 1
+    RETURNING p.id, r.scheduled_service_id AS was_linked_to
+  `);
+  const rows = unlinked.rows || [];
+  if (rows.length) {
      
     console.warn(
-      `[migration ${INDEX_NAME}] SKIPPED: ${dupes.length} visit(s) carry duplicate linked projects — `
-      + `resolve them, then re-create the index. Visits: `
-      + dupes.map((d) => `${d.scheduled_service_id} (x${d.n})`).join(', '),
+      `[migration ${INDEX_NAME}] self-healed ${rows.length} duplicate link(s) before indexing — `
+      + 'the strongest report kept each visit link; these projects were UNLINKED (content untouched): '
+      + rows.map((r) => `${r.id} (was → ${r.was_linked_to})`).join(', '),
     );
-    return;
   }
 
   await knex.raw(

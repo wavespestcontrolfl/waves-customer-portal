@@ -28,24 +28,16 @@ describe('evaluateTerminalTransition', () => {
     });
   });
 
-  test('re-sending the same terminal status is idempotent, not a conflict', () => {
-    expect(evaluateTerminalTransition('completed', 'completed')).toEqual({
-      idempotent: true,
-      status: 'completed',
-    });
-    expect(evaluateTerminalTransition('cancelled', 'cancelled')).toEqual({
-      idempotent: true,
-      status: 'cancelled',
-    });
-    expect(evaluateTerminalTransition('skipped', 'skipped')).toEqual({
-      idempotent: true,
-      status: 'skipped',
-    });
+  test('re-sending the same terminal status passes through — retries must rerun the route\'s idempotent post-commit effects', () => {
+    expect(evaluateTerminalTransition('completed', 'completed')).toBeNull();
+    expect(evaluateTerminalTransition('cancelled', 'cancelled')).toBeNull();
+    expect(evaluateTerminalTransition('skipped', 'skipped')).toBeNull();
   });
 
   test('status comparison is case-insensitive', () => {
-    expect(evaluateTerminalTransition('Completed', 'COMPLETED')).toEqual({
-      idempotent: true,
+    expect(evaluateTerminalTransition('Completed', 'COMPLETED')).toBeNull();
+    expect(evaluateTerminalTransition('COMPLETED', 'cancelled')).toEqual({
+      conflict: true,
       status: 'completed',
     });
   });

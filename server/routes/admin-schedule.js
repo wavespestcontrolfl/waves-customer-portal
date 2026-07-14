@@ -3026,9 +3026,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // Terminal rows are one-way (#2717 server hardening): a bulk
             // selection built from a stale board must not flip a finished
             // visit to cancelled (and void its paid invoice downstream).
-            // Already-cancelled counts as idempotent success; other
-            // terminal rows land in failed[] with the reason.
-            if (String(svc.status) === 'cancelled') break;
+            // Already-cancelled rows flow through — cancelled→cancelled
+            // passes the atomic guard and reruns the idempotent
+            // cancellation handling, matching the retry semantics of the
+            // status routes. Other terminal rows land in failed[] with
+            // the reason.
             if (['completed', 'skipped', 'no_show'].includes(String(svc.status))) {
               throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
             }
@@ -5081,13 +5083,11 @@ router.put('/:id/status', async (req, res, next) => {
     // ALL terminal statuses are one-way here too (#2717 server hardening —
     // mirror of the admin-dispatch guard): a stale board on another device
     // must not flip a completed/cancelled/skipped visit into a different
-    // terminal state. Idempotent on the same status, 409 otherwise.
+    // terminal state. Same-status re-sends flow through so retries rerun
+    // the idempotent post-commit effects; only a different target 409s.
     {
       const { evaluateTerminalTransition } = require('../services/job-status');
       const terminal = evaluateTerminalTransition(svc.status, toStatus);
-      if (terminal?.idempotent) {
-        return res.json({ success: true, alreadyTerminal: terminal.status });
-      }
       if (terminal?.conflict) {
         return res.status(409).json({
           error: `This visit is already ${terminal.status}. Refresh and try again.`,

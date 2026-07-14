@@ -1719,15 +1719,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // hardening): fromStatus is read fresh from the row, so a stale board
     // on another device could flip a completed compliance visit to
     // cancelled (firing a contradictory customer notice) hours after the
-    // work was done — the client cannot guard the two-device case. Same
-    // shape as the no_show block: re-sending the same status is idempotent
-    // success; any other target is a 409.
+    // work was done — the client cannot guard the two-device case. Only a
+    // DIFFERENT target 409s; a same-status re-send flows through so a
+    // retry after a partial failure reruns the idempotent post-commit
+    // effects below (invoice void, reminder handling, track state).
     {
       const { evaluateTerminalTransition } = require('../services/job-status');
       const terminal = evaluateTerminalTransition(svc.status, toStatus);
-      if (terminal?.idempotent) {
-        return res.json({ success: true, alreadyTerminal: terminal.status });
-      }
       if (terminal?.conflict) {
         return res.status(409).json({
           error: `This visit is already ${terminal.status}. Refresh and try again.`,

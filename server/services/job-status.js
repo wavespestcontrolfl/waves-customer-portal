@@ -436,19 +436,21 @@ function emitToAdmins(payload) {
 // transition matrix — only the atomic WHERE guard — so without a route-level
 // check a stale board on another device could flip a completed compliance
 // visit to cancelled hours after the work was done. no_show keeps its own
-// bespoke guards in the routes (distinct codes/messages predate this);
-// this helper covers the other terminal states with the same semantics:
-// re-sending the same status is an idempotent success, anything else
-// conflicts. Reactivating a visit means booking a new one — no un-cancel
-// flow exists in the portal.
+// bespoke guards in the routes (distinct codes/messages predate this).
+//
+// Scope: this conflicts ONLY on a DIFFERENT target status. A same-status
+// re-send deliberately passes through (returns null) so the route reruns
+// its idempotent post-commit machinery — retrying `cancelled` after a
+// partial failure must still re-drive invoice voiding / reminder handling /
+// track cancellation, exactly as it did before this guard existed
+// (Codex P2 on #2732). Reactivating a visit means booking a new one — no
+// un-cancel flow exists in the portal.
 const ONE_WAY_FROM_STATUSES = new Set(['completed', 'cancelled', 'skipped']);
 
 function evaluateTerminalTransition(fromStatus, toStatus) {
   const from = String(fromStatus || '').toLowerCase();
   if (!ONE_WAY_FROM_STATUSES.has(from)) return null;
-  if (String(toStatus || '').toLowerCase() === from) {
-    return { idempotent: true, status: from };
-  }
+  if (String(toStatus || '').toLowerCase() === from) return null;
   return { conflict: true, status: from };
 }
 

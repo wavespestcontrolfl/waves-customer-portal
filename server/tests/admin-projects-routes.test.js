@@ -1489,11 +1489,13 @@ describe('admin projects routes', () => {
   });
 });
 
-// #2717 server hardening: one visit, one report. POST /admin/projects is
-// idempotent on the visit link — an existing linked project is returned
-// instead of inserting a duplicate, and a lost create race (unique index
-// 23505) resolves to the winner with the same contract.
-describe('POST /admin/projects idempotent visit link', () => {
+// #2717 server hardening: one visit, one report. POST /admin/projects
+// refuses a create for an already-reported visit with a 409
+// visit_already_reported naming the existing project — a silent
+// return-the-existing-row success would let the client discard freshly
+// typed findings (Codex P2 on #2732). A lost create race (unique index
+// 23505) resolves to the same contract.
+describe('POST /admin/projects one-report-per-visit conflict', () => {
   afterEach(() => {
     delete db.schema;
   });
@@ -1521,7 +1523,7 @@ describe('POST /admin/projects idempotent visit link', () => {
     });
   }
 
-  test('returns the existing linked project instead of inserting a duplicate', async () => {
+  test('409s with the existing linked project instead of inserting a duplicate', async () => {
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     const existing = {
       id: 'project-existing', customer_id: 'customer-1',
@@ -1540,9 +1542,9 @@ describe('POST /admin/projects idempotent visit link', () => {
         body: wdoBody,
       });
       const body = await res.json();
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
       expect(body.project.id).toBe('project-existing');
-      expect(body.existing).toBe(true);
       expect(projectsInsert).not.toHaveBeenCalled();
     });
   });
@@ -1576,9 +1578,9 @@ describe('POST /admin/projects idempotent visit link', () => {
         body: wdoBody,
       });
       const body = await res.json();
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
       expect(body.project.id).toBe('project-winner');
-      expect(body.existing).toBe(true);
     });
   });
 });
