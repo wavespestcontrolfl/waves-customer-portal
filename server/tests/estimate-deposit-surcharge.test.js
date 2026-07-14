@@ -1,0 +1,515 @@
+/**
+ * Pins the PRODUCT DECISION (owner ruling 2026-07-13, reversing the
+ * 2026-06-12 exemption): estimate deposits ARE surcharged, with the same
+ * machinery as invoice payments — credit-funding-only, priced at confirm
+ * via quoteEstimateDepositSurcharge → finalizeEstimateDepositPayment, with
+ * customer-facing disclosure before the charged tap. Wallets (Express
+ * Checkout) stay at face value — Phase-1 parity with the invoice pay page.
+ *
+ * Two invariants survive the revert unchanged:
+ *   1. The PI MINTS at face value (funding is unknown until card entry).
+ *   2. The LEDGER credits face value (metadata.base_amount), never
+ *      amount_received — a $49 deposit paid by credit card captures $50.42
+ *      but credits exactly $49; the fee is recorded separately.
+ * Commercial prepay keeps its own exemption (owner ruling 2026-07-05,
+ * expressly NOT reversed).
+ */
+const crypto = require('crypto');
+
+describe('estimate deposit surcharge (owner ruling 2026-07-13)', () => {
+  let stripeClient;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env.JWT_SECRET = 'test-secret';
+
+    stripeClient = {
+      paymentIntents: {
+        create: jest.fn().mockResolvedValue({
+          id: 'pi_deposit',
+          status: 'requires_payment_method',
+          client_secret: 'pi_deposit_secret',
+        }),
+        retrieve: jest.fn(),
+        update: jest.fn().mockResolvedValue({}),
+        confirm: jest.fn().mockResolvedValue({
+          id: 'pi_deposit',
+          status: 'succeeded',
+          client_secret: 'pi_deposit_secret',
+        }),
+      },
+      paymentMethods: {
+        retrieve: jest.fn(),
+      },
+    };
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({
+      secretKey: 'sk_test_mock',
+      publishableKey: 'pk_test_mock',
+    }));
+    jest.doMock('../services/logger', () => ({
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+    }));
+    jest.doMock('../models/db', () => jest.fn());
+  });
+
+  const depositPi = (overrides = {}) => ({
+    id: 'pi_deposit',
+    status: 'requires_payment_method',
+    client_secret: 'pi_deposit_secret',
+    amount: 4900,
+    metadata: {
+      purpose: 'estimate_deposit',
+      estimate_id: 'est-1',
+      base_amount: '49',
+      surcharge_policy: 'quote_at_confirm',
+    },
+    ...overrides,
+  });
+
+  describe('createEstimateDepositIntent', () => {
+    test('mints at FACE value with base_amount + quote_at_confirm metadata', async () => {
+      const StripeService = require('../services/stripe');
+      await StripeService.createEstimateDepositIntent({ estimateId: 'est-1', amountDollars: 49 });
+
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalledTimes(1);
+      const [params, opts] = stripeClient.paymentIntents.create.mock.calls[0];
+      // Face value at mint — the surcharge only lands at finalize, when the
+      // entered card's funding is known. Wallets confirm this amount as-is.
+      expect(params.amount).toBe(4900);
+      expect(params.metadata).toEqual(expect.objectContaining({
+        purpose: 'estimate_deposit',
+        estimate_id: 'est-1',
+        base_amount: '49',
+        surcharge_policy: 'quote_at_confirm',
+      }));
+      // `_qac1` salts the key: the create params changed with the revert,
+      // and Stripe rejects a reused key with different params — a pending
+      // pre-revert PI must not 500 an in-flight customer's retry
+      // (Codex #2705 r2 P2). Still deterministic from (estimateId, cents).
+      expect(opts.idempotencyKey).toBe('estimate_deposit_est-1_4900_qac1');
+    });
+  });
+
+  describe('quoteEstimateDepositSurcharge', () => {
+    test('credit funding quotes the 2.9% fee on the face value', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit' } });
+
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+      });
+      expect(quote.base).toBe(49);
+      expect(quote.surcharge).toBeCloseTo(1.42, 2);
+      expect(quote.total).toBeCloseTo(50.42, 2);
+      expect(quote.funding).toBe('credit');
+      expect(typeof quote.quoteToken).toBe('string');
+    });
+
+    test.each(['debit', 'prepaid', null])('%s funding quotes zero — face value only', async (funding) => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding } });
+
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+      });
+      expect(quote.surcharge).toBe(0);
+      expect(quote.total).toBe(49);
+    });
+
+    test('rejects a PI pinned to a different estimate', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({ metadata: { purpose: 'estimate_deposit', estimate_id: 'est-OTHER', base_amount: '49' } }));
+
+      await expect(StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+      })).rejects.toThrow(/does not match/);
+    });
+
+    test('rejects a non-deposit PI (crafted paymentIntentId)', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({ metadata: { purpose: 'invoice_payment', estimate_id: 'est-1' } }));
+
+      await expect(StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_someone_elses',
+        paymentMethodId: 'pm_1',
+      })).rejects.toThrow(/does not match/);
+    });
+
+    test('409s an already-paid deposit', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({ status: 'succeeded' }));
+
+      await expect(StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+      })).rejects.toMatchObject({ statusCode: 409 });
+    });
+  });
+
+  describe('finalizeEstimateDepositPayment', () => {
+    const mintQuote = async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit' } });
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+      });
+      return { StripeService, quote };
+    };
+
+    test('re-derives the surcharge, updates the PI to the total, and confirms server-side', async () => {
+      const { StripeService, quote } = await mintQuote();
+      // finalize's own read sees the pre-update PI; the pre-confirm verify
+      // re-reads AFTER the update and must see the surcharged total.
+      stripeClient.paymentIntents.retrieve
+        .mockResolvedValueOnce(depositPi())
+        .mockResolvedValue(depositPi({ amount: 5042 }));
+      const result = await StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: quote.quoteToken,
+      });
+
+      expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(1);
+      const [piId, updateParams] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(piId).toBe('pi_deposit');
+      expect(updateParams.amount).toBe(5042);
+      expect(updateParams.payment_method).toBe('pm_1');
+      // MERGED metadata — the credit authority (base_amount) stays pinned
+      // from the create; finalize stamps the fee facts beside it.
+      expect(updateParams.metadata).toEqual(expect.objectContaining({
+        card_surcharge: '1.42',
+        card_funding: 'credit',
+      }));
+      expect(updateParams.metadata.base_amount).toBeUndefined();
+      expect(stripeClient.paymentIntents.confirm).toHaveBeenCalledWith('pi_deposit', {}, expect.anything());
+      expect(result.status).toBe('succeeded');
+      expect(result.total).toBeCloseTo(50.42, 2);
+    });
+
+    test('rejects a tampered quote token', async () => {
+      const { StripeService, quote } = await mintQuote();
+      const [payload] = quote.quoteToken.split('.');
+      const forged = `${payload}.${crypto.createHmac('sha256', 'wrong-secret').update('x').digest('base64url')}`;
+
+      await expect(StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: forged,
+      })).rejects.toThrow(/Invalid or tampered/);
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    });
+
+    test('rejects an expired quote', async () => {
+      const { StripeService } = await mintQuote();
+      const stale = JSON.stringify({
+        kind: 'estimate_deposit',
+        estimateId: 'est-1',
+        paymentIntentId: 'pi_deposit',
+        paymentMethodId: 'pm_1',
+        baseAmount: 49,
+        quotedAt: Date.now() - 11 * 60 * 1000,
+      });
+      const sig = crypto.createHmac('sha256', 'test-secret').update(stale).digest('base64url');
+
+      await expect(StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: `${Buffer.from(stale).toString('base64url')}.${sig}`,
+      })).rejects.toThrow(/expired/i);
+    });
+
+    test('replays cleanly when the PI already succeeded (double-tap / webhook race)', async () => {
+      const { StripeService, quote } = await mintQuote();
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({ status: 'succeeded' }));
+
+      const result = await StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: quote.quoteToken,
+      });
+      expect(result.status).toBe('succeeded');
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+    });
+
+    test('stamps base_amount on a pre-revert PI that replayed without one (Codex #2705 P2)', async () => {
+      const StripeService = require('../services/stripe');
+      // Legacy pending PI: minted before the revert — face value IS its
+      // amount, but nothing pins it in metadata.
+      const legacyPi = depositPi({
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', surcharge_policy: 'deposit_exempt' },
+      });
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(legacyPi);
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit' } });
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1', paymentIntentId: 'pi_deposit', paymentMethodId: 'pm_1',
+      });
+      stripeClient.paymentIntents.retrieve
+        .mockResolvedValueOnce(legacyPi)
+        .mockResolvedValue(depositPi({ amount: 5042 }));
+      await StripeService.finalizeEstimateDepositPayment({ estimateId: 'est-1', quoteToken: quote.quoteToken });
+
+      const [, updateParams] = stripeClient.paymentIntents.update.mock.calls[0];
+      // Without this stamp, the surcharged capture's amount_received (5042)
+      // becomes the fallback face value and the credit inflates by the fee.
+      expect(updateParams.metadata.base_amount).toBe('49');
+      expect(updateParams.amount).toBe(5042);
+    });
+
+    test('resets the PI to face value when the confirm FAILS (poisoned-amount wallet trap, Codex #2705 P1)', async () => {
+      const { StripeService, quote } = await mintQuote();
+      stripeClient.paymentIntents.confirm.mockRejectedValue(new Error('card_declined'));
+      // The reset path re-retrieves the PI: it now carries the surcharged
+      // amount + fee metadata from the failed finalize's update.
+      const poisoned = depositPi({
+        amount: 5042,
+        metadata: {
+          purpose: 'estimate_deposit',
+          estimate_id: 'est-1',
+          base_amount: '49',
+          card_surcharge: '1.42',
+        },
+      });
+      // Both the finalize's own retrieve AND the reset's re-retrieve see
+      // the poisoned state.
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(poisoned);
+
+      await expect(StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: quote.quoteToken,
+      })).rejects.toThrow(/Failed to finalize/);
+
+      // Second update = the reset: back to face, fee metadata deleted
+      // (empty string deletes a key on Stripe).
+      expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(2);
+      const [, resetParams] = stripeClient.paymentIntents.update.mock.calls[1];
+      expect(resetParams.amount).toBe(4900);
+      expect(resetParams.metadata.card_surcharge).toBe('');
+    });
+  });
+
+  describe('resetEstimateDepositIntentToFace', () => {
+    test('mid-3DS residue reports clean:false — the wallet preflight must block (r4)', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        status: 'requires_action',
+        amount: 5042,
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(false);
+      // requires_action is not reliably amount-updatable and the PI still
+      // carries the surcharged total — a wallet confirm here would pay it.
+      expect(result.clean).toBe(false);
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    });
+
+    test('clean face-value PI reports clean:true without touching Stripe (the common wallet path)', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(false);
+      expect(result.clean).toBe(true);
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    });
+
+    test('resets a surcharge-poisoned requires_payment_method PI', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+      const [, resetParams] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(resetParams.amount).toBe(4900);
+      expect(resetParams.metadata).toEqual({
+        card_surcharge: '',
+        surcharge_rate_bps: '',
+        surcharge_policy_version: '',
+        card_funding: '',
+        finalize_started_at: '',
+      });
+    });
+
+    test('clears a stale Stripe-side surcharge breakdown with the unset form (Codex #2705 r2 P2)', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        amount_details: { surcharge: { amount: 142 } },
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+      const [, params, opts] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(params.amount_details).toBe('');
+      expect(opts).toEqual({ apiVersion: expect.any(String) });
+    });
+
+    test('falls back to amount+metadata reset when the unset form is rejected', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        amount_details: { surcharge: { amount: 142 } },
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', card_surcharge: '1.42' },
+      }));
+      stripeClient.paymentIntents.update
+        .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+        .mockResolvedValueOnce({});
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+      expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(2);
+      const [, fallbackParams, fallbackOpts] = stripeClient.paymentIntents.update.mock.calls[1];
+      expect(fallbackParams.amount).toBe(4900);
+      expect(fallbackParams.amount_details).toBeUndefined();
+      expect(fallbackOpts).toBeUndefined();
+    });
+
+    test('no-fee finalize retry clears a stale breakdown left by a failed credit attempt', async () => {
+      const StripeService = require('../services/stripe');
+      // PI carries residue from a failed surcharged attempt whose reset
+      // fallback could not clear amount_details; the customer retries with
+      // a DEBIT card.
+      const residuePi = depositPi({
+        amount: 4900,
+        amount_details: { surcharge: { amount: 142 } },
+      });
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(residuePi);
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_debit', type: 'card', card: { funding: 'debit' } });
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1', paymentIntentId: 'pi_deposit', paymentMethodId: 'pm_debit',
+      });
+      expect(quote.surcharge).toBe(0);
+      await StripeService.finalizeEstimateDepositPayment({ estimateId: 'est-1', quoteToken: quote.quoteToken });
+      const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(params.amount).toBe(4900);
+      expect(params.amount_details).toBe('');
+      expect(params.metadata.card_surcharge).toBe('0');
+    });
+  });
+
+  describe('ledger face value (the credit never inflates)', () => {
+    test('depositFaceValueDollars prefers pinned base_amount over amount_received', () => {
+      const { depositFaceValueDollars, depositSurchargeDollars } = jest.requireActual('../services/stripe-pricing');
+      const surchargedCapture = depositPi({
+        status: 'succeeded',
+        amount: 5042,
+        amount_received: 5042,
+        metadata: {
+          purpose: 'estimate_deposit',
+          estimate_id: 'est-1',
+          base_amount: '49',
+          card_surcharge: '1.42',
+        },
+      });
+      expect(depositFaceValueDollars(surchargedCapture)).toBe(49);
+      expect(depositSurchargeDollars(surchargedCapture)).toBe(1.42);
+    });
+
+    test('pre-revert PIs (no base_amount) fall back to amount_received', () => {
+      const { depositFaceValueDollars, depositSurchargeDollars } = jest.requireActual('../services/stripe-pricing');
+      const legacy = {
+        amount_received: 4900,
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', surcharge_policy: 'deposit_exempt' },
+      };
+      expect(depositFaceValueDollars(legacy)).toBe(49);
+      expect(depositSurchargeDollars(legacy)).toBe(0);
+    });
+
+    test('a PENDING legacy PI (amount_received: 0, Stripe default) faces from amount, not zero (r5)', () => {
+      const { depositFaceValueDollars } = jest.requireActual('../services/stripe-pricing');
+      const pendingLegacy = {
+        amount: 4900,
+        amount_received: 0,
+        metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', surcharge_policy: 'deposit_exempt' },
+      };
+      expect(depositFaceValueDollars(pendingLegacy)).toBe(49);
+    });
+  });
+
+  describe('reset vs in-flight finalize (r5)', () => {
+    test('a public reset refuses while a finalize is between update and confirm', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        metadata: {
+          purpose: 'estimate_deposit',
+          estimate_id: 'est-1',
+          base_amount: '49',
+          card_surcharge: '1.42',
+          finalize_started_at: String(Date.now() - 5000),
+        },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result).toMatchObject({ reset: false, clean: false, inFlight: true });
+      expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    });
+
+    test('the finalize failure path resets THROUGH its own stamp (force) and clears it', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        metadata: {
+          purpose: 'estimate_deposit',
+          estimate_id: 'est-1',
+          base_amount: '49',
+          card_surcharge: '1.42',
+          finalize_started_at: String(Date.now() - 5000),
+        },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit', force: true });
+      expect(result.reset).toBe(true);
+      const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+      expect(params.metadata.finalize_started_at).toBe('');
+    });
+
+    test('an EXPIRED stamp (orphaned by a crash) no longer blocks the public reset', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi({
+        amount: 5042,
+        metadata: {
+          purpose: 'estimate_deposit',
+          estimate_id: 'est-1',
+          base_amount: '49',
+          card_surcharge: '1.42',
+          finalize_started_at: String(Date.now() - 10 * 60 * 1000),
+        },
+      }));
+      const result = await StripeService.resetEstimateDepositIntentToFace({ estimateId: 'est-1', paymentIntentId: 'pi_deposit' });
+      expect(result.reset).toBe(true);
+    });
+
+    test('finalize aborts before confirming when the PI amount was reset mid-flight', async () => {
+      const StripeService = require('../services/stripe');
+      stripeClient.paymentIntents.retrieve.mockResolvedValue(depositPi());
+      stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm_1', type: 'card', card: { funding: 'credit' } });
+      const quote = await StripeService.quoteEstimateDepositSurcharge({
+        estimateId: 'est-1', paymentIntentId: 'pi_deposit', paymentMethodId: 'pm_1',
+      });
+      // finalize's own read, then the pre-confirm verify sees FACE (4900)
+      // instead of the 5042 the update just wrote — a concurrent reset won.
+      stripeClient.paymentIntents.retrieve
+        .mockResolvedValueOnce(depositPi())
+        .mockResolvedValue(depositPi({ amount: 4900 }));
+      await expect(StripeService.finalizeEstimateDepositPayment({
+        estimateId: 'est-1',
+        quoteToken: quote.quoteToken,
+      })).rejects.toThrow(/Failed to finalize/);
+      expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+    });
+  });
+});

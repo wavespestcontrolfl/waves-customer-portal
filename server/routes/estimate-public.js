@@ -6277,7 +6277,10 @@ ${shellQuestionsBar()}
         + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
         + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
         + '</p>'
+        + '<div id="deposit-express-checkout"></div>'
+        + '<div id="deposit-express-divider" style="display:none;text-align:center;color:#8A97A5;font-size:13px;margin:10px 0">or pay by card</div>'
         + '<div id="deposit-payment-element"></div>'
+        + '<div id="deposit-fee-note" class="card-sub" aria-live="polite" style="display:none;margin-top:8px"></div>'
         + '<div id="deposit-error" class="deposit-error" role="alert" style="display:none"></div>'
         + '<div class="pay-pref-grid" style="margin-top:14px">'
         + '<button type="button" class="pay-pref-btn primary" id="deposit-pay-btn" disabled><span class="pay-pref-title">Pay ' + fmt(intent.amount) + ' deposit</span></button>'
@@ -6287,6 +6290,8 @@ ${shellQuestionsBar()}
       document.body.appendChild(overlay);
       const errEl = overlay.querySelector('#deposit-error');
       const payBtn = overlay.querySelector('#deposit-pay-btn');
+      const payBtnTitle = payBtn.querySelector('.pay-pref-title');
+      const feeNote = overlay.querySelector('#deposit-fee-note');
       const showError = function (message) {
         if (errEl) { errEl.textContent = message; errEl.style.display = ''; }
         if (payBtn) payBtn.disabled = false;
@@ -6299,11 +6304,12 @@ ${shellQuestionsBar()}
         const stripe = StripeCtor(intent.publishableKey);
         const elements = stripe.elements({
           clientSecret: intent.clientSecret,
+          // Required for the two-step card flow's createPaymentMethod (same
+          // as PayPageV2) — without it Stripe won't reliably create the PM
+          // before /deposit-quote (Codex #2705 P1).
+          paymentMethodCreation: 'manual',
           appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: 'Inter, system-ui, sans-serif' } },
         });
-        const paymentElement = elements.create('payment');
-        paymentElement.mount('#deposit-payment-element');
-        paymentElement.on('ready', function () { payBtn.disabled = false; });
         // Accept-gate contract: ensureDepositSatisfied live-verifies the PI
         // and only honors status === 'succeeded' — a processing PI would 402
         // at accept. So only succeeded advances; processing shows a pending
@@ -6318,6 +6324,122 @@ ${shellQuestionsBar()}
           return true;
         };
         const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
+        const proceedExempt = function () {
+          // Deposit gates changed mid-modal (kill switch off / already
+          // accepted) — nothing owed; close and continue to accept (the
+          // server accept gate re-verifies).
+          closeDepositOverlay();
+          resolve({ ok: true });
+        };
+
+        // ── Express Checkout — Apple Pay / Google Pay / Link one-tap.
+        // Wallets confirm the PI at FACE value: Phase-1 (same rule as the
+        // invoice pay page) puts no surcharge on Express Checkout, so the
+        // wallet sheet shows exactly the quoted deposit. Card surcharge
+        // applies only to the manual-entry path below.
+        const express = elements.create('expressCheckout', {
+          buttonTheme: { applePay: 'black', googlePay: 'black' },
+          buttonType: { applePay: 'buy', googlePay: 'buy' },
+          buttonHeight: 48,
+          paymentMethodOrder: ['applePay', 'googlePay', 'link'],
+          // 'auto' — let Stripe gate each wallet on real device/browser
+          // eligibility. Forcing googlePay 'always' renders its button on
+          // iOS where the popup flow is blocked and the tap dead-ends
+          // (same trap PayPageV2 hit — OR_BIBED_15).
+          paymentMethods: { googlePay: 'auto' },
+        });
+        express.on('ready', function (ev) {
+          // Only show the divider when a wallet button actually rendered —
+          // an empty ECE with a lone "or pay by card" divider reads broken.
+          if (ev && ev.availablePaymentMethods) {
+            overlay.querySelector('#deposit-express-divider').style.display = '';
+          }
+        });
+        express.on('confirm', function () {
+          if (errEl) errEl.style.display = 'none';
+          // Wallet PREFLIGHT (Codex #2705 r4) — obey the verdict: it
+          // re-checks the live deposit gates AND verifies the PI is at
+          // face value (a failed manual-card finalize can leave it at the
+          // surcharged total; wallets pay face). ok !== true = do NOT
+          // confirm.
+          fetch('/api/public/estimates/' + TOKEN + '/deposit-reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
+          }).then(function (pre) {
+            return pre.json().catch(function () { return {}; }).then(function (preData) {
+              if (pre.status === 409 && preData.exemptReason) { proceedExempt(); return null; }
+              if (!pre.ok || preData.ok !== true) {
+                showError(preData.error || 'A card verification is still pending on this deposit — finish it, or wait a moment and try again.');
+                return null;
+              }
+              return stripe.confirmPayment({
+                elements: elements,
+                confirmParams: { return_url: window.location.href },
+                redirect: 'if_required',
+              }).then(function (result) {
+                if (result.error) {
+                  showError(result.error.message || 'Payment did not go through. Try another card.');
+                  return;
+                }
+                if (succeedWith(result.paymentIntent)) return;
+                showError(result.paymentIntent && result.paymentIntent.status === 'processing'
+                  ? PROCESSING_MSG
+                  : 'Payment is still pending. Try again in a moment.');
+              });
+            });
+          }).catch(function () {
+            showError('Payment did not go through. Try again.');
+          });
+        });
+        express.mount('#deposit-express-checkout');
+
+        // ── Manual card entry — two-step surcharge disclosure (owner ruling
+        // 2026-07-13: deposits are surcharged like invoices, credit funding
+        // only). First tap prices the entered card via /deposit-quote; when
+        // a fee applies the button relabels to the disclosed total and the
+        // SECOND tap confirms via /deposit-finalize (server-side confirm,
+        // never trusting client numbers). Debit/prepaid quote $0 and
+        // finalize on the same tap — nothing to disclose. Wallets are
+        // hidden here (they live in Express Checkout above).
+        const paymentElement = elements.create('payment', {
+          wallets: { applePay: 'never', googlePay: 'never' },
+        });
+        paymentElement.mount('#deposit-payment-element');
+        paymentElement.on('ready', function () { payBtn.disabled = false; });
+        let depositQuote = null;
+        const resetQuote = function () {
+          depositQuote = null;
+          if (feeNote) feeNote.style.display = 'none';
+          if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(intent.amount) + ' deposit';
+        };
+        // Any edit invalidates the quote — the priced PaymentMethod is stale.
+        paymentElement.on('change', function () { resetQuote(); });
+
+        const finalizeQuoted = function (quote) {
+          return fetch('/api/public/estimates/' + TOKEN + '/deposit-finalize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ quoteToken: quote.quoteToken }),
+          }).then(function (res) {
+            return res.json().catch(function () { return {}; }).then(function (data) {
+              if (res.status === 409 && data.exemptReason) { proceedExempt(); return; }
+              if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
+              if (data.requiresAction && data.clientSecret) {
+                return stripe.handleNextAction({ clientSecret: data.clientSecret }).then(function (action) {
+                  if (action.error) throw new Error(action.error.message || 'Card verification failed. Try another card.');
+                  if (succeedWith(action.paymentIntent)) return;
+                  throw new Error(action.paymentIntent && action.paymentIntent.status === 'processing'
+                    ? PROCESSING_MSG
+                    : 'Payment is still pending. Try again in a moment.');
+                });
+              }
+              if (succeedWith({ id: data.paymentIntentId, status: data.status })) return;
+              throw new Error(data.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
+            });
+          });
+        };
+
         payBtn.addEventListener('click', function () {
           payBtn.disabled = true;
           if (errEl) errEl.style.display = 'none';
@@ -6327,22 +6449,57 @@ ${shellQuestionsBar()}
               showError(PROCESSING_MSG);
               return null;
             }
-            return stripe.confirmPayment({
-              elements: elements,
-              confirmParams: { return_url: window.location.href },
-              redirect: 'if_required',
-            }).then(function (result) {
-              if (result.error) {
-                showError(result.error.message || 'Payment did not go through. Try another card.');
-                return;
+            if (depositQuote) {
+              return finalizeQuoted(depositQuote).catch(function (err) {
+                resetQuote();
+                showError(err.message || 'Payment did not go through. Try again.');
+              });
+            }
+            // elements.submit() validates + collects the form BEFORE the PM
+            // is created — required for the manual-creation flow (PayPageV2
+            // parity).
+            return elements.submit().then(function (submitResult) {
+              if (submitResult && submitResult.error) {
+                showError(submitResult.error.message || 'Check your card details and try again.');
+                return null;
               }
-              if (succeedWith(result.paymentIntent)) return;
-              showError(result.paymentIntent && result.paymentIntent.status === 'processing'
-                ? PROCESSING_MSG
-                : 'Payment is still pending. Try again in a moment.');
+              return stripe.createPaymentMethod({ elements: elements });
+            }).then(function (pmResult) {
+              if (!pmResult) return null;
+              if (pmResult.error) {
+                showError(pmResult.error.message || 'Check your card details and try again.');
+                return null;
+              }
+              return fetch('/api/public/estimates/' + TOKEN + '/deposit-quote', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
+              }).then(function (res) {
+                return res.json().catch(function () { return {}; }).then(function (quote) {
+                  if (res.status === 409 && quote.exemptReason) { proceedExempt(); return null; }
+                  if (!res.ok) throw new Error(quote.error || 'Could not price the deposit payment. Please try again.');
+                  if (Number(quote.surcharge) > 0) {
+                    // Disclose, then require the second tap on the total.
+                    depositQuote = quote;
+                    if (feeNote) {
+                      feeNote.textContent = 'Credit card payments include a ' + fmt(quote.surcharge) + ' processing fee — total ' + fmt(quote.total) + '. Debit cards pay ' + fmt(quote.base) + '.';
+                      feeNote.style.display = '';
+                    }
+                    if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(quote.total);
+                    payBtn.disabled = false;
+                    return null;
+                  }
+                  // No fee (debit/prepaid/unknown funding) — same amount the
+                  // button already shows; finalize on this tap.
+                  return finalizeQuoted(quote).catch(function (err) {
+                    resetQuote();
+                    showError(err.message || 'Payment did not go through. Try again.');
+                  });
+                });
+              });
             });
-          }).catch(function () {
-            showError('Payment did not go through. Try again.');
+          }).catch(function (err) {
+            showError((err && err.message) || 'Payment did not go through. Try again.');
           });
         });
       }).catch(function () {

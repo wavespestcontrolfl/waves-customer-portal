@@ -311,6 +311,18 @@ finding and warns on P1. Reviewers must return JSON matching
   policies, PaymentIntent idempotent per estimate+amount with
   metadata-pinned purpose/estimate id; dark behind
   ESTIMATE_DEPOSIT_REQUIRED).
+  `/api/public/estimates/:token/deposit-quote` + `/deposit-finalize`
+  (deposit card surcharge, owner ruling 2026-07-13 reversing the 2026-06-12
+  exemption: manual card entry prices via computeChargeAmount — credit
+  funding only — behind a 10-min HMAC quote token, finalize re-derives from
+  the live PM and confirms server-side; wallets pay through Express
+  Checkout at FACE value, Phase-1 parity with pay-v2. The PI mints at face
+  value and the ledger credits face value (metadata.base_amount) — the fee
+  rides estimate_deposits.card_surcharge, never the credit. Both routes:
+  token format gate, generic 404, deposit rate limit, terminal/expired
+  rejection; trust re-derives from the PI's own purpose/estimate_id pin.
+  Commercial prepay keeps its separate exemption — owner ruling 2026-07-05,
+  expressly not reversed).
   `/api/public/estimates/:token/card-hold-intent` (one-time card-on-file
   hold; estimate token format gate, generic 404, 10 req/min limit,
   terminal/expired rejection, mirrors the accept-time quote + one-time

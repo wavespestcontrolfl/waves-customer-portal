@@ -3683,7 +3683,13 @@ const InvoiceService = {
           "COUNT(*) FILTER (WHERE status = 'received' AND amount - COALESCE(credited_amount, 0) - COALESCE(refunded_amount, 0) > 0) as on_hand_count",
         ),
         db.raw(
-          "COALESCE(SUM(amount - COALESCE(refunded_amount, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
+          // Collected = NET CASH: face + captured card surcharge, minus
+          // refunds. refunded_amount is face-denominated and refunds
+          // return the fee's prorated share alongside (estimate-deposits
+          // refund paths), so the fee scales by the UNREFUNDED fraction —
+          // a fully refunded deposit nets 0 including its fee. amount and
+          // on_hand stay face-only by design (the credit authority).
+          "COALESCE(SUM(GREATEST(amount - COALESCE(refunded_amount, 0), 0) + COALESCE(COALESCE(card_surcharge, 0) * GREATEST(amount - COALESCE(refunded_amount, 0), 0) / NULLIF(amount, 0), 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
         ),
       );
       deposits = {

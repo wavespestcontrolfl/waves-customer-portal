@@ -1,5 +1,6 @@
 let mockDbHandler = () => { throw new Error('db handler not configured'); };
 const mockRetrievePaymentIntent = jest.fn();
+const mockRetrievePaymentMethod = jest.fn();
 const mockCreateEstimateDepositIntent = jest.fn();
 
 jest.mock('../models/db', () => {
@@ -40,6 +41,7 @@ const mockFindLinkedAppt = jest.fn(async () => null);
 
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: (...args) => mockRetrievePaymentIntent(...args),
+  retrievePaymentMethod: (...args) => mockRetrievePaymentMethod(...args),
   createEstimateDepositIntent: (...args) => mockCreateEstimateDepositIntent(...args),
   refundPaymentIntent: (...args) => mockRefundPaymentIntent(...args),
 }));
@@ -423,6 +425,29 @@ describe('ensureDepositSatisfied', () => {
     expect(result.receivedTotal).toBe(70);
     expect(upserts).toHaveLength(1);
     expect(upserts[0].stripe_payment_intent_id).toBe('pi_1');
+  });
+
+  it('live verification WINNING the webhook race still fires the surcharge-bypass audit (r6)', async () => {
+    // A modified client confirmed a CREDIT card directly at face value
+    // (quote_at_confirm, no card_surcharge stamp, PM not a wallet), and the
+    // accept flow's live verification records it before the webhook — the
+    // webhook then replays out, so THIS path must raise the alert.
+    const upserts = [];
+    const table = depositsTable({
+      receivedTotals: [0, 49],
+      upserts,
+      ledgerRow: { status: 'received', amount: '49.00' },
+    });
+    mockDbHandler = () => table;
+    mockRetrievePaymentIntent.mockResolvedValue({
+      id: 'pi_bypass', status: 'succeeded', amount_received: 4900, payment_method: 'pm_credit',
+      metadata: { purpose: 'estimate_deposit', estimate_id: 'est-1', base_amount: '49', surcharge_policy: 'quote_at_confirm' },
+    });
+    mockRetrievePaymentMethod.mockResolvedValue({ id: 'pm_credit', type: 'card', card: { funding: 'credit', wallet: null } });
+
+    const result = await ensureDepositSatisfied({ estimate: { id: 'est-1' }, depositPaymentIntentId: 'pi_bypass' });
+    expect(result.satisfied).toBe(true);
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 
   it('a REFUNDED ledger row never satisfies, even though Stripe still says succeeded', async () => {
@@ -1338,6 +1363,33 @@ describe('deposit reversal webhooks (refunds + disputes)', () => {
     });
     await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 9900 });
     expect(updates2[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 99 });
+  });
+
+  it('a dashboard refund of the FACE amount on a surcharged deposit records the full face (never deflated) — r4', async () => {
+    // $49 deposit captured at $50.42 (card_surcharge 1.42). An operator
+    // refunds "$49.00" from the dashboard, meaning the whole deposit.
+    // Proportional deflation would record ~$47.62 and leave $1.38 able to
+    // satisfy acceptance — the conservative reading records the full face.
+    const updates = [];
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'received', estimate_id: 'est-1', amount: '49.00', credited_amount: '0.00', refunded_amount: null, card_surcharge: '1.42' },
+      updates,
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 4900 });
+    expect(result.handled).toBe(true);
+    expect(updates[0].payload).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
+
+  it('the echo of OUR prorated sweep refund on a surcharged deposit replays instead of re-recording — r4', async () => {
+    // Sweep refunded a $20 remainder + $0.58 prorated fee = 2058c gross;
+    // the ledger already stamps refunded_amount 20.00. The gross deflates
+    // back to ~2000c and must read as a replay, not a new dashboard refund.
+    mockDbHandler = reversalDb({
+      row: { id: 'd1', status: 'credited', estimate_id: 'est-1', amount: '49.00', credited_amount: '29.00', refunded_amount: '20.00', card_surcharge: '1.42' },
+      updates: [],
+    });
+    const result = await handleDepositChargeReversed('pi_1', 'charge.refunded', { amountRefundedCents: 2058 });
+    expect(result).toEqual({ handled: true, replay: true });
   });
 
   it('an already-credited deposit flips AND flags for manual reconciliation', async () => {

@@ -34,6 +34,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const StripeService = require('../services/stripe');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const { addETDays, etDateString } = require('../utils/datetime-et');
 const slotReservation = require('../services/slot-reservation');
@@ -704,6 +705,127 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   } catch (err) {
     logger.error(`[estimate-slots-public:deposit-intent] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'Something went wrong' });
+  }
+});
+
+// POST /:token/deposit-quote — surcharge quote for the deposit PI the client
+// is about to confirm with a MANUAL card entry (owner ruling 2026-07-13:
+// deposits are surcharged like invoices — credit funding only; wallets pay
+// through Express Checkout at face value and never hit this). Deliberately
+// LIGHT compared to /deposit-intent: the PI was minted through every
+// accept-mirror gate already, its face value is pinned in metadata, and a
+// quote only prices that existing intent — the service re-derives trust
+// from the PI's own purpose/estimate_id pin, so a crafted paymentIntentId
+// can't price (or later confirm) someone else's intent through this token.
+router.post('/:token/deposit-quote', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { paymentIntentId, paymentMethodId } = req.body || {};
+    if (!paymentIntentId || !paymentMethodId) {
+      return res.status(400).json({ error: 'paymentIntentId and paymentMethodId required' });
+    }
+    // Kill switch honored mid-modal (Codex #2705 r3 P2): if the deposit
+    // gate flips off while a customer has the payment form open, the
+    // already-minted PI must not be charged through this server-side
+    // path — the accept no longer requires it. (Per-estimate exemptions
+    // arising mid-modal are handled the same way they always were: the
+    // unconsumed-deposit sweep refunds money nothing consumes.)
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const quote = await StripeService.quoteEstimateDepositSurcharge({
+      estimateId: estimate.id,
+      paymentIntentId,
+      paymentMethodId,
+    });
+    return res.json({ success: true, ...quote });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-quote] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not price the deposit payment. Please try again.' });
+  }
+});
+
+// POST /:token/deposit-finalize — confirm the quoted deposit server-side
+// with the surcharge applied (mirrors the invoice /finalize contract:
+// re-derives the amount from the live PM + the PI's pinned face value,
+// never the client's numbers). requires_action (3DS) returns clientSecret
+// for the client's handleNextAction; the accept gate still live-verifies
+// the PI afterward, so this endpoint grants nothing by itself.
+router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { quoteToken } = req.body || {};
+    if (!quoteToken) return res.status(400).json({ error: 'quoteToken required' });
+    // Kill switch honored mid-modal — see /deposit-quote above.
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const result = await StripeService.finalizeEstimateDepositPayment({
+      estimateId: estimate.id,
+      quoteToken,
+    });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-finalize] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not complete the deposit payment. Please try again.' });
+  }
+});
+
+// POST /:token/deposit-reset — the WALLET PREFLIGHT (Codex #2705 r4): every
+// Express Checkout confirm calls this first and must obey the verdict.
+// It (1) re-checks the same live gates the card path's /deposit-finalize
+// enforces — kill switch, already-accepted, inactive — so a wallet tap
+// can't collect a deposit the accept no longer requires; and (2) returns
+// the PI to FACE value when a failed manual-card finalize left it at the
+// surcharged total (wallets pay face — Phase-1). Responds { ok: true }
+// only when the PI is verified clean and confirmable; { ok: false } means
+// DO NOT confirm (e.g. mid-3DS residue, which clears when the abandoned
+// challenge expires back to requires_payment_method).
+router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
+  const token = req.params.token;
+  if (!token || !TOKEN_RE.test(token)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const { paymentIntentId } = req.body || {};
+    if (!paymentIntentId) return res.status(400).json({ error: 'paymentIntentId required' });
+    if (!require('../services/estimate-deposits').isDepositEnforced()) {
+      return res.status(409).json({ error: 'No deposit is required for this estimate', exemptReason: 'deposits_disabled' });
+    }
+    const estimate = await db('estimates').where({ token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Not found' });
+    if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted', exemptReason: 'already_accepted' });
+    if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
+
+    const result = await StripeService.resetEstimateDepositIntentToFace({
+      estimateId: estimate.id,
+      paymentIntentId,
+    });
+    return res.json({ success: true, ok: result.clean === true, ...result });
+  } catch (err) {
+    if (err.statusCode === 400) return res.status(400).json({ error: err.message });
+    logger.error(`[estimate-slots-public:deposit-reset] ${err.message}`, { stack: err.stack });
+    return res.status(400).json({ error: 'Could not verify the deposit payment. Please try again.' });
   }
 });
 
