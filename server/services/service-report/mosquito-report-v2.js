@@ -25,6 +25,7 @@
 
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
+const { isOneTimeServiceLabel } = require('../pest-pressure/review-window');
 
 const STATUS_BY_KEY = {
   protected: { key: 'protected', label: 'Yard protected', tone: 'good' },
@@ -96,6 +97,30 @@ function findingText(finding) {
   return `${finding?.title || ''} ${finding?.detail || ''}`.toLowerCase();
 }
 
+// Negation guard for habitat matching: a finding that records the ABSENCE of
+// a condition ("No standing water observed", "gutters clear of debris") must
+// not light a watch node (codex P2) — the dashboard would tell the customer a
+// breeding site was documented when the report recorded the opposite. Only
+// the clause containing the match is inspected, so "No debris found. Standing
+// water at the AC drain." still flags correctly.
+const NEGATION_RE = /\b(no|none|not|never|without|zero|free (?:of|from)|clear(?:ed)? (?:of|from)|absent|absence of)\b/;
+function mentionsCondition(text, pattern) {
+  const match = pattern.exec(text);
+  if (!match) return false;
+  // The whole clause containing the match is inspected — negation can lead
+  // ("No standing water observed") or trail ("Gutters clear of debris").
+  const clauseStart = Math.max(
+    text.lastIndexOf('.', match.index),
+    text.lastIndexOf(';', match.index),
+    text.lastIndexOf(',', match.index),
+  ) + 1;
+  const ends = ['.', ';', ',']
+    .map((boundary) => text.indexOf(boundary, match.index))
+    .filter((idx) => idx !== -1);
+  const clauseEnd = ends.length ? Math.min(...ends) : text.length;
+  return !NEGATION_RE.test(text.slice(clauseStart, clauseEnd));
+}
+
 // Findings that only state "nothing documented" must not light up watch states.
 function isActiveFinding(finding) {
   return finding && finding.category !== 'no_activity';
@@ -132,7 +157,7 @@ function buildHabitat({ findings = [], applications = [] }) {
         : 'No mosquito application was logged today.',
     },
     ...HABITAT_NODES.map((node) => {
-      const hit = texts.some((t) => node.pattern.test(t));
+      const hit = texts.some((t) => mentionsCondition(t, node.pattern));
       return {
         key: node.key,
         label: node.label,
@@ -326,6 +351,18 @@ function buildMosquitoReportV2({
   };
 }
 
+// Recurring gate for the dashboard: legacy one-time mosquito rows completed
+// BEFORE the mosquito_event typed cutover carry serviceLine 'mosquito' with
+// no typed snapshot (codex P2), so the route's `!data.typedReport` check
+// alone would render recurring copy ("between visits", "before next
+// service") on a single-visit event report. Reuses the pest-pressure
+// one-time label check and additionally treats event sprays as one-time.
+function isRecurringMosquitoServiceType(serviceType) {
+  const text = String(serviceType || '');
+  if (isOneTimeServiceLabel(text)) return false;
+  return !/\bevent\b/i.test(text);
+}
+
 // PDF cache-key component. The stored-PDF hit check only compares keys, so
 // flipping MOSQUITO_REPORT_V2 for an already-rendered mosquito report must
 // change the expected key or permanent PDF links keep serving the pre-V2
@@ -340,6 +377,7 @@ function mosquitoReportV2PdfSignature(service = {}) {
 module.exports = {
   buildMosquitoReportV2,
   mosquitoReportV2PdfSignature,
+  isRecurringMosquitoServiceType,
   // exported for tests
   resolveStatusKey,
   buildHabitat,

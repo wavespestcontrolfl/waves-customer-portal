@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
@@ -127,6 +127,43 @@ describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
     const { mosquitoReportV2: _omit, ...gatedOff } = mosquitoReportV2;
     renderReport(gatedOff);
     await screen.findByText('Visit Summary');
+  });
+
+  it('rating submit refreshes the pressure pill from the recalculated response', async () => {
+    // Insufficient reading: no score pill, rating picker only. The POST
+    // returns a recalculated pestPressure the hero must surface (the
+    // standalone PestPressureCard that used to own this is suppressed).
+    const insufficient = JSON.parse(JSON.stringify(mosquitoReportV2));
+    insufficient.mosquitoReportV2.supportingMetric = {
+      kind: 'pressure', score: null, max: 5, label: null, trend: null,
+      caption: 'Mosquito pressure',
+      rating: { question: 'How much mosquito activity have you noticed?' },
+      submittedRating: null,
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      if (opts && opts.method === 'POST' && String(url).includes('pest-pressure/client-rating')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ pestPressure: { displayScore: '2.4', maxScore: 5, label: 'Moderate', trend: 'stable' }, submittedRating: 2 }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => insufficient };
+    }));
+    render(
+      <MemoryRouter initialEntries={['/report/test-mosquito-v2']}>
+        <Routes>
+          <Route path="/report/:token" element={<ReportViewPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('How much mosquito activity have you noticed?');
+    expect(screen.queryByText('2.4')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rating 2 of 5' }));
+    await screen.findByText('Thanks — your input helps us calibrate your protection plan.');
+    await screen.findByText('2.4');
+    await screen.findByText(/Moderate/); // renders as "· Moderate" beside the score
   });
 });
 

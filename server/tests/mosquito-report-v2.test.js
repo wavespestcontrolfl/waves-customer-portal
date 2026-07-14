@@ -8,6 +8,7 @@
 const {
   buildMosquitoReportV2,
   mosquitoReportV2PdfSignature,
+  isRecurringMosquitoServiceType,
   resolveStatusKey,
   buildHabitat,
   buildOutlook,
@@ -96,6 +97,41 @@ describe('buildHabitat — watch items derive from finding text', () => {
     });
     expect(habitat.items.find((i) => i.key === 'standing_water').status).toBe('clear');
     expect(habitat.summary).toMatch(/no conditions/i);
+  });
+
+  it('negated manual observations never light a watch state', () => {
+    // Manually entered observations keep category "observation", so the
+    // no_activity filter alone doesn't catch them (codex P2).
+    const habitat = buildHabitat({
+      findings: [
+        finding({ title: 'No standing water observed around the property' }),
+        finding({ title: 'Gutters clear of debris', detail: 'Downspouts draining freely, no pooling.' }),
+      ],
+      applications: [FOG_APP],
+    });
+    expect(habitat.items.find((i) => i.key === 'standing_water').status).toBe('clear');
+    expect(habitat.items.find((i) => i.key === 'drainage').status).toBe('clear');
+  });
+
+  it('a positive mention after a negated clause still flags', () => {
+    const habitat = buildHabitat({
+      findings: [finding({ title: 'No debris found. Standing water at the AC drain line.' })],
+      applications: [FOG_APP],
+    });
+    expect(habitat.items.find((i) => i.key === 'standing_water').status).toBe('watched');
+  });
+});
+
+describe('isRecurringMosquitoServiceType — legacy one-time exclusion', () => {
+  it('rejects one-time and event labels', () => {
+    expect(isRecurringMosquitoServiceType('One-Time Mosquito Control Service')).toBe(false);
+    expect(isRecurringMosquitoServiceType('Mosquito Event Spray')).toBe(false);
+    expect(isRecurringMosquitoServiceType('Single-Visit Mosquito Treatment')).toBe(false);
+  });
+
+  it('accepts recurring labels', () => {
+    expect(isRecurringMosquitoServiceType('Mosquito Control (Monthly)')).toBe(true);
+    expect(isRecurringMosquitoServiceType('Mosquito Control - Seasonal')).toBe(true);
   });
 });
 

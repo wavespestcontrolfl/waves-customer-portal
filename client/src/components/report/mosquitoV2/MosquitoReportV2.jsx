@@ -103,8 +103,28 @@ function TrendArrow({ trend }) {
 
 // ── Hero: protection status first ───────────────────────────────────────────────
 export function MosquitoStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
+  // The rating POST returns a recalculated pestPressure (possibly turning an
+  // insufficient reading into a real score) — hold the displayed metric in
+  // state so a successful submit can refresh it without a full reload
+  // (codex P2; the standalone PestPressureCard that used to own this is
+  // suppressed when the dashboard renders).
+  const [metric, setMetric] = useState(supportingMetric);
+  useEffect(() => { setMetric(supportingMetric); }, [supportingMetric]);
   if (!status) return null;
   const t = tone(status.tone);
+  const refreshFromPestPressure = (pestPressure) => {
+    if (!pestPressure) return;
+    const score = pestPressure.displayScore ?? pestPressure.score;
+    if (score == null) return;
+    setMetric((prev) => ({
+      ...(prev || { kind: 'pressure', caption: 'Mosquito pressure', rating: null, submittedRating: null }),
+      kind: 'pressure',
+      score: String(score),
+      max: pestPressure.maxScore || 5,
+      label: pestPressure.label || null,
+      trend: pestPressure.trend || null,
+    }));
+  };
   return (
     <section data-glass="card" style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
       <div data-gt="eyebrow" style={eyebrow}>Today’s mosquito protection</div>
@@ -117,10 +137,15 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
       ) : null}
       {/* The score pill hides when the reading is still insufficient (score
           null) — the metric may then exist solely to carry the rating picker. */}
-      {supportingMetric && (supportingMetric.score != null || supportingMetric.label)
-        ? <SupportingMetric metric={supportingMetric} />
+      {metric && (metric.score != null || metric.label)
+        ? <SupportingMetric metric={metric} />
         : null}
-      <MosquitoPressureRating metric={supportingMetric} token={token} live={mode === 'live'} />
+      <MosquitoPressureRating
+        metric={supportingMetric}
+        token={token}
+        live={mode === 'live'}
+        onRefreshed={refreshFromPestPressure}
+      />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
       ) : null}
@@ -148,7 +173,7 @@ function SupportingMetric({ metric }) {
 
 // One-shot customer calibration — same token route the pest hero uses; the
 // server only offers `rating` when this line's pressure tracking allows it.
-function MosquitoPressureRating({ metric, token, live }) {
+function MosquitoPressureRating({ metric, token, live, onRefreshed }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -174,8 +199,15 @@ function MosquitoPressureRating({ metric, token, live }) {
       const res = await fetch(`${API_BASE}/reports/${token}/pest-pressure/client-rating`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating: n }),
       });
-      if (res.ok || res.status === 409) setSubmitted(true);
-      else setFailed(true);
+      if (res.ok || res.status === 409) {
+        setSubmitted(true);
+        // The route recalculates the score with the new signal and returns
+        // the updated pestPressure — surface it (legacy card parity).
+        if (res.ok && onRefreshed) {
+          const body = await res.json().catch(() => null);
+          if (body?.pestPressure) onRefreshed(body.pestPressure);
+        }
+      } else setFailed(true);
     } catch { setFailed(true); } finally { setBusy(false); }
   };
   return (

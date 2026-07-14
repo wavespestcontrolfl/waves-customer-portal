@@ -108,7 +108,11 @@ const {
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
-const { mosquitoReportV2PdfSignature } = require('../services/service-report/mosquito-report-v2');
+const {
+  mosquitoReportV2PdfSignature,
+  buildMosquitoReportV2,
+  isRecurringMosquitoServiceType,
+} = require('../services/service-report/mosquito-report-v2');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -330,18 +334,19 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits
   // (flag-gated), same family as Pest V2 but with habitat semantics instead of
   // entry points (mosquito-report-v2.js explains the reframe). Mutually
-  // exclusive with pestReportV2 by service line. Typed one-time reports
-  // (mosquito_event) are excluded: they own the purpose-built activity gauge,
-  // which the dashboard would otherwise suppress client-side (codex P2).
-  // Best-effort, never blocks.
+  // exclusive with pestReportV2 by service line. One-time reports are
+  // excluded two ways (codex P2 ×2): typed snapshots (mosquito_event) own
+  // the purpose-built activity gauge the dashboard would suppress, and
+  // legacy pre-typed-cutover one-time labels must not get recurring
+  // "between visits" copy. Best-effort, never blocks.
   if (
     process.env.MOSQUITO_REPORT_V2 === 'true'
     && data.serviceLine === 'mosquito'
     && !data.typedReport
+    && isRecurringMosquitoServiceType(service.service_type)
     && dynamicContext.premiumExperience
   ) {
     try {
-      const { buildMosquitoReportV2 } = require('../services/service-report/mosquito-report-v2');
       const forecast = await fetchSeasonalForecastSafe(service.zip);
       const mosquitoReportV2 = buildMosquitoReportV2({
         premiumExperience: dynamicContext.premiumExperience,
