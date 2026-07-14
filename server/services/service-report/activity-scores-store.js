@@ -24,12 +24,29 @@ const HISTORY_LIMIT = 8;
 // banned-copy rules stay owned by the typed report's own wording).
 const PROGRESS_SUMMARY_INDICATORS = new Set(['bed_bug_activity', 'roach_activity']);
 
-function buildActivityProgress({ indicatorKey, history = [], currentScore = null } = {}) {
-  if (process.env.TYPED_PROGRESS_SUMMARY !== 'true') return null;
-  if (!PROGRESS_SUMMARY_INDICATORS.has(indicatorKey)) return null;
+function progressSummaryEligible(indicatorKey) {
+  return process.env.TYPED_PROGRESS_SUMMARY === 'true'
+    && PROGRESS_SUMMARY_INDICATORS.has(indicatorKey);
+}
+
+// `baseline` is the customer's TRUE first score row for this indicator,
+// loaded separately by the caller — the chart's history series truncates at
+// HISTORY_LIMIT, so on long programs history[0] is only the oldest RETAINED
+// point and "at your first visit" would state the wrong score/date (codex
+// P2). A null baseline (lookup failed / no prior rows) suppresses the chip
+// rather than guessing.
+function buildActivityProgress({
+  indicatorKey,
+  history = [],
+  currentScore = null,
+  currentRecordId = null,
+  baseline = null,
+} = {}) {
+  if (!progressSummaryEligible(indicatorKey)) return null;
   if (!Array.isArray(history) || history.length < 2) return null;
-  const baseline = history[0];
-  if (!baseline || baseline.isCurrent || !Number.isFinite(Number(baseline.score))) return null;
+  if (!baseline || !Number.isFinite(Number(baseline.score))) return null;
+  // The earliest row being THIS report means we're viewing the first visit.
+  if (baseline.serviceRecordId != null && String(baseline.serviceRecordId) === String(currentRecordId)) return null;
   if (!Number.isFinite(Number(currentScore))) return null;
   if (Number(currentScore) >= Number(baseline.score)) return null;
   return {
@@ -100,6 +117,37 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     });
   }
 
+  // True first-visit baseline for the progress chip — loaded separately
+  // because `history` truncates at HISTORY_LIMIT (see buildActivityProgress).
+  // Queried only when the chip could render at all; fail-soft to null (the
+  // chip suppresses rather than guessing a wrong "first visit").
+  let progressBaseline = null;
+  if (progressSummaryEligible(activity.indicatorKey) && history.length >= 2) {
+    try {
+      const row = await knex('service_activity_scores')
+        .where({
+          customer_id: service.customer_id,
+          indicator_key: activity.indicatorKey,
+        })
+        .modify((query) => {
+          if (service.service_date) query.where('service_date', '<=', service.service_date);
+        })
+        .orderBy('service_date', 'asc')
+        .orderBy('created_at', 'asc')
+        .first('service_record_id', 'service_date', 'score');
+      if (row) {
+        progressBaseline = {
+          serviceRecordId: row.service_record_id,
+          serviceDate: toDateOnly(row.service_date),
+          score: Number(row.score),
+          levelWord: scoreLevelWord(Number(row.score)),
+        };
+      }
+    } catch {
+      progressBaseline = null;
+    }
+  }
+
   return {
     indicatorKey: activity.indicatorKey,
     label: activity.label,
@@ -115,6 +163,8 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
       indicatorKey: activity.indicatorKey,
       history,
       currentScore: activity.score,
+      currentRecordId: service.id,
+      baseline: progressBaseline,
     }),
   };
 }
