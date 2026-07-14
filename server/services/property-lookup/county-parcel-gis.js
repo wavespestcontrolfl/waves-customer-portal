@@ -448,7 +448,16 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
     // still returns null and defers to the address search.
     const feature = pickParcelFeature(features, lng, lat);
     if (!feature) {
-      const aggregate = buildStackedAggregate(county, layer, features, lng, lat);
+      // A page-capped response is a PARTIAL stack — summing it would
+      // understate the association's units/sqft and underprice the job.
+      // Defer to the address search instead (codex P2 r3 #2721).
+      const truncated = !!data?.exceededTransferLimit;
+      const aggregate = truncated ? null : buildStackedAggregate(county, layer, features, lng, lat);
+      if (truncated) {
+        logger.info('[county-parcel-gis] stacked parcels truncated by page cap — deferring aggregation', {
+          county, count: features.length, elapsedMs: Date.now() - t0,
+        });
+      }
       if (aggregate && aggregate.parcelId) {
         const parcel = {
           ...aggregate,

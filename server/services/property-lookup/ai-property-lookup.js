@@ -1337,7 +1337,18 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 // outside the building set; interpolated points (a guess along the street)
 // additionally require positive membership — mirroring the single-parcel
 // exact-match rule.
+// A typed unit/suite means the customer is ONE unit, not the association —
+// aggregation must step aside so the PAO/address search resolves the unit
+// record (codex P1 r3 #2721: "1555 Tarpon Center Dr #101" is a condo
+// resident, not the commercial HOA).
+const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM)\b\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
+
+function addressHasSubpremise(address) {
+  return SUBPREMISE_RE.test(String(address || ''));
+}
+
 function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress) {
+  if (addressHasSubpremise(typedAddress) || addressHasSubpremise(searchAddress)) return 'drop';
   // Anchor to the ORIGINALLY TYPED address when one is supplied — Google can
   // snap a mistyped number onto one of the association's buildings, and the
   // canonical (snapped) address would then read as in-association (codex P2
@@ -4020,6 +4031,7 @@ module.exports = {
     parcelGisPrecision,
     situsHouseNumberMismatch,
     aggregateSitusVerdict,
+    addressHasSubpremise,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
     slugAddressLine,

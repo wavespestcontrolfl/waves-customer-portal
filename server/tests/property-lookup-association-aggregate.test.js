@@ -445,3 +445,77 @@ describe('codex round-2 hardening (#2721)', () => {
     expect(profile.estimatedSlabSqFt).toBeNull();
   });
 });
+
+describe('codex round-3 hardening (#2721)', () => {
+  const { aggregateSitusVerdict, addressHasSubpremise } = aiPrivate;
+
+  test('a typed unit/suite bypasses aggregation — a condo resident is not the HOA', () => {
+    const parcel = { aggregated: true, situsHouseNumbers: ['1535', '1555', '1575'] };
+
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr #101, Venice, FL 34285')).toBe('drop');
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr unit 105, Venice, FL 34285')).toBe('drop');
+    // Canonical (snapped) subpremise counts too — Google formats units as "#105".
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr #105, Venice, FL 34285', 'rooftop',
+      undefined)).toBe('drop');
+    // No subpremise → association behavior unchanged.
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr, Venice, FL 34285')).toBe('keep');
+    expect(addressHasSubpremise('1555 Tarpon Center Dr Ste 200, Venice, FL')).toBe(true);
+    expect(addressHasSubpremise('1555 Tarpon Center Dr, Venice, FL')).toBe(false);
+  });
+
+  test('a page-capped (truncated) stack defers instead of aggregating a partial sum', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        exceededTransferLimit: true,
+        features: [
+          MASTER_FEATURE,
+          unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+          unitFeature(1555, 104), unitFeature(1555, 105),
+        ],
+      }),
+    });
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel).toBeNull();
+  });
+
+  test('unknown-stories aggregates publish NO footprint claim, with a HIGH flag', () => {
+    const record = {
+      propertyType: 'Multifamily',
+      _source: 'county',
+      squareFootage: 122696,
+      lotSize: 200000,
+      stories: null,
+      _parcel: { aggregated: true, residentialUnits: 150, buildingCount: 3 },
+    };
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.footprint).toBe(0); // pricing must not read summed living area as a slab
+    expect(profile.homeSqFt).toBe(122696); // interior work measure stays
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'footprint', priority: 'HIGH' }),
+    ]));
+  });
+
+  test('known-stories aggregates still publish the derived footprint', () => {
+    const record = {
+      propertyType: 'Multifamily',
+      _source: 'county',
+      squareFootage: 122696,
+      lotSize: 200000,
+      stories: 2,
+      _parcel: { aggregated: true, residentialUnits: 150, buildingCount: 3 },
+    };
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.footprint).toBe(Math.round(122696 / 2));
+    expect(profile.estimatedPerimeterLF).toBeGreaterThan(0);
+  });
+});

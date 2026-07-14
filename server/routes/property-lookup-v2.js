@@ -1408,6 +1408,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const estimatedPerimeterLF = footprintSf > 0 && !aggregateStoriesUnknown
     ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
     : null;
+  if (aggregateStoriesUnknown && footprintSf > 0) {
+    // The profile must not CLAIM a ground-floor footprint it doesn't have —
+    // footprintSf here is the full summed living area (stories unknown), and
+    // profile.footprint feeds pricing's footprintSqFt directly (codex P1 r3
+    // #2721). Interior sqft (homeSqFt) stays: the association's total
+    // interior area is the real interior-treatment work measure regardless
+    // of floor count. Ground-geometry values (footprint / perimeter / attic
+    // / slab) all stay empty for a field measurement, flagged HIGH.
+    fieldVerifyFlags.push({
+      field: 'footprint',
+      reason: `Association aggregate with unknown story count — ground-floor footprint, perimeter, and slab/attic areas are not derivable from the summed ${footprintSf.toLocaleString()} sq ft interior area. Measure on site before termite/perimeter pricing.`,
+      priority: 'HIGH',
+    });
+  }
 
   const profile = {
     // ── ADDRESS ──
@@ -1442,7 +1456,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
-    footprint: footprintSf,
+    footprint: aggregateStoriesUnknown ? 0 : footprintSf,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
