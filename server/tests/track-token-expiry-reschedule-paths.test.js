@@ -17,6 +17,10 @@ function chain(overrides = {}) {
       return builder;
     }),
     orWhere: jest.fn().mockReturnThis(),
+    // rescheduleSeries scopes its sibling pull with whereRaw (#2725) — the
+    // fake chain must stub every builder method the code under test calls
+    // or the suite fails on main for every PR's CI merge ref.
+    whereRaw: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
@@ -140,7 +144,13 @@ describe('track token expiry on reschedule paths', () => {
     const secondUpdate = chain();
     const logInsert = chain();
 
-    const scheduledQueries = [siblingsQuery, firstUpdate, secondUpdate];
+    // #2725's series shift added a projected-date clash probe between the
+    // sibling SELECT and the per-sibling updates (rebooker.js ~L590); its
+    // bare chain resolves first() undefined = no clash. The per-tech
+    // overlap/clash probes stay skipped: no technicianId option, and the
+    // fixture siblings carry no technician_id.
+    const seriesClashLookup = chain();
+    const scheduledQueries = [siblingsQuery, seriesClashLookup, firstUpdate, secondUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;
