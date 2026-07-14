@@ -7,8 +7,9 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/newsletter-confirm', () => ({ sendConfirmationEmail: jest.fn().mockResolvedValue(true) }));
 
-const { propagateCustomerEmailChange, emailKey } = require('../services/customer-email-fanout');
+const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
 
 /**
  * Minimal knex-shaped stub. Per-table config:
@@ -30,6 +31,7 @@ function makeConn(cfg = {}) {
       whereRaw: (sql, bindings) => { calls.push({ table, op: 'whereRaw', arg: { sql, bindings } }); return qb; },
       whereNull: () => qb,
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
+      whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
       select: () => qb,
       count: () => { counting = true; return qb; },
       first: () => Promise.resolve(counting
@@ -57,7 +59,7 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, reviewCards: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
@@ -74,6 +76,8 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__updates('email_template_automation_runs')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('referral_promoters')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('notification_prefs')[0].arg.billing_email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('customer_contracts')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('booking_intents')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('charleswrobb@gmail.com');
 
     const cardUpdate = conn.__updates('triage_items')[0].arg;
@@ -100,7 +104,7 @@ describe('propagateCustomerEmailChange', () => {
       before: { id: 'cust-1', email: 'Charleswrobb@Gmail.com' },
       after: AFTER,
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -110,7 +114,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: null },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -165,6 +169,48 @@ describe('propagateCustomerEmailChange', () => {
     expect(enrollmentEmailGuard.arg.bindings).toEqual(['charlesw.robb@gmail.com']);
   });
 
+  test('a moved PENDING subscriber row surfaces pendingConfirmation for the post-commit re-send', async () => {
+    // The DOI confirmation went to the old typo; campaigns only send to
+    // status='active' — without a re-send the customer is stuck pending.
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Charles' },
+          null, // no row on the corrected spelling
+        ],
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(result.pendingConfirmation).toEqual({
+      id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1',
+    });
+  });
+
+  test('an ACTIVE subscriber move carries no pendingConfirmation', async () => {
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(result.pendingConfirmation).toBeUndefined();
+  });
+
+  test('booking-intent sync targets only unconverted, unsent, unsuppressed rows', async () => {
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const guard = conn.__calls.find((c) => c.table === 'booking_intents' && c.op === 'where'
+      && c.arg && typeof c.arg === 'object' && 'followup_email_sent' in c.arg);
+    expect(guard.arg).toEqual({ customer_id: 'cust-1', followup_email_sent: false, suppressed: false });
+  });
+
+  test('contract sync skips terminal statuses', async () => {
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const notIn = conn.__calls.find((c) => c.table === 'customer_contracts' && c.op === 'whereNotIn');
+    expect(notIn.arg.vals).toEqual(['signed', 'cancelled', 'voided']);
+  });
+
   test('an INVALID replacement email never fans out or resolves cards', async () => {
     const conn = makeConn({
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
@@ -173,7 +219,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: 'foo@bar' },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -207,6 +253,33 @@ describe('propagateCustomerEmailChange', () => {
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const reasonFilter = conn.__calls.find((c) => c.table === 'triage_items' && c.op === 'whereIn' && c.arg.col === 'reason_code');
     expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid']);
+  });
+});
+
+describe('resendPendingConfirmation', () => {
+  const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+
+  test('sends to the corrected address and stamps confirmation_sent_at', async () => {
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const conn = makeConn();
+    const ok = await resendPendingConfirmation(
+      { id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1' }, conn);
+    expect(ok).toBe(true);
+    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' }));
+    expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+  });
+
+  test('a failed send never throws and leaves the stamp alone', async () => {
+    sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
+    const conn = makeConn();
+    const ok = await resendPendingConfirmation(
+      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' }, conn);
+    expect(ok).toBe(false);
+    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+  });
+
+  test('null input is a no-op', async () => {
+    expect(await resendPendingConfirmation(null, makeConn())).toBe(false);
   });
 });
 

@@ -1030,6 +1030,12 @@ async function updateCustomer(customerId, updates) {
     }
     throw e;
   }
+  if (emailSync?.pendingConfirmation) {
+    // The moved DOI row's confirmation went to the old typo — re-send to the
+    // corrected address now that the edit is committed (fire-and-forget; the
+    // helper stamps confirmation_sent_at on success and never throws).
+    void require('../customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation);
+  }
   if (addressSubmitted) {
     // Coords may point at the old address — clear + re-geocode, then re-mirror the
     // fresh coords onto the primary property (syncPrimaryAddress nulled them).

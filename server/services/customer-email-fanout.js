@@ -76,11 +76,19 @@ function emailKey(value) {
  *            edit", "Intelligence Bar update_customer")
  * @param {object} conn — knex connection or transaction
  * @returns counts { leads, estimates, newsletter, automations, templateRuns,
- *   promoters, billingPrefs, reviewCards } — all zero when the email did not
- *   actually change or was removed.
+ *   promoters, billingPrefs, contracts, bookingIntents, reviewCards } — all
+ *   zero when the email did not actually change or was removed. When a
+ *   PENDING (double-opt-in) subscriber row was moved to the corrected
+ *   address, the result also carries `pendingConfirmation` ({ id, email,
+ *   first_name, confirmation_token }): the DOI confirmation was sent to the
+ *   OLD typo, so the CALLER must re-send it to the corrected address AFTER
+ *   its transaction commits (never send mail inside a trx) and stamp
+ *   confirmation_sent_at on success — otherwise the row sits pending forever
+ *   and campaigns (status='active' only) never reach them.
  */
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 };
+  let pendingConfirmation = null;
   const customerId = (after && after.id) || (before && before.id);
   // OLD is a loose match key (the stored copy may itself be malformed — that
   // is exactly what gets corrected); NEW must be a syntactically VALID
@@ -175,6 +183,26 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .whereRaw('LOWER(billing_email) = ?', [oldEmail])
       .update({ billing_email: newEmail, updated_at: now });
 
+    // Contract packets snapshot recipient_email at creation and the delivery
+    // path PREFERS it over the live customer row — resends and due reminders
+    // for draft/sent/viewed rows would keep mailing the misspelling.
+    // Terminal contracts (signed/cancelled/voided — mirrors
+    // document-contract-delivery TERMINAL_STATUSES) are history.
+    counts.contracts += await conn('customer_contracts')
+      .where({ customer_id: customerId })
+      .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
+      .whereNotIn('status', ['signed', 'cancelled', 'voided'])
+      .update({ recipient_email: newEmail, updated_at: now });
+
+    // Abandoned-booking recovery sends its ~24h second touch directly to
+    // booking_intents.email. Only rows still awaiting that touch matter:
+    // unconverted, email touch unsent, not suppressed.
+    counts.bookingIntents += await conn('booking_intents')
+      .where({ customer_id: customerId, followup_email_sent: false, suppressed: false })
+      .whereRaw('LOWER(email) = ?', [oldEmail])
+      .whereNull('converted_at')
+      .update({ email: newEmail, updated_at: now });
+
     // newsletter_subscribers.email is UNIQUE. Check-first instead of
     // update-and-catch: a caught unique violation would poison the caller's
     // transaction (Postgres aborts it), so the rare true race is left to
@@ -207,6 +235,16 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
           .update({ email: newEmail, updated_at: now });
+        // A PENDING row's DOI confirmation went to the old typo — hand the
+        // caller what it needs to re-send post-commit (see @returns).
+        if (String(oldSub.status || '') === 'pending' && oldSub.confirmation_token) {
+          pendingConfirmation = {
+            id: oldSub.id,
+            email: newEmail,
+            first_name: oldSub.first_name || null,
+            confirmation_token: oldSub.confirmation_token,
+          };
+        }
       }
     }
   }
@@ -245,9 +283,31 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).
-    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter, ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s); resolved ${counts.reviewCards} email review card(s)`);
+    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter, ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
   }
-  return counts;
+  return pendingConfirmation ? { ...counts, pendingConfirmation } : counts;
 }
 
-module.exports = { propagateCustomerEmailChange, emailKey };
+/**
+ * Post-commit companion to propagateCustomerEmailChange: re-send the DOI
+ * confirmation to the corrected address and stamp confirmation_sent_at on
+ * success. Fire-and-forget safe — never throws (the customer edit already
+ * committed; a failed re-send logs and leaves the pending row for the
+ * stale-pending sweep / a fresh signup). Call AFTER the edit transaction
+ * commits, never inside it.
+ */
+async function resendPendingConfirmation(pendingConfirmation, conn = db) {
+  if (!pendingConfirmation) return false;
+  try {
+    await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+    await conn('newsletter_subscribers')
+      .where({ id: pendingConfirmation.id })
+      .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+    return true;
+  } catch (e) {
+    logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.message}`);
+    return false;
+  }
+}
+
+module.exports = { propagateCustomerEmailChange, resendPendingConfirmation, emailKey };
