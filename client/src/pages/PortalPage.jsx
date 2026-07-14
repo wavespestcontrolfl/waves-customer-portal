@@ -1944,7 +1944,10 @@ function DashboardTab({ customer, onSwitchTab }) {
                   color: B.glassNavy, fontSize: 14, fontWeight: 800,
                 }}>Confirmed</span>
               )}
-              <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} data-glass-accent="" style={{
+              {/* Self-serve first: the visit's tokenized reschedule page
+                  (same one the reminder texts link). SMS-to-office only for
+                  legacy rows without a token. */}
+              <a href={nextService.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${nextService.serviceType || 'service'} visit.`} data-glass-accent="" style={{
                 ...dashboardSecondaryButton,
                 textDecoration: 'none',
                 position: 'relative',
@@ -3343,7 +3346,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           {/* Confirm + Reschedule */}
           <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
             {renderConfirmBtn(s, false)}
-            <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+            <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
               ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
               fontSize: 12, position: 'relative',
             }}>Reschedule</a>
@@ -3385,7 +3388,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
           {renderConfirmBtn(s, true)}
-          <a href={`sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
+          <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
             ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
             fontSize: 12, position: 'relative',
           }}>Reschedule</a>

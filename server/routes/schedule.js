@@ -63,6 +63,12 @@ router.get('/', async (req, res, next) => {
         // visits from one-time visits and free re-service callbacks.
         isRecurring: s.is_recurring === true,
         isCallback: s.is_callback === true,
+        // Self-serve deep link (same page the reminder texts link) — the
+        // portal's Reschedule buttons open this instead of drafting an SMS
+        // to the office. Same-customer row, so exposing the token here adds
+        // no reach beyond what the customer's own texts already carry.
+        // Null for legacy pre-backfill rows → the button falls back to SMS.
+        rescheduleUrl: s.reschedule_token ? `/reschedule/${s.reschedule_token}` : null,
       })),
     });
   } catch (err) {
@@ -211,6 +217,8 @@ router.get('/next', async (req, res, next) => {
         // visit from a one-time visit or a free re-service callback.
         isRecurring: nextService.is_recurring === true,
         isCallback: nextService.is_callback === true,
+        // Self-serve deep link — see the list route's note above.
+        rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
       },
     });
   } catch (err) {
