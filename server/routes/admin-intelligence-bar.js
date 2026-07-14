@@ -1079,7 +1079,13 @@ For create_customer, the route-optimization writes, and the inventory stock writ
       const response = await anthropic.messages.create({
         model: model,
         max_tokens: context === 'tech' ? 1024 : 4096,
-        system: [{ type: 'text', text: systemPrompt, ...EPHEMERAL_CACHE }],
+        // 1h TTL on the tools+system prefix: operator queries routinely arrive
+        // more than 5 minutes apart, so the default TTL expired between them
+        // and every query paid the cache-write premium with no read. The
+        // per-round message breakpoint below stays at the 5-minute default
+        // (rounds are seconds apart). Longer-TTL breakpoints must precede
+        // shorter-TTL ones — system renders before messages, so this is safe.
+        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
         messages: withCacheBreakpoint(currentMessages),
       });

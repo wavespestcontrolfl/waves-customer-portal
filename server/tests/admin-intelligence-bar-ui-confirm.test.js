@@ -258,9 +258,11 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     expect(mockMessagesCreate).toHaveBeenCalledTimes(2);
 
     for (const [call] of mockMessagesCreate.mock.calls) {
-      // system: single text block carrying the ephemeral breakpoint, no pageData.
+      // system: single text block carrying the 1h-TTL breakpoint (operator
+      // queries arrive >5 min apart, so the default TTL expired between
+      // queries and every one paid a cache write with no read), no pageData.
       expect(call.system).toHaveLength(1);
-      expect(call.system[0].cache_control).toEqual({ type: 'ephemeral' });
+      expect(call.system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
       expect(call.system[0].text).not.toContain('CURRENT PAGE STATE');
 
       // messages: exactly one breakpoint, on the last block of the last message.
