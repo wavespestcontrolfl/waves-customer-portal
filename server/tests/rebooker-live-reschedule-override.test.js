@@ -391,7 +391,9 @@ describe('live-status reschedule override (allowLive)', () => {
     });
 
     // Anchor write carried the status guard; nothing after it ran.
-    expect(updates[0].where).toHaveBeenCalledWith({ status: 'on_site' });
+    // Guard now rides the id predicate in one call (every row is
+    // status-guarded since codex r2 on #2725, anchors abort / siblings skip).
+    expect(updates[0].where).toHaveBeenCalledWith({ id: 'svc-1', status: 'on_site' });
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();
     expect(clearTechCurrentJob).not.toHaveBeenCalled();

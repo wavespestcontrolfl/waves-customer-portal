@@ -426,6 +426,24 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     // committing again would duplicate the reschedule_log row, re-send the
     // reschedule notice, and count toward the escalation threshold.
     if (apptDateStr(svc.scheduled_date) === date && hhmm(svc.window_start) === startTime) {
+      // If the commit this retry replays was a series re-anchor, the success
+      // card must still say the following visits moved — recover the flag
+      // from the reschedule_log row the original commit wrote (series
+      // commits log reason_code '<reason>_series').
+      let replaySeriesShifted = false;
+      if (isSeriesVisit(svc)) {
+        try {
+          const lastLog = await db('reschedule_log')
+            .where({ scheduled_service_id: svc.id })
+            .orderBy('created_at', 'desc')
+            .first('reason_code', 'new_date');
+          replaySeriesShifted = !!lastLog
+            && String(lastLog.reason_code || '').endsWith('_series')
+            && String(lastLog.new_date).split('T')[0] === date;
+        } catch (err) {
+          logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
+        }
+      }
       return res.json({
         success: true,
         replayed: true,
@@ -434,6 +452,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         window: { start: startTime, end: hhmm(svc.window_end) },
         startLabel: label12(startTime),
         endLabel: label12(svc.window_end),
+        seriesShifted: replaySeriesShifted,
       });
     }
 

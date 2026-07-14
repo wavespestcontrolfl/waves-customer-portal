@@ -1008,7 +1008,9 @@ export default function ReschedulePage() {
                   marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
                   borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
                 }}>
-                  Only this visit will move — the rest of your regular service schedule stays the same.
+                  {selectedSlot && slotReanchors(data, selectedSlot.date)
+                    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
+                    : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
                 </div>
               ) : null}
             </Card>
@@ -1098,7 +1100,9 @@ export default function ReschedulePage() {
             marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
             borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
           }}>
-            Only this visit will move — the rest of your regular service schedule stays the same.
+            {selectedSlot && slotReanchors(data, selectedSlot.date)
+              ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
+              : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
           </div>
         ) : null}
       </Card>

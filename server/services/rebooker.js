@@ -505,26 +505,27 @@ class SmartRebooker {
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
       const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
-      // Live-anchor race guard: between the outer service read and this
-      // SELECT the anchor may have completed/cancelled (absent — the
-      // terminal filter dropped it) or been marked skipped (present,
-      // since 'skipped' is non-terminal for cadence math, but a no-show
-      // drop that must NOT be revived to confirmed). Either way the
-      // series must not shift, the tech must not be freed, and the
-      // customer must not be notified — throw, rolling back the trx and
-      // skipping the wasLive post-commit cleanup. A raced live→live
-      // advance (en_route→on_site) or live→confirmed flip stays movable.
-      if (wasLive) {
+      // Anchor race guard — ALL callers: between the outer service read and
+      // this SELECT the anchor may have completed/cancelled (absent — the
+      // terminal filter dropped it) or been marked skipped (present, since
+      // 'skipped' is non-terminal for cadence math, but a no-show drop that
+      // must NOT be revived to confirmed). Either way the series must not
+      // shift: a terminal anchor changing the customer's future cadence is
+      // wrong regardless of who initiated the move. Throw, rolling back the
+      // trx (and skipping the wasLive post-commit cleanup). A raced
+      // live→live advance (en_route→on_site) or live→confirmed flip stays
+      // movable under allowLive.
+      {
         const anchorRow = droppedIdx === -1 ? null : siblings[droppedIdx];
         const anchorStillMovable = !!anchorRow
-          && (RESCHEDULABLE.has(anchorRow.status) || LIVE_OVERRIDE_STATUSES.has(anchorRow.status));
+          && (RESCHEDULABLE.has(anchorRow.status) || (wasLive && LIVE_OVERRIDE_STATUSES.has(anchorRow.status)));
         if (!anchorStillMovable) {
           throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
             statusCode: 409,
           });
         }
       }
-      const startIdx = droppedIdx === -1 ? 0 : droppedIdx;
+      const startIdx = droppedIdx;
 
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
@@ -596,21 +597,24 @@ class SmartRebooker {
           updateData.recurring_weekday = opts.weekday;
         }
 
-        const rowUpdate = trx('scheduled_services').where({ id: sib.id });
-        if (isLiveAnchor) {
-          // Atomic guard for the live anchor — same contract as the
-          // single-job override: the tech can complete/cancel this job
-          // between the sibling SELECT above and this UPDATE, and a
-          // terminal row must not be steamrolled back to confirmed +
-          // a rewound tracker. 0 rows updated → the whole series trx
-          // rolls back (all-or-none).
-          rowUpdate.where({ status: sib.status });
-        }
-        const updated = await rowUpdate.update(updateData);
-        if (isLiveAnchor && updated === 0) {
-          throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
-            statusCode: 409,
-          });
+        // Atomic guard for EVERY row — same contract as the single-job
+        // path: the tech can complete/cancel a job between the sibling
+        // SELECT above and this UPDATE, and a terminal row must not be
+        // steamrolled back to confirmed (+ a rewound tracker for the live
+        // anchor). Anchor raced away → the whole series trx rolls back
+        // (all-or-none); a raced non-anchor sibling is simply left
+        // untouched and the rest of the shift proceeds.
+        const isAnchor = occurrenceIndex === 0;
+        const updated = await trx('scheduled_services')
+          .where({ id: sib.id, status: sib.status })
+          .update(updateData);
+        if (updated === 0) {
+          if (isAnchor) {
+            throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
+              statusCode: 409,
+            });
+          }
+          continue;
         }
 
         if (sib.status !== 'confirmed') {
