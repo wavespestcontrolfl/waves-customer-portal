@@ -512,7 +512,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           // Anchor keeps the tech whose route offered the slot (the
           // rebooker applies it with the same lock + overlap guard the
           // single path uses); siblings keep their existing techs.
-          { technicianId: slot.technician_id }
+          // expectAnchor pins the anchor to the state the re-anchor
+          // DECISION was computed from — if it moved concurrently, the
+          // rebooker aborts (SLOT_TAKEN) instead of shifting a series the
+          // pull-forward math no longer justifies.
+          {
+            technicianId: slot.technician_id,
+            expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
+          }
         )
         : await SmartRebooker.reschedule(
           svc.id,

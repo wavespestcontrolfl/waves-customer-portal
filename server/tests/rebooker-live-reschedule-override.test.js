@@ -387,7 +387,8 @@ describe('live-status reschedule override (allowLive)', () => {
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,
-      message: expect.stringContaining('transitioned to a non-reschedulable state concurrently'),
+      // All-or-none: ANY raced row (anchor included) aborts the series trx.
+      message: expect.stringContaining('changed concurrently'),
     });
 
     // Anchor write carried the status guard; nothing after it ran.

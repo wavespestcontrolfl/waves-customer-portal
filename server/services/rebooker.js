@@ -431,6 +431,16 @@ class SmartRebooker {
     if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) {
       throw new Error('Service is not part of a recurring series');
     }
+    // The schema doesn't enforce parent/customer equality, and this method
+    // is reachable from the public bearer-token route — a stale or miswired
+    // recurring_parent_id must never let one customer's token mutate
+    // another customer's parent row or future visits. Sibling sweep below
+    // carries the same customer_id scope.
+    if (String(parent.customer_id) !== String(service.customer_id)) {
+      throw Object.assign(new Error('Series parent belongs to a different customer — refusing to shift'), {
+        statusCode: 409,
+      });
+    }
 
     const win = parseWindow(newWindow);
 
@@ -499,6 +509,7 @@ class SmartRebooker {
       // extra interval, destroying the configured booster schedule.
       const siblings = await trx('scheduled_services')
         .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+        .where('customer_id', service.customer_id)
         .where('scheduled_date', '>=', service.scheduled_date)
         .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
@@ -525,6 +536,26 @@ class SmartRebooker {
           throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
             statusCode: 409,
           });
+        }
+        // Caller-supplied expected anchor state: the public route DECIDES
+        // scope (single vs whole-series) from its own read of the anchor.
+        // If the anchor's date/window moved between that read and this trx,
+        // the pull-forward math behind the decision is stale — abort so the
+        // caller re-reads and re-decides instead of shifting a series the
+        // customer no longer qualified to shift.
+        if (options.expectAnchor) {
+          const norm = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
+          const hm = (t) => (t ? String(t).slice(0, 5) : null);
+          const expDate = norm(options.expectAnchor.scheduled_date);
+          const expStart = hm(options.expectAnchor.window_start);
+          if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
+            || (expStart && hm(anchorRow.window_start) !== expStart)) {
+            throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
         }
       }
       const startIdx = droppedIdx;
@@ -647,10 +678,10 @@ class SmartRebooker {
         // single-job path, and it carries the previously READ scheduling
         // fields, not just status: a concurrent reschedule usually leaves
         // status 'confirmed', so status alone would let this sweep
-        // overwrite a newer date/window/tech edit. Anchor raced away → the
-        // whole series trx rolls back (all-or-none); a raced non-anchor
-        // sibling is simply left untouched and the rest of the shift
-        // proceeds.
+        // overwrite a newer date/window/tech edit. ANY raced row aborts
+        // the whole trx — the series shift is all-or-none, so the customer
+        // is never told "your visits moved" while one stayed on the old
+        // cadence.
         const updated = await trx('scheduled_services')
           .where({
             id: sib.id,
@@ -666,12 +697,11 @@ class SmartRebooker {
           })
           .update(updateData);
         if (updated === 0) {
-          if (isAnchor) {
-            throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
-              statusCode: 409,
-            });
-          }
-          continue;
+          throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
         }
 
         if (sib.status !== 'confirmed') {
