@@ -612,19 +612,37 @@ finding and warns on P1. Reviewers must return JSON matching
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
   `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
-  customer self-serve single-visit reschedule linked from appointment
+  customer self-serve reschedule linked from appointment
   confirmation/72h/24h texts + reminder emails.
   `scheduled_services.reschedule_token` (64-hex, `TOKEN_RE` format gate)
   is the ONLY gate, plus 60 req/min router limit and 10 req/min on the POST.
   GET returns the appointment summary (customer first name, service type,
-  current date/window, recurring flag) + live open slots from the /book
-  availability engine. POST is a WRITE: it moves the single visit — never the
-  recurring series, never live/terminal visits (409) — and only to a slot the
-  availability engine still offers for that day (route feasibility, lunch
-  reserve, self-book day caps re-checked server-side); the commit goes through
-  `SmartRebooker.reschedule` (advisory lock + tech-route overlap conflict
-  check + `reschedule_log` audit as `customer_self_serve` + escalation
-  flagging). Generic 404 for bad/unknown tokens.
+  current date/window, recurring flag, `missed` flag, and — series visits
+  only — the `reanchorPullForwardDays` threshold) + live open slots from the
+  /book availability engine. POST is a WRITE with two owner-authorized
+  scopes (ruling 2026-07-13; single-visit-only before #2725), both limited
+  to the token's own customer/visit and never live/terminal visits (409),
+  and only to a slot the availability engine still offers for that day
+  (route feasibility, lunch reserve, self-book day caps re-checked
+  server-side):
+    - default: moves the single visit via `SmartRebooker.reschedule`
+      (advisory lock + tech-route overlap conflict check + `reschedule_log`
+      audit as `customer_self_serve` + escalation flagging);
+    - series re-anchor: a genuinely recurring visit (`is_recurring` only —
+      booster extras never qualify or move) pulled forward by
+      `RESCHEDULE_REANCHOR_PULLFORWARD_DAYS`+ (env, default 14) commits via
+      `SmartRebooker.rescheduleSeries` — every later cadence occurrence
+      re-anchors to the new date. Consent is explicit: the page swaps the
+      "only this visit moves" note for the series-shift warning before
+      Confirm (the GET's threshold drives it; the POST decides
+      authoritatively). The anchor keeps the offered tech under the same
+      advisory-lock overlap guard; shifted siblings that would double-book
+      a route are committed UNASSIGNED inside the trx and parked as a
+      `schedule_conflict` admin notification. Treat any widening of this
+      scope (other customers' rows, live visits, non-cadence rows) as P0.
+  A pending/confirmed visit whose time already passed is MISSED (rebookable
+  via the same link — eligibility `missed:true`); terminal/live/no_show
+  still 409. Generic 404 for bad/unknown tokens.
   `POST /:token/find-slots` is the Waves AI date/time search for this page:
   model-backed (free-text "when" → date window via `parseWhen`, the same
   parser the /book and estimate searches use) and READ-ONLY — it returns

@@ -33,9 +33,13 @@
  *
  * Post-commit (best-effort): AppointmentReminders.handleReschedule re-arms
  * the 72h/24h reminder row for the new time and sends the standard
- * appointment_rescheduled confirmation text; the dispatch board gets a live
- * job_update broadcast; the office gets the same internal alert text a
- * self-booked appointment fires.
+ * appointment_rescheduled confirmation text (series re-anchors instead
+ * re-arm every shifted occurrence silently and send ONE
+ * appointment_series_rescheduled text); the dispatch board gets a live
+ * job_update broadcast per moved row; the office gets the same internal
+ * alert text a self-booked appointment fires. Shifted siblings whose kept
+ * tech would double-book were committed UNASSIGNED inside the rebooker trx
+ * and are parked as a schedule_conflict admin notification here.
  */
 
 const express = require('express');
@@ -630,53 +634,30 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.error(`[reschedule-public] board broadcast failed for ${svc.id}: ${err.message}`);
     }
 
-    // Series-shift conflict sweep (best-effort, detection not blocking).
-    // The anchor was validated against live availability (and the rebooker
-    // re-guards it under the advisory lock), but recomputed SIBLING dates
-    // land months out where the route hasn't been planned — same posture as
-    // the admin series path, which doesn't pre-validate siblings either.
-    // Owner model is hands-off + exception-based: commit the shift, then
-    // park any sibling that landed on an already-booked window as an admin
-    // notification for a one-click fix from dispatch.
-    let siblingConflicts = [];
-    if (shiftedOccurrences && shiftedOccurrences.length > 1) {
+    // Series-shift conflicts: the rebooker validated each shifted sibling
+    // INSIDE the commit trx and cleared the tech on any that would have
+    // double-booked a route (occ.conflicted) — nothing double-booked ever
+    // commits. Owner model is hands-off + exception-based: park the
+    // unassigned ones as an admin notification for reassignment from
+    // dispatch.
+    const siblingConflicts = (shiftedOccurrences || [])
+      .filter((occ) => occ.conflicted)
+      .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+    if (siblingConflicts.length) {
+      logger.warn(`[reschedule-public] series re-anchor for ${svc.id} unassigned ${siblingConflicts.length} conflicting sibling(s): ${JSON.stringify(siblingConflicts)}`);
       try {
-        for (const occ of shiftedOccurrences.slice(1)) {
-          const occDate = String(occ.date).split('T')[0];
-          const occStart = hhmm(occ.windowStart);
-          const occEnd = hhmm(occ.windowEnd) || occStart;
-          if (!occStart) continue;
-          const row = await db('scheduled_services').where({ id: occ.id }).first('technician_id');
-          if (!row?.technician_id) continue;
-          const clash = await db('scheduled_services')
-            .where('scheduled_date', occDate)
-            .where('technician_id', row.technician_id)
-            .whereNot('id', occ.id)
-            .whereNotIn('status', ['cancelled', 'completed'])
-            .where((q) => {
-              q.whereNull('reservation_expires_at')
-                .orWhereRaw('reservation_expires_at > NOW()');
-            })
-            .whereRaw(
-              "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
-              [occEnd, occStart],
-            )
-            .first('id');
-          if (clash) siblingConflicts.push({ id: occ.id, date: occDate, conflictsWith: clash.id });
-        }
-        if (siblingConflicts.length) {
-          logger.warn(`[reschedule-public] series re-anchor for ${svc.id} produced ${siblingConflicts.length} sibling conflict(s): ${JSON.stringify(siblingConflicts)}`);
-          const NotificationService = require('../services/notification-service');
-          await NotificationService.notifyAdmin(
-            'schedule_conflict',
-            'Series re-anchor needs a look',
-            `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} pulled a recurring visit forward and ${siblingConflicts.length} shifted future visit(s) landed on already-booked windows (${siblingConflicts.map((c) => c.date).join(', ')}). Rebalance from dispatch.`,
-            { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
-          );
+        const NotificationService = require('../services/notification-service');
+        const notif = await NotificationService.notifyAdmin(
+          'schedule_conflict',
+          'Series re-anchor needs a look',
+          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} pulled a recurring visit forward; ${siblingConflicts.length} shifted future visit(s) landed on already-booked windows and were left UNASSIGNED (${siblingConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+          { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
+        );
+        if (!notif) {
+          logger.error(`[reschedule-public] schedule_conflict notification insert FAILED for ${svc.id} — unassigned siblings: ${JSON.stringify(siblingConflicts)}`);
         }
       } catch (err) {
-        logger.warn(`[reschedule-public] sibling conflict sweep failed for ${svc.id}: ${err.message}`);
-        siblingConflicts = [];
+        logger.error(`[reschedule-public] schedule_conflict notification failed for ${svc.id}: ${err.message} — unassigned siblings: ${JSON.stringify(siblingConflicts)}`);
       }
     }
 
@@ -689,7 +670,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
         const seriesNote = shiftedOccurrences
-          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} landed on busy windows (see bell)` : ''}`
+          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} left UNASSIGNED (see bell)` : ''}`
           : '';
         await TwilioService.sendSMS(
           process.env.ADAM_PHONE,

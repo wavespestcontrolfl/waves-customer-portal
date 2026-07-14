@@ -493,14 +493,16 @@ class SmartRebooker {
         });
       }
 
+      // Cadence rows ONLY: booster-month extras share recurring_parent_id
+      // but carry is_recurring=false and hold no recurrence index — sweeping
+      // them would both move the boosters and push genuine children an
+      // extra interval, destroying the configured booster schedule.
       const siblings = await trx('scheduled_services')
-        .where(function () {
-          this.where('id', parentId).orWhere('recurring_parent_id', parentId);
-        })
+        .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
         .where('scheduled_date', '>=', service.scheduled_date)
         .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
-        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end');
+        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
 
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
@@ -537,7 +539,8 @@ class SmartRebooker {
         if (!RESCHEDULABLE.has(sib.status) && !isLiveAnchor) continue;
 
         const occurrenceIndex = i - startIdx;
-        const date = occurrenceIndex === 0
+        const isAnchor = occurrenceIndex === 0;
+        const date = isAnchor
           ? newDate
           : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
 
@@ -556,7 +559,7 @@ class SmartRebooker {
         // advisory-lock + overlap guard as the single-visit path, scoped
         // to the anchor; siblings keep their existing techs. Callers that
         // omit the option (admin series shifts) are unaffected.
-        if (occurrenceIndex === 0 && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+        if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
           updateData.technician_id = options.technicianId || null;
           const anchorEnd = updateData.window_end;
           if (options.technicianId && updateData.window_start && anchorEnd) {
@@ -597,16 +600,52 @@ class SmartRebooker {
           updateData.recurring_weekday = opts.weekday;
         }
 
-        // Atomic guard for EVERY row — same contract as the single-job
-        // path: the tech can complete/cancel a job between the sibling
-        // SELECT above and this UPDATE, and a terminal row must not be
-        // steamrolled back to confirmed (+ a rewound tracker for the live
-        // anchor). Anchor raced away → the whole series trx rolls back
-        // (all-or-none); a raced non-anchor sibling is simply left
-        // untouched and the rest of the shift proceeds.
-        const isAnchor = occurrenceIndex === 0;
+        // Non-anchor siblings land on recomputed dates the route never
+        // validated. Never COMMIT a double-booking: if the sibling's kept
+        // tech already has an overlapping job on the new date (outside this
+        // series — earlier-loop siblings have already moved), clear the
+        // assignment inside the same trx and flag the occurrence so the
+        // caller can park it for dispatch. The visit itself still shifts —
+        // cadence is preserved; only the route assignment is deferred.
+        let conflicted = false;
+        if (!isAnchor && sib.technician_id && updateData.window_start) {
+          const clashEnd = updateData.window_end || updateData.window_start;
+          const clash = await trx('scheduled_services')
+            .where('scheduled_date', date)
+            .where('technician_id', sib.technician_id)
+            .whereNot('id', sib.id)
+            .whereRaw('(id != ? AND (recurring_parent_id IS NULL OR recurring_parent_id != ?))', [parentId, parentId])
+            .whereNotIn('status', TERMINAL)
+            .where((q) => {
+              q.whereNull('reservation_expires_at')
+                .orWhereRaw('reservation_expires_at > NOW()');
+            })
+            .whereRaw(
+              "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+              [clashEnd, updateData.window_start],
+            )
+            .first('id');
+          if (clash) {
+            conflicted = true;
+            updateData.technician_id = null;
+          }
+        }
+
+        // Atomic optimistic guard for EVERY row — same contract as the
+        // single-job path, and it carries the previously READ scheduling
+        // fields, not just status: a concurrent reschedule usually leaves
+        // status 'confirmed', so status alone would let this sweep
+        // overwrite a newer date/window/tech edit. Anchor raced away → the
+        // whole series trx rolls back (all-or-none); a raced non-anchor
+        // sibling is simply left untouched and the rest of the shift
+        // proceeds.
         const updated = await trx('scheduled_services')
-          .where({ id: sib.id, status: sib.status })
+          .where({
+            id: sib.id,
+            status: sib.status,
+            scheduled_date: sib.scheduled_date,
+            window_start: sib.window_start,
+          })
           .update(updateData);
         if (updated === 0) {
           if (isAnchor) {
@@ -636,6 +675,9 @@ class SmartRebooker {
           date,
           windowStart: win.start || sib.window_start,
           windowEnd: win.end || sib.window_end,
+          // True when the shift cleared this row's tech to avoid committing
+          // a double-booked route — the caller parks it for reassignment.
+          conflicted,
         });
       }
 
