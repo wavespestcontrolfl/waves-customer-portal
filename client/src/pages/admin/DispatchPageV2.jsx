@@ -2596,11 +2596,27 @@ export default function DispatchPageV2({
           service={editingService}
           technicians={technicians}
           onClose={() => setEditingService(null)}
-          onSaved={() => {
+          onSaved={async () => {
+            const editedId = editingService?.id;
             setEditingService(null);
-            // Silent: Edit is reachable from the Details sheet while the
-            // project editor stays mounted underneath (Codex r8 P2).
-            fetchSchedule(date, { silent: true });
+            // Silent only while the project editor is mounted underneath
+            // (the Details → Edit path) — desktop grid edits keep the loud
+            // gate so a failed refresh stays visible instead of silently
+            // leaving the board stale (Codex r9 P2).
+            const fresh = await fetchSchedule(date, {
+              silent: !!continueProjectId,
+            });
+            // Mirror the rain-out re-seat/retire (Codex r9 P2): an edit can
+            // change the visit's date/price/tech, and a day-miss would
+            // otherwise leave the Details pill serving the pre-edit
+            // appointment.
+            setContinueProjectService((s) => {
+              if (!s || String(s.id) !== String(editedId)) return s;
+              const row = (fresh?.services || []).find(
+                (r) => String(r.id) === String(s.id),
+              );
+              return row || null;
+            });
           }}
           onMarkPrepaid={(svc) => {
             setPrepaidEntryContext('edit');
@@ -2763,7 +2779,18 @@ export default function DispatchPageV2({
             // the new totals render immediately without the tech having
             // to close + reopen the sheet.
             const updated = fresh?.services?.find((s) => s.id === svcId);
-            if (updated) setCheckoutService(updated);
+            if (updated) {
+              setCheckoutService(updated);
+              return;
+            }
+            // The line edit saved, but the refresh failed or the visit
+            // isn't in the selected day's payload — never re-present
+            // checkout on pre-edit totals (Codex r9 P1). Close it;
+            // reopening re-derives fresh state.
+            setCheckoutService(null);
+            alert(
+              "Line saved, but the schedule refresh didn't return this visit — reopen checkout to continue with updated totals.",
+            );
           }}
         />
       )}
