@@ -93,9 +93,15 @@ function gmailCanonicalMailbox(email) {
 // domain-suffix mentions ("dot com") before testing.
 function dotSpokenInDictation(rawSpoken) {
   let s = String(rawSpoken || '');
-  const at = s.search(/\s(?:at|@)\s/i);
-  if (at !== -1) s = s.slice(0, at);
-  else s = s.replace(/\b(?:dot|period)\s+(?:com|net|org|edu|gov|co|io|us|biz|info)\b/gi, '');
+  // Anchor on the LAST spoken "at"/"@" — the separator before the domain. An
+  // earlier "at" can be prepositional ("reach me at jane dot doe at gmail"),
+  // and slicing there would hide a genuinely dictated local-part dot.
+  const separators = [...s.matchAll(/\s(?:at|@)\s/gi)];
+  if (separators.length) s = s.slice(0, separators[separators.length - 1].index);
+  // Domain-suffix mentions are never local-part evidence, whether the "at"
+  // anchor existed or not (trailing chatter can keep "gmail dot com" inside
+  // the sliced prefix: "... at gmail dot com, reach me at that address").
+  s = s.replace(/\b(?:dot|period)\s+(?:com|net|org|edu|gov|co|io|us|biz|info)\b/gi, '');
   return /\b(?:dot|period)\b/i.test(s);
 }
 
@@ -325,9 +331,25 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
     // dictation-faithful form (dotted only if the caller actually spoke
     // "dot"), else the decoder's top candidate. Hard gates still apply —
     // an ownership hit or dead domain falls through to the model path.
+    // Gmail-canonical ownership probe, shared by the short-circuit and the
+    // verdict gate below: the per-candidate exact-string checks above cannot
+    // see dot/tag ALIASES of the same inbox (another customer on file as
+    // johndoe@ while this call spelled john.doe@), so Google addresses get a
+    // second, inbox-identity lookup. Fails closed like every ownership check.
+    const gmailInboxOwnedByOther = deps.gmailInboxOwnedByOther
+      || ((value, own) => require('./email-bounce-recovery').gmailMailboxOwnedByOther(value, own));
+
     if (candidates.length > 1) {
       const canonicals = new Set(candidates.map((c) => gmailCanonicalMailbox(c.value)));
-      if (!canonicals.has(null) && canonicals.size === 1) {
+      // Decoder risk/confidence still gates the collapse: dot-equivalence
+      // proves the candidates share ONE inbox, not that the inbox is the
+      // CALLER'S. A risk-flagged or uniformly weak candidate set stays on
+      // the model/review path — same reason quarantine exists at all.
+      const groupRisky = candidates.some((c) => (c.risks || []).length > 0);
+      const bestDecoderConfidence = Math.max(0, ...candidates.map(
+        (c) => (typeof c.decoder_confidence === 'number' ? c.decoder_confidence : 0)));
+      if (!canonicals.has(null) && canonicals.size === 1
+          && !groupRisky && bestDecoderConfidence >= STORE_CONFIDENCE_FLOOR) {
         const v2Email = cleanValidEmailOrNull(callerContext?.v2_email);
         const dotSpoken = dotSpokenInDictation(entry?.raw_spoken);
         const pick = (v2Email && candidates.find((c) => c.value === v2Email))
@@ -339,8 +361,11 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
         // another customer owning ANY variant owns the inbox every variant
         // delivers to — adopting the unflagged spelling would still mail
         // their inbox. Any hit falls through to the model path (whose own
-        // verdict gate applies the same group rule below).
-        const groupOwned = evidence.some((e) => e.owned_by_other_customer);
+        // verdict gate applies the same group rule below). The canonical
+        // probe extends the gate to variants we never generated as
+        // candidates (dot/tag aliases already on file).
+        const groupOwned = evidence.some((e) => e.owned_by_other_customer)
+          || await Promise.resolve(gmailInboxOwnedByOther(pick.value, ownCustomerId)).catch(() => true);
         if (ev && ev.deliverable !== false && !groupOwned) {
           logger.info(`[quarantine-arbiter] Same-mailbox collapse (gmail dot-equivalence): adopted deterministically without model`);
           return {
@@ -411,6 +436,12 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
         // customer means the chosen spelling delivers to that customer's
         // inbox too — the flag on the variant IS a flag on the choice.
         downgrade = 'a same-mailbox variant of the chosen address is on file for another customer';
+      } else if (gmailCanonicalMailbox(match.value)
+          && await Promise.resolve(gmailInboxOwnedByOther(match.value, ownCustomerId)).catch(() => true)) {
+        // ...and the inbox can be on file under an alias that was never a
+        // candidate (johndoe@ vs this call's john.doe@) — the canonical probe
+        // catches those. Fails closed like every ownership check.
+        downgrade = 'the gmail inbox behind the chosen address is on file for another customer';
       } else if (ruling.confidence < STORE_CONFIDENCE_FLOOR) {
         downgrade = `confidence ${ruling.confidence} below storing floor`;
       }

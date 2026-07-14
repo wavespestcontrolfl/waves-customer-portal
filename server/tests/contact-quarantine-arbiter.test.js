@@ -353,7 +353,7 @@ describe('same-mailbox short-circuit', () => {
     const out = await arbitrateQuarantinedEmail({
       entry: GMAIL_ENTRY,
       callerContext: { v2_email: 'charleswrobb@gmail.com' },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
     });
     expect(createMessage).not.toHaveBeenCalled();
     expect(out.verdict).toBe('adopt');
@@ -366,7 +366,7 @@ describe('same-mailbox short-circuit', () => {
     const createMessage = jest.fn();
     const out = await arbitrateQuarantinedEmail({
       entry: GMAIL_ENTRY,
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
     });
     expect(createMessage).not.toHaveBeenCalled();
     expect(out.verdict).toBe('adopt');
@@ -376,7 +376,7 @@ describe('same-mailbox short-circuit', () => {
   test('prefers the dotted form when the caller actually spoke "dot"', async () => {
     const out = await arbitrateQuarantinedEmail({
       entry: { ...GMAIL_ENTRY, raw_spoken: 'charles w dot robb at gmail dot com' },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
     });
     expect(out.verdict).toBe('adopt');
     expect(out.chosenValue).toBe('charlesw.robb@gmail.com');
@@ -391,7 +391,7 @@ describe('same-mailbox short-circuit', () => {
           { value: 'charleswrobb@gmail.com', confidence: 0.7, basis: [], risks: [] },
         ],
       },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
     });
     expect(out.verdict).toBe('adopt');
     expect(out.chosenValue).toBe('charleswrobb@gmail.com');
@@ -441,11 +441,89 @@ describe('same-mailbox short-circuit', () => {
     expect(out.reasoning).toContain('same-mailbox variant');
   });
 
+  test('a canonical ALIAS on file blocks the collapse even when no candidate is flagged', async () => {
+    // Another customer is on file as charleswrobb+billing@gmail.com — never a
+    // candidate, so the per-candidate exact checks all pass. The canonical
+    // inbox probe must still block the adopt.
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.3, reasoning: 'inbox owned elsewhere' }));
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: {
+        ...GMAIL_DNS,
+        ownedByOther: () => Promise.resolve(false),
+        gmailInboxOwnedByOther: () => Promise.resolve(true),
+        createMessage,
+      },
+    });
+    expect(createMessage).toHaveBeenCalled();
+    expect(out.verdict).toBe('review');
+  });
+
+  test('model adopt of a gmail address whose inbox is on file under an alias is downgraded', async () => {
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: {
+        ...GMAIL_DNS,
+        ownedByOther: () => Promise.resolve(false),
+        gmailInboxOwnedByOther: () => Promise.resolve(true),
+        createMessage: modelSaying({ verdict: 'adopt', chosen_value: 'charleswrobb@gmail.com', confidence: 0.95, reasoning: 'looks clean' }),
+      },
+    });
+    expect(out.verdict).toBe('review');
+    expect(out.chosenValue).toBeNull();
+    expect(out.reasoning).toContain('gmail inbox behind the chosen address');
+  });
+
+  test('canonical probe failure fails closed — collapse blocked', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.3, reasoning: 'probe down' }));
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: {
+        ...GMAIL_DNS,
+        ownedByOther: () => Promise.resolve(false),
+        gmailInboxOwnedByOther: () => Promise.reject(new Error('db down')),
+        createMessage,
+      },
+    });
+    expect(createMessage).toHaveBeenCalled();
+    expect(out.verdict).toBe('review');
+  });
+
+  test('risk-flagged candidates never collapse — same inbox does not mean the CALLER\'s inbox', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'risky' }));
+    await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'charlesw.robb@gmail.com', confidence: 0.8, basis: [], risks: ['summary contradicts spelling'] },
+          { value: 'charleswrobb@gmail.com', confidence: 0.7, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+  });
+
+  test('a uniformly weak candidate set never collapses', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'weak' }));
+    await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'charlesw.robb@gmail.com', confidence: 0.4, basis: [], risks: [] },
+          { value: 'charleswrobb@gmail.com', confidence: 0.3, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+  });
+
   test('unknown deliverability caps the collapse at adopt_with_confirmation', async () => {
     const timeoutErr = () => { const e = new Error('queryMx timeout'); e.code = 'ETIMEOUT'; return Promise.reject(e); };
     const out = await arbitrateQuarantinedEmail({
       entry: GMAIL_ENTRY,
-      deps: { resolveMx: timeoutErr, resolve4: timeoutErr, resolve6: timeoutErr, ownedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
+      deps: { resolveMx: timeoutErr, resolve4: timeoutErr, resolve6: timeoutErr, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage: jest.fn() },
     });
     expect(out.verdict).toBe('adopt_with_confirmation');
     expect(out.chosenValue).toBe('charleswrobb@gmail.com');
@@ -462,7 +540,7 @@ describe('same-mailbox short-circuit', () => {
           { value: 'charleswrobb@yahoo.com', confidence: 0.7, basis: [], risks: [] },
         ],
       },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
     });
     expect(createMessage).toHaveBeenCalled();
   });
@@ -477,7 +555,7 @@ describe('same-mailbox short-circuit', () => {
           { value: 'charleswrobb@comcast.net', confidence: 0.7, basis: [], risks: [] },
         ],
       },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
     });
     expect(createMessage).toHaveBeenCalled();
   });
@@ -492,7 +570,7 @@ describe('same-mailbox short-circuit', () => {
           { value: 'jane+lead1@gmail.com', confidence: 0.7, basis: [], risks: [] },
         ],
       },
-      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), gmailInboxOwnedByOther: () => Promise.resolve(false), createMessage },
     });
     expect(createMessage).toHaveBeenCalled();
   });
@@ -541,5 +619,15 @@ describe('gmailCanonicalMailbox', () => {
     // No spoken "at" to anchor on: domain-suffix mentions are ignored.
     expect(dotSpokenInDictation('charleswrobb gmail dot com')).toBe(false);
     expect(dotSpokenInDictation('charles dot w robb gmail dot com')).toBe(true);
+  });
+
+  test('a prepositional "at" before the address does not hide a dictated dot', () => {
+    // The separator is the LAST spoken "at" — "reach me at ..." must not
+    // swallow the local part.
+    expect(dotSpokenInDictation('reach me at jane dot doe at gmail dot com')).toBe(true);
+    expect(dotSpokenInDictation('reach me at jane doe at gmail dot com')).toBe(false);
+    // Trailing chatter after the address keeps "gmail dot com" inside the
+    // sliced prefix — the suffix strip still discounts it.
+    expect(dotSpokenInDictation('jane doe at gmail dot com, reach me at that address')).toBe(false);
   });
 });
