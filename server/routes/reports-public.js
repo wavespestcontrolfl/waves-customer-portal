@@ -113,6 +113,7 @@ const {
   buildMosquitoReportV2,
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
+const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -978,8 +979,11 @@ router.get('/:token', async (req, res, next) => {
       // Mosquito V2 gate flips must invalidate cached mosquito-report PDFs
       // (key change → cache miss → re-render with the dashboard).
       const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
+      // PEST_REPORT_V2 predates this key component — pest PDFs cached before
+      // the pest V2 flip re-render once on next view.
+      const pestV2Signature = pestReportV2PdfSignature(service);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1033,7 +1037,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {
