@@ -45,6 +45,12 @@ const LOCATION_KEY = '27.34,-82.53';
 
 function mockTables() {
   db.mockImplementation((table) => {
+    // Blackout redemption re-check (PR #2733): nothing blocked in these
+    // scenarios — resolve empty so the fail-open warn never fires.
+    if (table === 'schedule_blackout_dates') {
+      const bb = { where: () => bb, whereBetween: () => bb, first: async () => undefined, select: async () => [] };
+      return bb;
+    }
     if (table === 'estimates') {
       // Id-sensitive: only the verified estimate EST_ID exists — the
       // source_estimate_id existence check must see unknown ids as missing.
@@ -334,6 +340,12 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
 
   function mockOwnershipTables() {
     db.mockImplementation((table) => {
+    // Blackout redemption re-check (PR #2733): nothing blocked in these
+    // scenarios — resolve empty so the fail-open warn never fires.
+    if (table === 'schedule_blackout_dates') {
+      const bb = { where: () => bb, whereBetween: () => bb, first: async () => undefined, select: async () => [] };
+      return bb;
+    }
       if (table === 'estimates') {
         const builder = {
           _id: null,
