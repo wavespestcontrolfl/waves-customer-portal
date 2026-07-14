@@ -244,6 +244,62 @@ async function resolvePrepSource(token) {
   };
 }
 
+// Load + interpolate the guide blocks for a resolved source. Shared by the
+// JSON page payload and the PDF download. Returns null when the template
+// has no active version (uniform 404 upstream).
+async function renderGuideForSource(source) {
+  const { customer, templateKey } = source;
+
+  const loaded = await loadTemplateByKey(templateKey);
+  if (!loaded?.activeVersion) {
+    logger.warn(`[prep-public] No active version for template ${templateKey}`);
+    return null;
+  }
+
+  let blocks;
+  try {
+    blocks = typeof loaded.activeVersion.blocks === 'string'
+      ? JSON.parse(loaded.activeVersion.blocks)
+      : loaded.activeVersion.blocks;
+  } catch {
+    blocks = [];
+  }
+  if (!Array.isArray(blocks)) blocks = [];
+
+  const filteredBlocks = blocks.filter((b) => !EMAIL_ONLY_BLOCK_TYPES.has(b.type));
+
+  const customerFirstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
+  const { typeLabel, serviceDate, techName } = source;
+
+  const propertyAddress = source.serviceAddress || (customer
+    ? [
+      customer.address_line1,
+      [customer.city, customer.state].filter(Boolean).join(', '),
+      customer.zip,
+    ].filter(Boolean).join(' ')
+    : '');
+
+  const vars = {
+    first_name: customerFirstName,
+    customer_name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || 'Waves customer',
+    project_type: typeLabel,
+    service_date: serviceDate,
+    property_address: propertyAddress,
+    technician_name: techName,
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+  };
+
+  return {
+    customerFirstName,
+    customerName: vars.customer_name,
+    typeLabel,
+    serviceDate,
+    techName,
+    propertyAddress,
+    renderedBlocks: filteredBlocks.map((b) => interpolateBlock(b, vars)),
+  };
+}
+
 router.get('/:token', async (req, res) => {
   res.set(PRIVACY_HEADERS);
 
@@ -254,48 +310,13 @@ router.get('/:token', async (req, res) => {
     const source = await resolvePrepSource(token);
     if (!source) return res.status(404).json({ error: 'Not found' });
 
-    const { customer, templateKey } = source;
+    const guide = await renderGuideForSource(source);
+    if (!guide) return res.status(404).json({ error: 'Not found' });
+    const { customer } = source;
+    const {
+      customerFirstName, typeLabel, serviceDate, techName, propertyAddress, renderedBlocks,
+    } = guide;
 
-    const loaded = await loadTemplateByKey(templateKey);
-    if (!loaded?.activeVersion) {
-      logger.warn(`[prep-public] No active version for template ${templateKey}`);
-      return res.status(404).json({ error: 'Not found' });
-    }
-
-    let blocks;
-    try {
-      blocks = typeof loaded.activeVersion.blocks === 'string'
-        ? JSON.parse(loaded.activeVersion.blocks)
-        : loaded.activeVersion.blocks;
-    } catch {
-      blocks = [];
-    }
-    if (!Array.isArray(blocks)) blocks = [];
-
-    const filteredBlocks = blocks.filter((b) => !EMAIL_ONLY_BLOCK_TYPES.has(b.type));
-
-    const customerFirstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
-    const { typeLabel, serviceDate, techName } = source;
-
-    const propertyAddress = source.serviceAddress || (customer
-      ? [
-        customer.address_line1,
-        [customer.city, customer.state].filter(Boolean).join(', '),
-        customer.zip,
-      ].filter(Boolean).join(' ')
-      : '');
-
-    const vars = {
-      first_name: customerFirstName,
-      customer_name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ').trim() || 'Waves customer',
-      project_type: typeLabel,
-      service_date: serviceDate,
-      property_address: propertyAddress,
-      technician_name: techName,
-      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-    };
-
-    const renderedBlocks = filteredBlocks.map((b) => interpolateBlock(b, vars));
     const upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
 
     const ipHash = req.ip
@@ -317,7 +338,7 @@ router.get('/:token', async (req, res) => {
       // tokenized link, so contact PII stays off the payload entirely;
       // their names render under the account holder's. Matches the tracker
       // (track-public.js).
-      customerName: vars.customer_name,
+      customerName: guide.customerName,
       serviceContactNames: serviceContactNamesOf(customer),
       projectTypeLabel: typeLabel,
       serviceDate,
@@ -331,6 +352,43 @@ router.get('/:token', async (req, res) => {
     // Token prefix only — a full capability token in the logs is a leak.
     logger.error(`[prep-public] Error for token ${token.slice(0, 8)}…: ${err.message}`);
     return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Downloadable PDF twin of the page (action-bar Download button — same
+// treatment service reports get). Same token gate, uniform 404s, and PII
+// posture; view analytics stay on the page route only.
+router.get('/:token/pdf', async (req, res) => {
+  res.set(PRIVACY_HEADERS);
+
+  const { token } = req.params;
+  if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    const source = await resolvePrepSource(token);
+    if (!source) return res.status(404).json({ error: 'Not found' });
+
+    const guide = await renderGuideForSource(source);
+    if (!guide) return res.status(404).json({ error: 'Not found' });
+
+    const { renderPrepGuidePdf } = require('../services/pdf/prep-guide-pdf');
+    const title = `${guide.typeLabel} Prep Guide`;
+    // Sanitized filename (prevents header injection via customer-derived
+    // service labels — same posture as documents.js).
+    const safe = (s) => String(s || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'Prep_Guide';
+    renderPrepGuidePdf({
+      title,
+      blocks: guide.renderedBlocks,
+      technicianName: guide.techName,
+      customerName: guide.customerName,
+      propertyAddress: guide.propertyAddress,
+      fileName: `Waves_${safe(title)}.pdf`,
+    }, res);
+    return undefined;
+  } catch (err) {
+    logger.error(`[prep-public] PDF error for token ${token.slice(0, 8)}…: ${err.message}`);
+    if (!res.headersSent) return res.status(500).json({ error: 'Internal server error' });
+    return res.end();
   }
 });
 

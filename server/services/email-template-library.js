@@ -230,6 +230,11 @@ function normalizeBlocks(blocks) {
     if (type === 'details') {
       return {
         type,
+        // variant survives admin edits: the prep page renders
+        // variant:'faq' details single-column (question over answer) —
+        // dropping it here would silently regress the FAQ layout after
+        // the next editor save.
+        ...(block.variant ? { variant: String(block.variant) } : {}),
         rows: Array.isArray(block.rows)
           ? block.rows.map((r) => ({ label: String(r.label || ''), value: String(r.value || '') }))
           : [],
