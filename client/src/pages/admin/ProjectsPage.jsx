@@ -1502,7 +1502,11 @@ export function ProjectDetail({
       setDelivery(d.project.delivery_channels || null);
     } catch (e) {
       setError(e.message || "Could not load project");
-      setData(null);
+      // A preserveEdits refresh is a background reload behind a mounted,
+      // possibly-dirty editor — blanking data would strand the unsaved
+      // draft behind "Project unavailable" (Codex r11 P2). Keep the stale
+      // data; the error notice still surfaces the failure.
+      if (!preserveEdits) setData(null);
     } finally {
       setLoading(false);
     }

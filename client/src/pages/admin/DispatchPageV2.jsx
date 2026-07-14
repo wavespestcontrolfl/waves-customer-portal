@@ -2605,6 +2605,10 @@ export default function DispatchPageV2({
           onSaved={async () => {
             const editedId = editingService?.id;
             setEditingService(null);
+            // Week rows cache their own /week payload — invalidate it so a
+            // saved date/price/tech change can't be re-served pre-edit from
+            // a week row into checkout/details (Codex r11 P1).
+            setScheduleRefreshKey((k) => k + 1);
             // Silent only while the project editor is mounted underneath
             // (the Details → Edit path) — desktop grid edits keep the loud
             // gate so a failed refresh stays visible instead of silently
@@ -2687,7 +2691,11 @@ export default function DispatchPageV2({
             setShowNewAppt(true);
           }}
           onCancelled={() => {
-            fetchSchedule(date, { silent: true });
+            // Silent only while the project editor is mounted underneath —
+            // ordinary day-row sheets keep the loud gate so a failed
+            // refresh can't quietly leave the pre-mutation row active
+            // (Codex r11 P2).
+            fetchSchedule(date, { silent: !!continueProjectId });
             // Week rows come from MobileDispatchList's cached /week payload —
             // without a bump the terminalized visit stays tappable as an
             // active project-backed row and can mint a project against a
@@ -2704,7 +2712,8 @@ export default function DispatchPageV2({
             );
           }}
           onNoShow={() => {
-            fetchSchedule(date, { silent: true });
+            // Same conditional silence as onCancelled (Codex r11 P2).
+            fetchSchedule(date, { silent: !!continueProjectId });
             // Same week-cache staleness as onCancelled (Codex r4 P2).
             setScheduleRefreshKey((k) => k + 1);
             // Same week-origin snapshot retirement as onCancelled (Codex r5).
@@ -2718,7 +2727,10 @@ export default function DispatchPageV2({
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);
-            const fresh = await fetchSchedule(date, { silent: true });
+            // Same conditional silence as onCancelled (Codex r11 P2).
+            const fresh = await fetchSchedule(date, {
+              silent: !!continueProjectId,
+            });
             // Re-seat (or retire) the continue snapshot off the refreshed
             // day payload (Codex r7 P2): a rain-out/reschedule moves the
             // visit, and a day-miss would otherwise keep serving the old
@@ -2892,6 +2904,10 @@ export default function DispatchPageV2({
               // without forcing the operator to close + reopen.
               const updated = fresh?.services?.find((s) => s.id === svc.id);
               if (updated) setEditingService(updated);
+              // Prepaid resolves project closeout billing — refresh the
+              // mounted editor's closeoutPreview too, or Close project
+              // stays disabled until reopen (Codex r11 P2).
+              setProjectReloadKey((k) => k + 1);
             } else {
               // Same project-backed routing as the primary Complete action
               // (Codex r7 P1).
