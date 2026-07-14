@@ -1447,6 +1447,7 @@ export function ProjectDetail({
   onClose,
   onChanged,
   canAdminActions = false,
+  reloadKey = 0,
 }) {
   const [confirmAsk, confirmDialog] = useConfirmDialog();
   const [data, setData] = useState(null);
@@ -1508,8 +1509,18 @@ export function ProjectDetail({
   }
 
   useEffect(() => {
-    load();  
+    load();
   }, [projectId]);
+
+  // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
+  // payment detour (Details → checkout) resolves billing, the mounted
+  // editor kept its stale closeoutPreview and left Close project disabled
+  // — the decision-time preview fetch never runs off a disabled button.
+  // preserveEdits keeps unsaved findings/recommendations intact.
+  useEffect(() => {
+    if (!reloadKey) return;
+    load({ preserveEdits: true });
+  }, [reloadKey]);
 
   const project = data?.project;
   const typeCfg =
@@ -1999,12 +2010,15 @@ export function ProjectDetail({
         method: "POST",
       });
       const d = await readJsonResponse(r, "Could not close project");
-      await load();
       // Close also completes the linked visit — tell the host so schedule
       // embeds can retire their visit snapshot (DispatchPageV2 Details
-      // handoff, Codex P1 on #2717). Other call sites stay bare; consumers
-      // that take no args (loadProjects) are unaffected.
+      // handoff, Codex P1 on #2717). Emitted BEFORE the project reload:
+      // during that await the host still rendered the Details pill off
+      // the stale active snapshot, and a quick tap could cancel the
+      // just-completed visit (Codex r10 P1). Consumers that take no args
+      // (loadProjects) are unaffected by the earlier emission.
       onChanged?.({ visitCompleted: !!d.serviceCompleted });
+      await load();
       const serviceText = d.serviceCompleted ? " Service marked completed." : "";
       const portalText = d.portalAttached
         ? " Report attached to the customer portal."

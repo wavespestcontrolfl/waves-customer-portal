@@ -1227,6 +1227,11 @@ export default function DispatchPageV2({
       setContinueProjectService(fresh);
     }
   }, [data, continueProjectService]);
+  // Bumped after payment detours (Details → checkout) so the mounted
+  // ProjectDetail reloads its closeoutPreview (preserveEdits) — otherwise
+  // the footer keeps the stale billing block and Close project stays
+  // disabled (Codex r10 P2).
+  const [projectReloadKey, setProjectReloadKey] = useState(0);
   // ProjectDetail needs the types registry for form labels/fields; fetched
   // once on first open, then cached for the session.
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
@@ -2550,6 +2555,7 @@ export default function DispatchPageV2({
             )}
             <ProjectDetail
               projectId={continueProjectId}
+              reloadKey={projectReloadKey}
               typesRegistry={projectTypesRegistry}
               onClose={() => {
                 setContinueProjectId(null);
@@ -2757,6 +2763,7 @@ export default function DispatchPageV2({
                 checkoutInvoiceId: invoiceId,
                 checkoutInvoiceToken: invoiceToken,
               });
+              setProjectReloadKey((k) => k + 1);
               fetchSchedule(date, { silent: true });
               return;
             }
@@ -2775,6 +2782,11 @@ export default function DispatchPageV2({
             const svcId = editingLineService.id;
             setEditingLineService(null);
             const fresh = await fetchSchedule(date, { silent: true });
+            // Invalidate the cached week rows too (Codex r10 P1): a
+            // week-origin visit never lands in the day payload, and
+            // reopening checkout from a stale week row would hand the
+            // pre-edit totals right back.
+            setScheduleRefreshKey((k) => k + 1);
             // Re-seat the checkout sheet on the updated service record so
             // the new totals render immediately without the tech having
             // to close + reopen the sheet.
@@ -2817,6 +2829,7 @@ export default function DispatchPageV2({
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
             handleComplete(svc);
+            setProjectReloadKey((k) => k + 1);
             fetchSchedule(date, { silent: true });
           }}
           onChargeSuccess={async () => {
@@ -2837,6 +2850,7 @@ export default function DispatchPageV2({
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
             handleComplete(updated ? { ...updated, ...svc } : svc);
+            setProjectReloadKey((k) => k + 1);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
             // Cash / Check tender marked the pre-minted invoice paid server-side;
@@ -2855,6 +2869,7 @@ export default function DispatchPageV2({
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
             handleComplete(updated ? { ...updated, ...svc } : svc);
+            setProjectReloadKey((k) => k + 1);
           }}
         />
       )}
@@ -2881,6 +2896,7 @@ export default function DispatchPageV2({
               // Same project-backed routing as the primary Complete action
               // (Codex r7 P1).
               handleComplete(svc);
+              setProjectReloadKey((k) => k + 1);
             }
           }}
         />
