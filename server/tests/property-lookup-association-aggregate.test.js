@@ -148,7 +148,7 @@ describe('association aggregate → cadastral record → enriched profile', () =
       lotSqft: 98084,
       livingAreaSqft: 104096,
       groundAreaSqft: 115086,
-      stories: null,
+      stories: 2,
       yearBuilt: 1970,
       residentialUnits: 118,
       dorUseCode: '0403',
@@ -190,11 +190,39 @@ describe('association aggregate → cadastral record → enriched profile', () =
     expect(profile.lotSqFt).toBe(98084);
 
     // 3 buildings of footprint/3 each: √3 × the single-slab perimeter.
-    const footprint = 104096; // stories default 1
+    const footprint = Math.round(104096 / 2); // 2 stories known
     const single = Math.round(4 * Math.sqrt(footprint) * 1.35);
     const multi = Math.round(3 * 4 * Math.sqrt(footprint / 3) * 1.35);
     expect(profile.estimatedPerimeterLF).toBe(multi);
     expect(profile.estimatedPerimeterLF).toBeGreaterThan(single);
+  });
+
+  test('an aggregate with UNKNOWN stories gets NO perimeter prefill (codex P2)', () => {
+    const parcel = aggregateParcel({ stories: null });
+    const record = attachParcelMeta(
+      buildCadastralRecord(parcel, '1555 Tarpon Center Dr, Venice, FL 34285'),
+      parcel,
+    );
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    // footprint would be the FULL summed living area (stories defaulted to
+    // 1) — a prefilled perimeter off that inflates mid/high-rise complexes
+    // by ~√stories, so the box stays empty for a field measurement.
+    expect(profile.estimatedPerimeterLF).toBeNull();
+  });
+
+  test('the association unit total beats a PAO-won merge default of 1 (codex P2)', () => {
+    const parcel = aggregateParcel();
+    // Simulate a merge where a PAO record won: unitCount seeded to 1.
+    const record = attachParcelMeta(
+      { ...buildCadastralRecord(parcel, '1555 Tarpon Center Dr, Venice, FL 34285'), unitCount: 1 },
+      parcel,
+    );
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.unitCount).toBe(118);
   });
 
   test('a normal single-parcel profile keeps the single-building perimeter formula', () => {
@@ -251,5 +279,77 @@ describe('commercial county turf prior', () => {
 
     expect(profile.category).toBe('RESIDENTIAL');
     expect(profile.countyTurfPriorSf).toBeNull();
+  });
+});
+
+describe('codex round-1 hardening (#2721)', () => {
+  const { aggregateSitusVerdict } = aiPrivate;
+
+  test('mixed rows: living-only units each count as one unit', async () => {
+    // Only one row exposes livunits; four more carry living area only. The
+    // stack is still a 5-unit association, not a reject.
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1555, 101),
+      unitFeature(1555, 102, { livunits: null }),
+      unitFeature(1555, 103, { livunits: null }),
+      unitFeature(1555, 104, { livunits: null }),
+      unitFeature(1555, 105, { livunits: null }),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel).toMatchObject({ aggregated: true, residentialUnits: 5 });
+  });
+
+  test('no common row → no PAO parcel id (a unit id must not key by-parcel detail)', async () => {
+    mockArcgis([
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.paoParcelId).toBeNull();
+  });
+
+  test('a genuine common row keeps its PAO parcel id', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.paoParcelId).toBe('0000007090');
+  });
+
+  test('the aggregate carries every building number for the situs guard', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1535, 101), unitFeature(1535, 102),
+      unitFeature(1555, 103), unitFeature(1555, 104),
+      unitFeature(1575, 205), unitFeature(1575, 206),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.situsHouseNumbers).toEqual(['1535', '1555', '1575']);
+  });
+
+  test('situs guard: any association building number is a valid hit', () => {
+    const parcel = { aggregated: true, situsHouseNumbers: ['1535', '1555', '1575'] };
+
+    expect(aggregateSitusVerdict(parcel, '1575 Tarpon Center Dr, Venice, FL 34285', 'rooftop')).toBe('keep');
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop')).toBe('keep');
+    // A number OUTSIDE the association is still a wrong-building drop.
+    expect(aggregateSitusVerdict(parcel, '1600 Tarpon Center Dr, Venice, FL 34285', 'rooftop')).toBe('drop');
+    // Interpolated points need positive membership.
+    expect(aggregateSitusVerdict(parcel, 'Tarpon Center Dr, Venice, FL 34285', 'interpolated')).toBe('drop');
+    expect(aggregateSitusVerdict(parcel, '1575 Tarpon Center Dr, Venice, FL 34285', 'interpolated')).toBe('keep');
+    // Rooftop with no typed number: keep (fail-open, matches single-parcel rule).
+    expect(aggregateSitusVerdict(parcel, 'Tarpon Center Dr, Venice, FL 34285', 'rooftop')).toBe('keep');
   });
 });

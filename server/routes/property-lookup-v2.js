@@ -1380,7 +1380,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // slab — one 104k sf square is ~1,290 LF, but three separate buildings of
   // ~35k sf are ~2,235 LF of exterior wall to treat.
   const buildingCount = Math.max(1, Math.round(Number(rc?._parcel?.buildingCount) || 1));
-  const estimatedPerimeterLF = footprintSf > 0
+  // An aggregate with UNKNOWN stories has footprintSf = the full summed
+  // living area (stories defaulted to 1), which would inflate the perimeter
+  // by ~sqrt(stories) on mid/high-rise associations — leave the box empty
+  // for a field measurement instead of prefilling a wrong number (codex P2
+  // #2721). Aggregates with a known story count (Manatee) still prefill.
+  const aggregateStoriesUnknown = Boolean(rc?._parcel?.aggregated)
+    && !(Number(rc?.stories) >= 1);
+  const estimatedPerimeterLF = footprintSf > 0 && !aggregateStoriesUnknown
     ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
     : null;
 
@@ -1398,9 +1405,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
-    unitCount: rc?.unitCount
-      || (rc?._parcel?.aggregated ? Number(rc._parcel.residentialUnits) || 0 : 0)
-      || 1,
+    // On an aggregate, the association total wins over the merge's
+    // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
+    // so a plain fallback chain never reaches the aggregate figure when a
+    // PAO record won the merge — codex P2 #2721).
+    unitCount: (rc?._parcel?.aggregated
+      ? Math.max(Number(rc?.unitCount) || 0, Number(rc._parcel.residentialUnits) || 0)
+      : rc?.unitCount) || 1,
     // Stacked-parcel association aggregate: distinct unit street numbers on
     // the roll (1 when the whole association shares one address).
     buildingCount,

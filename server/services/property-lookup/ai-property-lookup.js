@@ -1326,6 +1326,25 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
   return searchNumber !== situsNumber;
 }
 
+// Association aggregate counterpart of the situs guards: the aggregate's
+// situs is the MODAL building's address, but a lookup for ANY building in
+// the association is a valid hit (codex P2 #2721: entering 1575 in a
+// 1535/1555/1575 complex must not read as a wrong-building mismatch).
+// Rooftop points keep the parcel unless the typed number is POSITIVELY
+// outside the building set; interpolated points (a guess along the street)
+// additionally require positive membership — mirroring the single-parcel
+// exact-match rule.
+function aggregateSitusVerdict(parcel, searchAddress, gisPrecision) {
+  const typedNumber = leadingHouseNumber(searchAddress);
+  const buildingNumbers = Array.isArray(parcel?.situsHouseNumbers)
+    ? parcel.situsHouseNumbers.map(String)
+    : [];
+  const inAssociation = Boolean(typedNumber) && buildingNumbers.includes(String(typedNumber));
+  if (typedNumber && buildingNumbers.length && !inAssociation) return 'drop';
+  if (gisPrecision === 'interpolated' && !inAssociation) return 'drop';
+  return 'keep';
+}
+
 // Positive confirmation — both sides expose a single clean leading house
 // number AND they agree, AND the full street identities agree (unit
 // designators peeled; suffix and any post-direction KEPT — "4506 45th St W"
@@ -1521,7 +1540,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
           .catch(() => null);
       }
     }
-    if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
+    if (parcel && parcel.aggregated === true) {
+      if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision) === 'drop') {
+        logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
+        parcel = null;
+      }
+    } else if (parcel && situsHouseNumberMismatch(searchAddress, parcel.situsAddress)) {
       // The rooftop point landed inside a parcel whose situs is a different
       // building (multi-building complex master parcel). Drop the GIS match
       // entirely — by-parcel detail, the cadastral record, and parcel meta
@@ -3988,6 +4012,7 @@ module.exports = {
     leadingHouseNumber,
     parcelGisPrecision,
     situsHouseNumberMismatch,
+    aggregateSitusVerdict,
     situsHouseNumberExactMatch,
     houseNumberFromSourceUrl,
     slugAddressLine,

@@ -143,8 +143,13 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
 
   const unitRows = rows.filter((row) => (row.parsed.residentialUnits || 0) > 0
     || (row.parsed.livingAreaSqft || 0) > 0);
-  const units = unitRows.reduce((sum, row) => sum + (row.parsed.residentialUnits || 0), 0)
-    || unitRows.length;
+  // A unit row with living area but no explicit livunits still IS a unit —
+  // counting it as zero would reject a valid association whose layer omits
+  // the unit-count column on most rows (codex P2 #2721).
+  const units = unitRows.reduce(
+    (sum, row) => sum + Math.max(row.parsed.residentialUnits || 0, (row.parsed.livingAreaSqft || 0) > 0 ? 1 : 0),
+    0,
+  );
   if (units < AGGREGATE_MIN_UNITS) return null;
 
   const livingAreaSqft = unitRows.reduce((sum, row) => sum + (row.parsed.livingAreaSqft || 0), 0);
@@ -161,10 +166,14 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   const buildingCount = Math.max(1, streetNumbers.size);
 
   // Land: a stacked master/common row carrying a roll land figure wins; else
-  // the shared polygon's own area (units all carry lsqft 0 by design).
-  const masterRow = rows.find((row) => (row.parsed.lotSqft || 0) > 0 && !(row.parsed.residentialUnits > 0))
+  // the shared polygon's own area (units all carry lsqft 0 by design). Only a
+  // GENUINE common row may key PAO detail fetches — advertising an arbitrary
+  // unit's parcel id would let a by-parcel unit record collapse the aggregate
+  // back to single-unit dimensions on merge ties (codex P2 #2721).
+  const commonRow = rows.find((row) => (row.parsed.lotSqft || 0) > 0 && !(row.parsed.residentialUnits > 0))
     || rows.find((row) => !(row.parsed.residentialUnits > 0) && !(row.parsed.livingAreaSqft > 0))
-    || rows[0];
+    || null;
+  const masterRow = commonRow || rows[0];
   const polyArea = polygonAreaSqft(masterRow.rings);
   const lotSqft = masterRow.parsed.lotSqft || polyArea;
 
@@ -178,6 +187,11 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
 
   return {
     parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,
+    masterIsCommon: Boolean(commonRow),
+    // Every building number in the association — the situs-mismatch guard
+    // must accept a lookup for ANY of them, not just the modal one
+    // (codex P2 #2721: entering 1575 in a 1535/1555/1575 association).
+    situsHouseNumbers: [...streetNumbers].sort(),
     situsAddress,
     situsCity: modalValue(rows.map((row) => row.parsed.situsCity)),
     situsZip: modalValue(rows.map((row) => row.parsed.situsZip)),
@@ -434,7 +448,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
         const parcel = {
           ...aggregate,
           county,
-          paoParcelId: paoParcelIdFrom(aggregate.parcelId),
+          paoParcelId: aggregate.masterIsCommon ? paoParcelIdFrom(aggregate.parcelId) : null,
           polygon: aggregate._masterRings,
           polygonAreaSqft: aggregate._polyArea,
           assessmentYear: aggregate.rollYear || null,
