@@ -159,14 +159,17 @@ describe('propagateCustomerEmailChange', () => {
     expect(statusFilter.arg.vals).toEqual(['queued', 'scheduled', 'retry_scheduled']);
   });
 
-  test('enrollment sync includes customer_id-NULL rows via the old-email guard', async () => {
-    // Estimate follow-ups enroll with customer_id null; the where-callback
-    // (customer match OR null) plus the old-email whereRaw scopes them.
+  test('enrollment and run syncs require the customer link — never email-only matching', async () => {
+    // Email equality alone can't prove ownership: the typo can be a real
+    // third party's address, and retargeting their sends is a P0.
     const conn = makeConn();
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    const enrollmentEmailGuard = conn.__calls.find(
-      (c) => c.table === 'automation_enrollments' && c.op === 'whereRaw');
-    expect(enrollmentEmailGuard.arg.bindings).toEqual(['charlesw.robb@gmail.com']);
+    const enrollmentScope = conn.__calls.find(
+      (c) => c.table === 'automation_enrollments' && c.op === 'where' && c.arg && c.arg.customer_id);
+    expect(enrollmentScope.arg).toEqual({ customer_id: 'cust-1', status: 'active' });
+    const runScope = conn.__calls.find(
+      (c) => c.table === 'email_template_automation_runs' && c.op === 'where' && c.arg && c.arg.recipient_id);
+    expect(runScope.arg).toEqual({ recipient_id: 'cust-1' });
   });
 
   test('a moved PENDING subscriber row surfaces pendingConfirmation for the post-commit re-send', async () => {
@@ -181,9 +184,29 @@ describe('propagateCustomerEmailChange', () => {
       },
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(result.pendingConfirmation).toEqual({
-      id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1',
+    expect(result.pendingConfirmation).toMatchObject({
+      id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles',
     });
+    // The OLD token was delivered to the typo mailbox — the re-send must use
+    // a FRESH one, and the row rotates BOTH bearer tokens with the move.
+    expect(result.pendingConfirmation.confirmation_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(result.pendingConfirmation.confirmation_token).not.toBe('tok-1');
+    const moved = conn.__updates('newsletter_subscribers')[0].arg;
+    expect(moved.confirmation_token).toBe(result.pendingConfirmation.confirmation_token);
+    expect(moved.unsubscribe_token).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test('bearer tokens rotate on ACTIVE subscriber moves too', async () => {
+    // Newsletter footers delivered the unsubscribe link to the old mailbox.
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+      },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const moved = conn.__updates('newsletter_subscribers')[0].arg;
+    expect(moved.unsubscribe_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(moved.confirmation_token).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('an ACTIVE subscriber move carries no pendingConfirmation', async () => {

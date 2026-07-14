@@ -13,9 +13,10 @@
  *   - automation_enrollments.email — denormalized at enrollment; the
  *     automation runner sends every remaining step to it, so an ACTIVE
  *     enrollment keeps mailing the misspelling after the record is fixed.
- *     Includes customer_id-NULL rows matching the old email: estimate
- *     follow-ups enroll with `customer_id: estimate.customer_id || null`
- *     and nothing backfills the link later.
+ *     Customer-linked rows only — email equality alone never proves an
+ *     unlinked row is this customer's (retargeting a stranger's sends is a
+ *     P0), so the known unlinked-enrollment gap awaits an
+ *     ownership-verified backfill instead.
  *   - email_template_automation_runs.recipient_email — queued/delayed runs
  *     (estimate, appointment, payment follow-ups) send to the stored value
  *     at claim time; a run queued before the correction would deliver to
@@ -47,6 +48,7 @@
  * customer-record edit do all of that.
  */
 
+const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
@@ -145,13 +147,15 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
     // Active automation enrollments send every remaining step to their
     // denormalized email — terminal enrollments (completed/cancelled/failed)
-    // are history and stay untouched. customer_id-NULL rows matching the old
-    // email are included: estimate follow-ups enroll with
-    // `customer_id: estimate.customer_id || null` and nothing links them
-    // later — the old-email guard is what scopes them to this correction.
+    // are history and stay untouched. CUSTOMER-LINKED rows only: email
+    // equality alone does not prove an unlinked row belongs to this customer
+    // (the typo can be someone ELSE'S real address), and retargeting a
+    // stranger's enrollment would redirect their messages and PII to our
+    // customer. The unlinked-enrollment gap (estimate follow-ups enroll with
+    // customer_id null) is real but needs an ownership-verified backfill,
+    // never an email-only match.
     counts.automations += await conn('automation_enrollments')
-      .where({ status: 'active' })
-      .where((q) => q.where({ customer_id: customerId }).orWhereNull('customer_id'))
+      .where({ customer_id: customerId, status: 'active' })
       .whereRaw('LOWER(email) = ?', [oldEmail])
       .update({ email: newEmail, updated_at: now });
 
@@ -165,9 +169,11 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // mid-flight failure retries to the old spelling (bounded by
     // max_attempts). Completed/skipped runs are an audit trail and stay
     // untouched.
+    // Same ownership rule as enrollments: recipient-linked rows only —
+    // email-only matching could retarget another person's queued sends.
     counts.templateRuns += await conn('email_template_automation_runs')
       .whereIn('status', ['queued', 'scheduled', 'retry_scheduled'])
-      .where((q) => q.where({ recipient_id: String(customerId) }).orWhereNull('recipient_id'))
+      .where({ recipient_id: String(customerId) })
       .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
       .update({ recipient_email: newEmail, updated_at: now });
 
@@ -235,17 +241,29 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         }
         counts.newsletter += await conn('newsletter_subscribers').where({ id: oldSub.id }).del();
       } else {
+        // ROTATE both bearer tokens with the move: the old confirmation and
+        // unsubscribe links were DELIVERED to the old mailbox (DOI email,
+        // newsletter footers), and a typo address can be a real third
+        // party's inbox — the stale tokens would let that mailbox confirm
+        // or unsubscribe the corrected address.
+        const freshConfirmationToken = randomUUID();
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
-          .update({ email: newEmail, updated_at: now });
+          .update({
+            email: newEmail,
+            confirmation_token: freshConfirmationToken,
+            unsubscribe_token: randomUUID(),
+            updated_at: now,
+          });
         // A PENDING row's DOI confirmation went to the old typo — hand the
-        // caller what it needs to re-send post-commit (see @returns).
-        if (String(oldSub.status || '') === 'pending' && oldSub.confirmation_token) {
+        // caller what it needs to re-send post-commit (see @returns), keyed
+        // to the FRESH token (the old one is dead by design).
+        if (String(oldSub.status || '') === 'pending') {
           pendingConfirmation = {
             id: oldSub.id,
             email: newEmail,
             first_name: oldSub.first_name || null,
-            confirmation_token: oldSub.confirmation_token,
+            confirmation_token: freshConfirmationToken,
           };
         }
       }
