@@ -1726,6 +1726,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // ALL terminal statuses are one-way, not just no_show (#2717 server
+    // hardening): fromStatus is read fresh from the row, so a stale board
+    // on another device could flip a completed compliance visit to
+    // cancelled (firing a contradictory customer notice) hours after the
+    // work was done — the client cannot guard the two-device case. Only a
+    // DIFFERENT target 409s; a same-status re-send flows through so a
+    // retry after a partial failure reruns the idempotent post-commit
+    // effects below (invoice void, reminder handling, track state).
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, toStatus);
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit is already ${terminal.status}. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
+    }
+
     // No-show is only valid FROM an active visit state, and only once the
     // visit window has actually started. The mobile detail sheet exposes
     // "Mark as no-show" on every same-day row, so without these guards an
@@ -2456,6 +2476,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: 'This visit was marked as a no-show and can no longer be completed. Refresh and try again.',
         code: 'service_no_show',
       });
+    }
+
+    // cancelled/skipped are one-way too, and this submit path bypasses the
+    // PUT /status terminal guard — a CompletionPanel opened before another
+    // dispatcher cancelled or skipped the visit could otherwise flip it
+    // back to completed and run the full completion machinery (invoice,
+    // customer recap text) for a visit the status machine says never
+    // happened. Same non-completable set as pest-recap and
+    // project-completion. completed→completed deliberately passes through
+    // (evaluateTerminalTransition returns null on same-status) so durable
+    // completion resumes and retries keep reaching the stored-response
+    // path below.
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, 'completed');
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit was already ${terminal.status} and can no longer be completed. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
     }
 
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {

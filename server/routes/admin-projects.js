@@ -1397,23 +1397,82 @@ router.post('/', async (req, res, next) => {
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
-    const [row] = await db('projects').insert({
-      customer_id,
-      project_type,
-      project_date: projectDate,
-      title: title || null,
-      findings: findings || null,
-      recommendations: recommendations || null,
-      service_record_id: service_record_id || null,
-      // Persist the DERIVED link too (record-only callers): the linked-only
-      // gate accepted this create because the record resolved to a scheduled
-      // visit, and the schedule/tech continuation path looks projects up by
-      // projects.scheduled_service_id — dropping it here would let the same
-      // visit mint a duplicate report (Codex round-2 P2).
-      scheduled_service_id: linkedScheduledServiceId || null,
-      status: 'draft',
-      created_by_tech_id: req.technicianId,
-    }).returning('*');
+    // One visit, one report (#2717 server hardening): stale client caches
+    // (week rows, continue snapshots) repeatedly re-offered the create
+    // sheet for already-linked visits, and nothing here prevented a second
+    // row. This is a CONFLICT, not a silent merge (Codex P2 on #2732): the
+    // submitted body may carry freshly typed findings, and returning the
+    // existing row as a success would let the client discard that draft.
+    // A 409 keeps the client's local draft intact (create-failure path
+    // never clears it) and names the existing report to continue in.
+    // Keeper preference matches migration 20260714000010: strongest report
+    // first (closed > sent > draft), then oldest.
+    //
+    // Legacy record-only links count too (Codex round-2 P2): a project
+    // created before the derived link was persisted carries
+    // scheduled_service_id = NULL while its service record points at the
+    // visit — the direct-column lookup (and the partial unique index)
+    // would miss it and let the visit mint a second report. Migration
+    // 20260714000010 backfills those rows; the join here covers any that
+    // appear between deploys or in environments where the backfill was
+    // guarded out.
+    const existingByVisit = () => db('projects')
+      .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
+      .where((q) => q
+        .where('projects.scheduled_service_id', linkedScheduledServiceId)
+        .orWhere('service_records.scheduled_service_id', linkedScheduledServiceId))
+      .orderByRaw("CASE projects.status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END")
+      .orderBy('projects.created_at', 'asc')
+      .select('projects.*')
+      .first();
+    if (linkedScheduledServiceId) {
+      const existing = await existingByVisit();
+      if (existing) {
+        logger.info(`[projects] create for visit ${linkedScheduledServiceId} refused — existing project ${existing.id}`);
+        return res.status(409).json({
+          error: 'This visit already has a report — open it to continue instead of starting a new one.',
+          code: 'visit_already_reported',
+          project: existing,
+        });
+      }
+    }
+
+    let row;
+    try {
+      [row] = await db('projects').insert({
+        customer_id,
+        project_type,
+        project_date: projectDate,
+        title: title || null,
+        findings: findings || null,
+        recommendations: recommendations || null,
+        service_record_id: service_record_id || null,
+        // Persist the DERIVED link too (record-only callers): the linked-only
+        // gate accepted this create because the record resolved to a scheduled
+        // visit, and the schedule/tech continuation path looks projects up by
+        // projects.scheduled_service_id — dropping it here would let the same
+        // visit mint a duplicate report (Codex round-2 P2).
+        scheduled_service_id: linkedScheduledServiceId || null,
+        status: 'draft',
+        created_by_tech_id: req.technicianId,
+      }).returning('*');
+    } catch (insertErr) {
+      // Unique-violation on the partial index (migration 20260714000010) =
+      // we lost a same-visit create race — same 409 contract as the
+      // pre-insert check above, naming the winner.
+      if (insertErr?.code === '23505' && linkedScheduledServiceId) {
+        const winner = await existingByVisit();
+        if (winner) {
+          logger.info(`[projects] create race for visit ${linkedScheduledServiceId} lost to existing project ${winner.id}`);
+          return res.status(409).json({
+            error: 'This visit already has a report — open it to continue instead of starting a new one.',
+            code: 'visit_already_reported',
+            project: winner,
+          });
+        }
+      }
+      throw insertErr;
+    }
 
     logger.info(`[projects] created ${row.id} (${project_type}) by tech ${req.technicianId}`);
     await logProjectActivity(
