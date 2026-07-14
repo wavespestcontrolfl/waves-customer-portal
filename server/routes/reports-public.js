@@ -108,6 +108,7 @@ const {
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { mosquitoReportV2PdfSignature } = require('../services/service-report/mosquito-report-v2');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -326,13 +327,17 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
     } catch { /* best-effort — never block the report */ }
   }
 
-  // Mosquito Report V2 — yard-usability dashboard for recurring mosquito visits
+  // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits
   // (flag-gated), same family as Pest V2 but with habitat semantics instead of
   // entry points (mosquito-report-v2.js explains the reframe). Mutually
-  // exclusive with pestReportV2 by service line. Best-effort, never blocks.
+  // exclusive with pestReportV2 by service line. Typed one-time reports
+  // (mosquito_event) are excluded: they own the purpose-built activity gauge,
+  // which the dashboard would otherwise suppress client-side (codex P2).
+  // Best-effort, never blocks.
   if (
     process.env.MOSQUITO_REPORT_V2 === 'true'
     && data.serviceLine === 'mosquito'
+    && !data.typedReport
     && dynamicContext.premiumExperience
   ) {
     try {
@@ -965,8 +970,11 @@ router.get('/:token', async (req, res, next) => {
       // mass cache bust. Derived from the immutable record, so no re-check
       // is needed in the render race loop below.
       const summarySignature = summaryCopySignature(service);
+      // Mosquito V2 gate flips must invalidate cached mosquito-report PDFs
+      // (key change → cache miss → re-render with the dashboard).
+      const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1020,7 +1028,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

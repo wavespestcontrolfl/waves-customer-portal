@@ -7,6 +7,7 @@
 
 const {
   buildMosquitoReportV2,
+  mosquitoReportV2PdfSignature,
   resolveStatusKey,
   buildHabitat,
   buildOutlook,
@@ -95,6 +96,25 @@ describe('buildHabitat — watch items derive from finding text', () => {
     });
     expect(habitat.items.find((i) => i.key === 'standing_water').status).toBe('clear');
     expect(habitat.summary).toMatch(/no conditions/i);
+  });
+});
+
+describe('mosquitoReportV2PdfSignature — PDF cache-key component', () => {
+  afterEach(() => { delete process.env.MOSQUITO_REPORT_V2; });
+
+  it('is empty when the gate is off, regardless of line', () => {
+    delete process.env.MOSQUITO_REPORT_V2;
+    expect(mosquitoReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');
+  });
+
+  it('marks mosquito-line records only when the gate is on', () => {
+    process.env.MOSQUITO_REPORT_V2 = 'true';
+    expect(mosquitoReportV2PdfSignature({ service_line: 'mosquito' })).toBe('-mosqv2');
+    expect(mosquitoReportV2PdfSignature({ service_type: 'Mosquito Control (Monthly)' })).toBe('-mosqv2');
+    // Non-mosquito lines keep their keys — a gate flip must not
+    // mass-invalidate cached pest/lawn report PDFs.
+    expect(mosquitoReportV2PdfSignature({ service_line: 'pest' })).toBe('');
+    expect(mosquitoReportV2PdfSignature({ service_type: 'Lawn Fertilization' })).toBe('');
   });
 });
 
@@ -188,6 +208,33 @@ describe('buildMosquitoReportV2 — assembly and guards', () => {
       technicianReport: 'Your mosquito infestation is eliminated — the yard is guaranteed bite-free.',
     });
     expect(out.aiSummary.body).toBe('Yard treatment was completed today.');
+  });
+
+  it('keeps a rating-only metric when pressure is visible but still insufficient', () => {
+    const out = buildMosquitoReportV2({
+      premiumExperience: premium(),
+      pestPressure: {
+        displayScore: null, score: null, maxScore: 5,
+        showOnCustomerReport: true, enabled: true,
+        canCaptureClientRating: true,
+      },
+      findings: [],
+      applications: [FOG_APP],
+    });
+    expect(out.supportingMetric.kind).toBe('pressure');
+    expect(out.supportingMetric.score).toBeNull();
+    expect(out.supportingMetric.rating).not.toBeNull();
+  });
+
+  it('insufficient pressure with no rating capture falls through to activity', () => {
+    const out = buildMosquitoReportV2({
+      premiumExperience: premium(),
+      pestPressure: { displayScore: null, score: null, showOnCustomerReport: true, enabled: true },
+      activity: { levelWord: 'Light', score: 1, maxScore: 5, label: 'Mosquito Activity' },
+      findings: [],
+      applications: [FOG_APP],
+    });
+    expect(out.supportingMetric.kind).toBe('activity');
   });
 
   it('prefers safe technician copy in the hero summary slot', () => {

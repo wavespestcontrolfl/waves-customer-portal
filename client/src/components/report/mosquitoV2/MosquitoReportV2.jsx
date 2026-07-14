@@ -82,15 +82,23 @@ const eyebrow = {
   marginBottom: 8,
 };
 
-// Pressure trend reads inverted: DOWN is good (fewer mosquitoes). Forecast
-// trend reads straight: UP is the thing to watch.
-function TrendArrow({ trend, goodWhenDown = false }) {
-  if (!trend || trend === 'flat' || trend === 'stable' || trend === 'insufficient_data') return null;
-  const up = trend === 'up' || trend === 'worsening';
-  const arrow = up ? '▲' : '▼';
-  const isGood = goodWhenDown ? !up : up === false;
-  const color = isGood ? COLORS.green : (up ? COLORS.red : COLORS.green);
-  return <span style={{ color, fontSize: 11, marginLeft: 4 }}>{arrow}</span>;
+// Trend arrow across the two vocabularies this dashboard receives: the
+// seasonal forecast emits up/down/flat, while Pest Pressure trends
+// (pest-pressure/trend.js) emit improving / increasing /
+// significant_increase / stable / first_marker / insufficient_data (codex
+// P2 — the old up/down-only check rendered a worsening "increasing" trend
+// as a green down arrow). Directional reads: UP = more mosquitoes (red),
+// DOWN = fewer (green); non-directional states render nothing.
+const TREND_UP = new Set(['up', 'worsening', 'increasing', 'significant_increase']);
+const TREND_DOWN = new Set(['down', 'improving', 'decreasing', 'significant_decrease']);
+function TrendArrow({ trend }) {
+  const up = TREND_UP.has(trend);
+  if (!up && !TREND_DOWN.has(trend)) return null;
+  return (
+    <span style={{ color: up ? COLORS.red : COLORS.green, fontSize: 11, marginLeft: 4 }}>
+      {up ? '▲' : '▼'}
+    </span>
+  );
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
@@ -107,7 +115,11 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
       {statusSummary ? (
         <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
-      {supportingMetric ? <SupportingMetric metric={supportingMetric} /> : null}
+      {/* The score pill hides when the reading is still insufficient (score
+          null) — the metric may then exist solely to carry the rating picker. */}
+      {supportingMetric && (supportingMetric.score != null || supportingMetric.label)
+        ? <SupportingMetric metric={supportingMetric} />
+        : null}
       <MosquitoPressureRating metric={supportingMetric} token={token} live={mode === 'live'} />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
@@ -129,7 +141,7 @@ function SupportingMetric({ metric }) {
       <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{value}</span>
       {showOutOf ? <span style={{ fontSize: 12, color: MUTED }}>/ {metric.max}</span> : null}
       {metric.label && metric.score != null ? <span style={{ fontSize: 12, color: MUTED }}>· {metric.label}</span> : null}
-      <TrendArrow trend={metric.trend} goodWhenDown />
+      <TrendArrow trend={metric.trend} />
     </div>
   );
 }
@@ -140,6 +152,15 @@ function MosquitoPressureRating({ metric, token, live }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Client-side navigation to another /report/:token reuses this mounted
+  // component — re-derive the one-shot state from the new report's payload so
+  // a rating submitted on the previous report doesn't hide this one's picker
+  // (codex P2, matches the legacy PestPressureCard's token reset).
+  useEffect(() => {
+    setSubmitted(Boolean(metric && metric.submittedRating != null));
+    setBusy(false);
+    setFailed(false);
+  }, [token, metric && metric.submittedRating]);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
     return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;

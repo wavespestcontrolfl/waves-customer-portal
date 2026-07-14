@@ -24,6 +24,7 @@
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
+const { detectServiceLine } = require('./service-line-configs');
 
 const STATUS_BY_KEY = {
   protected: { key: 'protected', label: 'Yard protected', tone: 'good' },
@@ -156,13 +157,19 @@ function buildHabitat({ findings = [], applications = [] }) {
 function buildSupportingMetric({ pestPressure, activity }) {
   if (pestPressure && pestPressure.showOnCustomerReport !== false && pestPressure.enabled !== false) {
     const score = pestPressure.displayScore ?? pestPressure.score;
-    if (score != null) {
+    // A visible-but-insufficient pressure view (score still null) can still
+    // carry the one-shot client-rating calibration. Since the dashboard
+    // suppresses the standalone PestPressureCard, the rating prompt must ride
+    // this metric or first-report customers lose the calibration flow
+    // entirely (codex P2). The client hides the score pill when score is
+    // null and renders only the picker.
+    if (score != null || pestPressure.canCaptureClientRating) {
       return {
         kind: 'pressure',
-        score: String(score),
+        score: score != null ? String(score) : null,
         max: pestPressure.maxScore || 5,
-        label: pestPressure.label || null,
-        trend: pestPressure.trend || null,
+        label: score != null ? (pestPressure.label || null) : null,
+        trend: score != null ? (pestPressure.trend || null) : null,
         caption: 'Mosquito pressure',
         rating: pestPressure.canCaptureClientRating
           ? { question: pestPressure.clientRatingQuestion || 'Over the past month, how much mosquito activity have you noticed in your yard?' }
@@ -319,8 +326,20 @@ function buildMosquitoReportV2({
   };
 }
 
+// PDF cache-key component. The stored-PDF hit check only compares keys, so
+// flipping MOSQUITO_REPORT_V2 for an already-rendered mosquito report must
+// change the expected key or permanent PDF links keep serving the pre-V2
+// render (codex P2). Scoped to mosquito-line records so a gate flip doesn't
+// mass-invalidate every cached pest/lawn report PDF.
+function mosquitoReportV2PdfSignature(service = {}) {
+  if (process.env.MOSQUITO_REPORT_V2 !== 'true') return '';
+  const line = service.service_line || detectServiceLine(service.service_type);
+  return line === 'mosquito' ? '-mosqv2' : '';
+}
+
 module.exports = {
   buildMosquitoReportV2,
+  mosquitoReportV2PdfSignature,
   // exported for tests
   resolveStatusKey,
   buildHabitat,
