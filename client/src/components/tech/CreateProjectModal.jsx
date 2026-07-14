@@ -374,12 +374,17 @@ export default function CreateProjectModal({
       draftFlushRef.current = null;
       return;
     }
+    // Prefill alone must NOT arm a draft write (house review on #2717):
+    // sheet mode always seeds projectType/customerId from props, and a
+    // defaults-only draft made the unmount flush rewrite what the tech had
+    // just discarded — a deterministic discard → close → restore-prompt
+    // loop. Only content the tech actually entered counts.
     const hasContent = Boolean(
-      projectType
-      || customerId
-      || (title && title.trim())
+      (title && title.trim())
       || (recommendations && recommendations.trim())
-      || Object.values(findings).some((v) => String(v || '').trim()),
+      || Object.values(findings).some((v) => String(v || '').trim())
+      || (projectType && projectType !== (defaultProjectType || ''))
+      || (customerId && String(customerId) !== String(defaultCustomerId || '')),
     );
     if (!hasContent) {
       draftFlushRef.current = null;
@@ -396,7 +401,7 @@ export default function CreateProjectModal({
       } catch { /* quota / serialization — non-blocking */ }
     }, 700);
     return () => clearTimeout(timer);
-  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations, defaultProjectType, defaultCustomerId]);
 
   // Unmount-only flush of a pending draft write. The debounce cleanup above
   // cancels the timer on EVERY dep change, which is correct while mounted —

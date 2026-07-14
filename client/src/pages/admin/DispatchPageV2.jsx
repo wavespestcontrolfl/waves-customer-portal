@@ -113,6 +113,16 @@ function isProjectBackedCompletion(service) {
   // service_report profiles serialize projectBacked:false, so cut-over
   // jobs fall through to CompletionPanel.
   const profile = service?.completionProfile;
+  // An explicit profile is authoritative (house review on #2717): cut-over
+  // visits keep their legacy project linked via scheduled_service_id, but
+  // the server's /complete gate reads the PROFILE, not the link — treating
+  // the leftover link as project-backed dead-ended the post-payment punches
+  // (and the row button) on visits the server would happily complete. The
+  // link heuristic only backstops rows whose payload carries no profile
+  // (e.g. week-list rows).
+  if (profile && typeof profile.projectBacked === "boolean") {
+    return !!(profile.projectBacked || profile.requiresProject);
+  }
   return !!(profile?.projectBacked || profile?.requiresProject || service?.linkedProject?.id);
 }
 
@@ -1533,6 +1543,11 @@ export default function DispatchPageV2({
         body: JSON.stringify(body),
       });
       handleStatusChange(serviceId, "completed");
+      // The mobile week list serves rows from its own cached /week payload —
+      // completion was the one terminal transition that never invalidated
+      // it, leaving the completed stop tappable for a duplicate /complete
+      // submission (house review; same pattern as cancel/no-show/rain-out).
+      setScheduleRefreshKey((k) => k + 1);
       const invoiceWasAlreadyBundled =
         ["service_complete_with_invoice", "service_report_v1_with_invoice"].includes(r?.completionSmsType) &&
         r?.completionSmsStatus === "sent";
@@ -2486,7 +2501,14 @@ export default function DispatchPageV2({
           onCreated={(p) => {
             const svc = projectService;
             setProjectService(null);
-            fetchSchedule(date);
+            // Silent: this chains straight into the continue editor below,
+            // and the loud loading/error gates render ABOVE the overlays —
+            // a loud refresh withheld the just-created report's editor in
+            // board/week modes, and a failed one stranded the tech on the
+            // no-retry error screen with the local draft already deleted
+            // (house review). The conditional-silence idiom can't cover
+            // this call: continueProjectId isn't seated yet.
+            fetchSchedule(date, { silent: true });
             // The mobile week list serves rows from its own cached /week
             // payload — without a refetch that row still shows no
             // linkedProject, and tapping it again would open a second
@@ -2622,10 +2644,16 @@ export default function DispatchPageV2({
             // appointment.
             setContinueProjectService((s) => {
               if (!s || String(s.id) !== String(editedId)) return s;
-              const row = (fresh?.services || []).find(
+              // A miss is NOT a retire here (house review): week-origin
+              // rows are never in the day payload and a failed silent
+              // refresh returns null — neither means the visit is gone,
+              // and nulling killed the Details pill for the rest of the
+              // editor session. Only a found row re-points.
+              if (!fresh) return s;
+              const row = (fresh.services || []).find(
                 (r) => String(r.id) === String(s.id),
               );
-              return row || null;
+              return row || s;
             });
           }}
           onMarkPrepaid={(svc) => {
@@ -2743,7 +2771,11 @@ export default function DispatchPageV2({
               ) {
                 return s;
               }
-              const row = (fresh?.services || []).find(
+              // A failed refresh is not a move — keep the snapshot (house
+              // review). The retire below is only for a visit that a
+              // successful refetch shows really left the selected day.
+              if (!fresh) return s;
+              const row = (fresh.services || []).find(
                 (r) => String(r.id) === String(s.id),
               );
               return row || null;
@@ -2903,7 +2935,18 @@ export default function DispatchPageV2({
               // EditServiceModal banner reflects the new prepaid state
               // without forcing the operator to close + reopen.
               const updated = fresh?.services?.find((s) => s.id === svc.id);
-              if (updated) setEditingService(updated);
+              if (updated) {
+                setEditingService(updated);
+              } else {
+                // Refresh failed or the visit isn't in the day payload —
+                // never leave the edit modal claiming the visit is still
+                // unpaid; the stale banner invited a second collection
+                // (house review; mirrors the r9 line-edit alert).
+                setEditingService(null);
+                alert(
+                  "Prepayment recorded, but the schedule refresh didn't return this visit — reopen it to see the updated state.",
+                );
+              }
               // Prepaid resolves project closeout billing — refresh the
               // mounted editor's closeoutPreview too, or Close project
               // stays disabled until reopen (Codex r11 P2).
