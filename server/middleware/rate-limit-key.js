@@ -39,11 +39,28 @@ function rateLimitKey(req) {
   if (authHeader && authHeader.startsWith('Bearer ') && config.jwt.secret) {
     try {
       const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
-      if (decoded.technicianId) return `tech:${decoded.technicianId}`;
+      if (decoded.technicianId) {
+        if (
+          decoded.type !== 'access'
+          || !Number.isInteger(decoded.tokenVersion)
+          || decoded.tokenVersion < 1
+        ) {
+          return ipFallbackKey(req.ip);
+        }
+        return `tech:${decoded.technicianId}:v${decoded.tokenVersion}`;
+      }
+      if (decoded.type === 'refresh') return ipFallbackKey(req.ip);
       if (decoded.customerId) return `cust:${decoded.customerId}`;
-    } catch (_err) { /* fall through to IP */ }
+    } catch { /* fall through to IP */ }
   }
   return ipFallbackKey(req.ip);
 }
 
-module.exports = { rateLimitKey, ipFallbackKey };
+// Auth endpoints are intentionally unauthenticated. Never let an attached
+// signed JWT select a subject bucket there; otherwise callers can alternate
+// tokens to evade login/reset limits. ipFallbackKey still collapses IPv6 /64s.
+function unauthenticatedAuthLimitKey(req) {
+  return ipFallbackKey(req?.ip);
+}
+
+module.exports = { ipFallbackKey, rateLimitKey, unauthenticatedAuthLimitKey };

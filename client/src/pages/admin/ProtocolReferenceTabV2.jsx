@@ -30,9 +30,7 @@ const FALLBACK_SERVICE_PROGRAMS = [
 ];
 
 function adminFetch(path, options = {}) {
-  const token =
-    localStorage.getItem("waves_admin_token") ||
-    localStorage.getItem("adminToken");
+  const token = localStorage.getItem("waves_admin_token");
   return fetch(`/api${path}`, {
     ...options,
     headers: {

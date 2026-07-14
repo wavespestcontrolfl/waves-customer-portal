@@ -5,6 +5,7 @@ import {
   Building2,
   ChevronRight,
   DollarSign,
+  KeyRound,
   MapPinned,
   Plug,
   RotateCcw,
@@ -269,6 +270,21 @@ export default function SettingsPage() {
       {/* ── GENERAL ── */}
       {tab === "general" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {searchParams.get("passwordChanged") === "1" && (
+            <div
+              role="status"
+              style={{
+                padding: "12px 14px",
+                borderRadius: 8,
+                background: "#DCFCE7",
+                color: D.green,
+                fontSize: 14,
+                fontWeight: 600,
+              }}
+            >
+              Password updated. Older staff sessions have been signed out.
+            </div>
+          )}
           {" "}
           <Card>
             {" "}
@@ -370,6 +386,27 @@ export default function SettingsPage() {
                 </div>{" "}
               </div>{" "}
             </div>{" "}
+            <Link
+              to="/admin/change-password"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                minHeight: 44,
+                marginTop: 18,
+                padding: "0 16px",
+                border: `1px solid ${D.inputBorder}`,
+                borderRadius: 8,
+                color: D.heading,
+                fontSize: 14,
+                fontWeight: 600,
+                textDecoration: "none",
+              }}
+            >
+              <KeyRound size={16} aria-hidden />
+              Change password
+            </Link>
           </Card>{" "}
           <Card>
             {" "}

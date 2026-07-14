@@ -104,7 +104,7 @@ function asmBlockFor(groupId) {
  * Send one email. Used for test sends and one-off transactional. Returns
  * { messageId } where messageId is read from the X-Message-Id response header.
  */
-async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog }) {
+async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments, customArgs, suppressErrorLog, disableTracking = false }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
   const payload = {
@@ -126,11 +126,11 @@ async function sendOne({ to, fromEmail, fromName, subject, html, text, replyTo, 
     categories: categories || undefined,
     asm: asmBlockFor(asmGroupId),
     attachments: Array.isArray(attachments) && attachments.length ? attachments : undefined,
-    // Disable SendGrid's own tracking pixels by default — we use our own
-    // open/click events via webhooks. Operator can re-enable via env later.
+    // Standard sends keep the existing provider tracking behavior. Security
+    // emails opt out so one-time credentials never enter click/open metadata.
     tracking_settings: {
-      click_tracking: { enable: true, enable_text: false },
-      open_tracking: { enable: true },
+      click_tracking: { enable: !disableTracking, enable_text: false },
+      open_tracking: { enable: !disableTracking },
       subscription_tracking: { enable: false },  // we own the unsubscribe path
     },
   };

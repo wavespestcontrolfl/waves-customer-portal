@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
+import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
+
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 const DARK = {
   bg: '#0f1923',
@@ -25,13 +28,74 @@ export default function TechLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [techName, setTechName] = useState('Tech');
-  const [authed, setAuthed] = useState(() => Boolean(getAdminAuthToken()));
+  const [authStatus, setAuthStatus] = useState(() => (
+    getAdminAuthToken() ? 'checking' : 'unauthenticated'
+  ));
 
   useEffect(() => {
     const token = getAdminAuthToken();
-    setAuthed(Boolean(token));
-    if (token) setTechName(getAdminDisplayName('Tech'));
-  }, []);
+    if (!token) {
+      setAuthStatus('unauthenticated');
+      return undefined;
+    }
+
+    let cancelled = false;
+    setAuthStatus('checking');
+
+    const clearStaffAuth = () => {
+      localStorage.removeItem('waves_admin_token');
+      localStorage.removeItem('adminToken');
+      localStorage.removeItem('waves_admin_user');
+    };
+    const loginDestination = `${location.pathname}${location.search}`;
+
+    fetch(`${API_BASE}/admin/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (response) => {
+        const profile = await response.json().catch(() => null);
+        if (!response.ok) {
+          const error = new Error(profile?.error || 'Unable to verify staff access');
+          error.status = response.status;
+          throw error;
+        }
+        if (
+          !profile
+          || !profile.id
+          || !['admin', 'technician'].includes(profile.role)
+        ) {
+          const error = new Error('Invalid staff profile');
+          error.invalidProfile = true;
+          throw error;
+        }
+        if (cancelled) return;
+
+        localStorage.setItem('waves_admin_user', JSON.stringify(profile));
+        setTechName(profile.name || getAdminDisplayName('Tech'));
+        if (profile.mustChangePassword) {
+          navigate('/admin/change-password', { replace: true });
+          return;
+        }
+        setAuthStatus('ready');
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        if (error?.status === 401 || error?.invalidProfile) {
+          clearStaffAuth();
+          setAuthStatus('unauthenticated');
+          Promise.resolve().then(refetchFlags).catch(() => {});
+          navigate(`/admin/login?next=${encodeURIComponent(loginDestination)}`, {
+            replace: true,
+          });
+          return;
+        }
+        setAuthStatus('error');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
 
   // While in the tech portal, point the PWA manifest + home-screen title at
   // the field app. The default manifest pins start_url to "/" (the customer
@@ -58,7 +122,30 @@ export default function TechLayout() {
   // so an "Add to Home Screen" install captures /tech as the launch URL. The
   // hint self-hides off iOS / when already installed; the Sign in button
   // continues to the shared admin/tech login.
-  if (!authed) {
+  if (authStatus === 'checking' || authStatus === 'error') {
+    return (
+      <div
+        role={authStatus === 'error' ? 'alert' : 'status'}
+        style={{
+          minHeight: '100vh',
+          background: DARK.bg,
+          color: DARK.text,
+          fontFamily: "'Nunito Sans', sans-serif",
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          textAlign: 'center',
+        }}
+      >
+        {authStatus === 'error'
+          ? 'Unable to verify staff access. Refresh to try again.'
+          : 'Verifying staff access…'}
+      </div>
+    );
+  }
+
+  if (authStatus === 'unauthenticated') {
     return (
       <div
         style={{

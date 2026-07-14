@@ -108,8 +108,19 @@ describe('Staff maintenance Socket.io interlock', () => {
 
   test('authenticates Staff normally while the interlock is disabled', async () => {
     process.env.STAFF_MAINTENANCE_MODE = 'false';
-    mockIdentityLookup({ id: 'tech-1', active: true, role: 'technician' });
-    const socket = socketWithToken(jwt.sign({ technicianId: 'tech-1', role: 'technician' }, SECRET));
+    mockIdentityLookup({
+      id: 'tech-1',
+      active: true,
+      role: 'technician',
+      auth_token_version: 2,
+      must_change_password: false,
+    });
+    const socket = socketWithToken(jwt.sign({
+      technicianId: 'tech-1',
+      role: 'technician',
+      type: 'access',
+      tokenVersion: 2,
+    }, SECRET));
 
     await expect(authorize(socket)).resolves.toBeNull();
     expect(socket.userType).toBe('technician');

@@ -13,9 +13,8 @@ import {
   Textarea,
   cn,
 } from "../../components/ui";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
-
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const STATUS_TABS = [
   { key: "open", label: "Open" },
@@ -517,17 +516,15 @@ export default function TriageInboxTabV2() {
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>
                     )}
 
-                    {item.recording_url && (
+                    {item.recording_available && recId && (
                       <div className="mt-2 bg-zinc-50 border-hairline rounded-md p-2">
                         <div className="flex items-center gap-1.5 text-11 text-ink-tertiary font-medium mb-1">
                           <PhoneCall size={11} strokeWidth={1.75} aria-hidden /> Recording
                         </div>
-                        <audio controls preload="none" className="w-full h-8">
-                          <source
-                            src={`${API_BASE}/admin/call-recordings/audio/${recId}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
-                            type="audio/mpeg"
-                          />
-                        </audio>
+                        <AuthenticatedCallAudio
+                          recordingId={recId}
+                          className="w-full h-8"
+                        />
                       </div>
                     )}
                   </div>

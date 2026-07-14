@@ -84,10 +84,17 @@ async function clockIn(technicianId, { lat, lng, notes, source } = {}) {
   // unique active-timer index can be installed after rollout.
   const entry = await db.transaction(async (trx) => {
     const technician = await trx('technicians')
-      .where({ id: technicianId })
+      .where({ id: technicianId, active: true })
       .forUpdate()
       .first('id');
-    if (!technician) throw new Error('Technician not found.');
+    if (!technician) {
+      const error = staffTimeHttpError(
+        409,
+        'Staff account is inactive; clock-in was cancelled.',
+      );
+      error.code = 'ACCOUNT_INACTIVE';
+      throw error;
+    }
 
     const existing = await trx('time_entries')
       .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })

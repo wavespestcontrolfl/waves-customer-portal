@@ -14,6 +14,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -36,9 +37,17 @@ async function staffCanViewSuppressed(req) {
     const header = String(req.headers.authorization || '');
     if (!header.startsWith('Bearer ')) return false;
     const decoded = jwt.verify(header.slice(7), config.jwt.secret);
-    if (!decoded.technicianId || decoded.scope === 'terminal') return false;
-    const tech = await db('technicians').where({ id: decoded.technicianId }).first('id', 'active');
-    return Boolean(tech && tech.active);
+    if (!isStaffAccessToken(decoded) || !decoded.technicianId || decoded.scope === 'terminal') return false;
+    const tech = await db('technicians')
+      .where({ id: decoded.technicianId })
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+    return Boolean(
+      tech
+      && tech.active
+      && ['admin', 'technician'].includes(tech.role)
+      && !tech.must_change_password
+      && staffTokenVersionMatches(decoded, tech)
+    );
   } catch {
     return false;
   }

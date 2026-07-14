@@ -66,6 +66,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar } from "./StickyActionBar";
+import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
 import {
   Card,
@@ -5816,10 +5817,9 @@ export default function Customer360ProfileV2({
                           {summary}
                         </div>
                       )}
-                      {rec?.url && rec?.sid && (
-                        <audio
-                          controls
-                          src={`${API_BASE}/admin/call-recordings/audio/${rec.sid}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
+                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
+                        <AuthenticatedCallAudio
+                          recordingId={rec?.sid || m.recordingSid}
                           className="mt-1.5 w-full h-8"
                         />
                       )}

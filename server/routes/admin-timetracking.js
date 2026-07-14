@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { etParts, etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
 const {
@@ -10,6 +11,10 @@ const {
   staffWorkDate,
   staffWorkDateSql,
 } = require('../utils/staff-time-work-date');
+const {
+  MAX_STAFF_EMAIL_LENGTH,
+  canonicalStaffEmail,
+} = require('../utils/staff-identity');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
 
@@ -48,41 +53,42 @@ function addCalendarDaysToYMD(ymd, days) {
 // requireTechOrAdmin, admin-only payroll/PII paths get requireAdmin.
 router.use(adminAuthenticate);
 
-// Allowlist of `technicians` columns safe to expose to tech-role
-// callers (other techs hitting GET /technicians for a roster view).
-// Allowlist over denylist — an unknown future column added to the
-// table (auth tokens, password resets, anything HR adds) defaults to
-// "not exposed" instead of "leaked until somebody updates the
-// denylist." password_hash specifically lives on this table.
-const PUBLIC_TECH_FIELDS = [
+// Positive response allowlists for `technicians`. Authentication state lives
+// on the same row as the team/payroll profile, so returning `technicians.*`
+// and deleting known secrets is unsafe: future auth columns would otherwise
+// become API fields by default.
+const TECH_ROSTER_RESPONSE_FIELDS = [
   'id', 'name', 'phone', 'email', 'role',
   'active', 'auto_flip_enabled',
   'avatar_url',
   'created_at', 'updated_at',
 ];
 
-function sanitizeTechForNonAdmin(tech) {
+const ADMIN_TECH_RESPONSE_FIELDS = [
+  ...TECH_ROSTER_RESPONSE_FIELDS,
+  'pay_rate', 'hire_date', 'job_title', 'employment_type',
+  'address', 'dob', 'emergency_contact_name',
+  'emergency_contact_phone', 'ssn_last4',
+  'fl_applicator_license', 'license_expiry', 'license_categories',
+  'applicator_printed_name',
+  'bouncie_imei', 'bouncie_vin', 'vehicle_name',
+];
+
+function pickTechResponseFields(tech, fields) {
+  if (!tech) return tech;
   const out = {};
-  for (const f of PUBLIC_TECH_FIELDS) {
+  for (const f of fields) {
     if (f in tech) out[f] = tech[f];
   }
   return out;
 }
 
-// Fields that should never leave the server in any response, even to
-// admin callers. password_hash exists on the technicians row for
-// portal-side auth — clients have no business case for receiving it
-// and a leaked hash makes offline brute-force possible against any
-// JWT-revoked rotation. Apply this stripper at every admin response
-// path that returns a raw `technicians.*` row (insert/update returning,
-// .first() lookups). Non-admin paths already exclude it via the
-// PUBLIC_TECH_FIELDS allowlist.
-const NEVER_RETURN_TECH_FIELDS = ['password_hash'];
-function stripPrivateTechFields(tech) {
-  if (!tech) return tech;
-  const out = { ...tech };
-  for (const f of NEVER_RETURN_TECH_FIELDS) delete out[f];
-  return out;
+function sanitizeTechForNonAdmin(tech) {
+  return pickTechResponseFields(tech, TECH_ROSTER_RESPONSE_FIELDS);
+}
+
+function sanitizeTechForAdmin(tech) {
+  return pickTechResponseFields(tech, ADMIN_TECH_RESPONSE_FIELDS);
 }
 
 // Authoritative admin check — reads from req.technician.role (the
@@ -491,7 +497,7 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
 // admin tokens get the full rows. Keeping the route accessible to
 // techs preserves the pre-existing dispatch/team-roster use cases
 // without exposing each coworker's wage, DOB, address, etc.
-router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
+async function listTechnicians(req, res, next) {
   try {
     const techs = await db('technicians').orderBy('active', 'desc').orderBy('name');
     // Presign photo_s3_key into avatar_url for the response. After
@@ -506,11 +512,13 @@ router.get('/technicians', requireTechOrAdmin, async (req, res, next) => {
         ...t,
         avatar_url: await resolveTechPhotoUrl(t.photo_s3_key, t.avatar_url),
       };
-      return callerIsAdmin ? stripPrivateTechFields(row) : sanitizeTechForNonAdmin(row);
+      return callerIsAdmin ? sanitizeTechForAdmin(row) : sanitizeTechForNonAdmin(row);
     }));
     res.json({ technicians: enriched });
   } catch (err) { next(err); }
-});
+}
+
+router.get('/technicians', requireTechOrAdmin, listTechnicians);
 
 // Map camelCase payroll-profile fields from the client to snake_case
 // columns. Each mapping is conditional — undefined leaves the column
@@ -536,19 +544,80 @@ function applyPayrollProfileFields(updates, body) {
   }
 }
 
+// Staff emails are authentication identifiers. Store one canonical form so
+// login/reset lookups cannot diverge on casing or surrounding whitespace.
+function normalizeTechnicianEmail(value) {
+  if (value === undefined) return { value: undefined };
+  if (value === null) return { value: null };
+  if (typeof value !== 'string') return { error: 'Email must be a string or null' };
+
+  if (!value.trim()) return { value: null };
+  const email = canonicalStaffEmail(value);
+  if (!email) {
+    return { error: `Email must be a valid address of ${MAX_STAFF_EMAIL_LENGTH} characters or fewer` };
+  }
+  return { value: email };
+}
+
+async function findTechnicianByCanonicalEmail(connection, email, excludeId) {
+  if (!email) return null;
+  let query = connection('technicians')
+    .whereNotNull('email')
+    .whereRaw('LOWER(BTRIM(email)) = ?', [email]);
+  if (excludeId) query = query.whereNot('id', excludeId);
+  return query.first('id');
+}
+
+// The staff table is small and identity mutations are rare. Serialize them to
+// make canonical-email uniqueness and last-admin checks race-safe.
+async function lockTechnicianMutations(trx) {
+  await trx.raw('LOCK TABLE technicians IN SHARE ROW EXCLUSIVE MODE');
+}
+
+function disconnectRevokedStaffSessions(technicianId, reason) {
+  try {
+    const { disconnectStaffSockets } = require('../sockets');
+    disconnectStaffSockets(technicianId, reason);
+  } catch (error) {
+    logger.error(`[team] Live-session disconnect failed for technician id=${technicianId} (${error.message})`);
+  }
+}
+
+async function deactivationBlocker(trx, target, actorId) {
+  if (!target.active) return null;
+  if (target.id === actorId) return 'You cannot deactivate your own staff account';
+  if (target.role !== 'admin') return null;
+
+  const otherActiveAdmin = await trx('technicians')
+    .where({ role: 'admin', active: true })
+    .whereNot('id', target.id)
+    .first('id');
+  if (!otherActiveAdmin) return 'The final active admin cannot be deactivated';
+  return null;
+}
+
 // POST /technicians — add a new technician. Admin only because the
 // payload now carries payroll/PII fields (pay_rate, DOB, address,
 // SSN-4, emergency contact). Pre-existing route protection was
 // requireTechOrAdmin; tightening to requireAdmin since we widened
 // the body shape.
-router.post('/technicians', requireAdmin, async (req, res, next) => {
+async function createTechnician(req, res, next) {
   try {
-    const { name, phone, email, autoFlipEnabled } = req.body;
-    if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+    const body = req.body || {};
+    const { name, phone, email, autoFlipEnabled } = body;
+    if (typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    const normalizedEmail = normalizeTechnicianEmail(email);
+    if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+    if (!normalizedEmail.value) {
+      return res.status(400).json({ error: 'An active technician requires a valid staff email' });
+    }
+
     const insertRow = {
       name: name.trim(),
       phone: phone || null,
-      email: email || null,
+      email: normalizedEmail.value ?? null,
       active: true,
     };
     // Honor the create-form's auto-flip checkbox. Without this, an
@@ -558,39 +627,139 @@ router.post('/technicians', requireAdmin, async (req, res, next) => {
     // the tech out. Falsy explicit value → false; undefined → leave
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
-    applyPayrollProfileFields(insertRow, req.body);
-    const [tech] = await db('technicians').insert(insertRow).returning('*');
+    applyPayrollProfileFields(insertRow, body);
+
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      if (insertRow.email && await findTechnicianByCanonicalEmail(trx, insertRow.email)) {
+        return { conflict: true };
+      }
+      const [tech] = await trx('technicians').insert(insertRow).returning('*');
+      return { tech };
+    });
+    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+
+    const { tech } = outcome;
     // Log id + structural state only; the row now carries payroll/PII
     // so names stay out of logs per AGENTS.md.
     logger.info(`[team] Added technician id=${tech.id} (auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: stripPrivateTechFields(tech) });
-  } catch (err) { next(err); }
-});
+    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    return next(err);
+  }
+}
+
+router.post('/technicians', requireAdmin, createTechnician);
 
 // PUT /technicians/:id — update a technician. Admin only — same
 // reasoning as POST: techs must not be able to edit their own (or
 // anyone else's) pay rate, DOB, SSN, address, or emergency contact.
-router.put('/technicians/:id', requireAdmin, async (req, res, next) => {
+async function updateTechnician(req, res, next) {
   try {
-    const { name, phone, email, active, autoFlipEnabled } = req.body;
-    const updates = {};
-    if (name !== undefined) updates.name = name.trim();
-    if (phone !== undefined) updates.phone = phone;
-    if (email !== undefined) updates.email = email;
-    if (active !== undefined) updates.active = active;
-    // Per-tech auto-flip opt-out (Phase 2E). When false, the geofence
-    // EXIT auto-flip pipeline skips this tech entirely with
-    // action_taken='auto_flip_skipped_tech_disabled'. Default TRUE on
-    // the column so existing rows keep current behavior.
-    if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
-    applyPayrollProfileFields(updates, req.body);
-    updates.updated_at = new Date();
-    await db('technicians').where({ id: req.params.id }).update(updates);
-    const tech = await db('technicians').where({ id: req.params.id }).first();
+    const body = req.body || {};
+    const { name, phone, email, active, autoFlipEnabled } = body;
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+      return res.status(400).json({ error: 'Name cannot be empty' });
+    }
+    if (active !== undefined && typeof active !== 'boolean') {
+      return res.status(400).json({ error: 'active must be a boolean' });
+    }
+    const normalizedEmail = normalizeTechnicianEmail(email);
+    if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+
+    const outcome = await db.transaction(async (trx) => {
+      // Every Staff identity writer takes the table lock before a row lock.
+      // Keeping one global order avoids deadlocks with password reset/register.
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
+
+      const storedEmail = canonicalStaffEmail(target.email);
+      const resultingEmail = email === undefined ? storedEmail : normalizedEmail.value;
+      const resultingActive = active === undefined ? Boolean(target.active) : active;
+      if (resultingActive && !resultingEmail) return { missingEmail: true };
+
+      if (active === false) {
+        const blocker = await deactivationBlocker(trx, target, req.technicianId);
+        if (blocker) return { blocker };
+        const activeTimer = await trx('time_entries')
+          .where({ technician_id: target.id, status: 'active' })
+          .forUpdate()
+          .first('id');
+        if (activeTimer) return { activeTimer: true };
+      }
+      if (normalizedEmail.value && await findTechnicianByCanonicalEmail(
+        trx,
+        normalizedEmail.value,
+        target.id,
+      )) {
+        return { conflict: true };
+      }
+
+      const updates = {};
+      if (name !== undefined) updates.name = name.trim();
+      if (phone !== undefined) updates.phone = phone || null;
+      if (email !== undefined) updates.email = normalizedEmail.value;
+      if (active !== undefined) updates.active = active;
+
+      const activeChanged = active !== undefined && active !== Boolean(target.active);
+      const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
+      const credentialsChanged = activeChanged || emailChanged;
+      if (credentialsChanged) {
+        updates.auth_token_version = Number(target.auth_token_version || 0) + 1;
+        updates.password_reset_token_hash = null;
+        updates.password_reset_expires_at = null;
+        updates.password_reset_requested_at = null;
+      }
+      if (autoFlipEnabled !== undefined) updates.auto_flip_enabled = !!autoFlipEnabled;
+      applyPayrollProfileFields(updates, body);
+      updates.updated_at = new Date();
+      await trx('technicians').where({ id: target.id }).update(updates);
+
+      const revokeAccess = credentialsChanged || active === false;
+      if (revokeAccess) await PushService.deactivateStaffUser(target.id, trx);
+      const tech = await trx('technicians').where({ id: target.id }).first();
+      return {
+        tech,
+        revokeAccess,
+        revocationReason: active === false
+          ? 'account_deactivated'
+          : activeChanged
+            ? 'account_status_changed'
+            : 'email_changed',
+      };
+    });
+
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.missingEmail) {
+      return res.status(400).json({ error: 'An active technician requires a valid staff email' });
+    }
+    if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
+    if (outcome.activeTimer) {
+      return res.status(409).json({
+        error: 'Close every active time entry before deactivating this staff account',
+        code: 'ACTIVE_TIME_ENTRIES',
+      });
+    }
+    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+
+    const { tech } = outcome;
+    if (outcome.revokeAccess) {
+      disconnectRevokedStaffSessions(tech.id, outcome.revocationReason);
+    }
     logger.info(`[team] Updated technician id=${tech.id} (active=${tech.active}, auto_flip_enabled=${tech.auto_flip_enabled})`);
-    res.json({ success: true, technician: stripPrivateTechFields(tech) });
-  } catch (err) { next(err); }
-});
+    return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    return next(err);
+  }
+}
+
+router.put('/technicians/:id', requireAdmin, updateTechnician);
 
 // GET /technicians/:id/earnings — hours × pay_rate breakdown for a
 // window. OT pays at 1.5×. Falls back to $35/hr if pay_rate is unset
@@ -773,7 +942,7 @@ router.post(
       const { resolveTechPhotoUrl } = require('../services/tech-photo');
       updated.avatar_url = await resolveTechPhotoUrl(updated.photo_s3_key, updated.avatar_url);
 
-      const responseRow = isAdminCaller(req) ? stripPrivateTechFields(updated) : sanitizeTechForNonAdmin(updated);
+      const responseRow = isAdminCaller(req) ? sanitizeTechForAdmin(updated) : sanitizeTechForNonAdmin(updated);
       res.json({ success: true, technician: responseRow });
     } catch (err) {
       logger.error(`[team] Tech photo upload failed: ${err.message}`);
@@ -782,69 +951,65 @@ router.post(
   }
 );
 
-// DELETE /technicians/:id — hard delete the technician row.
-// If related records exist (time entries, assignments) the DB FK
-// will error; the client surfaces that message. Admin only — the
-// row now carries payroll/PII and the ?force=true branch can purge
-// related records, so tech-role tokens have no business calling
-// this.
-router.delete('/technicians/:id', requireAdmin, async (req, res, next) => {
-  const force = String(req.query.force || '') === 'true';
+// DELETE /technicians/:id — compatibility alias for deactivation. A staff id
+// is historical identity for time, payroll, jobs, compliance, and audit rows;
+// even ?force=true must never turn this endpoint into a data purge.
+async function deactivateTechnician(req, res, next) {
   try {
-    if (!force) {
-      const deleted = await db('technicians').where({ id: req.params.id }).del();
-      if (!deleted) return res.status(404).json({ error: 'Technician not found' });
-      logger.info(`[team] Deleted technician: ${req.params.id}`);
-      return res.json({ success: true });
-    }
+    const outcome = await db.transaction(async (trx) => {
+      await lockTechnicianMutations(trx);
+      const target = await trx('technicians')
+        .where({ id: req.params.id })
+        .forUpdate()
+        .first();
+      if (!target) return { notFound: true };
 
-    // Force delete — cascade-clean every FK reference using information_schema.
-    const techId = req.params.id;
-    const tech = await db('technicians').where({ id: techId }).first();
-    if (!tech) return res.status(404).json({ error: 'Technician not found' });
+      const blocker = await deactivationBlocker(trx, target, req.technicianId);
+      if (blocker) return { blocker };
+      const activeTimer = await trx('time_entries')
+        .where({ technician_id: target.id, status: 'active' })
+        .forUpdate()
+        .first('id');
+      if (activeTimer) return { activeTimer: true };
 
-    const fks = await db.raw(`
-      SELECT tc.table_name, kcu.column_name, c.is_nullable
-      FROM information_schema.table_constraints tc
-      JOIN information_schema.key_column_usage kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-      JOIN information_schema.constraint_column_usage ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-      JOIN information_schema.columns c
-        ON c.table_name = tc.table_name
-       AND c.column_name = kcu.column_name
-       AND c.table_schema = tc.table_schema
-      WHERE tc.constraint_type = 'FOREIGN KEY'
-        AND ccu.table_name = 'technicians'
-        AND ccu.column_name = 'id'
-    `);
-
-    const purged = [];
-    await db.transaction(async (trx) => {
-      for (const row of fks.rows) {
-        const { table_name, column_name, is_nullable } = row;
-        if (is_nullable === 'YES') {
-          const n = await trx(table_name).where({ [column_name]: techId }).update({ [column_name]: null });
-          purged.push({ table: table_name, column: column_name, action: 'nulled', rows: n });
-        } else {
-          const n = await trx(table_name).where({ [column_name]: techId }).del();
-          purged.push({ table: table_name, column: column_name, action: 'deleted', rows: n });
-        }
+      if (target.active) {
+        await trx('technicians').where({ id: target.id }).update({
+          active: false,
+          auth_token_version: Number(target.auth_token_version || 0) + 1,
+          password_reset_token_hash: null,
+          password_reset_expires_at: null,
+          password_reset_requested_at: null,
+          updated_at: new Date(),
+        });
       }
-      await trx('technicians').where({ id: techId }).del();
+      await PushService.deactivateStaffUser(target.id, trx);
+      const tech = target.active
+        ? await trx('technicians').where({ id: target.id }).first()
+        : target;
+      return { tech, changed: Boolean(target.active) };
     });
 
-    logger.warn(`[team] FORCE deleted technician ${tech.email || techId}: ${JSON.stringify(purged)}`);
-    res.json({ success: true, forced: true, cleaned: purged });
-  } catch (err) {
-    if (err.code === '23503' && !force) {
-      return res.status(409).json({ error: 'Technician has linked records (time entries or jobs). Deactivate instead, or retry with ?force=true to purge related data.' });
+    if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.blocker) return res.status(409).json({ error: outcome.blocker });
+    if (outcome.activeTimer) {
+      return res.status(409).json({
+        error: 'Close every active time entry before deactivating this staff account',
+        code: 'ACTIVE_TIME_ENTRIES',
+      });
     }
-    next(err);
+    disconnectRevokedStaffSessions(outcome.tech.id, 'account_deactivated');
+    if (outcome.changed) logger.info(`[team] Deactivated technician id=${outcome.tech.id}`);
+    return res.json({
+      success: true,
+      deactivated: true,
+      technician: sanitizeTechForAdmin(outcome.tech),
+    });
+  } catch (err) {
+    return next(err);
   }
-});
+}
+
+router.delete('/technicians/:id', requireAdmin, deactivateTechnician);
 
 // =============================================================================
 // COMPANY DOCUMENTS — admin-only internal docs (SOPs, onboarding, offer letters)
@@ -1005,3 +1170,9 @@ router._test = {
 };
 
 module.exports = router;
+module.exports._handlers = {
+  createTechnician,
+  deactivateTechnician,
+  listTechnicians,
+  updateTechnician,
+};
