@@ -63,6 +63,10 @@ const REANCHOR_PULLFORWARD_DAYS = Math.max(
   Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
 );
 
+// Customer-quoted arrival window: 2 hours from window_start (owner rule —
+// the same promise the page, reminders, and the late detector all quote).
+const ARRIVAL_PROMISE_MINUTES = 120;
+
 // Days the target date sits EARLIER than the visit's current date (negative
 // for push-backs). Both args are YYYY-MM-DD strings; UTC-noon parse avoids
 // DST edges.
@@ -73,8 +77,13 @@ function pullForwardDays(currentDateStr, targetDateStr) {
   return Math.round((cur - tgt) / 86400000);
 }
 
+// True cadence membership ONLY. Booster-month extras share
+// recurring_parent_id but carry is_recurring=false (admin-schedule booster
+// creation — "the auto-extend path leaves them alone"), and moving a booster
+// must never shift the underlying base plan. Genuine child occurrences carry
+// is_recurring=true themselves, so the flag alone is the right gate.
 function isSeriesVisit(svc) {
-  return !!(svc?.is_recurring || svc?.recurring_parent_id);
+  return !!svc?.is_recurring;
 }
 
 // True when committing `targetDateStr` for this visit re-anchors the series.
@@ -152,13 +161,24 @@ function eligibility(svc, now = new Date()) {
   const todayEt = etDateString(now);
   if (dateStr && dateStr < todayEt) return { ok: true, missed: true };
   if (dateStr === todayEt) {
-    // Same-day appointment whose window already elapsed in ET is equally a
-    // missed visit — offer the rebook rather than a dead end.
-    const cutoff = hhmm(svc.window_end) || hhmm(svc.window_start);
-    if (cutoff) {
+    // Same-day: the visit is only MISSED once BOTH the internal job block
+    // (window_end) AND the customer-quoted arrival promise (window_start +
+    // 2h — owner rule, same constant the page displays) have elapsed.
+    // window_end alone is often just the job-duration block: a 9:00 visit
+    // with window_end 10:00 is still legitimately "on the way" at 10:05
+    // inside the quoted 9–11 arrival window, and must not read as missed.
+    const toMin = (t) => {
+      const [h, m] = String(t).split(':').map(Number);
+      return h * 60 + (m || 0);
+    };
+    const candidates = [];
+    const start = hhmm(svc.window_start);
+    const end = hhmm(svc.window_end);
+    if (end) candidates.push(toMin(end));
+    if (start) candidates.push(toMin(start) + ARRIVAL_PROMISE_MINUTES);
+    if (candidates.length) {
       const nowEt = etParts(now);
-      const [ch, cm] = cutoff.split(':').map(Number);
-      if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
+      if (Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute) {
         return { ok: true, missed: true };
       }
     }
@@ -266,11 +286,13 @@ router.get('/:token', async (req, res, next) => {
       reason: elig.ok ? null : elig.reason,
       customerFirstName: svc.cust_first_name || null,
       service: { type: svc.service_type || 'service' },
-      // A recurring visit moves only this date — UNLESS the customer pulls
-      // it forward by ≥ reanchorPullForwardDays, which shifts the whole
-      // series (owner ruling 2026-07-13). The client uses the threshold to
-      // warn before Confirm; the POST enforces it regardless.
-      isRecurring: isSeriesVisit(svc),
+      // isRecurring drives the "only this visit moves" note and includes
+      // boosters (they belong to a plan even though they never re-anchor it).
+      // reanchorPullForwardDays is the re-anchor threshold and is series-only:
+      // pulls ≥ this many days forward shift the whole series (owner ruling
+      // 2026-07-13). The client uses it to warn before Confirm; the POST
+      // enforces the same rule regardless.
+      isRecurring: !!(svc.is_recurring || svc.recurring_parent_id),
       reanchorPullForwardDays: isSeriesVisit(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
@@ -463,7 +485,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           date,
           newWindow,
           'customer_request',
-          'customer_self_serve'
+          'customer_self_serve',
+          // Anchor keeps the tech whose route offered the slot (the
+          // rebooker applies it with the same lock + overlap guard the
+          // single path uses); siblings keep their existing techs.
+          { technicianId: slot.technician_id }
         )
         : await SmartRebooker.reschedule(
           svc.id,
@@ -585,6 +611,56 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.error(`[reschedule-public] board broadcast failed for ${svc.id}: ${err.message}`);
     }
 
+    // Series-shift conflict sweep (best-effort, detection not blocking).
+    // The anchor was validated against live availability (and the rebooker
+    // re-guards it under the advisory lock), but recomputed SIBLING dates
+    // land months out where the route hasn't been planned — same posture as
+    // the admin series path, which doesn't pre-validate siblings either.
+    // Owner model is hands-off + exception-based: commit the shift, then
+    // park any sibling that landed on an already-booked window as an admin
+    // notification for a one-click fix from dispatch.
+    let siblingConflicts = [];
+    if (shiftedOccurrences && shiftedOccurrences.length > 1) {
+      try {
+        for (const occ of shiftedOccurrences.slice(1)) {
+          const occDate = String(occ.date).split('T')[0];
+          const occStart = hhmm(occ.windowStart);
+          const occEnd = hhmm(occ.windowEnd) || occStart;
+          if (!occStart) continue;
+          const row = await db('scheduled_services').where({ id: occ.id }).first('technician_id');
+          if (!row?.technician_id) continue;
+          const clash = await db('scheduled_services')
+            .where('scheduled_date', occDate)
+            .where('technician_id', row.technician_id)
+            .whereNot('id', occ.id)
+            .whereNotIn('status', ['cancelled', 'completed'])
+            .where((q) => {
+              q.whereNull('reservation_expires_at')
+                .orWhereRaw('reservation_expires_at > NOW()');
+            })
+            .whereRaw(
+              "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+              [occEnd, occStart],
+            )
+            .first('id');
+          if (clash) siblingConflicts.push({ id: occ.id, date: occDate, conflictsWith: clash.id });
+        }
+        if (siblingConflicts.length) {
+          logger.warn(`[reschedule-public] series re-anchor for ${svc.id} produced ${siblingConflicts.length} sibling conflict(s): ${JSON.stringify(siblingConflicts)}`);
+          const NotificationService = require('../services/notification-service');
+          await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Series re-anchor needs a look',
+            `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} pulled a recurring visit forward and ${siblingConflicts.length} shifted future visit(s) landed on already-booked windows (${siblingConflicts.map((c) => c.date).join(', ')}). Rebalance from dispatch.`,
+            { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
+          );
+        }
+      } catch (err) {
+        logger.warn(`[reschedule-public] sibling conflict sweep failed for ${svc.id}: ${err.message}`);
+        siblingConflicts = [];
+      }
+    }
+
     // Office alert — same internal ping a new self-booked appointment fires.
     try {
       if (process.env.ADAM_PHONE) {
@@ -594,7 +670,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
         const seriesNote = shiftedOccurrences
-          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted`
+          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} landed on busy windows (see bell)` : ''}`
           : '';
         await TwilioService.sendSMS(
           process.env.ADAM_PHONE,

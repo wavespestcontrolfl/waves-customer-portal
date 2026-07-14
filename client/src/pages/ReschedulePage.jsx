@@ -569,10 +569,15 @@ function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, subm
                     {submitting ? 'Moving…' : `Confirm ${'→'}`}
                   </button>
                 ) : null}
+                {picked && reanchorNote ? (
+                  // Inside the picked row (full-width grid item) so the
+                  // heads-up sits directly under the Confirm it applies to —
+                  // never below the fold behind later slots.
+                  <div style={{ gridColumn: '1 / -1' }}><ReanchorNote /></div>
+                ) : null}
               </div>
             );
           })}
-          {reanchorNote ? <ReanchorNote /> : null}
         </div>
       )}
     </Card>

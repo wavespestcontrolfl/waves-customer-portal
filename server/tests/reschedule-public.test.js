@@ -52,13 +52,25 @@ describe('reschedule-public eligibility', () => {
       .toEqual({ ok: false, reason: 'completed' });
   });
 
-  test('same-day appointment whose window elapsed in ET is missed, not dead', () => {
+  test('same-day appointment is missed only after the QUOTED arrival window (start + 2h), not the job block', () => {
+    // 8:00 start, job block ends 10:00, arrival promise ran to 10:00 —
+    // by 12:00 ET it is genuinely missed.
     expect(eligibility({
       status: 'confirmed',
       scheduled_date: '2026-07-02',
       window_start: '08:00:00',
       window_end: '10:00:00',
     }, NOW)).toEqual({ ok: true, missed: true });
+    // 10:30 start with job block ending 11:00: at 12:00 ET the job block has
+    // elapsed but the quoted 10:30–12:30 arrival window has NOT — the tech
+    // may still legitimately arrive, so it's a plain reschedulable visit,
+    // never "we missed each other" (codex P2 2026-07-13).
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-02',
+      window_start: '10:30:00',
+      window_end: '11:00:00',
+    }, NOW)).toEqual({ ok: true });
   });
 
   test('same-day appointment with a window still ahead stays reschedulable', () => {
@@ -114,8 +126,11 @@ describe('reschedule-public series re-anchor rule', () => {
     expect(shouldReanchor(recurring, '2026-08-20')).toBe(false);
     // Non-recurring visits never re-anchor regardless of distance.
     expect(shouldReanchor({ is_recurring: false, scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(false);
-    // A child occurrence (recurring_parent_id set) counts as series too.
-    expect(shouldReanchor({ recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(true);
+    // A genuine child occurrence carries is_recurring itself and re-anchors.
+    expect(shouldReanchor({ is_recurring: true, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(true);
+    // BOOSTER extras share recurring_parent_id but are is_recurring=false —
+    // moving one must NEVER shift the base plan (codex P1 2026-07-13).
+    expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(false);
   });
 });
 

@@ -548,6 +548,44 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
           ...(isLiveAnchor ? LIVE_LIFECYCLE_RESET : {}),
         };
+        // The ANCHOR may carry a caller-chosen technician (the customer
+        // self-serve path validated its slot against a specific tech's
+        // route — dropping that assignment would bypass the slot's
+        // conflict guarantee and strand the chosen opening). Same
+        // advisory-lock + overlap guard as the single-visit path, scoped
+        // to the anchor; siblings keep their existing techs. Callers that
+        // omit the option (admin series shifts) are unaffected.
+        if (occurrenceIndex === 0 && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          updateData.technician_id = options.technicianId || null;
+          const anchorEnd = updateData.window_end;
+          if (options.technicianId && updateData.window_start && anchorEnd) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
+            );
+            const overlap = await trx('scheduled_services')
+              .where('scheduled_date', date)
+              .where('technician_id', options.technicianId)
+              .whereNot('id', sib.id)
+              .whereNotIn('status', ['cancelled', 'completed'])
+              .where((q) => {
+                q.whereNull('reservation_expires_at')
+                  .orWhereRaw('reservation_expires_at > NOW()');
+              })
+              .whereRaw(
+                "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+                [anchorEnd, updateData.window_start],
+              )
+              .first('id');
+            if (overlap) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+          }
+        }
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
           trx,
           date,
