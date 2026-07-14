@@ -96,6 +96,11 @@ function enqueue(table, cfg) {
   (queues[table] = queues[table] || []).push(cfg);
 }
 
+// enqueueJob is a single raw INSERT ... SELECT (atomic lifecycle guard).
+// Calls land here; results come from jobInsertResults (default = queued).
+const rawJobs = [];
+let jobInsertResults;
+
 const NOW = new Date('2026-06-10T15:00:00Z');
 const H = 3600000;
 const MIN = 60000;
@@ -119,6 +124,8 @@ function baseEstimate(overrides = {}) {
     customer_name: 'Taylor Doe',
     customer_email: 'taylor@example.com',
     token: 'tok-xyz',
+    sent_at: new Date(NOW.getTime() - 100 * H),
+    expires_at: new Date(NOW.getTime() + 5 * 86400000),
     viewed_at: new Date(NOW.getTime() - 80 * H),
     last_viewed_at: new Date(NOW.getTime() - 80 * H),
     ...overrides,
@@ -144,8 +151,17 @@ const HOT_RULE = RULE_ROWS[0];
 beforeEach(() => {
   jest.clearAllMocks();
   writes.length = 0;
+  rawJobs.length = 0;
+  jobInsertResults = [];
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  db.raw.mockImplementation((sql, bindings) => {
+    if (typeof sql === 'string' && sql.includes('INSERT INTO estimate_followup_jobs')) {
+      rawJobs.push({ sql, bindings });
+      return Promise.resolve({ rows: jobInsertResults.shift() ?? [{ id: 'job-1' }] });
+    }
+    return sql;
+  });
   isEnabled.mockReturnValue(true);
   inferEstimateServiceLines.mockReturnValue([{ key: 'pest' }]);
   customerConvertedSince.mockResolvedValue({ converted: false });
@@ -165,16 +181,16 @@ describe('onEstimateViewed (view-event rules)', () => {
       session('2026-06-10T12:00:00Z', '2026-06-10T12:10:00Z'),
       session('2026-06-10T14:55:00Z'),
     ]);
-    enqueue('estimate_followup_sends', { first: undefined }); // not already sent
-    enqueue('estimate_followup_jobs', { first: undefined });     // no prior terminal job
-    enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
-    const jobInsert = writes.find((w) => w.table === 'estimate_followup_jobs');
-    expect(jobInsert.payload).toEqual(expect.objectContaining({ estimate_id: 'est-1', rule_key: 'return_visit_hot' }));
-    // due ≈ session start evaluation time + 15min fire delay
-    expect(jobInsert.payload.due_at).toBeInstanceOf(Date);
+    expect(rawJobs).toHaveLength(1);
+    expect(rawJobs[0].sql).toContain('NOT EXISTS');
+    const [estimateId, ruleKey, dueAt] = rawJobs[0].bindings;
+    expect(estimateId).toBe('est-1');
+    expect(ruleKey).toBe('return_visit_hot');
+    // due ≈ evaluation time + 15min fire delay
+    expect(dueAt).toBeInstanceOf(Date);
   });
 
   test('a return after 4 days dark queues dark_then_return, NOT return_visit_hot', async () => {
@@ -183,14 +199,10 @@ describe('onEstimateViewed (view-event rules)', () => {
       session('2026-06-06T12:00:00Z', '2026-06-06T12:10:00Z'),
       session('2026-06-10T14:55:00Z'),
     ]);
-    enqueue('estimate_followup_sends', { first: undefined });
-    enqueue('estimate_followup_jobs', { first: undefined });
-    enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
-    const jobKeys = writes.filter((w) => w.table === 'estimate_followup_jobs').map((w) => w.payload.rule_key);
-    expect(jobKeys).toEqual(['dark_then_return']);
+    expect(rawJobs.map((j) => j.bindings[1])).toEqual(['dark_then_return']);
   });
 
   test('three sessions inside 72h queue multi_view_high_intent', async () => {
@@ -201,41 +213,27 @@ describe('onEstimateViewed (view-event rules)', () => {
       session('2026-06-10T14:55:00Z'),
     ]);
     // high intent is the only match (3 sessions ≠ exactly 2; last gap < 3d)
-    enqueue('estimate_followup_sends', { first: undefined });
-    enqueue('estimate_followup_jobs', { first: undefined });
-    enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
-    const jobKeys = writes.filter((w) => w.table === 'estimate_followup_jobs').map((w) => w.payload.rule_key);
-    expect(jobKeys).toEqual(['multi_view_high_intent']);
+    expect(rawJobs.map((j) => j.bindings[1])).toEqual(['multi_view_high_intent']);
   });
 
-  test('already-sent rules never re-enqueue', async () => {
+  test('prior send or terminal job suppresses the enqueue inside ONE statement', async () => {
     enqueueViewRules();
     sessionsForEstimate.mockResolvedValue([
       session('2026-06-10T12:00:00Z', '2026-06-10T12:10:00Z'),
       session('2026-06-10T14:55:00Z'),
     ]);
-    enqueue('estimate_followup_sends', { first: { id: 'sent-already' } });
+    jobInsertResults.push([]); // NOT EXISTS guard (send or terminal job) blocked it
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
-    expect(writes.filter((w) => w.table === 'estimate_followup_jobs')).toHaveLength(0);
-  });
-
-  test('a shadow-consumed (terminal) job blocks re-enqueue — one lifecycle per estimate+rule', async () => {
-    enqueueViewRules();
-    sessionsForEstimate.mockResolvedValue([
-      session('2026-06-10T12:00:00Z', '2026-06-10T12:10:00Z'),
-      session('2026-06-10T14:55:00Z'),
-    ]);
-    enqueue('estimate_followup_sends', { first: undefined });
-    enqueue('estimate_followup_jobs', { first: { id: 'prior-shadow-job' } }); // consumed last tick
-
-    await Engine.onEstimateViewed(baseEstimate(), NOW);
-
-    expect(writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'insert')).toHaveLength(0);
+    // The statement itself carries both guards — atomic with the insert.
+    expect(rawJobs).toHaveLength(1);
+    expect(rawJobs[0].sql).toContain('FROM estimate_followup_jobs');
+    expect(rawJobs[0].sql).toContain('FROM estimate_followup_sends');
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('queued'));
   });
 
   test('terminal/archived/email-less estimates never evaluate', async () => {
@@ -411,6 +409,70 @@ describe('processDueJobs', () => {
     enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'delivery_unopened_24h' })] });
     enqueue('estimate_followup_rules', { rows: [UNOPENED_RULE] });
     enqueue('estimates', { first: baseEstimate({ status: 'viewed' }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('an unopened job goes stale after a RESEND (sent_at age re-checked)', async () => {
+    const UNOPENED_RULE = { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_unopened', params: {} };
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'delivery_unopened_24h' })] });
+    enqueue('estimate_followup_rules', { rows: [UNOPENED_RULE] });
+    enqueue('estimates', { first: baseEstimate({ status: 'sent', viewed_at: null, last_viewed_at: null, sent_at: new Date(NOW.getTime() - 2 * H) }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('a legacy-lane unviewed claim suppresses the engine unopened email', async () => {
+    const UNOPENED_RULE = { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_unopened', params: {} };
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'delivery_unopened_24h' })] });
+    enqueue('estimate_followup_rules', { rows: [UNOPENED_RULE] });
+    enqueue('estimates', { first: baseEstimate({ status: 'sent', viewed_at: null, last_viewed_at: null, followup_unviewed_sent: true }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('a resend resets the gone-quiet clock', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({ sent_at: new Date(NOW.getTime() - 1 * H) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('a lapsed expires_at skips BEFORE the daily sweep flips status', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({ expires_at: new Date(NOW.getTime() - 1 * H) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
+  });
+
+  test('a legacy-lane expiring claim suppresses the engine expiring email', async () => {
+    const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });
+    enqueue('estimate_followup_rules', { rows: [EXPIRING_RULE] });
+    enqueue('estimates', { first: baseEstimate({ expires_at: new Date(NOW.getTime() + 1 * 86400000), followup_expiring_sent: true }) });
 
     const result = await Engine.processDueJobs(NOW);
 

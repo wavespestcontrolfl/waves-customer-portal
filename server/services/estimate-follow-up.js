@@ -795,7 +795,17 @@ const EstimateFollowUp = {
           q
             .where("followup_unviewed_sent", false)
             .orWhereNull("followup_unviewed_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's
+        // delivery_unopened_24h rule targets the same non-view — one
+        // unopened nudge per estimate across both lanes. (The engine's
+        // sweep/predicate mirror this via followup_unviewed_sent.)
+        .whereNotExists(function excludeEngineUnopened() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .where("estimate_followup_sends.rule_key", "delivery_unopened_24h");
+        });
 
       for (const est of unviewed) {
         let claimed = false;
@@ -1043,7 +1053,19 @@ const EstimateFollowUp = {
           q
             .where("followup_expiring_sent", false)
             .orWhereNull("followup_expiring_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's expiring_*
+        // rules target the same deadline — one expiry reminder per estimate
+        // across both lanes. (The engine mirrors via followup_expiring_sent.)
+        .whereNotExists(function excludeEngineExpiring() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .whereIn("estimate_followup_sends.rule_key", [
+              "expiring_engaged",
+              "expiring_never_viewed",
+            ]);
+        });
 
       for (const est of expiring) {
         let claimed = false;

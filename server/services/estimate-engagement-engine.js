@@ -118,26 +118,31 @@ function categoryEligible(est, rule) {
 // candidate, inflating volume counts and letting a shadow-consumed
 // candidate send after a mid-window gate flip).
 async function enqueueJob(estimateId, rule, dueAt, trigger) {
-  const alreadySent = await db('estimate_followup_sends')
-    .where({ estimate_id: estimateId, rule_key: rule.rule_key })
-    .first('id');
-  if (alreadySent) return false;
-  const priorJob = await db('estimate_followup_jobs')
-    .where({ estimate_id: estimateId, rule_key: rule.rule_key })
-    .whereNot({ status: 'pending' })
-    .first('id');
-  if (priorJob) return false;
-  const rows = await db('estimate_followup_jobs')
-    .insert({
-      estimate_id: estimateId,
-      rule_key: rule.rule_key,
-      due_at: dueAt,
-      trigger: JSON.stringify(trigger || {}),
-    })
-    .onConflict(db.raw("(estimate_id, rule_key) WHERE status = 'pending'"))
-    .ignore()
-    .returning('id');
-  return Array.isArray(rows) && rows.length === 1;
+  // Single statement (codex 2736 r2): the NOT EXISTS guards evaluate in the
+  // same snapshot as the insert, so a processor flipping the prior row from
+  // pending → shadow/done between a separate lookup and the insert can't
+  // resurrect a consumed lifecycle. The pending partial-unique conflict
+  // clause still backstops two concurrent view hooks racing each other.
+  const result = await db.raw(
+    `INSERT INTO estimate_followup_jobs (estimate_id, rule_key, due_at, trigger)
+     SELECT ?, ?, ?, ?::jsonb
+     WHERE NOT EXISTS (
+       SELECT 1 FROM estimate_followup_jobs
+       WHERE estimate_id = ? AND rule_key = ?
+     )
+     AND NOT EXISTS (
+       SELECT 1 FROM estimate_followup_sends
+       WHERE estimate_id = ? AND rule_key = ?
+     )
+     ON CONFLICT (estimate_id, rule_key) WHERE status = 'pending' DO NOTHING
+     RETURNING id`,
+    [
+      estimateId, rule.rule_key, dueAt, JSON.stringify(trigger || {}),
+      estimateId, rule.rule_key,
+      estimateId, rule.rule_key,
+    ],
+  );
+  return (result?.rows?.length || 0) === 1;
 }
 
 // ── View hook ────────────────────────────────────────────────────────────
@@ -208,27 +213,36 @@ async function sweepTimeRules(now = new Date()) {
         })
         .select('estimates.id');
       if (rule.rule_key === 'delivery_unopened_24h') {
+        // Legacy-lane dedupe: skip estimates the 2h cron's unviewed stage
+        // already claimed (followup_unviewed_sent) — see the predicate.
         q = q.where({ status: 'sent' })
           .whereNull('viewed_at')
           .where('sent_at', '<', new Date(nowMs - p.minAgeHours * 3600000))
-          .where('sent_at', '>', new Date(nowMs - p.maxAgeHours * 3600000));
+          .where('sent_at', '>', new Date(nowMs - p.maxAgeHours * 3600000))
+          .where((sub) => sub.where('followup_unviewed_sent', false).orWhereNull('followup_unviewed_sent'));
       } else if (rule.rule_key === 'viewed_gone_quiet_72h') {
+        // Quiet from the latest TOUCH: a resend (sent_at bump) resets the
+        // window, so require sent_at outside it too (null sent_at passes —
+        // the view timestamps carry the window alone).
         q = q.where({ status: 'viewed' })
           .whereNotNull('last_viewed_at')
           .where('last_viewed_at', '<', new Date(nowMs - p.minQuietHours * 3600000))
-          .where('last_viewed_at', '>', new Date(nowMs - p.maxQuietHours * 3600000));
+          .where('last_viewed_at', '>', new Date(nowMs - p.maxQuietHours * 3600000))
+          .where((sub) => sub.whereNull('sent_at').orWhere('sent_at', '<', new Date(nowMs - p.minQuietHours * 3600000)));
       } else if (rule.rule_key === 'expiring_engaged') {
         q = q.whereIn('status', ACTIVE_STATUSES)
           .whereNotNull('viewed_at')
           .whereNotNull('expires_at')
           .where('expires_at', '>', now)
-          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000));
+          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))
+          .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else if (rule.rule_key === 'expiring_never_viewed') {
         q = q.whereIn('status', ACTIVE_STATUSES)
           .whereNull('viewed_at')
           .whereNotNull('expires_at')
           .where('expires_at', '>', now)
-          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000));
+          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))
+          .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else {
         continue; // unknown sweep rule — nothing to scan
       }
@@ -259,13 +273,28 @@ function rulePredicateStillHolds(est, rule, nowMs) {
   const p = rule.params;
   if (rule.trigger_type !== 'time_sweep') return true;
   if (rule.rule_key === 'delivery_unopened_24h') {
+    // sent_at age re-checked (codex 2736 r2): a resend stamps sent_at=now,
+    // so a job queued from the OLD delivery must not fire minutes into the
+    // new one. Legacy-lane dedupe: the 2h cron's unviewed stage claims
+    // followup_unviewed_sent — one unopened nudge per estimate across lanes.
+    if (est.followup_unviewed_sent) return false;
+    const sentAt = est.sent_at ? new Date(est.sent_at).getTime() : 0;
+    if (!sentAt || nowMs - sentAt < p.minAgeHours * 3600000) return false;
     return est.status === 'sent' && !est.viewed_at;
   }
   if (rule.rule_key === 'viewed_gone_quiet_72h') {
+    // Quiet is measured from the latest TOUCH — view or (re)send. A resend
+    // resets the clock (codex 2736 r2): the customer gets the full quiet
+    // window to react to the fresh delivery.
     const lastView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
-    return !!lastView && nowMs - lastView >= p.minQuietHours * 3600000;
+    const sentAt = est.sent_at ? new Date(est.sent_at).getTime() : 0;
+    const lastTouch = Math.max(lastView, sentAt);
+    return !!lastView && !!lastTouch && nowMs - lastTouch >= p.minQuietHours * 3600000;
   }
   if (rule.rule_key === 'expiring_engaged' || rule.rule_key === 'expiring_never_viewed') {
+    // Legacy-lane dedupe: the 2h cron's expiring stage claims
+    // followup_expiring_sent — one expiry reminder per deadline across lanes.
+    if (est.followup_expiring_sent) return false;
     const expires = est.expires_at ? new Date(est.expires_at).getTime() : 0;
     if (!expires || expires <= nowMs || expires >= nowMs + p.expiresWithinDays * 86400000) return false;
     return rule.rule_key === 'expiring_engaged' ? !!est.viewed_at : !est.viewed_at;
@@ -317,6 +346,13 @@ async function processDueJobs(now = new Date()) {
       const est = await db('estimates').where({ id: job.estimate_id }).first();
       if (!est || est.archived_at || !ACTIVE_STATUSES.includes(est.status) || TERMINAL_STATUSES.has(est.status)) {
         await markJob(job.id, 'skipped', 'estimate-inactive');
+        continue;
+      }
+      // expires_at can lapse HOURS before the daily expiration sweep flips
+      // status to 'expired', and the public route already renders those
+      // links as expired (codex 2736 r2) — never email a link that dead-ends.
+      if (est.expires_at && new Date(est.expires_at).getTime() <= nowMs) {
+        await markJob(job.id, 'skipped', 'link-expired');
         continue;
       }
       if (!est.customer_email) {
