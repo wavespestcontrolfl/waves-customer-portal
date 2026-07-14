@@ -2282,7 +2282,13 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     try {
-      await runExclusive('estimate-engagement-engine', async () => {
+      // SAME advisory lock as the legacy follow-up cron (codex 2736 r6):
+      // both lanes read/bump the shared follow_up_count / last_follow_up_at
+      // counters, so a same-minute overlap could let each pass a stale
+      // spacing/cap check and double-touch the customer. One lock
+      // serializes them; the engine just skips a 5-min tick when the 2h
+      // job holds it.
+      await runExclusive('estimate-follow-up', async () => {
         const EngagementEngine = require('./estimate-engagement-engine');
         await EngagementEngine.sweepTimeRules();
         await EngagementEngine.processDueJobs();

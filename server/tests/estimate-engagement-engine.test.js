@@ -45,6 +45,8 @@ jest.mock('../services/estimate-follow-up', () => ({
     mintStageLinks: jest.fn(async () => ({ smsUrl: 'url', emailUrl: 'url' })),
     hasRepliedRecently: jest.fn(async () => false),
     wasRecentlyOpened: jest.fn(() => false),
+    bumpFollowupCounters: jest.fn(async () => {}),
+    repairFollowupCounters: jest.fn(async () => null),
   },
 }));
 
@@ -183,6 +185,8 @@ beforeEach(() => {
   followupShared.claimFollowupSend.mockResolvedValue(true);
   followupShared.sendDualChannel.mockResolvedValue(true);
   followupShared.hasRepliedRecently.mockResolvedValue(false);
+  followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
+  followupShared.repairFollowupCounters.mockResolvedValue(null);
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -287,7 +291,7 @@ describe('processDueJobs', () => {
     );
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'done' }));
-    expect(writes.some((w) => w.table === 'estimates' && w.op === 'update')).toBe(true);
+    expect(followupShared.bumpFollowupCounters).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
   });
 
   test('gate off = shadow: job consumed, would-send logged, nothing claimed', async () => {
@@ -509,11 +513,8 @@ describe('processDueJobs', () => {
   });
 
   test('a bookkeeping failure AFTER a successful send never releases the claim', async () => {
-    enqueue('estimate_followup_jobs', { rows: [pendingJob()] });     // due scan
-    enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
-    enqueue('estimates', { first: baseEstimate() });
-    enqueue('notification_prefs', { first: { email_enabled: true } });
-    enqueue('estimates', { updateError: 'bump failed mid-transaction' }); // follow_up_count bump throws
+    followupShared.bumpFollowupCounters.mockRejectedValue(new Error('bump failed mid-transaction'));
+    enqueueProcessorHappyPath();
 
     await Engine.processDueJobs(NOW);
 
@@ -522,18 +523,17 @@ describe('processDueJobs', () => {
     expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
   });
 
-  test('a lost claim repairs the counters for the send that already happened', async () => {
-    followupShared.claimFollowupSend.mockResolvedValue(false); // our earlier attempt (or a twin) already holds the row
-    enqueueProcessorHappyPath();
+  test('counters heal BEFORE the guardrails judge them — a lost bump still trips the cap', async () => {
+    // In-memory row says 3 sends; the heal reveals a 4th whose bump died.
+    followupShared.repairFollowupCounters.mockResolvedValue({ follow_up_count: 4, last_follow_up_at: new Date(NOW.getTime() - 20 * H) });
+    enqueueProcessorHappyPath({ est: baseEstimate({ follow_up_count: 3 }) });
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(0);
-    expect(rawRepairs).toHaveLength(1);
-    expect(rawRepairs[0].sql).toContain('last_follow_up_at < s.sent_at');
-    expect(rawRepairs[0].bindings).toEqual(['est-1', 'viewed_gone_quiet_72h']);
+    expect(followupShared.repairFollowupCounters).toHaveBeenCalledWith('est-1');
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
-    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'lost-claim' }));
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'max-sends-cap' }));
   });
 
   test('rule priority breaks due_at ties — the expiring email wins the budget', async () => {
@@ -550,10 +550,8 @@ describe('processDueJobs', () => {
     enqueue('estimates', { first: baseEstimate({ id: 'est-2', expires_at: new Date(NOW.getTime() + 1 * 86400000) }) });
     enqueue('estimate_followup_sends', { first: undefined }); // expiring sibling check
     enqueue('notification_prefs', { first: { email_enabled: true } });
-    enqueue('estimates', { update: 1 });
     enqueue('estimates', { first: baseEstimate({ id: 'est-1' }) });
     enqueue('notification_prefs', { first: { email_enabled: true } });
-    enqueue('estimates', { update: 1 });
 
     const result = await Engine.processDueJobs(NOW);
 

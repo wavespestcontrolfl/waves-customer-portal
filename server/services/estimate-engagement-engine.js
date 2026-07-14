@@ -287,32 +287,6 @@ async function sweepTimeRules(now = new Date()) {
 
 // ── Job processor ────────────────────────────────────────────────────────
 
-// Lost-claim repair (codex 2736 r5): a lost claim means either a
-// concurrent winner sent, or OUR earlier attempt sent and the
-// follow_up_count/last_follow_up_at bump failed before the job was marked
-// done. Idempotently re-apply the bump from the ledger row — guarded on
-// last_follow_up_at < sends.sent_at, so a healthy estimate (bump already
-// ran, stamped at/after the claim) is untouched and the repair runs at
-// most once per send. Without it, a transiently-failed bump leaves the
-// sent email invisible to the cap/spacing guards.
-async function repairSendBookkeeping(estimateId, ruleKey) {
-  try {
-    await db.raw(
-      `UPDATE estimates SET
-         follow_up_count = COALESCE(estimates.follow_up_count, 0) + 1,
-         last_follow_up_at = s.sent_at
-       FROM estimate_followup_sends s
-       WHERE estimates.id = ?
-         AND s.estimate_id = estimates.id
-         AND s.rule_key = ?
-         AND (estimates.last_follow_up_at IS NULL OR estimates.last_follow_up_at < s.sent_at)`,
-      [estimateId, ruleKey],
-    );
-  } catch (err) {
-    logger.warn(`[est-engage] bookkeeping repair failed for estimate ${estimateId}/${ruleKey}: ${err.message}`);
-  }
-}
-
 // Time-sweep predicates re-checked at PROCESS time (codex 2736 r1): a job
 // queued in-window can go stale before it fires — the customer opens the
 // "unopened" estimate, returns to the "gone quiet" one, or the expiry date
@@ -472,6 +446,15 @@ async function processDueJobs(now = new Date()) {
           continue;
         }
       }
+      // Heal the counters BEFORE judging them (codex 2736 r5/r6): any
+      // ledger row whose post-send bump failed — engine rules AND
+      // payment_step_abandoned — is applied now, atomically and exactly,
+      // and the fresh values overlay the stale in-memory row.
+      const healed = await followupShared.repairFollowupCounters(est.id);
+      if (healed) {
+        est.follow_up_count = healed.follow_up_count;
+        est.last_follow_up_at = healed.last_follow_up_at;
+      }
       // Inbox guardrails from the estimate's OWN counters (codex 2736 r3):
       // follow_up_count / last_follow_up_at are bumped by BOTH lanes, so
       // legacy sends count toward the cap and the spacing window — the
@@ -515,7 +498,6 @@ async function processDueJobs(now = new Date()) {
         blockLegacyFlags: legacyFlagsFor(rule.rule_key),
         blockRuleKeys: siblings,
       }))) {
-        await repairSendBookkeeping(est.id, rule.rule_key);
         await markJob(job.id, 'skipped', 'lost-claim');
         continue;
       }
@@ -535,12 +517,7 @@ async function processDueJobs(now = new Date()) {
         // re-email the customer). A failed bump/markJob falls to the poison
         // guard; the retry then loses the claim and marks the job skipped.
         claimed = false;
-        await db('estimates')
-          .where({ id: est.id })
-          .update({
-            follow_up_count: db.raw('COALESCE(follow_up_count, 0) + 1'),
-            last_follow_up_at: db.fn.now(),
-          });
+        await followupShared.bumpFollowupCounters(est.id, rule.rule_key);
         await markJob(job.id, 'done', null);
         sent++;
       } else {
@@ -595,7 +572,6 @@ module.exports._private = {
   rulePredicateStillHolds,
   dedupeGroup,
   legacyFlagsFor,
-  repairSendBookkeeping,
   ENGINE_LIMITS,
   DEFAULT_RULE_PARAMS,
 };

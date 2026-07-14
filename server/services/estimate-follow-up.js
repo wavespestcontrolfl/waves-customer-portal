@@ -570,6 +570,49 @@ async function releaseFollowupSend(estimateId, ruleKey) {
     .del();
 }
 
+// Atomic post-send bookkeeping (codex 2736 r6): stamping the ledger row's
+// counted_at and bumping the estimate's counters happen in ONE statement,
+// so a transient failure leaves a clean uncounted row (healable by
+// repairFollowupCounters) instead of a half-applied state. Idempotent: an
+// already-counted row makes the whole statement a no-op.
+async function bumpFollowupCounters(estimateId, ruleKey) {
+  await db.raw(
+    `WITH counted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND rule_key = ? AND counted_at IS NULL
+       RETURNING 1
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + 1,
+       last_follow_up_at = now()
+     WHERE id = ? AND EXISTS (SELECT 1 FROM counted)`,
+    [estimateId, ruleKey, estimateId],
+  );
+}
+
+// Estimate-wide counter heal: applies every uncounted ledger row (any rule,
+// payment_step_abandoned included) to follow_up_count/last_follow_up_at in
+// one atomic statement. Exact — counts rows rather than guessing from
+// timestamps, so a newer successful send can't mask an older lost bump.
+// Returns the healed counters (null when nothing was uncounted) so callers
+// can overlay a stale in-memory row before judging caps/spacing.
+async function repairFollowupCounters(estimateId) {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND counted_at IS NULL
+       RETURNING sent_at
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + (SELECT count(*) FROM uncounted),
+       last_follow_up_at = GREATEST(COALESCE(last_follow_up_at, '-infinity'::timestamptz), (SELECT max(sent_at) FROM uncounted))
+     WHERE id = ? AND EXISTS (SELECT 1 FROM uncounted)
+     RETURNING follow_up_count, last_follow_up_at`,
+    [estimateId, estimateId],
+  );
+  return result?.rows?.[0] || null;
+}
+
 // Fail-CLOSED re-check that the abandoned payment step is still the thing
 // standing between this customer and acceptance. Runs the SAME policy
 // resolvers the intent endpoints ran (lazy-required to avoid loading the
@@ -790,14 +833,12 @@ async function checkPaymentStepAbandoned(now = new Date()) {
       });
       if (ok) {
         // The email is SENT — the ledger row must survive a bookkeeping
-        // failure (releasing it would re-email on the next tick).
+        // failure (releasing it would re-email on the next tick). The bump
+        // is atomic with the ledger's counted_at stamp; if it fails, the
+        // row stays uncounted and repairFollowupCounters heals it before
+        // the engine next judges this estimate's caps.
         claimed = false;
-        await db("estimates")
-          .where({ id: est.id })
-          .update({
-            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-            last_follow_up_at: db.fn.now(),
-          });
+        await bumpFollowupCounters(est.id, PAYMENT_STEP_RULE_KEY);
         sent++;
       }
     } catch (e) {
@@ -1218,6 +1259,8 @@ module.exports._private = {
   paymentStepStillRequiresCard,
   claimFollowupSend,
   releaseFollowupSend,
+  bumpFollowupCounters,
+  repairFollowupCounters,
   safetyGate,
   claimStage,
   mintStageLinks,
