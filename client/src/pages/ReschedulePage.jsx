@@ -118,6 +118,36 @@ function formatTimeLabel(hhmm) {
 // never show windowEnd as the arrival window.
 const ARRIVAL_WINDOW_MINUTES = 120;
 
+// Days `target` sits EARLIER than `current` (YYYY-MM-DD strings; UTC-noon
+// parse). Mirrors the server's pullForwardDays — the server is authoritative,
+// this only drives the pre-confirm warning copy.
+function pullForwardDaysBetween(currentDate, targetDate) {
+  const cur = new Date(`${String(currentDate || '').split('T')[0]}T12:00:00Z`).getTime();
+  const tgt = new Date(`${String(targetDate || '').split('T')[0]}T12:00:00Z`).getTime();
+  if (!Number.isFinite(cur) || !Number.isFinite(tgt)) return 0;
+  return Math.round((cur - tgt) / 86400000);
+}
+
+// True when confirming this slot will re-anchor the whole recurring series
+// (big pull-forward). Threshold comes from the server payload.
+function slotReanchors(data, slotDate) {
+  const threshold = data?.reanchorPullForwardDays;
+  if (!threshold || !slotDate) return false;
+  return pullForwardDaysBetween(data?.current?.date, slotDate) >= threshold;
+}
+
+function ReanchorNote() {
+  return (
+    <div data-glass="soft" style={{
+      background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8,
+      padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
+    }}>
+      Heads up — moving this far up shifts your whole plan: your following
+      visits will move to match the new date, keeping your regular schedule.
+    </div>
+  );
+}
+
 function arrivalEndHHMM(start) {
   const [h, m] = String(start || '').split(':').map(Number);
   if (Number.isNaN(h)) return null;
@@ -247,7 +277,8 @@ function SuccessCard({ result, service }) {
         Your {service?.type || 'service'} visit is now scheduled for{' '}
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
-        We'll text you a confirmation shortly.
+        {result.seriesShifted ? ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.' : ''}
+        {' '}We'll text you a confirmation shortly.
       </div>
     </Card>
   );
@@ -490,7 +521,7 @@ function V2DayGrid({ availability, selectedDate, onSelectDay }) {
   );
 }
 
-function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, submitError }) {
+function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, submitError, reanchorNote }) {
   return (
     <Card>
       <div data-gt="h3x" style={{ fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 2 }}>
@@ -541,6 +572,7 @@ function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, subm
               </div>
             );
           })}
+          {reanchorNote ? <ReanchorNote /> : null}
         </div>
       )}
     </Card>
@@ -946,9 +978,19 @@ export default function ReschedulePage() {
                 {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
               </div>
               <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-                Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
-                scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
-                {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+                {data.missed ? (
+                  <>
+                    Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit was set
+                    for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>, but it looks like
+                    we missed each other — pick a new time below and we'll get you taken care of.
+                  </>
+                ) : (
+                  <>
+                    Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
+                    scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
+                    {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+                  </>
+                )}
               </div>
               {data.isRecurring ? (
                 <div data-glass="soft" style={{
@@ -1000,6 +1042,7 @@ export default function ReschedulePage() {
                 onConfirm={confirm}
                 submitting={submitting}
                 submitError={submitError}
+                reanchorNote={!!(selectedSlot && slotReanchors(data, selectedSlot.date))}
               />
             )}
             <Card data-glass="soft" style={{ background: S.page }}>
@@ -1021,9 +1064,19 @@ export default function ReschedulePage() {
           {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
         </div>
         <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-          Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
-          scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
-          {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+          {data.missed ? (
+            <>
+              Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit was set
+              for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>, but it looks like
+              we missed each other — pick a new time below and we'll get you taken care of.
+            </>
+          ) : (
+            <>
+              Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
+              scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
+              {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+            </>
+          )}
         </div>
         {data.isRecurring ? (
           <div data-glass="soft" style={{
@@ -1085,6 +1138,9 @@ export default function ReschedulePage() {
             {days.map((day) => (
               <DayGroup key={day.date} day={day} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />
             ))}
+            {selectedSlot && slotReanchors(data, selectedSlot.date) ? (
+              <div style={{ marginBottom: 10 }}><ReanchorNote /></div>
+            ) : null}
             <button
               type="button"
               data-glass-accent=""

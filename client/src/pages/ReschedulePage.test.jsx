@@ -266,6 +266,88 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Two openings Tuesday afternoon.')).not.toBeInTheDocument();
   });
 
+  it('v2: missed visit renders the "missed each other" rebook framing with slots', async () => {
+    const payload = reschedulablePayload({
+      missed: true,
+      current: { date: '2026-07-06', windowStart: '11:00', windowEnd: '12:00' },
+    });
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+      return Promise.resolve(jsonResponse(payload));
+    }));
+
+    renderPage({ v2: true });
+
+    expect(await screen.findByText(/we missed each other/)).toBeInTheDocument();
+    expect(screen.queryByText(/is currently\s+scheduled for/)).not.toBeInTheDocument();
+    // Rebooking is live — the day still offers its slot.
+    expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
+  });
+
+  it('v2: big pull-forward on a recurring visit warns before Confirm and reports the series shift after', async () => {
+    const payload = reschedulablePayload({
+      isRecurring: true,
+      reanchorPullForwardDays: 14,
+      current: { date: '2026-08-13', windowStart: '12:00', windowEnd: '13:00' },
+    });
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') {
+        return Promise.resolve(jsonResponse({
+          success: true,
+          originalDate: '2026-08-13',
+          newDate: '2026-07-12',
+          window: { start: '13:00', end: '14:00' },
+          startLabel: '1:00 PM',
+          endLabel: '2:00 PM',
+          seriesShifted: true,
+          occurrencesRescheduled: 3,
+        }));
+      }
+      return Promise.resolve(jsonResponse(payload));
+    }));
+
+    renderPage({ v2: true });
+
+    // No warning before a slot is picked…
+    expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
+    expect(screen.queryByText(/shifts your whole plan/)).not.toBeInTheDocument();
+
+    // …picking a slot 32 days earlier than the visit shows the heads-up.
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    expect(screen.getByText(/shifts your whole plan/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+    await waitFor(() => {
+      expect(screen.getByText('You\'re all set')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+  });
+
+  it('v2: a small move on a recurring visit shows no series warning', async () => {
+    const payload = reschedulablePayload({
+      isRecurring: true,
+      reanchorPullForwardDays: 14,
+      // Visit is Jul 15; the offered Jul 12 slot is only a 3-day pull-forward.
+      current: { date: '2026-07-15', windowStart: '12:00', windowEnd: '13:00' },
+    });
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/public/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+      if (opts.method === 'POST') return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
+      return Promise.resolve(jsonResponse(payload));
+    }));
+
+    renderPage({ v2: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    expect(screen.getByRole('button', { name: /Confirm/ })).toBeInTheDocument();
+    expect(screen.queryByText(/shifts your whole plan/)).not.toBeInTheDocument();
+  });
+
   it('keeps the filtered list AND the reset link when the full-window refetch fails', async () => {
     let getCalls = 0;
     const findSlotsBody = {

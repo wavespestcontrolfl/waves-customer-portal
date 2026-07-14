@@ -24,9 +24,12 @@
  *   still offers — lunch/cap/route rules included), then committed through
  *   SmartRebooker.reschedule, which owns the advisory-lock + tech-route
  *   overlap conflict check, reschedule_log audit, and escalation flagging.
- *   Single occurrence ONLY — a recurring visit moves just this one date; the
- *   series cadence is never shifted from this surface (no rescheduleSeries,
- *   no allowLive: live/terminal visits 409).
+ *   A recurring visit moves just this one date — EXCEPT a big pull-forward
+ *   (≥ REANCHOR_PULLFORWARD_DAYS earlier than the current date), which
+ *   commits through SmartRebooker.rescheduleSeries so every later occurrence
+ *   re-anchors to the new date (owner ruling 2026-07-13). Never allowLive:
+ *   live/terminal visits 409. A pending visit whose time already passed is a
+ *   MISSED visit and may be rebooked (eligibility returns missed:true).
  *
  * Post-commit (best-effort): AppointmentReminders.handleReschedule re-arms
  * the 72h/24h reminder row for the new time and sends the standard
@@ -48,6 +51,37 @@ const { stampedDivergesSql } = require('../services/stamped-address');
 const TOKEN_RE = /^[a-f0-9]{64}$/;
 
 const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+
+// Owner ruling 2026-07-13: a BIG pull-forward on a recurring visit re-anchors
+// the whole series (SmartRebooker.rescheduleSeries) so the plan's cadence
+// follows the new date instead of leaving a long protection gap. "Big" =
+// the new date is at least this many days EARLIER than the visit's current
+// date. Push-backs and small nudges never re-anchor — only this visit moves,
+// exactly as the page has always promised.
+const REANCHOR_PULLFORWARD_DAYS = Math.max(
+  1,
+  Number(process.env.RESCHEDULE_REANCHOR_PULLFORWARD_DAYS) || 14
+);
+
+// Days the target date sits EARLIER than the visit's current date (negative
+// for push-backs). Both args are YYYY-MM-DD strings; UTC-noon parse avoids
+// DST edges.
+function pullForwardDays(currentDateStr, targetDateStr) {
+  const cur = new Date(`${String(currentDateStr).split('T')[0]}T12:00:00Z`).getTime();
+  const tgt = new Date(`${String(targetDateStr).split('T')[0]}T12:00:00Z`).getTime();
+  if (!Number.isFinite(cur) || !Number.isFinite(tgt)) return 0;
+  return Math.round((cur - tgt) / 86400000);
+}
+
+function isSeriesVisit(svc) {
+  return !!(svc?.is_recurring || svc?.recurring_parent_id);
+}
+
+// True when committing `targetDateStr` for this visit re-anchors the series.
+function shouldReanchor(svc, targetDateStr) {
+  if (!isSeriesVisit(svc)) return false;
+  return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
+}
 
 router.use(rateLimit({
   windowMs: 60 * 1000,
@@ -109,18 +143,23 @@ function eligibility(svc, now = new Date()) {
   if (status === 'en_route' || status === 'on_site') return { ok: false, reason: 'in_progress' };
   if (!RESCHEDULABLE_STATUSES.has(status)) return { ok: false, reason: 'not_available' };
 
+  // A pending/confirmed visit whose time already passed was MISSED, not
+  // served — the customer may rebook it from the same link (owner ruling
+  // 2026-07-13: "we missed each other — pick a new time"). Terminal and
+  // live states were already rejected above; the rebooker only validates
+  // the TARGET date, so a future target on a past visit commits cleanly.
   const dateStr = apptDateStr(svc.scheduled_date);
   const todayEt = etDateString(now);
-  if (dateStr && dateStr < todayEt) return { ok: false, reason: 'past' };
+  if (dateStr && dateStr < todayEt) return { ok: true, missed: true };
   if (dateStr === todayEt) {
-    // Same-day appointment whose window already elapsed in ET is as done as
-    // yesterday's — the rebooker would reject the move anyway.
+    // Same-day appointment whose window already elapsed in ET is equally a
+    // missed visit — offer the rebook rather than a dead end.
     const cutoff = hhmm(svc.window_end) || hhmm(svc.window_start);
     if (cutoff) {
       const nowEt = etParts(now);
       const [ch, cm] = cutoff.split(':').map(Number);
       if (ch * 60 + (cm || 0) <= nowEt.hour * 60 + nowEt.minute) {
-        return { ok: false, reason: 'past' };
+        return { ok: true, missed: true };
       }
     }
   }
@@ -227,8 +266,16 @@ router.get('/:token', async (req, res, next) => {
       reason: elig.ok ? null : elig.reason,
       customerFirstName: svc.cust_first_name || null,
       service: { type: svc.service_type || 'service' },
-      // Single-occurrence contract: a recurring visit moves only this date.
-      isRecurring: !!(svc.is_recurring || svc.recurring_parent_id),
+      // A recurring visit moves only this date — UNLESS the customer pulls
+      // it forward by ≥ reanchorPullForwardDays, which shifts the whole
+      // series (owner ruling 2026-07-13). The client uses the threshold to
+      // warn before Confirm; the POST enforces it regardless.
+      isRecurring: isSeriesVisit(svc),
+      reanchorPullForwardDays: isSeriesVisit(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
+      // The visit's time already passed without service — the page renders
+      // the "we missed each other" rebook framing instead of the standard
+      // reschedule copy.
+      missed: !!elig.missed,
       current: {
         date: apptDateStr(svc.scheduled_date),
         windowStart: hhmm(svc.window_start),
@@ -403,22 +450,38 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     const newWindow = { start: slot.start_time, end: slot.end_time };
+    // Big pull-forward on a recurring visit re-anchors the whole series
+    // (owner ruling 2026-07-13): the customer getting service ~a month early
+    // should have every later visit follow, not sit a double interval out.
+    // Strict statuses only (no allowLive) — eligibility already gated those.
+    const reanchor = shouldReanchor(svc, date);
     let result;
     try {
-      result = await SmartRebooker.reschedule(
-        svc.id,
-        date,
-        newWindow,
-        'customer_request',
-        'customer_self_serve',
-        { technicianId: slot.technician_id }
-      );
+      result = reanchor
+        ? await SmartRebooker.rescheduleSeries(
+          svc.id,
+          date,
+          newWindow,
+          'customer_request',
+          'customer_self_serve'
+        )
+        : await SmartRebooker.reschedule(
+          svc.id,
+          date,
+          newWindow,
+          'customer_request',
+          'customer_self_serve',
+          { technicianId: slot.technician_id }
+        );
     } catch (err) {
       if (err?.statusCode) {
         return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
       }
       throw err;
     }
+    const shiftedOccurrences = reanchor && Array.isArray(result.rescheduledOccurrences)
+      ? result.rescheduledOccurrences
+      : null;
 
     // Self-booked visits carry a linked self_booked_appointments row that the
     // public availability builder counts for max_self_books_per_day
@@ -441,19 +504,83 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     }
 
-    // Post-commit, best-effort: reminder re-arm + the standard
-    // appointment_rescheduled confirmation text (handleReschedule owns both).
-    try {
-      const AppointmentReminders = require('../services/appointment-reminders');
-      await AppointmentReminders.handleReschedule(svc.id, `${date}T${slot.start_time}`);
-    } catch (err) {
-      logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);
+    // Post-commit, best-effort reminder + notification sync.
+    //
+    // Single visit: handleReschedule re-arms reminders AND sends the standard
+    // appointment_rescheduled confirmation text.
+    //
+    // Series re-anchor: mirror the admin dispatch series path — re-arm every
+    // shifted occurrence WITHOUT per-occurrence texts (sendNotification:false,
+    // coverDueWindows so the 15-min cron can't double-remind in the gap), then
+    // send ONE appointment_series_rescheduled confirmation and mark the
+    // reschedule notice sent for every shifted row.
+    const AppointmentReminders = require('../services/appointment-reminders');
+    if (shiftedOccurrences) {
+      for (const occ of shiftedOccurrences) {
+        try {
+          await AppointmentReminders.handleReschedule(
+            occ.id,
+            `${String(occ.date).split('T')[0]}T${hhmm(occ.windowStart) || slot.start_time}`,
+            { sendNotification: false, coverDueWindows: true }
+          );
+        } catch (err) {
+          logger.error(`[reschedule-public] series reminder sync failed for ${occ.id}: ${err.message}`);
+        }
+      }
+      try {
+        const smsTemplatesRouter = require('./admin-sms-templates');
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+        const customer = await db('customers').where({ id: svc.customer_id }).first('phone');
+        if (customer?.phone && typeof smsTemplatesRouter.getTemplate === 'function') {
+          const displayDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
+            weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York',
+          });
+          const arrivalRange = arrivalWindowRange(slot.start_time);
+          const body = await smsTemplatesRouter.getTemplate('appointment_series_rescheduled', {
+            first_name: svc.cust_first_name || 'there',
+            start_date: displayDate,
+            window_text: arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '',
+          }, {
+            workflow: 'customer_self_serve_series_reschedule',
+            entity_type: 'scheduled_service',
+            entity_id: svc.id,
+          });
+          if (body) {
+            const msg = await sendCustomerMessage({
+              to: customer.phone,
+              body,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'appointment',
+              customerId: svc.customer_id,
+              identityTrustLevel: 'phone_matches_customer',
+              metadata: { original_message_type: 'reschedule_series_confirmation', source: 'reschedule_public' },
+            });
+            if (!(msg?.blocked || msg?.sent === false)) {
+              await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[reschedule-public] series confirmation SMS failed for ${svc.id}: ${err.message}`);
+      }
+    } else {
+      try {
+        await AppointmentReminders.handleReschedule(svc.id, `${date}T${slot.start_time}`);
+      } catch (err) {
+        logger.error(`[reschedule-public] reminder sync failed for ${svc.id}: ${err.message}`);
+      }
     }
 
-    // Live dispatch-board refresh, same broadcast the admin reschedule emits.
+    // Live dispatch-board refresh, same broadcast the admin reschedule emits
+    // (every shifted occurrence on a series re-anchor).
     try {
       const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-      await emitDispatchJobUpdate({ jobId: svc.id, actorId: null });
+      const jobIds = shiftedOccurrences ? shiftedOccurrences.map((occ) => occ.id) : [svc.id];
+      for (const jobId of jobIds) {
+        await emitDispatchJobUpdate({ jobId, actorId: null });
+      }
     } catch (err) {
       logger.error(`[reschedule-public] board broadcast failed for ${svc.id}: ${err.message}`);
     }
@@ -466,9 +593,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         const displayDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', {
           weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
+        const seriesNote = shiftedOccurrences
+          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted`
+          : '';
         await TwilioService.sendSMS(
           process.env.ADAM_PHONE,
-          `🔁 Customer self-rescheduled:\n${name}\n${svc.service_type || 'service'}\n${apptDateStr(svc.scheduled_date)} → ${displayDate} ${slot.start_label}-${slot.end_label}\n${svc.city || ''}`,
+          `🔁 Customer self-rescheduled:\n${name}\n${svc.service_type || 'service'}\n${apptDateStr(svc.scheduled_date)} → ${displayDate} ${slot.start_label}-${slot.end_label}${seriesNote}\n${svc.city || ''}`,
           { messageType: 'internal_alert' }
         );
       }
@@ -483,6 +613,9 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       window: newWindow,
       startLabel: slot.start_label,
       endLabel: slot.end_label,
+      // The success card tells the customer their following visits moved too.
+      seriesShifted: !!shiftedOccurrences,
+      occurrencesRescheduled: shiftedOccurrences ? shiftedOccurrences.length : 1,
     });
   } catch (err) {
     next(err);
@@ -495,6 +628,9 @@ router._test = {
   searchParseOpts,
   apptDateStr,
   label12,
+  pullForwardDays,
+  shouldReanchor,
+  REANCHOR_PULLFORWARD_DAYS,
 };
 
 module.exports = router;
