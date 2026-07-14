@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 
 /**
- * Read-only production preflight for the Staff authentication/payroll rollout.
+ * Read-only production verification for the deployed Staff authentication,
+ * session-revocation, and payroll contract.
  *
  * Default output is counts only. `--details` adds structural identifiers and
  * payroll timing metadata, so use it only in a restricted operator terminal.
  * For machine-readable output, keep npm's own script banner off stdout:
  * `npm run --silent audit:staff-rollout -- --json`.
- * Run against the intended Railway database before enabling the Staff
- * migration or adding the deferred active-timer partial unique index.
+ * During a controlled rollout, run the previous release's copy before its
+ * migration, then run this release's copy after the new application is live.
  */
 const db = require('../models/db');
 const {
+  ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES: WEEKLY_OVERTIME_THRESHOLD_MINUTES,
 } = require('../constants/staff-time');
 const {
@@ -19,6 +21,12 @@ const {
   normalizeCheckConstraintDefinition,
   sqlStringLiteral,
 } = require('../models/migrations/20260711000002_staff_time_schema_reconciliation');
+const {
+  RESET_LINK_TTL_MINUTES,
+} = require('../services/staff-password-reset-email');
+const {
+  MAX_STAFF_EMAIL_LENGTH,
+} = require('../utils/staff-identity');
 
 const SAMPLE_LIMIT = 25;
 const SCHEMA_DEPENDENCY_ERROR_CODES = new Set(['42P01', '42703']);
@@ -43,7 +51,10 @@ const EXPECTED_CHECK_DEFINITIONS = {
     CHECK (status = ANY (ARRAY['active', 'completed', 'edited', 'voided']::text[]))
   `),
   activeWriter: normalizeCheckConstraintDefinition(`
-    CHECK (status <> 'active' OR staff_write_generation IS NOT DISTINCT FROM 1)
+    CHECK (
+      status <> 'active'
+      OR staff_write_generation IS NOT DISTINCT FROM ${Number(ACTIVE_WRITE_GENERATION)}
+    )
   `),
 };
 
@@ -192,6 +203,209 @@ const checks = [
        AND existing.column_name = required.column_name
       WHERE existing.column_name IS NULL
       ORDER BY required.table_name, required.column_name
+    `,
+  },
+  {
+    key: 'staff_auth_schema_columns',
+    description: 'Required Staff authentication/session-revocation columns are missing; apply auth hardening first',
+    schema: true,
+    sql: `
+      WITH required(table_name, column_name) AS (
+        VALUES
+          ('technicians', 'auth_token_version'),
+          ('technicians', 'must_change_password'),
+          ('technicians', 'password_changed_at'),
+          ('technicians', 'password_reset_token_hash'),
+          ('technicians', 'password_reset_expires_at'),
+          ('technicians', 'password_reset_requested_at'),
+          ('push_subscriptions', 'staff_token_version')
+      )
+      SELECT required.table_name, required.column_name
+      FROM required
+      LEFT JOIN information_schema.columns existing
+        ON existing.table_schema = current_schema()
+       AND existing.table_name = required.table_name
+       AND existing.column_name = required.column_name
+      WHERE existing.column_name IS NULL
+      ORDER BY required.table_name, required.column_name
+    `,
+  },
+  {
+    key: 'staff_auth_schema_column_shapes',
+    description: 'Staff authentication/session-revocation column shape differs from the Phase B contract',
+    schema: true,
+    sql: `
+      WITH expected(
+        table_name,
+        column_name,
+        data_type,
+        character_maximum_length,
+        nullable,
+        normalized_default
+      ) AS (
+        VALUES
+          ('technicians', 'auth_token_version', 'integer', NULL::integer, false, '1'),
+          ('technicians', 'must_change_password', 'boolean', NULL::integer, false, 'false'),
+          ('technicians', 'password_changed_at', 'timestamp with time zone', NULL::integer, true, NULL),
+          ('technicians', 'password_reset_token_hash', 'character varying', 64, true, NULL),
+          ('technicians', 'password_reset_expires_at', 'timestamp with time zone', NULL::integer, true, NULL),
+          ('technicians', 'password_reset_requested_at', 'timestamp with time zone', NULL::integer, true, NULL),
+          ('push_subscriptions', 'staff_token_version', 'integer', NULL::integer, true, NULL)
+      ), existing AS (
+        SELECT columns.*,
+               REGEXP_REPLACE(
+                 REGEXP_REPLACE(
+                   LOWER(columns.column_default),
+                   '::(boolean|integer)',
+                   '',
+                   'g'
+                 ),
+                 '[[:space:]()]',
+                 '',
+                 'g'
+               ) AS normalized_default
+        FROM information_schema.columns columns
+        WHERE columns.table_schema = current_schema()
+          AND columns.table_name IN ('technicians', 'push_subscriptions')
+      )
+      SELECT expected.table_name,
+             expected.column_name,
+             expected.data_type AS expected_data_type,
+             existing.data_type AS actual_data_type,
+             expected.character_maximum_length AS expected_character_maximum_length,
+             existing.character_maximum_length AS actual_character_maximum_length,
+             expected.nullable AS expected_nullable,
+             existing.is_nullable = 'YES' AS actual_nullable,
+             expected.normalized_default AS expected_default,
+             existing.column_default AS actual_default
+      FROM expected
+      LEFT JOIN existing
+        ON existing.table_name = expected.table_name
+       AND existing.column_name = expected.column_name
+      WHERE existing.column_name IS NULL
+         OR existing.data_type IS DISTINCT FROM expected.data_type
+         OR (
+           expected.character_maximum_length IS NOT NULL
+           AND existing.character_maximum_length
+                 IS DISTINCT FROM expected.character_maximum_length
+         )
+         OR (existing.is_nullable = 'YES') IS DISTINCT FROM expected.nullable
+         OR (
+           expected.normalized_default IS NULL
+           AND existing.column_default IS NOT NULL
+         )
+         OR (
+           expected.normalized_default IS NOT NULL
+           AND existing.normalized_default
+                 IS DISTINCT FROM expected.normalized_default
+         )
+      ORDER BY expected.table_name, expected.column_name
+    `,
+  },
+  {
+    key: 'staff_auth_schema_indexes',
+    description: 'Required Staff authentication/session-revocation index is missing or invalid',
+    schema: true,
+    sql: `
+      WITH required(table_name, index_name, should_be_unique, key_columns) AS (
+        VALUES
+          (
+            'technicians',
+            'technicians_staff_email_canonical_uidx',
+            true,
+            NULL::text[]
+          ),
+          (
+            'technicians',
+            'technicians_password_reset_token_hash_idx',
+            false,
+            ARRAY['password_reset_token_hash']::text[]
+          ),
+          (
+            'push_subscriptions',
+            'push_subscriptions_staff_token_version_idx',
+            false,
+            ARRAY['admin_user_id', 'staff_token_version']::text[]
+          )
+      ), existing AS (
+        SELECT table_class.relname AS table_name,
+               index_class.relname AS index_name,
+               access_method.amname AS access_method,
+               index_meta.indisunique,
+               index_meta.indisvalid,
+               index_meta.indisready,
+               index_meta.indnatts,
+               index_meta.indnkeyatts,
+               ARRAY(
+                 SELECT attribute.attname::text
+                 FROM unnest(
+                   string_to_array(BTRIM(index_meta.indkey::text), ' ')::smallint[]
+                 ) WITH ORDINALITY indexed_key(attnum, ordinal_position)
+                 LEFT JOIN pg_attribute attribute
+                   ON attribute.attrelid = index_meta.indrelid
+                  AND attribute.attnum = indexed_key.attnum
+                 WHERE indexed_key.ordinal_position <= index_meta.indnkeyatts
+                 ORDER BY indexed_key.ordinal_position
+               ) AS key_columns,
+               PG_GET_INDEXDEF(index_meta.indexrelid) AS index_definition,
+               PG_GET_EXPR(index_meta.indexprs, index_meta.indrelid) AS index_expression,
+               PG_GET_EXPR(index_meta.indpred, index_meta.indrelid) AS index_predicate
+        FROM pg_index index_meta
+        JOIN pg_class table_class ON table_class.oid = index_meta.indrelid
+        JOIN pg_class index_class ON index_class.oid = index_meta.indexrelid
+        JOIN pg_am access_method ON access_method.oid = index_class.relam
+        JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
+        WHERE namespace.nspname = current_schema()
+      )
+      SELECT required.table_name,
+             required.index_name,
+             required.should_be_unique,
+             required.key_columns AS expected_key_columns,
+             existing.access_method,
+             existing.indisunique,
+             existing.indisvalid,
+             existing.indisready,
+             existing.key_columns AS actual_key_columns,
+             existing.index_definition,
+             existing.index_expression,
+             existing.index_predicate
+      FROM required
+      LEFT JOIN existing
+        ON existing.table_name = required.table_name
+       AND existing.index_name = required.index_name
+      WHERE existing.index_name IS NULL
+         OR existing.indisvalid IS NOT true
+         OR existing.indisready IS NOT true
+         OR existing.access_method IS DISTINCT FROM 'btree'
+         OR existing.indisunique IS DISTINCT FROM required.should_be_unique
+         OR existing.indnatts IS DISTINCT FROM existing.indnkeyatts
+         OR (
+           required.key_columns IS NOT NULL
+           AND (
+             existing.key_columns IS DISTINCT FROM required.key_columns
+             OR existing.index_expression IS NOT NULL
+             OR existing.index_predicate IS NOT NULL
+           )
+         )
+         OR (
+           required.index_name = 'technicians_staff_email_canonical_uidx'
+           AND (
+             existing.index_definition IS NULL
+             OR existing.index_expression IS NULL
+             OR existing.index_predicate IS NULL
+             OR existing.indnkeyatts IS DISTINCT FROM 1
+             OR POSITION('lower' IN LOWER(existing.index_expression)) = 0
+             OR POSITION('btrim' IN LOWER(existing.index_expression)) = 0
+             OR POSITION('email' IN LOWER(existing.index_expression)) = 0
+             OR POSITION('role' IN LOWER(existing.index_predicate)) = 0
+             OR POSITION('admin' IN LOWER(existing.index_predicate)) = 0
+             OR POSITION('technician' IN LOWER(existing.index_predicate)) = 0
+             OR POSITION('email is not null' IN LOWER(existing.index_predicate)) = 0
+             OR POSITION('btrim' IN LOWER(existing.index_predicate)) = 0
+             OR POSITION('<>' IN existing.index_predicate) = 0
+           )
+         )
+      ORDER BY required.table_name, required.index_name
     `,
   },
   {
@@ -1157,13 +1371,119 @@ const checks = [
     `,
   },
   {
+    key: 'invalid_staff_auth_versions',
+    description: 'Staff account has an invalid credential version and cannot enforce session revocation',
+    sql: `
+      SELECT id AS technician_id, role, auth_token_version
+      FROM technicians
+      WHERE role IN ('admin', 'technician')
+        AND (
+          auth_token_version IS NULL
+          OR auth_token_version < 1
+        )
+      ORDER BY id
+    `,
+  },
+  {
+    key: 'inconsistent_staff_password_reset_state',
+    description: 'Staff password-reset state is partial or contains an invalid token hash/expiry',
+    sql: `
+      SELECT id AS technician_id,
+             password_reset_expires_at,
+             password_reset_requested_at,
+             CASE
+               WHEN password_reset_token_hash IS NOT NULL
+                    AND password_reset_token_hash !~ '^[a-f0-9]{64}$'
+                 THEN 'invalid_token_hash'
+               WHEN password_reset_token_hash IS NULL
+                    AND (
+                      password_reset_expires_at IS NOT NULL
+                      OR password_reset_requested_at IS NOT NULL
+                    )
+                 THEN 'partial_reset_state'
+               WHEN password_reset_token_hash IS NOT NULL
+                    AND (
+                      password_reset_expires_at IS NULL
+                      OR password_reset_requested_at IS NULL
+                    )
+                 THEN 'partial_reset_state'
+               WHEN password_reset_expires_at <= password_reset_requested_at
+                 THEN 'invalid_reset_window'
+               WHEN password_reset_expires_at
+                    > password_reset_requested_at
+                      + INTERVAL '${Number(RESET_LINK_TTL_MINUTES)} minutes'
+                 THEN 'reset_window_too_long'
+               WHEN password_reset_requested_at
+                    > CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+                 THEN 'reset_requested_in_future'
+               ELSE 'invalid_reset_state'
+             END AS reason
+      FROM technicians
+      WHERE role IN ('admin', 'technician')
+        AND (
+          (
+            password_reset_token_hash IS NOT NULL
+            AND password_reset_token_hash !~ '^[a-f0-9]{64}$'
+          )
+          OR (
+            password_reset_token_hash IS NULL
+            AND (
+              password_reset_expires_at IS NOT NULL
+              OR password_reset_requested_at IS NOT NULL
+            )
+          )
+          OR (
+            password_reset_token_hash IS NOT NULL
+            AND (
+              password_reset_expires_at IS NULL
+              OR password_reset_requested_at IS NULL
+            )
+          )
+          OR password_reset_expires_at <= password_reset_requested_at
+          OR password_reset_expires_at
+               > password_reset_requested_at
+                 + INTERVAL '${Number(RESET_LINK_TTL_MINUTES)} minutes'
+          OR password_reset_requested_at
+               > CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+        )
+      ORDER BY id
+    `,
+  },
+  {
+    key: 'invalid_forced_password_change_state',
+    description: 'Staff account requires a password change but has no credential to replace',
+    sql: `
+      SELECT id AS technician_id, role
+      FROM technicians
+      WHERE role IN ('admin', 'technician')
+        AND active = true
+        AND must_change_password = true
+        AND (password_hash IS NULL OR BTRIM(password_hash) = '')
+      ORDER BY id
+    `,
+  },
+  {
+    key: 'missing_active_admin',
+    description: 'No active admin exists to recover Staff access or reach admin-only controls',
+    sql: `
+      SELECT 'missing_active_admin' AS invariant
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM technicians
+        WHERE role = 'admin'
+          AND active = true
+      )
+    `,
+  },
+  {
     key: 'invalid_active_staff_identity',
     description: 'Active staff account cannot authenticate or request a reset with its stored email',
     sql: `
       SELECT id AS technician_id, role,
              CASE
                WHEN email IS NULL OR BTRIM(email) = '' THEN 'missing_email'
-               WHEN LENGTH(BTRIM(email)) > 254 THEN 'email_too_long'
+               WHEN LENGTH(BTRIM(email)) > ${Number(MAX_STAFF_EMAIL_LENGTH)} THEN 'email_too_long'
+               WHEN email IS DISTINCT FROM LOWER(BTRIM(email)) THEN 'noncanonical_email'
                ELSE 'invalid_email_format'
              END AS reason
       FROM technicians
@@ -1172,7 +1492,8 @@ const checks = [
         AND (
           email IS NULL
           OR BTRIM(email) = ''
-          OR LENGTH(BTRIM(email)) > 254
+          OR LENGTH(BTRIM(email)) > ${Number(MAX_STAFF_EMAIL_LENGTH)}
+          OR email IS DISTINCT FROM LOWER(BTRIM(email))
           OR BTRIM(email) !~ '^[^[:space:]@]+@[^[:space:]@]+\\.[^[:space:]@]+$'
         )
       ORDER BY id
@@ -1191,6 +1512,27 @@ const checks = [
       GROUP BY LOWER(BTRIM(email))
       HAVING COUNT(*) > 1
       ORDER BY MIN(id::text)
+    `,
+  },
+  {
+    key: 'stale_staff_push_session_versions',
+    description: 'Active Staff push subscription is not bound to the account current credential version',
+    sql: `
+      SELECT p.admin_user_id AS technician_id,
+             p.id AS subscription_id,
+             p.staff_token_version,
+             t.auth_token_version
+      FROM push_subscriptions p
+      LEFT JOIN technicians t ON t.id = p.admin_user_id
+      WHERE p.active = true
+        AND p.admin_user_id IS NOT NULL
+        AND (
+          t.id IS NULL
+          OR t.active IS NOT true
+          OR t.role NOT IN ('admin', 'technician')
+          OR p.staff_token_version IS DISTINCT FROM t.auth_token_version
+        )
+      ORDER BY p.admin_user_id, p.id
     `,
   },
   {
@@ -1292,6 +1634,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ACTIVE_WRITE_GENERATION,
+  MAX_STAFF_EMAIL_LENGTH,
+  RESET_LINK_TTL_MINUTES,
   WEEKLY_OVERTIME_THRESHOLD_MINUTES,
   checks,
   expectedDailyOvertimeMinutes,

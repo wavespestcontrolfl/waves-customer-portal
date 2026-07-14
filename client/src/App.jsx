@@ -137,6 +137,9 @@ function NewsletterExternalRedirect() {
 import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
 import LoginPage from './pages/LoginPage';
 import AdminLoginPage from './pages/AdminLoginPage';
+import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
+import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
+import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
 import InstallPrompt from './components/InstallPrompt';
@@ -425,6 +428,9 @@ export default function App() {
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
+          <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
+          <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
+          <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
             <Route index element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading...</div>}><TechHomePage /></Suspense>} />
             <Route path="estimate" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading estimator...</div>}><TechEstimatorPage /></Suspense>} />

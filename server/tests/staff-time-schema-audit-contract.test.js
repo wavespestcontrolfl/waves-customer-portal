@@ -7,6 +7,9 @@ jest.mock('../models/db', () => ({
 }));
 
 const {
+  ACTIVE_WRITE_GENERATION,
+  MAX_STAFF_EMAIL_LENGTH,
+  RESET_LINK_TTL_MINUTES,
   WEEKLY_OVERTIME_THRESHOLD_MINUTES,
   checks,
   expectedDailyOvertimeMinutes,
@@ -100,6 +103,8 @@ describe('Staff time schema rollout audit contract', () => {
   test('checks schema, writer fencing, active timers, and legacy weekly rows', () => {
     const byKey = Object.fromEntries(checks.map((check) => [check.key, check]));
 
+    expect(ACTIVE_WRITE_GENERATION).toBe(2);
+
     expect(byKey.staff_time_schema_columns.schema).toBe(true);
     expect(byKey.staff_time_schema_columns.sql).toMatch(/staff_write_generation/);
     expect(byKey.staff_time_schema_column_shapes.schema).toBe(true);
@@ -120,7 +125,7 @@ describe('Staff time schema rollout audit contract', () => {
       /pg_get_constraintdef\(c\.oid, true\)/,
     );
     expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
-      /staff_write_generationisnotdistinctfrom1/,
+      new RegExp(`staff_write_generationisnotdistinctfrom${ACTIVE_WRITE_GENERATION}`),
     );
     expect(byKey.staff_time_schema_value_constraints.sql).toMatch(
       /entry_type=anyarray\[/,
@@ -193,6 +198,50 @@ describe('Staff time schema rollout audit contract', () => {
     expect(byKey.approved_week_nonapproved_daily_summaries.sql).toMatch(
       /w\.status = 'approved'[\s\S]*d\.status IS DISTINCT FROM 'approved'/,
     );
+    expect(byKey.staff_auth_schema_columns.schema).toBe(true);
+    expect(byKey.staff_auth_schema_columns.sql).toMatch(/auth_token_version/);
+    expect(byKey.staff_auth_schema_columns.sql).toMatch(/staff_token_version/);
+    expect(byKey.staff_auth_schema_column_shapes.sql).toMatch(
+      /password_reset_token_hash[\s\S]*character varying[\s\S]*64/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(
+      /technicians_staff_email_canonical_uidx/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/indisvalid/);
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/indisready/);
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/access_method/);
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(
+      /ARRAY\['password_reset_token_hash'\]::text\[\]/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(
+      /ARRAY\['admin_user_id', 'staff_token_version'\]::text\[\]/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(
+      /existing\.key_columns IS DISTINCT FROM required\.key_columns/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/existing\.index_expression IS NOT NULL/);
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(
+      /email is not null[\s\S]*POSITION\('btrim'/,
+    );
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/PG_GET_INDEXDEF/);
+    expect(byKey.staff_auth_schema_indexes.sql).toMatch(/index_predicate/);
+    expect(byKey.invalid_staff_auth_versions.sql).toMatch(/auth_token_version < 1/);
+    expect(byKey.inconsistent_staff_password_reset_state.sql).toMatch(
+      /\^\[a-f0-9\]\{64\}\$/,
+    );
+    expect(byKey.inconsistent_staff_password_reset_state.sql).toContain(
+      `INTERVAL '${RESET_LINK_TTL_MINUTES} minutes'`,
+    );
+    expect(byKey.stale_staff_push_session_versions.sql).toMatch(
+      /p\.staff_token_version IS DISTINCT FROM t\.auth_token_version/,
+    );
+    expect(byKey.missing_active_admin.sql).toMatch(
+      /NOT EXISTS[\s\S]*role = 'admin'[\s\S]*active = true/,
+    );
+    expect(byKey.invalid_active_staff_identity.sql).toContain(
+      `LENGTH(BTRIM(email)) > ${MAX_STAFF_EMAIL_LENGTH}`,
+    );
+    expect(byKey.invalid_active_staff_identity.sql).toMatch(/noncanonical_email/);
   });
 
   test('counts findings in PostgreSQL and strips the internal count field', async () => {

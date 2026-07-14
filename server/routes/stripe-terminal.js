@@ -7,7 +7,11 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const config = require('../config');
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const {
+  adminAuthenticate,
+  isStaffAccessToken,
+  staffTokenVersionMatches,
+} = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const {
   buildSurchargeAmountDetails,
@@ -27,12 +31,19 @@ async function terminalAuthenticate(req, res, next) {
   }
   try {
     const decoded = jwt.verify(authHeader.split(' ')[1], config.jwt.secret);
+    if (!isStaffAccessToken(decoded)) return res.status(401).json({ error: 'Invalid token type' });
     if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid token' });
     if (decoded.scope && decoded.scope !== 'terminal') {
       return res.status(401).json({ error: 'Invalid token scope' });
     }
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
     if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    if (!['admin', 'technician'].includes(tech.role)) {
+      return res.status(401).json({ error: 'Account not found or inactive' });
+    }
+    if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
+      return res.status(401).json({ error: 'Session has been revoked', code: 'TOKEN_REVOKED' });
+    }
     req.technician = tech;
     req.technicianId = tech.id;
     req.techRole = tech.role;
@@ -58,6 +69,19 @@ const TERMINAL_LOCATION_ID = process.env.STRIPE_TERMINAL_LOCATION_ID || null;
 const HANDOFF_TTL_SECONDS = 60;
 const HANDOFF_ISS = 'waves-portal';
 const HANDOFF_AUD = 'waves-pay-ios';
+
+function handoffStaffSessionMatches(claims, tech) {
+  const claimedVersion = claims?.staff_token_version;
+  const currentVersion = Number(tech?.auth_token_version);
+  return Boolean(tech?.active)
+    && ['admin', 'technician'].includes(tech.role)
+    && !tech.must_change_password
+    && Number.isInteger(claimedVersion)
+    && claimedVersion >= 1
+    && Number.isInteger(currentVersion)
+    && currentVersion >= 1
+    && claimedVersion === currentVersion;
+}
 
 // Per-tech mint ceiling. The limiter is a security control (handoff tokens
 // authorize real-money charges) — it MUST survive deploys and be accurate
@@ -259,6 +283,7 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
         invoice_id: String(invoice.id),
         amount_cents,
         tech_user_id: req.technicianId,
+        staff_token_version: req.staffToken.tokenVersion,
         jti: mintedJti,
       },
       secret,
@@ -479,7 +504,7 @@ router.post('/validate-handoff', async (req, res) => {
     }
 
     const tech = await db('technicians').where({ id: handoffRow.tech_user_id }).first();
-    if (!tech || tech.active === false) {
+    if (!tech || !tech.active) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: invoice.id,
@@ -491,6 +516,20 @@ router.post('/validate-handoff', async (req, res) => {
       return res.status(409).json({
         error: 'Technician not active',
         code: 'technician_not_active',
+      });
+    }
+    if (!handoffStaffSessionMatches(claims, tech)) {
+      auditTerminalHandoffValidate({
+        tech_user_id: handoffRow.tech_user_id || null,
+        invoice_id: invoice.id,
+        jti: claims.jti,
+        outcome: 'session_revoked',
+        ip_address: ip,
+        user_agent: ua,
+      });
+      return res.status(401).json({
+        error: 'Staff session has been revoked',
+        code: 'staff_session_revoked',
       });
     }
 
@@ -515,7 +554,14 @@ router.post('/validate-handoff', async (req, res) => {
     // Keychain login token expired. scope:'terminal' is rejected by
     // adminAuthenticate, so this token can't access other admin routes.
     const authToken = jwt.sign(
-      { technicianId: tech.id, role: tech.role, name: tech.name, scope: 'terminal' },
+      {
+        technicianId: tech.id,
+        role: tech.role,
+        name: tech.name,
+        scope: 'terminal',
+        type: 'access',
+        tokenVersion: Number(tech.auth_token_version),
+      },
       config.jwt.secret,
       { expiresIn: '15m' },
     );
@@ -962,3 +1008,4 @@ router.post('/capture', adminAuthenticate, async (req, res) => {
 });
 
 module.exports = router;
+module.exports._test = { handoffStaffSessionMatches };

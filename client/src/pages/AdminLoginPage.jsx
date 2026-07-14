@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -33,7 +33,8 @@ export default function AdminLoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
+  const handleLogin = async (event) => {
+    event?.preventDefault();
     if (!email || !password) return;
     setLoading(true);
     setError('');
@@ -43,8 +44,23 @@ export default function AdminLoginPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Login failed');
+      if (data.user?.mustChangePassword) {
+        localStorage.removeItem('waves_admin_token');
+        localStorage.removeItem('waves_admin_user');
+        try {
+          await refetchFlags();
+        } catch {
+          // The server response already established the required reset path.
+          // Flag availability must not strand the user on the login form.
+        }
+        navigate('/admin/forgot-password', {
+          replace: true,
+          state: { email: data.user.email, resetRequired: true },
+        });
+        return;
+      }
       localStorage.setItem('waves_admin_token', data.token);
       localStorage.setItem('waves_admin_user', JSON.stringify(data.user));
       // Flag cache is keyed by user_id on the server and session-cached in
@@ -52,14 +68,27 @@ export default function AdminLoginPage() {
       // different user, or token-less → fail-closed {}), that stale cache
       // will decide gated surfaces on the next render. Invalidate + refetch
       // with the new token before we navigate so flag reads see truth.
-      await refetchFlags();
+      try {
+        await refetchFlags();
+      } catch {
+        // Authentication is already committed and stored. Feature flags fail
+        // closed independently, so continue to the authenticated destination.
+      }
       // Honor a ?next= return target (e.g. the tech entry point sends
       // ?next=/tech) so techs land in Field Tools rather than the admin-only
       // dashboard. Defaults to /admin for the normal admin sign-in.
       const next = searchParams.get('next');
-      navigate(isInternalPath(next) ? next : '/admin', { replace: true });
-    } catch (e) { setError(e.message); }
-    setLoading(false);
+      const techNext = isInternalPath(next)
+        && (next === '/tech' || next.startsWith('/tech/'));
+      const destination = data.user?.role === 'technician'
+        ? (techNext ? next : '/tech')
+        : (isInternalPath(next) ? next : '/admin');
+      navigate(destination, { replace: true });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -71,26 +100,31 @@ export default function AdminLoginPage() {
           <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Waves Pest Control Admin</div>
         </div>
 
-        <div style={{ background: D.card, borderRadius: 16, padding: 28, border: `1px solid ${D.border}` }}>
-          <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address"
+        <form onSubmit={handleLogin} style={{ background: D.card, borderRadius: 16, padding: 28, border: `1px solid ${D.border}` }}>
+          <label htmlFor="staff-email" style={{ display: 'block', color: D.text, fontSize: 14, marginBottom: 6 }}>Email address</label>
+          <input id="staff-email" type="email" autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} placeholder="Email address" required
             style={{ width: '100%', padding: '14px 16px', borderRadius: 10, border: `2px solid ${D.border}`, fontSize: 16, fontFamily: ADMIN_FONT, color: D.white, background: D.bg, outline: 'none', boxSizing: 'border-box', marginBottom: 12 }}
             onFocus={e => e.target.style.borderColor = D.teal} onBlur={e => e.target.style.borderColor = D.border} />
 
-          <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password"
-            onKeyDown={e => e.key === 'Enter' && handleLogin()}
+          <label htmlFor="staff-password" style={{ display: 'block', color: D.text, fontSize: 14, marginBottom: 6 }}>Password</label>
+          <input id="staff-password" type="password" autoComplete="current-password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" required
             style={{ width: '100%', padding: '14px 16px', borderRadius: 10, border: `2px solid ${D.border}`, fontSize: 16, fontFamily: ADMIN_FONT, color: D.white, background: D.bg, outline: 'none', boxSizing: 'border-box' }}
             onFocus={e => e.target.style.borderColor = D.teal} onBlur={e => e.target.style.borderColor = D.border} />
 
-          {error && <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, background: '#7f1d1d', color: '#fca5a5', fontSize: 13 }}>{error}</div>}
+          {error && <div role="alert" style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, background: '#7f1d1d', color: '#fca5a5', fontSize: 14 }}>{error}</div>}
 
-          <button onClick={handleLogin} disabled={loading} style={{
+          <button type="submit" disabled={loading} style={{
             ...BUTTON_BASE, width: '100%', padding: 16, marginTop: 16, fontSize: 15, fontFamily: ADMIN_FONT,
             background: D.red, color: D.white, opacity: loading ? 0.7 : 1,
           }}>{loading ? 'Signing in...' : 'Sign In'}</button>
-        </div>
+
+          <Link to="/admin/forgot-password" style={{ display: 'block', marginTop: 16, minHeight: 44, lineHeight: '44px', textAlign: 'center', fontSize: 14, color: D.teal, textDecoration: 'none' }}>
+            Forgot password?
+          </Link>
+        </form>
 
         <div style={{ textAlign: 'center', marginTop: 16 }}>
-          <a href="/login" style={{ fontSize: 13, color: D.teal, textDecoration: 'none' }}>← Back to Customer Portal</a>
+          <a href="/login" style={{ fontSize: 14, color: D.teal, textDecoration: 'none' }}>← Back to Customer Portal</a>
         </div>
       </div>
     </div>

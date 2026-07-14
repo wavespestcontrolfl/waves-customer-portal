@@ -1,5 +1,4 @@
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -10,10 +9,16 @@ const { executeAutoAction } = require('../services/email/email-actions');
 const { unblockSender, isProtectedDomain } = require('../services/email/spam-blocker');
 const logger = require('../services/logger');
 const { publicPortalUrl } = require('../utils/portal-url');
+const {
+  createStaffOAuthState,
+  withClaimedStaffOAuthState,
+} = require('../services/staff-oauth-state');
 
 const MAX_PAGE_LIMIT = 200;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
+const GMAIL_OAUTH_STATE_PREFIX = 'gmail.oauth_state:';
+const GMAIL_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 function redactEmail(value) {
   const normalized = value ? String(value).trim().toLowerCase() : '';
@@ -38,29 +43,19 @@ router.use((req, res, next) => {
 // OAuth flow
 // ============================================
 
-async function createOauthState() {
-  const state = crypto.randomBytes(32).toString('base64url');
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-  const existing = await db('email_sync_state').first();
-  if (existing) {
-    await db('email_sync_state').where('id', existing.id).update({
-      oauth_state: state,
-      oauth_state_expires_at: expiresAt,
-    });
-  } else {
-    await db('email_sync_state').insert({
-      emails_synced: 0,
-      oauth_state: state,
-      oauth_state_expires_at: expiresAt,
-    });
-  }
-  return state;
+async function createOauthState(technician) {
+  return createStaffOAuthState({
+    prefix: GMAIL_OAUTH_STATE_PREFIX,
+    technician,
+    ttlMs: GMAIL_OAUTH_STATE_TTL_MS,
+    description: 'Gmail OAuth one-time state',
+  });
 }
 
 // GET /oauth/auth-url — create signed OAuth URL for an authenticated admin
 router.get('/oauth/auth-url', async (req, res) => {
   try {
-    const state = await createOauthState();
+    const state = await createOauthState(req.technician);
     res.json({ url: gmailClient.getAuthUrl(state) });
   } catch (err) {
     logger.error(`[email] OAuth start error: ${err.message}`);
@@ -71,7 +66,7 @@ router.get('/oauth/auth-url', async (req, res) => {
 // GET /oauth/start — authenticated redirect fallback for non-SPA callers
 router.get('/oauth/start', async (req, res) => {
   try {
-    const state = await createOauthState();
+    const state = await createOauthState(req.technician);
     res.redirect(gmailClient.getAuthUrl(state));
   } catch (err) {
     logger.error(`[email] OAuth start error: ${err.message}`);
@@ -86,17 +81,10 @@ router.get('/oauth/callback', async (req, res) => {
     if (!code) return res.status(400).send('Missing authorization code');
     if (!state) return res.status(400).send('Missing OAuth state');
 
-    const syncState = await db('email_sync_state').first();
-    const stateExpires = syncState?.oauth_state_expires_at ? new Date(syncState.oauth_state_expires_at) : null;
-    if (!syncState?.oauth_state || syncState.oauth_state !== state || !stateExpires || stateExpires < new Date()) {
-      logger.warn('[email] OAuth callback rejected: invalid or expired state');
-      return res.status(400).send('Invalid or expired OAuth state');
-    }
-
-    await gmailClient.handleCallback(code);
-    await db('email_sync_state').where('id', syncState.id).update({
-      oauth_state: null,
-      oauth_state_expires_at: null,
+    await withClaimedStaffOAuthState({
+      prefix: GMAIL_OAUTH_STATE_PREFIX,
+      rawState: String(state),
+      callback: () => gmailClient.handleCallback(code),
     });
     logger.info('[email] Gmail OAuth connected successfully');
 
@@ -112,6 +100,9 @@ router.get('/oauth/callback', async (req, res) => {
     res.redirect(`${clientUrl}/admin/email`);
   } catch (err) {
     logger.error(`[email] OAuth callback error: ${err.message}`);
+    if (err.code === 'STAFF_OAUTH_STATE_INVALID') {
+      return res.status(400).send('Invalid or expired OAuth state');
+    }
     res.status(500).send(`OAuth failed: ${err.message}`);
   }
 });

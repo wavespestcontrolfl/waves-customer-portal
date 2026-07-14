@@ -330,7 +330,33 @@ describe('Staff active timer serialization', () => {
       'shiftInsert.insert',
       'transaction.commit',
     ]);
+    expect(specs[0].whereArgs).toEqual([{ id: 'tech-1', active: true }]);
     expect(specs[2].insertPayload.staff_write_generation).toBe(ACTIVE_WRITE_GENERATION);
+  });
+
+  test('aborts a fresh clock-in when deactivation wins the technician-row lock race', async () => {
+    const events = [];
+    const specs = [
+      { table: 'technicians', label: 'technicianLock', firstValue: undefined },
+    ];
+    const { queue } = installTransaction(specs, events);
+
+    await expect(timeTracking.clockIn('tech-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ACCOUNT_INACTIVE',
+      message: expect.stringMatching(/inactive.*cancelled/i),
+    });
+
+    expect(specs[0].whereArgs).toEqual([{ id: 'tech-1', active: true }]);
+    expect(events).toEqual([
+      'transaction.begin',
+      'technicianLock.table',
+      'technicianLock.where',
+      'technicianLock.forUpdate',
+      'technicianLock.first',
+      'transaction.rollback',
+    ]);
+    expect(queue).toHaveLength(0);
   });
 
   test('locks the shift and rejects an already-active break before inserting', async () => {

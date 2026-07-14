@@ -47,6 +47,8 @@ const { Server } = require('socket.io');
 const { allowedOrigins } = require('../config/cors-origins');
 const { socketAuth } = require('./auth');
 const logger = require('../services/logger');
+const db = require('../models/db');
+const { staffTokenVersionMatches } = require('../middleware/admin-auth');
 
 // Module-level singleton so service modules (server/services/*.js)
 // can call getIo().to(room).emit(...) without us threading the io
@@ -55,6 +57,89 @@ const logger = require('../services/logger');
 // hasn't run yet — service modules that emit must guard the null
 // case so a test harness without sockets doesn't crash.
 let _io = null;
+const STAFF_RECHECK_INTERVAL_MS = 60 * 1000;
+
+function isStaffSocket(socket) {
+  return socket?.userType === 'admin' || socket?.userType === 'technician';
+}
+
+function disconnectSocket(socket, reason = 'credential_revoked') {
+  if (!socket || socket.disconnected) return false;
+  try {
+    socket.emit('auth:revoked', { code: 'IDENTITY_REVOKED', reason });
+  } catch { /* best-effort notice; disconnect remains authoritative */ }
+  socket.disconnect(true);
+  return true;
+}
+
+function disconnectMatchingStaffSockets(io, technicianId, reason = 'credential_revoked') {
+  if (!io || !technicianId) return 0;
+  let disconnected = 0;
+  for (const socket of io.sockets?.sockets?.values?.() || []) {
+    if (isStaffSocket(socket) && String(socket.userId) === String(technicianId)) {
+      if (disconnectSocket(socket, reason)) disconnected += 1;
+    }
+  }
+  return disconnected;
+}
+
+// Credential mutations call this after commit for immediate local-replica
+// revocation. Periodic DB checks bound exposure on other replicas.
+function disconnectStaffSockets(technicianId, reason = 'credential_revoked') {
+  return disconnectMatchingStaffSockets(_io, technicianId, reason);
+}
+
+async function revalidateStaffSocket(socket) {
+  if (!isStaffSocket(socket) || socket.disconnected) return true;
+  if (socket.staffTokenExpiresAt && Date.now() >= socket.staffTokenExpiresAt) {
+    disconnectSocket(socket, 'token_expired');
+    return false;
+  }
+
+  let tech;
+  try {
+    tech = await db('technicians')
+      .where({ id: socket.userId })
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+  } catch (err) {
+    logger.error(`[socket] staff recheck failed: tech_id=${socket.userId} error=${err.message}`);
+    disconnectSocket(socket, 'auth_backend_unavailable');
+    return false;
+  }
+
+  const versionMatches = staffTokenVersionMatches({
+    type: 'access',
+    tokenVersion: socket.staffTokenVersion,
+  }, tech);
+  const valid = Boolean(
+    tech
+    && tech.active
+    && !tech.must_change_password
+    && tech.role === socket.userType
+    && ['admin', 'technician'].includes(tech.role)
+    && versionMatches
+  );
+  if (!valid) disconnectSocket(socket, 'credential_revoked');
+  return valid;
+}
+
+function startStaffSocketRevalidation(socket) {
+  if (!isStaffSocket(socket)) return null;
+  const timer = setInterval(() => {
+    if (socket.staffRecheckInFlight || socket.disconnected) return;
+    socket.staffRecheckInFlight = true;
+    void revalidateStaffSocket(socket)
+      .finally(() => { socket.staffRecheckInFlight = false; });
+  }, STAFF_RECHECK_INTERVAL_MS);
+  timer.unref?.();
+  socket.staffRecheckTimer = timer;
+  return timer;
+}
+
+function stopStaffSocketRevalidation(socket) {
+  if (socket?.staffRecheckTimer) clearInterval(socket.staffRecheckTimer);
+  if (socket) socket.staffRecheckTimer = null;
+}
 
 function attachSockets(httpServer) {
   _io = new Server(httpServer, {
@@ -75,6 +160,7 @@ function attachSockets(httpServer) {
     // comment for why.
     if (socket.userType === 'admin' || socket.userType === 'technician') {
       socket.join('dispatch:admins');
+      startStaffSocketRevalidation(socket);
     } else if (socket.userType === 'customer' || socket.userType === 'customer-track') {
       // Customer joins exactly one room: their own. socket.userId
       // came from socket auth's verified DB lookup (or, for
@@ -89,6 +175,7 @@ function attachSockets(httpServer) {
     );
 
     socket.on('disconnect', (reason) => {
+      stopStaffSocketRevalidation(socket);
       logger.info(
         `[socket] disconnect id=${socket.id} userType=${socket.userType} userId=${socket.userId} reason=${reason}`
       );
@@ -102,4 +189,11 @@ function getIo() {
   return _io;
 }
 
-module.exports = { attachSockets, getIo };
+module.exports = {
+  STAFF_RECHECK_INTERVAL_MS,
+  attachSockets,
+  disconnectStaffSockets,
+  getIo,
+  _disconnectMatchingStaffSockets: disconnectMatchingStaffSockets,
+  _revalidateStaffSocket: revalidateStaffSocket,
+};

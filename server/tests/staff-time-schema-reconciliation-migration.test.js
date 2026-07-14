@@ -498,8 +498,8 @@ describe('Staff time schema reconciliation migration', () => {
     expect(migration.sqlStringLiteral("odd'seq")).toBe("'odd''seq'");
   });
 
-  test('Phase-A application stamps every create/reopen-active write', () => {
-    expect(ACTIVE_WRITE_GENERATION).toBe(1);
+  test('Phase-B application stamps every create/reopen-active write as generation 2', () => {
+    expect(ACTIVE_WRITE_GENERATION).toBe(2);
     const service = fs.readFileSync(
       path.join(__dirname, '../services/time-tracking.js'),
       'utf8',

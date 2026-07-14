@@ -1,59 +1,91 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const {
+  adminAuthenticate,
+  requireTechOrAdmin,
+} = require('../middleware/admin-auth');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 
-// ── Audio proxy — registered BEFORE the global admin middleware because
-// <audio src> can't send Authorization headers. Accepts the JWT via ?token=
-// query param in addition to Bearer; scope is limited to this one endpoint
-// so no other admin route gains query-token auth.
-router.get('/audio/:id', async (req, res) => {
-  try {
-    const config = require('../config');
-    const headerToken = req.headers.authorization?.startsWith('Bearer ')
-      ? req.headers.authorization.slice(7)
-      : null;
-    const token = headerToken || req.query.token;
-    if (!token) return res.status(401).json({ error: 'Admin authentication required' });
-
-    let decoded;
-    try { decoded = jwt.verify(token, config.jwt.secret); }
-    catch { return res.status(401).json({ error: 'Invalid token' }); }
-    if (!decoded.technicianId) return res.status(401).json({ error: 'Invalid admin token' });
-    const tech = await db('technicians').where({ id: decoded.technicianId }).first();
-    if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
-    if (!['admin', 'technician'].includes(tech.role)) return res.status(403).json({ error: 'Staff access required' });
-
-    // call_log.id is uuid; recording_sid is a Twilio SID (e.g. "RE…"). A combined
-    // .where({id}).orWhere({recording_sid}) fails in Postgres with "invalid input
-    // syntax for type uuid" when the param isn't UUID-shaped, so route by shape.
-    const param = req.params.id;
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param);
-    const recording = await db('call_log')
-      .where(isUuid ? { id: param } : { recording_sid: param })
-      .first();
-
-    if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
-
-    let url = recording.recording_url;
-    if (!url.endsWith('.mp3')) url += '.mp3';
-    if (!url.startsWith('http')) url = `https://api.twilio.com${url}`;
-
-    const authHeader = 'Basic ' + Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
-    const audioRes = await fetch(url, { headers: { Authorization: authHeader } });
-    if (!audioRes.ok) return res.status(audioRes.status).json({ error: 'Failed to fetch recording' });
-
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Cache-Control', 'private, max-age=3600');
-    const buffer = await audioRes.arrayBuffer();
-    res.send(Buffer.from(buffer));
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+function rejectQueryString(req, res, next) {
+  if (req.originalUrl.includes('?')) {
+    return res.status(400).json({
+      error: 'Query strings are not supported for recording audio',
+    });
   }
-});
+  return next();
+}
+
+function canonicalTwilioRecordingUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl || rawUrl !== rawUrl.trim()) return null;
+
+  let url;
+  try {
+    url = new URL(rawUrl, 'https://api.twilio.com/');
+  } catch {
+    return null;
+  }
+
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || url.hostname !== 'api.twilio.com'
+    || url.port
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    return null;
+  }
+
+  // Twilio historically emitted HTTP media URLs and now redirects them to
+  // HTTPS. Upgrade the one exact trusted host locally so Basic credentials are
+  // never sent over plaintext and the proxy still refuses all redirects.
+  url.protocol = 'https:';
+  if (!url.pathname.endsWith('.mp3')) url.pathname += '.mp3';
+  return url.toString();
+}
+
+// Fetch recording audio with the normal Bearer-authenticated middleware. The
+// client converts the response to a short-lived Blob URL, so credentials never
+// appear in request URLs, browser history, proxy logs, or Referer headers.
+router.get(
+  '/audio/:id',
+  rejectQueryString,
+  adminAuthenticate,
+  requireTechOrAdmin,
+  async (req, res) => {
+    try {
+      const config = require('../config');
+      const param = req.params.id;
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param);
+      const recording = await db('call_log')
+        .where(isUuid ? { id: param } : { recording_sid: param })
+        .first();
+
+      if (!recording?.recording_url) return res.status(404).json({ error: 'Recording not found' });
+
+      const url = canonicalTwilioRecordingUrl(recording.recording_url);
+      if (!url) return res.status(502).json({ error: 'Unable to load recording' });
+
+      const authHeader = 'Basic ' + Buffer.from(`${config.twilio.accountSid}:${config.twilio.authToken}`).toString('base64');
+      const audioRes = await fetch(url, {
+        headers: { Authorization: authHeader },
+        redirect: 'manual',
+      });
+      if (!audioRes.ok) return res.status(502).json({ error: 'Unable to load recording' });
+
+      res.setHeader('Content-Type', 'audio/mpeg');
+      res.setHeader('Cache-Control', 'private, no-store');
+      const buffer = await audioRes.arrayBuffer();
+      return res.send(Buffer.from(buffer));
+    } catch (err) {
+      logger.error('[call-recordings] Audio proxy failed', { error: err.message });
+      return res.status(500).json({ error: 'Unable to load recording' });
+    }
+  },
+);
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -201,9 +233,10 @@ router.put('/calls/:id/disposition', async (req, res, next) => {
           metadata: JSON.stringify({
             disposition,
             callSid: call.twilio_call_sid,
+            recordingSid: call.recording_sid || null,
             phone: call.from_phone,
             duration: call.duration_seconds,
-            recordingUrl: call.recording_url || null,
+            recordingAvailable: Boolean(call.recording_url),
           }),
         }).catch(() => {});
         logger.info(`[calls] Tagged call ${call.id} as "${label}" → customer ${call.customer_id} timeline`);

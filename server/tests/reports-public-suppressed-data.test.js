@@ -86,7 +86,11 @@ async function withServer(fn) {
 }
 
 const VALID_TOKEN = '0123456789abcdef0123456789abcdef';
-const STAFF_JWT = jwt.sign({ technicianId: 'tech-1' }, 'test-jwt-secret');
+const STAFF_JWT = jwt.sign({
+  technicianId: 'tech-1',
+  type: 'access',
+  tokenVersion: 4,
+}, 'test-jwt-secret');
 
 function mockDb({ deliveryMode }) {
   const structuredNotes = JSON.stringify({ typedReportDelivery: deliveryMode });
@@ -108,7 +112,12 @@ function mockDb({ deliveryMode }) {
   db.mockImplementation((table) => {
     if (table === 'service_records') return serviceRead;
     if (table === 'technicians') return chain({
-      first: jest.fn().mockResolvedValue({ id: 'tech-1', active: true }),
+      first: jest.fn().mockResolvedValue({
+        id: 'tech-1',
+        active: true,
+        role: 'technician',
+        auth_token_version: 4,
+      }),
     });
     if (table === 'service_products') return chain({
       where: jest.fn().mockResolvedValue([]),

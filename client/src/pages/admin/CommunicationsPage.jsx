@@ -34,6 +34,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 
 import CallRecordingsPanel from "./CallRecordingsPanel";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import PushSettings from "../../components/admin/PushSettings";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 
@@ -1702,7 +1703,7 @@ function CallLogTab() {
                       )}
                     </div>
                     {/* Recording player */}
-                    {c.recording_url && (
+                    {c.recording_available && (
                       <div
                         style={{
                           marginTop: 8,
@@ -1727,17 +1728,10 @@ function CallLogTab() {
                             ? `(${Math.floor(c.recording_duration_seconds / 60)}:${String(c.recording_duration_seconds % 60).padStart(2, "0")})`
                             : ""}
                         </div>{" "}
-                        <audio
-                          controls
-                          preload="none"
+                        <AuthenticatedCallAudio
+                          recordingId={c.recording_sid || c.id}
                           style={{ width: "100%", height: 32 }}
-                        >
-                          {" "}
-                          <source
-                            src={`${API_BASE}/admin/call-recordings/audio/${c.recording_sid || c.id}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
-                            type="audio/mpeg"
-                          />{" "}
-                        </audio>{" "}
+                        />{" "}
                       </div>
                     )}
                     {/* Transcription */}

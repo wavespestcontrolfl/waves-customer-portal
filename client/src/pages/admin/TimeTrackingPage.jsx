@@ -2343,7 +2343,7 @@ const EMPTY_TECH_FORM = {
   ssnLast4: "",
 };
 
-function TeamTab({ showToast }) {
+export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -2442,52 +2442,33 @@ function TeamTab({ showToast }) {
     setSaving(false);
   };
 
-  const handleToggleActive = async (tech) => {
+  const handleActivate = async (tech) => {
     try {
       await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "PUT",
-        body: JSON.stringify({ active: !tech.active }),
+        body: JSON.stringify({ active: true }),
       });
-      showToast(
-        tech.active ? `${tech.name} deactivated` : `${tech.name} activated`,
-      );
+      showToast(`${tech.name} activated`);
       load();
     } catch (e) {
       showToast("Failed: " + e.message);
     }
   };
 
-  const handleDelete = async (tech) => {
-    if (!confirm(`Permanently delete ${tech.name}? This cannot be undone.`))
-      return;
+  const handleDeactivate = async (tech) => {
+    if (
+      !confirm(
+        `Deactivate ${tech.name}'s staff account? They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.`,
+      )
+    ) return;
     try {
       await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
       });
-      showToast(`${tech.name} deleted`);
+      showToast(`${tech.name} deactivated`);
       load();
     } catch (e) {
-      const msg = String(e.message || "");
-      if (msg.includes("linked records") || msg.includes("409")) {
-        if (
-          !confirm(
-            `${tech.name} has linked records (time entries, jobs, assignments, etc.). Purge all related data and delete anyway? This is NOT reversible.`,
-          )
-        )
-          return;
-        try {
-          await adminFetch(
-            `/admin/timetracking/technicians/${tech.id}?force=true`,
-            { method: "DELETE" },
-          );
-          showToast(`${tech.name} force-deleted`);
-          load();
-        } catch (e2) {
-          showToast("Force delete failed: " + e2.message);
-        }
-      } else {
-        showToast("Failed: " + msg);
-      }
+      showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
     }
   };
 
@@ -3148,7 +3129,9 @@ function TeamTab({ showToast }) {
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
                     <button
-                      onClick={() => handleToggleActive(t)}
+                      onClick={() => (
+                        t.active ? handleDeactivate(t) : handleActivate(t)
+                      )}
                       style={{
                         padding: "4px 10px",
                         background: "transparent",
@@ -3160,20 +3143,6 @@ function TeamTab({ showToast }) {
                       }}
                     >
                       {t.active ? "Deactivate" : "Activate"}
-                    </button>{" "}
-                    <button
-                      onClick={() => handleDelete(t)}
-                      style={{
-                        padding: "4px 10px",
-                        background: "transparent",
-                        border: `1px solid ${D.red}55`,
-                        borderRadius: 6,
-                        color: D.red,
-                        fontSize: 11,
-                        cursor: "pointer",
-                      }}
-                    >
-                      Delete
                     </button>{" "}
                   </div>{" "}
                 </td>{" "}
