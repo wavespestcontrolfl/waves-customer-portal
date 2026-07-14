@@ -2770,7 +2770,14 @@ export default function EstimateToolViewV2({
     const fields = {};
     if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
     if (String(form.lotSqFt || "").trim() !== "") fields.lotSize = Number(form.lotSqFt);
-    if (String(form.stories || "").trim() !== "") fields.stories = Number(form.stories);
+    // A story count nobody actually knew (lookup default, operator never
+    // touched it) must not be persisted as "tech verified" — for an
+    // unknown-stories aggregate that would defeat the footprint suppression
+    // on every future lookup of the address (codex P2 #2721).
+    const storiesIsUntouchedDefault =
+      enrichedProfile?.storiesSource === "default" && !form._storiesEdited;
+    if (String(form.stories || "").trim() !== "" && !storiesIsUntouchedDefault)
+      fields.stories = Number(form.stories);
     if (!form.address || !Object.keys(fields).length) return;
     setVerifySaveState("saving");
     try {
@@ -2785,7 +2792,7 @@ export default function EstimateToolViewV2({
       setVerifySaveState("error");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
+  }, [form.address, form.homeSqFt, form.lotSqFt, form.stories, form._storiesEdited, enrichedProfile]);
 
   const resolveFleaExteriorDefault = useCallback((currentForm = form) => {
     const currentArea = parseNonNegativeInteger(currentForm.fleaExteriorAreaSqFt);

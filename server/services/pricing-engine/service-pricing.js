@@ -835,6 +835,25 @@ function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
   const warnings = [];
+  // footprintUnknown: the lookup explicitly refused to claim a ground-floor
+  // footprint (association aggregate with an unknown story count). The
+  // homeSqFt/livingAreaSqFt aliases below would divide the summed living
+  // area by a DEFAULTED story count and fabricate a 100k+ sf "slab" — take
+  // the defaulted/manual-review path instead, which commercial pest (and its
+  // mirrors) turns into a quote-required line until a real building size is
+  // measured (codex P1 #2721).
+  if (property.footprintUnknown === true) {
+    manualReviewReasons.push('footprint_unknown_field_measurement_required');
+    warnings.push('footprint_unknown_field_measurement_required');
+    return {
+      footprint: fallback,
+      source: 'footprint_unknown_fallback',
+      wasDefaulted: true,
+      requiresManualReview: true,
+      manualReviewReasons,
+      warnings,
+    };
+  }
   const aliases = [
     ['footprint', property.footprint, positiveFiniteNumber],
     ['footprintSqFt', property.footprintSqFt, positiveFiniteNumber],

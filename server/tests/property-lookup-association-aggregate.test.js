@@ -719,3 +719,112 @@ describe('codex round-5 hardening (#2721)', () => {
     expect(property.footprintUnknown).toBe(false);
   });
 });
+
+describe('codex round-6 hardening (#2721)', () => {
+  const { aggregateSitusVerdict, addressHasSubpremise } = aiPrivate;
+
+  test('a numbered route keeps its route number in situs lines', async () => {
+    // "123 US 41": the trailing 41 is the street name, not a unit — every
+    // row carries the identical full line, so stripping it would make the
+    // situs guard reject the association as a wrong street.
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(123, 101, { fulladdress: '123 US 41, VENICE FL, 34285' }),
+      unitFeature(123, 102, { fulladdress: '123 US 41, VENICE FL, 34285' }),
+      unitFeature(123, 103, { fulladdress: '123 US 41, VENICE FL, 34285' }),
+      unitFeature(123, 104, { fulladdress: '123 US 41, VENICE FL, 34285' }),
+      unitFeature(123, 105, { fulladdress: '123 US 41, VENICE FL, 34285' }),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.situsLines).toEqual(['123 US 41']);
+    expect(parcel.situsAddress).toBe('123 US 41');
+    expect(aggregateSitusVerdict(parcel, '123 US 41, Venice, FL 34285', 'rooftop',
+      '123 US 41, Venice, FL 34285')).toBe('keep');
+  });
+
+  test('varying trailing numbers still strip as unit numbers', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.situsLines).toEqual(['1555 TARPON CENTER DR']);
+  });
+
+  test('BLDG designators count as buildings under one street number', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(100, 101, { fulladdress: '100 MAIN ST BLDG A, VENICE FL, 34285' }),
+      unitFeature(100, 102, { fulladdress: '100 MAIN ST BLDG A, VENICE FL, 34285' }),
+      unitFeature(100, 103, { fulladdress: '100 MAIN ST BLDG B, VENICE FL, 34285' }),
+      unitFeature(100, 104, { fulladdress: '100 MAIN ST BLDG B, VENICE FL, 34285' }),
+      unitFeature(100, 105, { fulladdress: '100 MAIN ST BLDG C, VENICE FL, 34285' }),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.buildingCount).toBe(3);
+    // The BLDG token is still a unit designator for street identity.
+    expect(parcel.situsLines).toEqual(['100 MAIN ST']);
+  });
+
+  test('a common row with a BLANK parcel id exposes NO PAO parcel id', async () => {
+    mockArcgis([
+      { ...MASTER_FEATURE, attributes: { ...MASTER_FEATURE.attributes, id: null } },
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.masterIsCommon).toBe(true);
+    // parcelId fell back to a unit id — that unit id must NOT key by-parcel
+    // PAO detail, or a single-unit record collapses the aggregate on merge.
+    expect(parcel.paoParcelId).toBeNull();
+  });
+
+  test('punctuated unit designators (Apt. 101 / Ste. 200) bypass aggregation', () => {
+    const parcel = {
+      aggregated: true,
+      situsHouseNumbers: ['1555'],
+      situsLines: ['1555 TARPON CENTER DR'],
+    };
+
+    expect(addressHasSubpremise('1555 Tarpon Center Dr Apt. 101, Venice, FL')).toBe(true);
+    expect(addressHasSubpremise('1555 Tarpon Center Dr Ste. 200, Venice, FL')).toBe(true);
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr Apt. 101, Venice, FL 34285')).toBe('drop');
+    // Unpunctuated forms keep working.
+    expect(aggregateSitusVerdict(parcel, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr, Venice, FL 34285')).toBe('keep');
+  });
+
+  test('commercial pest quote-requires instead of pricing off summed living area', () => {
+    const { priceCommercialPest } = require('../services/pricing-engine/service-pricing');
+
+    // footprintUnknown: resolvePestFootprint must NOT fall through to the
+    // homeSqFt/stories alias (122,696 sf treated as a one-story slab).
+    const line = priceCommercialPest({
+      homeSqFt: 122696,
+      stories: 1,
+      footprintUnknown: true,
+      commercialSubtype: 'multifamily_common_area_residential',
+    }, {});
+
+    expect(line.quoteRequired).toBe(true);
+    expect(line.price).toBeNull();
+    expect(line.manualReviewReasons).toContain('commercial_pest_missing_building_footprint');
+
+    // A known building size still auto-prices.
+    const priced = priceCommercialPest({ homeSqFt: 20000, stories: 2 }, {});
+    expect(priced.quoteRequired).not.toBe(true);
+    expect(priced.annual).toBeGreaterThan(0);
+  });
+});

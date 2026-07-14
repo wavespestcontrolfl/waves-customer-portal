@@ -132,25 +132,33 @@ function modalValue(values) {
   return best;
 }
 
-// Building line of a situs: "NUMBER STREET" with any labeled secondary-unit
-// designator removed. County rows label units as "APT 101" / "UNIT B4" /
-// "# 12" (and some layers emit a bare trailing number instead). The bare-
-// number strip alone leaves the designator word behind ("13510 LUXE AVE APT"),
-// which the situs guard then reads as a different street and drops the whole
-// association back to the empty address-search path (codex P2 #2721). The
-// designator set mirrors stripUnitDesignators in ai-property-lookup.js.
+// Labeled secondary-unit designators on a situs line. County rows label units
+// as "APT 101" / "UNIT B4" / "# 12" (and some layers emit a bare trailing
+// number instead). Left in place, the designator word survives the bare-
+// number strip ("13510 LUXE AVE APT") and the situs guard reads it as a
+// different street, dropping the whole association back to the empty
+// address-search path (codex P2 #2721). The designator set mirrors
+// stripUnitDesignators in ai-property-lookup.js.
 const SITUS_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]*\s*$/i;
 
-function situsBuildingLine(situs) {
-  let s = String(situs || '').split(',')[0].replace(/\s+/g, ' ').trim();
+function stripSitusDesignators(situs) {
+  let s = String(situs || '').split(',')[0].replace(/\s+/g, ' ').trim().toUpperCase();
   // Peel repeatedly — "STE 200 BLDG C" carries two designators.
   for (let i = 0; i < 3; i += 1) {
     const next = s.replace(SITUS_UNIT_DESIGNATOR_RE, '').trim();
     if (next === s) break;
     s = next;
   }
-  const m = s.match(/^(\d+\s+[^,]*?)(?:\s+\d+)?$/);
-  return m ? m[1].trim() : null;
+  return s;
+}
+
+// Split a designator-stripped situs into its base line and any BARE trailing
+// number. Whether that number is a UNIT number (strip it) or part of a
+// numbered route's street name ("123 US 41" — keep it) is decided by
+// cross-row evidence in buildStackedAggregate, not here (codex P2 #2721).
+function splitSitusTrailingNumber(situs) {
+  const m = stripSitusDesignators(situs).match(/^(\d+\s+\S[^,]*?)(?:\s+(\d+))?$/);
+  return m ? { base: m[1].trim(), trailing: m[2] || null } : null;
 }
 
 function buildStackedAggregate(county, layer, features, lng, lat) {
@@ -180,17 +188,50 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   // roll's only building signal ("1535 / 1555 / 1575 Tarpon Center Dr" = 3
   // buildings). Single shared number → 1; satellite vision refines later.
   const streetNumbers = new Set();
-  // Full "NUMBER STREET" situs lines (unit designators stripped) — the situs
+  // Building identity also honors an explicit BLDG token: "100 MAIN ST
+  // BLDG A/B/C" is 3 buildings under one street number, and collapsing them
+  // to 1 would underestimate the multi-building perimeter (codex P2 #2721).
+  const buildingKeys = new Set();
+  // Cross-row evidence for the bare-trailing-number strip: unit numbers VARY
+  // across a base line (or the base also appears bare), while a numbered
+  // route's number ("123 US 41") is identical on every row — stripping it
+  // would make the situs guard reject the association as a wrong street
+  // (codex P2 #2721).
+  const baseVariants = new Map();
+  for (const row of unitRows) {
+    const situs = String(row.parsed.situsAddress || '');
+    const m = situs.match(/^(\d+)\s/);
+    if (m) streetNumbers.add(m[1]);
+    if (m) {
+      const bldg = situs.split(',')[0].match(/\b(?:BLDG|BUILDING)\.?\s*#?\s*([A-Z0-9-]+)/i);
+      buildingKeys.add(`${m[1]}|${bldg ? bldg[1].toUpperCase() : ''}`);
+    }
+    const parts = splitSitusTrailingNumber(situs);
+    if (!parts) continue;
+    const entry = baseVariants.get(parts.base) || { numbers: new Set(), bare: false, rows: 0 };
+    entry.rows += 1;
+    if (parts.trailing) entry.numbers.add(parts.trailing); else entry.bare = true;
+    baseVariants.set(parts.base, entry);
+  }
+  // Resolved "NUMBER STREET" line for a situs — the base with the trailing
+  // number stripped when the evidence says it's a unit number, the full line
+  // when a shared single number reads as part of the street name. The situs
   // guard needs street identity, not just the number: "1555 Harbor Dr" must
   // not ride a 1555 that only exists on Tarpon Center Dr (codex P2 r4).
+  const resolveSitusLine = (situs) => {
+    const parts = splitSitusTrailingNumber(situs);
+    if (!parts) return null;
+    if (!parts.trailing) return parts.base;
+    const entry = baseVariants.get(parts.base);
+    const routeNumber = entry && !entry.bare && entry.numbers.size === 1 && entry.rows >= 2;
+    return routeNumber ? `${parts.base} ${parts.trailing}` : parts.base;
+  };
   const situsLines = new Set();
   for (const row of unitRows) {
-    const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
-    if (m) streetNumbers.add(m[1]);
-    const line = situsBuildingLine(row.parsed.situsAddress);
-    if (line) situsLines.add(line.toUpperCase());
+    const line = resolveSitusLine(row.parsed.situsAddress);
+    if (line) situsLines.add(line);
   }
-  const buildingCount = Math.max(1, streetNumbers.size);
+  const buildingCount = Math.max(1, buildingKeys.size);
 
   // Land: a stacked master/common row carrying a roll land figure wins; else
   // the shared polygon's own area (units all carry lsqft 0 by design). Only a
@@ -213,12 +254,17 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   const stories = unitRows.reduce((max, row) => Math.max(max, row.parsed.stories || 0), 0) || null;
   // Situs without the trailing unit designator — the modal "NUMBER STREET".
   const situsAddress = modalValue(unitRows.map(
-    (row) => situsBuildingLine(row.parsed.situsAddress) || row.parsed.situsAddress,
+    (row) => resolveSitusLine(row.parsed.situsAddress) || row.parsed.situsAddress,
   )) || masterRow.parsed.situsAddress || null;
 
   return {
     parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,
     masterIsCommon: Boolean(commonRow),
+    // The common row's OWN parcel id, or nothing — parcelId above falls back
+    // to a unit id when the common row's id is blank, and keying PAO detail
+    // off that unit id would let a single-unit record collapse the aggregate
+    // on merge ties (codex P2 #2721).
+    masterParcelId: commonRow?.parsed.parcelId || null,
     situsLines: [...situsLines].sort(),
     // Every building number in the association — the situs-mismatch guard
     // must accept a lookup for ANY of them, not just the modal one
@@ -489,7 +535,7 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
         const parcel = {
           ...aggregate,
           county,
-          paoParcelId: aggregate.masterIsCommon ? paoParcelIdFrom(aggregate.parcelId) : null,
+          paoParcelId: aggregate.masterParcelId ? paoParcelIdFrom(aggregate.masterParcelId) : null,
           polygon: aggregate._masterRings,
           polygonAreaSqft: aggregate._polyArea,
           assessmentYear: aggregate.rollYear || null,

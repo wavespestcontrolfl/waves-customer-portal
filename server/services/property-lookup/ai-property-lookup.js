@@ -1342,7 +1342,11 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 // aggregation must step aside so the PAO/address search resolves the unit
 // record (codex P1 r3 #2721: "1555 Tarpon Center Dr #101" is a condo
 // resident, not the commercial HOA).
-const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM)\b\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
+// The optional period covers punctuated designators ("Apt. 101" / "Ste. 200")
+// — without it the raw typed address slips past this guard while the
+// normalized street comparison strips the unit anyway, so a condo-resident
+// lookup would ride the association aggregate (codex P1 #2721).
+const SUBPREMISE_RE = /(?:\b(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|TRLR|RM)\b\.?\s*#?\s*[A-Z0-9-]+|#\s*[A-Z0-9-]+)/i;
 
 function addressHasSubpremise(address) {
   return SUBPREMISE_RE.test(String(address || ''));
