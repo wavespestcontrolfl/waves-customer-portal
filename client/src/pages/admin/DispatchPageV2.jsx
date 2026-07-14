@@ -2638,6 +2638,13 @@ export default function DispatchPageV2({
             const fresh = await fetchSchedule(date, {
               silent: !!continueProjectId,
             });
+            // An edit can change the visit's price/service — refresh the
+            // mounted editor's closeoutPreview too, or a billing-required
+            // Close stays disabled after the tech lowers the visit to
+            // $0/covered and the decision-time re-fetch never runs off the
+            // disabled button (Codex r12 P2). Harmless when no editor is
+            // mounted: the consumed-key ref ignores pre-mount bumps.
+            setProjectReloadKey((k) => k + 1);
             // Mirror the rain-out re-seat/retire (Codex r9 P2): an edit can
             // change the visit's date/price/tech, and a day-miss would
             // otherwise leave the Details pill serving the pre-edit
@@ -2929,6 +2936,10 @@ export default function DispatchPageV2({
             const entry = prepaidEntryContext;
             setPrepaidService(null);
             setPrepaidEntryContext(null);
+            // Week rows cache their own /week payload — without a bump a
+            // week-origin visit keeps showing unpaid and can reopen
+            // checkout/prepay off stale totals (Codex r12 P2).
+            setScheduleRefreshKey((k) => k + 1);
             const fresh = await fetchSchedule(date, { silent: true });
             if (entry === 'edit') {
               // Re-seat the editing service with the post-save row so the

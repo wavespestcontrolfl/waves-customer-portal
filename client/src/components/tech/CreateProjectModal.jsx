@@ -367,6 +367,13 @@ export default function CreateProjectModal({
   // unmount) inside the 700ms window was silently dropping the last edits
   // (Codex P2 on #2717).
   const draftFlushRef = useRef(null);
+  // True only after the tech actually contributed content: typing anywhere
+  // in the body (container onInput), an AI fill/append, a library pick, or
+  // restoring a saved draft. Autofill EFFECTS (type defaults → title/
+  // findings, customer autofill) deliberately do not set it — counting
+  // effect output as content re-armed the flush on untouched sheets and
+  // rewrote just-discarded drafts (Codex r12 P2).
+  const userDirtyRef = useRef(false);
   useEffect(() => {
     // Stop once the project exists on the server — the server draft is then
     // the source of truth and a local draft would risk a duplicate on restore.
@@ -386,7 +393,7 @@ export default function CreateProjectModal({
       || (projectType && projectType !== (defaultProjectType || ''))
       || (customerId && String(customerId) !== String(defaultCustomerId || '')),
     );
-    if (!hasContent) {
+    if (!hasContent || !userDirtyRef.current) {
       draftFlushRef.current = null;
       return;
     }
@@ -420,6 +427,9 @@ export default function CreateProjectModal({
   function restoreDraft() {
     const d = savedDraft;
     if (!d) return;
+    // Restored content is user content — keep the draft armed so further
+    // edits stay protected.
+    userDirtyRef.current = true;
     // Only restore the type (and its findings) if it's permitted in this modal;
     // findings are type-specific, so drop them when the type isn't restored.
     const typeAllowed = d.projectType && (!allowedProjectTypes || allowedProjectTypes.includes(d.projectType));
@@ -833,14 +843,17 @@ export default function CreateProjectModal({
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
+    userDirtyRef.current = true;
     setFindings(prev => mergeSuggestionsIntoFindings(prev, suggestions, options.overwrite));
   }
 
   function applyWdoProfile(profile) {
+    userDirtyRef.current = true;
     setFindings(prev => applyProfileToWdoFindings(prev, profile, { overwrite: true }));
   }
 
   function applyWdoHistory(history) {
+    userDirtyRef.current = true;
     setFindings(prev => applyHistoryToWdoFindings(prev, history, { overwrite: true }));
   }
 
@@ -865,7 +878,10 @@ export default function CreateProjectModal({
       });
       const data = await d.json();
       if (!d.ok) throw new Error(data?.error || 'AI draft failed');
-      if (data.report) setRecommendations(data.report.trim());
+      if (data.report) {
+        userDirtyRef.current = true;
+        setRecommendations(data.report.trim());
+      }
     } catch (e) {
       setError(e.message || 'AI draft failed');
     } finally {
@@ -1107,12 +1123,18 @@ export default function CreateProjectModal({
           </div>
         </div>
 
-        {/* Body — in sheet mode this is the scroll region (header/footer pinned) */}
-        <div style={{
-          padding: isEstimateStyle ? 22 : 16,
-          display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
-          ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
-        }}>
+        {/* Body — in sheet mode this is the scroll region (header/footer pinned).
+            onInput marks the draft user-dirty: every keystroke in any field
+            bubbles here, while autofill EFFECTS don't fire input events —
+            the cheap way to tell typed content from effect output. */}
+        <div
+          onInput={() => { userDirtyRef.current = true; }}
+          style={{
+            padding: isEstimateStyle ? 22 : 16,
+            display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
+            ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+          }}
+        >
           {/* Restore saved draft */}
           {showDraftPrompt && (
             <div style={{
@@ -1296,6 +1318,7 @@ export default function CreateProjectModal({
                         key={s.id}
                         type="button"
                         onClick={() => {
+                          userDirtyRef.current = true;
                           setTitle(s.name || '');
                           setServiceSearch('');
                           setServiceResults([]);
@@ -1497,7 +1520,10 @@ export default function CreateProjectModal({
                   <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
                     <DictationButton
                       palette={P}
-                      onAppend={(text) => setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text)}
+                      onAppend={(text) => {
+                        userDirtyRef.current = true;
+                        setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text);
+                      }}
                     />
                   </div>
                 </div>
