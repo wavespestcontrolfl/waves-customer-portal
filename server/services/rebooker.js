@@ -230,6 +230,22 @@ class SmartRebooker {
       });
     }
 
+    // Owner blackout re-check at COMMIT for every non-admin initiator
+    // (customer self-serve, SMS replies, rain-out/auto flows): the option
+    // being confirmed may have been generated before the owner blocked the
+    // date. Admin-initiated moves stay unblocked BY DESIGN — the owner can
+    // knowingly book his own day off from dispatch. Fail-open helper.
+    if (initiatedBy !== 'admin') {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(newDateStr)) {
+        throw Object.assign(new Error('That day is no longer available'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+    }
+
     const originalDate = service.scheduled_date;
     const win = parseWindow(newWindow);
     const windowEnd = win.end || service.window_end;
@@ -454,6 +470,17 @@ class SmartRebooker {
         isOperational: true,
         code: 'INVALID_DATE',
       });
+    }
+    // Same non-admin blackout commit guard as reschedule() — see there.
+    if (initiatedBy !== 'admin') {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(seriesDateStr)) {
+        throw Object.assign(new Error('That day is no longer available'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
     }
     if (seriesDateStr === etDateString()) {
       const cutoff = win.end || service.window_end || win.start || service.window_start;

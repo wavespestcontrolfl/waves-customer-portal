@@ -893,11 +893,16 @@ function buildAsapCapacitySlotsForTechs({
   maxCandidates = 36,
   minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes,
   now = new Date(),
+  // Dates removed BEFORE maxCandidates applies (owner blackout days) — a
+  // post-cap filter would let blackout days consume cap slots and leave the
+  // picker short even when later open days exist.
+  excludeDates = null,
 } = {}) {
   if (!techs.length) return [];
 
   const groups = [];
   for (const date of enumerateETDateStrings(dateFrom, dateTo, { includeWeekends })) {
+    if (excludeDates && excludeDates.has(date)) continue;
     const earliestMinute = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
     for (const windowStart of PREFERRED_WINDOWS) {
       if (timeToMinutes(windowStart) < earliestMinute) continue;
@@ -937,16 +942,17 @@ async function buildAsapCapacitySlots(options = {}) {
   const techs = await db('technicians')
     .where({ active: true })
     .select('id', 'name');
-  const slots = buildAsapCapacitySlotsForTechs({ ...options, techs });
   // ASAP capacity enumerates its own dates (it deliberately skips the
-  // route-aware find-time path), so owner blackout days must be filtered
-  // here too — same shared helper, same fail-open posture.
-  if (slots.length && options.dateFrom && options.dateTo) {
+  // route-aware find-time path), so owner blackout days are excluded here —
+  // BEFORE the maxCandidates cap, so a blocked stretch never eats cap slots
+  // and shorts the picker while later open days exist. Fail-open helper.
+  let excludeDates = null;
+  if (options.dateFrom && options.dateTo) {
     const { getBlackoutDates } = require('./scheduling/blackout-dates');
     const blackout = await getBlackoutDates(options.dateFrom, options.dateTo);
-    if (blackout.size) return slots.filter((s) => !blackout.has(s.date));
+    if (blackout.size) excludeDates = blackout;
   }
-  return slots;
+  return buildAsapCapacitySlotsForTechs({ ...options, techs, excludeDates });
 }
 
 // Reorder a date-sorted slot pool so customers see a spread of distinct

@@ -212,7 +212,11 @@ async function getOptions(serviceId) {
   if (!service) return { ok: false, reason: 'not_found' };
 
   const todayStr = etDateString();
-  const sameDay = sameDayOptions();
+  // Owner blackout: when TODAY is blocked, the "later today" choices must
+  // not be offered (findRescheduleOptions covers tomorrow onward; same-day
+  // candidates are built here). Fail-open helper.
+  const { isBlackoutDate } = require('./scheduling/blackout-dates');
+  const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
 
   const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain');
 
