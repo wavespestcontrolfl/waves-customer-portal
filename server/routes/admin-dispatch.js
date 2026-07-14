@@ -129,6 +129,20 @@ async function renderTemplate(templateKey, vars, context = {}) {
   return null;
 }
 
+// Feature probe for OPT-IN completion templates. Deliberately the OPPOSITE
+// posture of smsTemplatesRouter.isTemplateActive (there, a MISSING row means
+// active — a kill-switch stance for long-standing sends): these templates ARM
+// new sending behavior, so they must exist AND be active to engage, and any
+// doubt (missing table, lookup error) means OFF. No audit-log noise either —
+// getTemplate would file a missing/inactive audit row per completion.
+async function isOptInSmsTemplateEnabled(templateKey) {
+  try {
+    if (!(await db.schema.hasTable('sms_templates'))) return false;
+    const row = await db('sms_templates').where({ template_key: templateKey }).first('is_active');
+    return !!row && row.is_active !== false;
+  } catch { return false; }
+}
+
 async function runtimeServiceReportFlag(req, flagKey, envKey, defaultValue = false) {
   const envValue = process.env[envKey];
   if (envValue !== undefined) {
@@ -5157,6 +5171,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // link exactly as before, so the customer experience degrades to manual
     // pay — never a blocked completion and never a double charge (the helper
     // fail-closes on a live PaymentIntent).
+    // Completion-time payment texts (owner opt-in via sms_templates rows):
+    // autoChargedReceiptPending — the inline auto-charge settled and the
+    // combined report+receipt template is active, so the completion SMS
+    // carries the receipt and the queued separate receipt text stands down.
+    // paymentFailedSmsContext — a genuine off-session decline; the decline
+    // notice (`payment_failed` template) sends as its own text and the
+    // completion SMS goes report-only.
+    let autoChargedReceiptPending = false;
+    let paymentFailedSmsContext = null;
     if (perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
@@ -5234,11 +5257,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
           );
         } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
-      } else try {
+      } else {
+      // Hoisted so the decline handler below can cite the attempted card and
+      // amount: the catch can't see consts declared inside the try.
+      let autopayPm = null;
+      let chargeAttempted = false;
+      const attemptAmountDue = require('../services/invoice-helpers').invoiceAmountDue(invoice);
+      // Combined report+receipt text (owner opt-in): decided BEFORE the charge
+      // because the receipt-delivery queue drains ~1s after it — a successful
+      // charge immediately stamps receipt_sent_at so the queue's SMS leg
+      // yields to the combined completion SMS. The receipt EMAIL leg is
+      // unaffected either way.
+      const combinedReceiptArmed = await isOptInSmsTemplateEnabled('service_complete_paid_receipt');
+      try {
         const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
-        const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
+        autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
         if (isChargeableAutopayMethod(autopayPm)) {
           const StripeService = require('../services/stripe');
+          chargeAttempted = true;
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id);
           const fresh = await db('invoices').where({ id: invoice.id }).first();
           if (fresh) invoice = fresh;
@@ -5247,6 +5283,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             alreadyPaid = true;
             invoiceCreated = false;
             payUrl = null;
+            if (combinedReceiptArmed) {
+              // Stand the queued receipt text down — the completion SMS
+              // carries the receipt. (Sliver of a race vs the +1s queue
+              // drain: worst case the classic receipt also sends; the money
+              // facts are identical either way.)
+              try {
+                await db('invoices').where({ id: invoice.id }).whereNull('receipt_sent_at')
+                  .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() });
+                autoChargedReceiptPending = true;
+              } catch (stampErr) {
+                logger.warn(`[dispatch] combined-receipt stamp failed for invoice ${invoice.id} — separate receipt text keeps sending: ${stampErr.message}`);
+              }
+            }
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
                 details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
@@ -5320,6 +5369,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           logger.error(`[dispatch] per-application autopay charge ORPHANED for invoice ${invoice?.id} (PI ${chargeErr.stripePaymentIntentId || 'unknown'}) — pay link suppressed, invoice parked 'processing', see stripe_orphan_charges`);
         } else {
           logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+          // Genuine decline — never the orphaned money-collected case above
+          // and never an ACH already processing. Arm the separate decline
+          // notice (owner-managed `payment_failed` template): it sends as its
+          // own text in the completion-SMS block and the completion text goes
+          // report-only. Only when a charge was actually ATTEMPTED — "no
+          // chargeable method on file" is not a failed payment.
+          if (chargeAttempted) {
+            paymentFailedSmsContext = {
+              amount: attemptAmountDue,
+              cardBrand: autopayPm?.card_brand || null,
+              cardLast4: autopayPm?.last_four || null,
+            };
+          }
         }
         try {
           await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
@@ -5327,6 +5389,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           });
         } catch (e) { /* log-only */ }
       } // end try/catch — paired with the above-quote guard's else
+      }
     }
 
     // One-time card-on-file hold: resolve the hold on completion (dark until
@@ -5541,7 +5604,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // SMS body only; the mobile in-person payment sheet
         // (invoicePaymentActionRequired) is intentionally left untouched so an
         // unpaid invoice always keeps a collection path.
-        const allowCompletionInvoiceLink = !suppressCompletionInvoiceLink
+        const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
           && includePayLink !== false
           && !prepaidCovered
           && !alreadyPaid
@@ -5557,6 +5620,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // payer-billed invoice — AR routes to the payer's AP inbox. The
           // homeowner still gets the report-only completion SMS (no pay_url).
           && !invoice?.payer_id;
+        // Decline notice (owner-managed `payment_failed` template): a genuine
+        // off-session decline texts its own message carrying the pay link,
+        // and the completion SMS goes report-only — the two never share one
+        // text. Renders null while the template is missing/disabled, which
+        // keeps today's fallback (the pay link rides the completion SMS).
+        // Gated on the same conditions that would have allowed the pay link.
+        let paymentFailedBody = null;
+        if (paymentFailedSmsContext && allowCompletionInvoiceLinkBase && invoiceCreated && payUrl) {
+          const { formatCardLine } = require('../services/invoice-helpers');
+          paymentFailedBody = await renderTemplate('payment_failed', {
+            first_name: svc.first_name || '',
+            service_type: displayServiceType,
+            service_date: new Date().toLocaleDateString('en-US', {
+              weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+            }),
+            pay_url: payUrl,
+            amount: Number(paymentFailedSmsContext.amount || 0).toFixed(2),
+            card_line: formatCardLine(paymentFailedSmsContext.cardBrand, paymentFailedSmsContext.cardLast4),
+            card_last4: paymentFailedSmsContext.cardLast4 || '',
+          }, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
+          });
+        }
+        const allowCompletionInvoiceLink = allowCompletionInvoiceLinkBase && !paymentFailedBody;
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
@@ -5652,7 +5741,34 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               entity_id: record.id,
             };
             let body = null;
-            if (annualPrepayCovered) {
+            if (autoChargedReceiptPending) {
+              // This completion's auto-charge settled inline and the combined
+              // template is active: ONE text carries the report and the
+              // receipt facts (amount, card, receipt link); the queued
+              // separate receipt text was stood down at charge time.
+              try {
+                const InvoiceService = require('../services/invoice');
+                const receiptFacts = await InvoiceService.receiptSmsFacts(invoice);
+                sentSmsType = 'service_complete_paid_receipt';
+                body = await renderTemplate(sentSmsType, {
+                  ...paidTemplateVars,
+                  amount: receiptFacts.amount,
+                  card_line: receiptFacts.cardLine,
+                  receipt_url: receiptFacts.receiptUrl,
+                }, paidTemplateContext);
+              } catch (factsErr) {
+                logger.warn(`[dispatch] combined receipt facts failed for invoice ${invoice?.id}: ${factsErr.message}`);
+              }
+              if (!body) {
+                // Template deactivated between the pre-charge probe and now
+                // (or facts failed): restore the separate receipt the
+                // receipt_sent_at stamp suppressed, then fall through to the
+                // standard paid template.
+                require('../services/invoice').sendReceipt(invoice.id, { hasEmailLeg: true, force: true })
+                  .catch((rErr) => logger.warn(`[dispatch] fallback separate receipt failed for invoice ${invoice?.id}: ${rErr.message}`));
+              }
+            }
+            if (!body && annualPrepayCovered) {
               sentSmsType = 'service_complete_annual_prepay';
               body = await renderTemplate(sentSmsType, paidTemplateVars, paidTemplateContext);
             }
@@ -5789,6 +5905,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            if (sentSmsType === 'service_complete_paid_receipt' && invoice?.id) {
+              // The combined text carried the receipt and never went out —
+              // restore the separate receipt (force bypasses the stamp laid
+              // at charge time; email-only/opt-out prefs still honored).
+              require('../services/invoice').sendReceipt(invoice.id, { hasEmailLeg: true, force: true })
+                .catch((rErr) => logger.warn(`[dispatch] receipt recovery after failed combined SMS for invoice ${invoice.id}: ${rErr.message}`));
+            }
           } else {
             const sentNotes = {
               ...sendingNotes,
@@ -5842,6 +5965,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               await markBundledReviewFailed();
             }
             record.structured_notes = sentNotes;
+          }
+        }
+        if (paymentFailedBody) {
+          // The decline notice rides its own text (owner-managed
+          // `payment_failed` copy) carrying the pay link the completion SMS
+          // deliberately dropped. Own try/catch: a failed notice must never
+          // mark the completion SMS failed — the invoice stays open and the
+          // urgent admin payment-failed bell (Stripe webhook) still fires.
+          try {
+            const failResult = await sendCustomerMessage({
+              to: svc.cust_phone,
+              body: paymentFailedBody,
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'payment_failure',
+              customerId: svc.customer_id,
+              invoiceId: invoice?.id,
+              identityTrustLevel: 'phone_matches_customer',
+              metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice?.id },
+            });
+            if (!failResult.sent) {
+              logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice?.id}: ${failResult.code || failResult.reason || 'unknown'}`);
+            }
+          } catch (failErr) {
+            logger.warn(`[dispatch] payment-failed notice errored for invoice ${invoice?.id}: ${failErr.message}`);
           }
         }
       } catch (e) {

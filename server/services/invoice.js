@@ -668,6 +668,7 @@ const {
   INVOICE_UNCOLLECTIBLE_STATUSES,
   assertInvoiceVoidable,
   invoiceAmountDue,
+  formatCardLine,
 } = require("./invoice-helpers");
 
 function invoiceNotSendableError(invoice) {
@@ -2457,6 +2458,51 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  /**
+   * The customer-facing money facts a payment-receipt text needs: exact
+   * amount collected, the " (Visa ending 4242)" card clause, and the
+   * shortened receipt link. Shared by sendReceipt and the combined
+   * completion+receipt SMS (admin-dispatch completion) so both always cite
+   * the same figures.
+   *
+   * Amount comes from the PAYMENT row, not invoiceAmountDue(invoice): a full
+   * refund zeroes credit_applied, after which invoiceAmountDue returns the
+   * gross total. On a recorded refund show net cash kept (amount − refunded)
+   * to match the receipt page/PDF; otherwise amount due (total − applied
+   * credit). Falls back to amount due when no payment row exists.
+   */
+  async receiptSmsFacts(invoice) {
+    const domain = publicPortalUrl();
+    const longReceiptUrl = invoice.token
+      ? `${domain}/pay/${invoice.token}`
+      : "";
+    const receiptUrl = longReceiptUrl
+      ? await shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+    const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
+    const receiptPayment = await db("payments")
+      .where({ customer_id: invoice.customer_id })
+      .whereIn("status", ["paid", "refunded"])
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
+    const receiptAmount = receiptRefunded > 0
+      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
+      : invoiceAmountDue(invoice);
+    const amount = Number.isFinite(receiptAmount)
+      ? receiptAmount.toFixed(2)
+      : "0.00";
+    return { amount, cardLine, receiptUrl };
+  },
+
   async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
@@ -2481,47 +2527,9 @@ const InvoiceService = {
       .first();
     if (!customer?.phone) return { sent: false, reason: "no-phone" };
 
-    const domain = publicPortalUrl();
-    const longReceiptUrl = invoice.token
-      ? `${domain}/pay/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: customer.id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
-
     // Template body has a {card_line} placeholder that renders as e.g.
     // " (Visa ending 4242)" when card metadata is present, or empty otherwise.
-    const cardBrand = invoice.card_brand;
-    const cardLast4 = invoice.card_last_four;
-    const cardLine =
-      cardBrand && cardLast4
-        ? ` (${cardBrand.charAt(0).toUpperCase() + cardBrand.slice(1)} ending ${cardLast4})`
-        : "";
-    // Receipt amount from the PAYMENT row, not invoiceAmountDue(invoice): a full
-    // refund zeroes credit_applied, after which invoiceAmountDue returns the gross
-    // total. On a recorded refund show net cash kept (amount − refunded) to match
-    // the receipt page/PDF; otherwise amount due (total − applied credit). Falls
-    // back to amount due when no payment row exists.
-    const receiptPayment = await db("payments")
-      .where({ customer_id: invoice.customer_id })
-      .whereIn("status", ["paid", "refunded"])
-      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
-      .orderBy("created_at", "desc")
-      .first()
-      .catch(() => null);
-    const receiptRefunded = receiptPayment ? Number(receiptPayment.refund_amount || 0) : 0;
-    const receiptAmount = receiptRefunded > 0
-      ? Math.max(0, Number(receiptPayment.amount || 0) - receiptRefunded)
-      : invoiceAmountDue(invoice);
-    const amount = Number.isFinite(receiptAmount)
-      ? receiptAmount.toFixed(2)
-      : "0.00";
+    const { amount, cardLine, receiptUrl } = await InvoiceService.receiptSmsFacts(invoice);
 
     let body = null;
     try {
