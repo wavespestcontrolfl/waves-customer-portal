@@ -11,9 +11,10 @@ jest.mock('../services/project-email', () => ({
     name: customer.service_contact_name || customer.first_name || '',
     role: customer.service_contact_email ? 'service_contact' : 'primary',
   }),
-  // Real implementation (against the mocked db) so the tokened prep_url
-  // path is exercised end-to-end.
+  // Real implementations (against the mocked db) so the tokened prep_url
+  // and confirmed-delivery stamp paths are exercised end-to-end.
   ensureServicePrepToken: jest.requireActual('../services/project-email').ensureServicePrepToken,
+  markServicePrepSent: jest.requireActual('../services/project-email').markServicePrepSent,
 }));
 
 const db = require('../models/db');
@@ -223,8 +224,12 @@ describe('sendPrepToCustomer', () => {
     expect(payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
     expect(payload.customer_portal_url).toContain('?tab=visits');
     expect(payload.service_date).not.toBe('To be confirmed');
-    // Confirmed send → the track page's "prep actually went out" marker.
-    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(true);
+    // Confirmed send → the track page's "prep actually went out" marker,
+    // aligned to the guide THIS email delivered.
+    expect(serviceUpdates).toContainEqual(expect.objectContaining({
+      prep_sent_at: 'NOW()',
+      prep_template_key: 'prep.flea',
+    }));
   });
 
   test('a rejected email never stamps prep_sent_at', async () => {

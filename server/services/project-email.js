@@ -259,22 +259,20 @@ async function ensureServicePrepToken(serviceId, templateKey) {
     .select('prep_token', 'prep_template_key')
     .where({ id: serviceId })
     .first();
-  // Last send wins: the page must render the guide the most recent email
-  // promised, so a resend after reclassification (or a mapping change)
-  // realigns the stored key instead of silently serving the stale guide.
-  // The prior prep_sent_at is cleared with it — that marker proved the OLD
-  // guide went out, and carrying it over would let the tracker expose the
-  // new guide before its send is confirmed. The caller re-stamps it once
-  // the matching delivery succeeds.
-  const realignKey = async (storedKey) => {
-    if (storedKey === key) return;
-    await db('scheduled_services')
-      .where({ id: serviceId })
-      .update({ prep_template_key: key, prep_sent_at: null });
-  };
-
+  // A reused token with a DIFFERENT stored key is deliberately left alone
+  // here: the stored key is what the last DELIVERED guide rendered, and
+  // flipping it before the new send is confirmed would retarget an
+  // already-emailed URL onto a guide the customer never received. The key
+  // (and the tracker's prep_sent_at proof) move together at confirmed
+  // delivery — markServicePrepSent. An existing token with NO key yet is
+  // just initialized (nothing rendered before a key existed).
   if (existing?.prep_token) {
-    await realignKey(existing.prep_template_key);
+    if (!existing.prep_template_key) {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .whereNull('prep_template_key')
+        .update({ prep_template_key: key });
+    }
     return existing.prep_token;
   }
 
@@ -288,12 +286,24 @@ async function ensureServicePrepToken(serviceId, templateKey) {
   if (updated?.length) return updated[0].prep_token || token;
 
   const afterRace = await db('scheduled_services')
-    .select('prep_token', 'prep_template_key')
+    .select('prep_token')
     .where({ id: serviceId })
     .first();
   if (!afterRace?.prep_token) throw new Error(`Failed to ensure prep_token for service ${serviceId}`);
-  await realignKey(afterRace.prep_template_key);
   return afterRace.prep_token;
+}
+
+// Confirmed-delivery marker for a scheduled-service prep guide: stamps the
+// tracker's "prep actually went out" proof AND aligns the rendered guide to
+// the template that was just delivered, in one write. Last DELIVERED guide
+// wins — a queued-but-skipped or failed resend never moves either field, so
+// the emailed URL keeps rendering the guide the customer actually received.
+async function markServicePrepSent(serviceId, templateKey) {
+  const key = clean(templateKey);
+  if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
+  await db('scheduled_services')
+    .where({ id: serviceId })
+    .update({ prep_sent_at: db.fn.now(), prep_template_key: key });
 }
 
 async function sendProjectReportReady({
@@ -434,6 +444,7 @@ module.exports = {
   buildProjectPayload,
   ensurePrepToken,
   ensureServicePrepToken,
+  markServicePrepSent,
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,

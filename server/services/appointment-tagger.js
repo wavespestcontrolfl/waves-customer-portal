@@ -553,18 +553,13 @@ class AppointmentTagger {
       // email is coming, so the companion SMS that references it must not send.
       // These are NOT the "no email on file" case, so no standalone fallback
       // either — a disabled automation or a re-run should stay silent.
+      // No prep_sent_at stamp here: "queued" is not "delivered" — the
+      // executor stamps it (markServicePrepSent) when the run actually
+      // reaches 'sent', so the tracker never links a guide that a later
+      // skip/suppress/failure kept from the customer.
       const queued = (trigger?.results || []).some(
         (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
       );
-      if (queued) {
-        // prep_sent_at is the "prep actually went out" marker the track
-        // page gates its prep link on — the token alone is minted BEFORE
-        // this confirmation and must not read as proof of a send.
-        await db('scheduled_services')
-          .where({ id: service.id })
-          .update({ prep_sent_at: db.fn.now() })
-          .catch((stampErr) => logger.warn(`[appointment-tagger] prep_sent_at stamp failed for service ${service.id}: ${stampErr.message}`));
-      }
       return { queued, reason: queued ? 'queued' : 'not_queued' };
     } catch (err) {
       logger.error(`[appointment-tagger] Prep email automation failed for service ${service.id}: ${err.message}`);

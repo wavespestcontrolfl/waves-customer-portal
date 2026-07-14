@@ -192,28 +192,23 @@ describe('appointment tagger prep email automation', () => {
     expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
   });
 
-  test('a reused token realigns a stale prep_template_key to the requested guide', async () => {
+  test('a reused token with a different stored key is NOT retargeted at queue time', async () => {
     servicePrepRow = { prep_token: 'cd'.repeat(16), prep_template_key: 'prep.flea' };
 
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
 
-    // Last send wins, and the OLD guide's sent-marker is cleared with it —
-    // the tracker must not expose the new guide on the old send's proof.
-    expect(serviceUpdates).toContainEqual({ prep_template_key: 'prep.cockroach', prep_sent_at: null });
+    // The stored key is what the last DELIVERED guide rendered; it moves
+    // (with prep_sent_at) only when the new send confirms — in the
+    // executor's markServicePrepSent, never here.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
   });
 
-  test('a queued guide email stamps prep_sent_at; a skipped one does not', async () => {
+  test('queueing the guide email never stamps prep_sent_at (delivery does)', async () => {
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
-    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(true);
 
-    serviceUpdates = [];
-    executor.processTrigger.mockResolvedValueOnce({
-      automation_count: 1,
-      results: [{ automation_key: 'prep', run: { id: 'run-2', status: 'skipped' }, deduped: false }],
-    });
-    priorPrepInteraction = null;
-    await AppointmentTagger.triggerPestPrep(service({ id: 'svc-2' }), 'cockroach');
-    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
+    // The executor stamps prep_sent_at when the run actually reaches
+    // 'sent' — a queued run can still skip, suppress, or fail.
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
   });
 
   test('prep_url degrades to the portal visits tab when the token mint fails', async () => {

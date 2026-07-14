@@ -23,7 +23,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
+const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSent } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -128,12 +128,14 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
       },
     });
     if (result?.sent && visit?.id) {
-      // The track page gates its prep link on prep_sent_at — the token is
-      // minted before this send, so only a confirmed send stamps it.
-      await db('scheduled_services')
-        .where({ id: visit.id })
-        .update({ prep_sent_at: db.fn.now() })
-        .catch((stampErr) => logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`));
+      // Confirmed delivery: stamp the tracker's prep_sent_at proof and
+      // align the rendered guide to what THIS email delivered. The token
+      // is minted before the send, so only a confirmed send moves these.
+      try {
+        await markServicePrepSent(visit.id, config.emailTemplateKey);
+      } catch (stampErr) {
+        logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`);
+      }
     }
     return !!result?.sent;
   } catch (err) {
