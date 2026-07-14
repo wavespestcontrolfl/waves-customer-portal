@@ -15,7 +15,7 @@
  * remain the base non-glass rendering.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
@@ -60,10 +60,10 @@ const PRIMARY_CTA = {
   textDecoration: 'none',
 };
 
-function Page({ children }) {
+function Page({ children, wide = false }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: wide ? 960 : 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
         <BrandFooter />
       </div>
@@ -82,8 +82,8 @@ function Card({ children, style, ...rest }) {
 function ContactRow() {
   return (
     <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-      <a href={WAVES_SUPPORT_SMS_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Text us</a>
-      <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Call us</a>
+      <a href={WAVES_SUPPORT_SMS_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Text Waves</a>
+      <a href={WAVES_SUPPORT_PHONE_TEL} data-glass-accent="" style={{ ...PRIMARY_CTA, flex: 1 }}>Call Waves</a>
     </div>
   );
 }
@@ -253,8 +253,536 @@ function SuccessCard({ result, service }) {
   );
 }
 
+// ───────────────────────────── V2 layout (dark: ?v2=1) ─────────────────────────────
+// Owner-approved redesign 2026-07-13 (interactive mock review): calendar-first
+// day grid, route-ranked "Best times" strip, tap-time → inline Confirm (the
+// bottom CTA is gone), and the report page's floating Waves AI bar in place of
+// the embedded search card. Header/footer (WavesShell + BrandFooter) and every
+// endpoint/behavior are unchanged from the legacy layout above, which stays
+// the default until the owner flips the gate.
+
+const V2_PROMPTS = ['Tomorrow morning', 'This weekend', 'Next week', 'Saturday', 'Late afternoon'];
+
+function parseYMD(dateStr) {
+  const [y, m, d] = String(dateStr || '').split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(Date.UTC(y, m - 1, d, 12));
+}
+
+// Monday-start column index (0 = Mon … 6 = Sun) so the grid's weekday
+// columns line up regardless of which day the window opens on.
+function mondayIndex(dateStr) {
+  const dt = parseYMD(dateStr);
+  return dt ? (dt.getUTCDay() + 6) % 7 : 0;
+}
+
+function listRangeDates(from, to) {
+  const start = parseYMD(from);
+  const end = parseYMD(to);
+  if (!start || !end || end < start) return [];
+  const out = [];
+  for (let t = start.getTime(); t <= end.getTime(); t += 24 * 3600 * 1000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+function shortMonthDay(dateStr, { withMonth = true } = {}) {
+  const dt = parseYMD(dateStr);
+  if (!dt) return '';
+  return dt.toLocaleDateString('en-US', withMonth ? { month: 'short', day: 'numeric', timeZone: 'UTC' } : { day: 'numeric', timeZone: 'UTC' });
+}
+
+function v2RangeLabel(from, to) {
+  const a = parseYMD(from);
+  const b = parseYMD(to);
+  if (!a || !b) return '';
+  const sameMonth = a.getUTCMonth() === b.getUTCMonth();
+  return `${shortMonthDay(from)} – ${shortMonthDay(to, { withMonth: !sameMonth })}`;
+}
+
+// Report-style floating Waves AI bar (FloatingAskWaves in ReportViewPage is
+// the visual source of truth — owner ask 2026-07-13: "look like what we have
+// on the post service reports"). Same sticky slim bar, star label, marquee
+// prompt pills, pill input + gold button, and absolute answer dropdown; the
+// answer here is the search's summary line instead of a report Q&A answer.
+function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
+  const [question, setQuestion] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [notice, setNotice] = useState(null); // { text, isError }
+
+  const ask = async (text) => {
+    const q = String((text ?? question) || '').trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setNotice(null);
+    try {
+      const res = await onSearch(q);
+      setNotice(res?.summary ? { text: res.summary, isError: false } : null);
+    } catch {
+      setNotice({ text: `I couldn't search right now. Text or call ${WAVES_SUPPORT_PHONE_DISPLAY} and we'll find a time.`, isError: true });
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  return (
+    <div className="rsv2-ask-wrap">
+      <section data-glass="card" className="rsv2-ask-bar" aria-label="Waves AI — search for a day or time">
+        <span className="rsv2-ask-title">Waves AI</span>
+        <div className="rsv2-ask-pills" aria-label="Example searches">
+          <div className="rsv2-ask-track">
+            {[...V2_PROMPTS, ...V2_PROMPTS].map((prompt, i) => (
+              <button
+                data-glass="chip"
+                type="button"
+                key={`${prompt}-${i}`}
+                className="rsv2-ask-pill"
+                onClick={() => ask(prompt)}
+                disabled={asking}
+                tabIndex={i < V2_PROMPTS.length ? 0 : -1}
+                aria-hidden={i >= V2_PROMPTS.length}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="rsv2-ask-form">
+          <input
+            id="rsv2-ask-input"
+            name="rsv2_ask_input"
+            value={question}
+            onChange={(event) => setQuestion(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                ask();
+              }
+            }}
+            placeholder="Ask Waves"
+            aria-label="Search for a service date or time"
+          />
+          <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
+            {asking ? 'Checking…' : 'Search'}
+          </button>
+        </div>
+        {(notice || aiFiltered) ? (
+          <div className="rsv2-ask-answer" role="status" data-glass="soft">
+            <span>{notice ? notice.text : 'Showing the times that match your search.'}</span>
+            <span className="rsv2-ask-answer-actions">
+              {aiFiltered ? (
+                <button type="button" className="rsv2-ask-reset" onClick={onShowAll}>Show all open times</button>
+              ) : null}
+              <button type="button" className="rsv2-ask-dismiss" onClick={() => setNotice(null)} aria-label="Dismiss">{'\u2715'}</button>
+            </span>
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
+// Route-ranked top picks. availability.slots is already sorted by the slot
+// engine's score (detour minutes + days-out) — surfacing it is the whole
+// point (owner ask 2026-07-13: the ranking existed but the layout buried it).
+// Copy stays privacy-safe: never another customer's name or address, same
+// rule as the estimate surface's nearby label.
+function V2BestTimes({ slots, days, onPick }) {
+  const byDate = new Map((days || []).map((d) => [d.date, d]));
+  // Nearby days lead (that steer is the strip's whole job); the engine's
+  // rank order is preserved within each group. Stable sort keeps ties honest.
+  const picks = (slots || [])
+    .filter((s) => s.date && byDate.has(s.date))
+    .map((s, i) => ({ s, i, nearby: !!byDate.get(s.date)?.nearby }))
+    .sort((a, b) => (Number(b.nearby) - Number(a.nearby)) || (a.i - b.i))
+    .map((x) => x.s)
+    .slice(0, 3);
+  if (!picks.length) return null;
+  return (
+    <Card>
+      <div data-gt="h3x" style={{ fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 2 }}>
+        Our best times for you
+      </div>
+      <div style={{ fontSize: 14, color: S.muted, marginBottom: 12, lineHeight: 1.45 }}>
+        These fit our route near you best — easiest for everyone.
+      </div>
+      <div className="rsv2-best-row">
+        {picks.map((slot) => {
+          const day = byDate.get(slot.date);
+          const nearby = !!day?.nearby;
+          return (
+            <button
+              type="button"
+              data-glass="chip"
+              key={`${slot.date}|${slot.start_time}`}
+              className="rsv2-best-chip"
+              onClick={() => onPick(slot, day)}
+            >
+              <span>
+                <span className="rsv2-best-when">{day.fullDate} {'·'} {slot.start_label}</span>
+                <span className="rsv2-best-why">
+                  {nearby ? "We're servicing a property close to you that day" : 'Our soonest opening'}
+                </span>
+              </span>
+              <span className="rsv2-best-go">Pick {'→'}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function V2DayGrid({ availability, selectedDate, onSelectDay }) {
+  const days = availability?.days || [];
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const from = availability?.rangeFrom || days[0]?.date;
+  const to = availability?.rangeTo || days[days.length - 1]?.date;
+  const dates = listRangeDates(from, to);
+  if (!dates.length) return null;
+  const leading = mondayIndex(dates[0]);
+  return (
+    <Card>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+        <div data-gt="h3x" style={{ fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading }}>Pick a day</div>
+        <div style={{ fontSize: 14, color: S.muted }}>{v2RangeLabel(from, to)}</div>
+      </div>
+      <div className="rsv2-dow" aria-hidden="true">
+        {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((letter, i) => <span key={`${letter}-${i}`}>{letter}</span>)}
+      </div>
+      <div className="rsv2-grid" role="listbox" aria-label="Days with open times">
+        {Array.from({ length: leading }, (_, i) => <span key={`pad-${i}`} className="rsv2-day-pad" />)}
+        {dates.map((date) => {
+          const day = byDate.get(date);
+          const open = !!day?.slots?.length;
+          const label = day?.fullDate || formatDateLabel(date);
+          return (
+            <button
+              type="button"
+              key={date}
+              role="option"
+              aria-selected={date === selectedDate}
+              className={`rsv2-day${date === selectedDate ? ' rsv2-day-selected' : ''}`}
+              disabled={!open}
+              aria-label={open
+                ? `${label}${day.nearby ? ' — tech in your neighborhood' : ''}, ${day.slots.length} ${day.slots.length === 1 ? 'opening' : 'openings'}`
+                : `${label}, no open times`}
+              onClick={() => open && onSelectDay(date)}
+            >
+              <span className="rsv2-day-num">{shortMonthDay(date, { withMonth: false })}</span>
+              {open ? (
+                <span className="rsv2-day-dots">
+                  {day.slots.slice(0, 3).map((slot, i) => (
+                    <i key={i} className={day.nearby ? 'rsv2-dot-nearby' : ''} />
+                  ))}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
+      </div>
+      <div className="rsv2-legend">
+        <span><i className="rsv2-legend-open" />Openings</span>
+        <span><i className="rsv2-legend-nearby" />Tech in your neighborhood</span>
+      </div>
+    </Card>
+  );
+}
+
+function V2TimesPanel({ day, selectedSlot, onSelect, onConfirm, submitting, submitError }) {
+  return (
+    <Card>
+      <div data-gt="h3x" style={{ fontSize: 17, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 2 }}>
+        {day ? day.fullDate : 'Open times'}
+      </div>
+      <div style={{ fontSize: 14, color: S.muted, marginBottom: 14, lineHeight: 1.45 }}>
+        Tap a time, then confirm. Your technician arrives within a two-hour window of the start time.
+      </div>
+      {submitError ? (
+        <div style={{
+          background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8,
+          padding: '10px 12px', fontSize: 14, color: '#9A3412', marginBottom: 14, lineHeight: 1.45,
+        }}>
+          {submitError}
+        </div>
+      ) : null}
+      {!day || !day.slots?.length ? (
+        <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+          No open times this day {'—'} pick another day above, or text Waves and we'll fit you in.
+        </div>
+      ) : (
+        <div className="rsv2-slot-col">
+          {day.slots.map((slot) => {
+            const picked = selectedSlot && selectedSlot.date === day.date && selectedSlot.start_time === slot.start_time;
+            return (
+              <div key={`${day.date}|${slot.start_time}`} className={`rsv2-slot${picked ? ' rsv2-slot-picked' : ''}`}>
+                <button
+                  type="button"
+                  {...(picked ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                  className="rsv2-time-btn"
+                  aria-label={`Choose ${slot.start_label} on ${day.fullDate}${day.nearby ? ', technician already in your neighborhood' : ''}`}
+                  onClick={() => onSelect(picked ? null : { ...slot, date: day.date, fullDate: day.fullDate })}
+                >
+                  {slot.start_label}
+                  {day.nearby ? <span className="rsv2-nearby-pill">Tech nearby</span> : null}
+                </button>
+                {picked ? (
+                  <button
+                    type="button"
+                    data-glass-accent=""
+                    className="rsv2-confirm-btn"
+                    onClick={onConfirm}
+                    disabled={submitting}
+                  >
+                    {submitting ? 'Moving…' : `Confirm ${'→'}`}
+                  </button>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// Page-scoped styles for the V2 layout. Class-prefixed (rsv2-) so nothing
+// leaks; the star before the Waves AI label is the CSS-escaped \2726 glyph
+// (raw decorative glyphs fail check:portal-brand — same trick ReportViewPage
+// uses for its floating bar).
+function V2Styles() {
+  return (
+    <style>{`
+      .rsv2-ask-wrap { position: sticky; top: 57px; z-index: 8; margin-bottom: 16px; }
+      .rsv2-ask-bar {
+        position: relative;
+        display: grid;
+        grid-template-areas: 'title pills form';
+        grid-template-columns: auto minmax(0, 1fr) minmax(240px, 40%);
+        align-items: center;
+        gap: 10px;
+        border: 1px solid ${S.border};
+        border-radius: 18px;
+        background: ${S.surface};
+        padding: 10px 14px;
+      }
+      .rsv2-ask-title {
+        grid-area: title;
+        color: ${S.text};
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      .rsv2-ask-title::before { content: '\\2726  '; color: ${COLORS.yellow}; }
+      .rsv2-ask-pills {
+        grid-area: pills;
+        min-width: 0;
+        overflow: hidden;
+        -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+        mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 22px), transparent);
+      }
+      .rsv2-ask-track { display: flex; gap: 8px; width: max-content; animation: rsv2PillMarquee 48s linear infinite; }
+      .rsv2-ask-pills:hover .rsv2-ask-track,
+      .rsv2-ask-track:focus-within { animation-play-state: paused; }
+      @keyframes rsv2PillMarquee {
+        from { transform: translateX(0); }
+        to { transform: translateX(calc(-50% - 4px)); }
+      }
+      @media (prefers-reduced-motion: reduce) { .rsv2-ask-track { animation: none; } }
+      .rsv2-ask-pill {
+        flex: 0 0 auto;
+        border: 1px solid ${S.border};
+        border-radius: 999px;
+        background: #fff;
+        color: ${S.text};
+        font: inherit;
+        font-size: 14px;
+        line-height: 1;
+        font-weight: 700;
+        padding: 9px 12px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .rsv2-ask-form { grid-area: form; display: flex; gap: 8px; min-width: 0; }
+      .rsv2-ask-form input {
+        flex: 1;
+        min-width: 0;
+        border: 1px solid ${S.border};
+        border-radius: 999px;
+        padding: 9px 14px;
+        color: ${S.text};
+        font: inherit;
+        font-size: 14px;
+        outline: none;
+        background: #fff;
+      }
+      .rsv2-ask-form button {
+        border: 1px solid ${COLORS.glassNavy};
+        border-radius: 999px;
+        background: ${COLORS.yellow};
+        color: ${COLORS.glassNavy};
+        font: inherit;
+        font-size: 14px;
+        font-weight: 800;
+        padding: 9px 16px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .rsv2-ask-form button:disabled, .rsv2-ask-pill:disabled { opacity: .5; cursor: default; }
+      .rsv2-ask-answer {
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 0;
+        right: 0;
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        border: 1px solid ${S.border};
+        border-radius: 14px;
+        background: ${S.surface};
+        padding: 12px 14px;
+        color: ${S.text};
+        font-size: 14px;
+        line-height: 1.5;
+        box-shadow: 0 18px 50px rgba(4, 57, 94, 0.18);
+      }
+      .rsv2-ask-answer-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+      .rsv2-ask-reset {
+        border: 0;
+        background: transparent;
+        color: ${COLORS.glassNavy};
+        font: inherit;
+        font-size: 14px;
+        font-weight: 700;
+        text-decoration: underline;
+        cursor: pointer;
+        white-space: nowrap;
+        padding: 0;
+      }
+      .rsv2-ask-dismiss { border: 0; background: transparent; color: ${S.muted}; font-size: 14px; line-height: 1; padding: 2px 4px; cursor: pointer; }
+      @media (max-width: 700px) {
+        .rsv2-ask-bar {
+          grid-template-areas: 'title form' 'pills pills';
+          grid-template-columns: auto minmax(0, 1fr);
+          border-radius: 16px;
+        }
+      }
+
+      .rsv2-best-row { display: flex; flex-direction: column; gap: 8px; }
+      .rsv2-best-chip {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+        background: #FFFBEA;
+        border: 1px solid #F5D76E;
+        border-radius: 12px;
+        padding: 12px 14px;
+        color: ${S.text};
+      }
+      .rsv2-best-when { display: block; font-size: 15px; font-weight: 800; }
+      .rsv2-best-why { display: block; font-size: 14px; font-weight: 500; color: ${S.muted}; margin-top: 2px; }
+      .rsv2-best-go {
+        flex: 0 0 auto;
+        font-size: 14px;
+        font-weight: 800;
+        color: ${COLORS.glassNavy};
+        background: ${COLORS.yellow};
+        border-radius: 999px;
+        padding: 7px 13px;
+        white-space: nowrap;
+      }
+
+      .rsv2-dow, .rsv2-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+      .rsv2-dow { margin-bottom: 6px; }
+      .rsv2-dow span { font-size: 14px; font-weight: 700; text-align: center; color: ${S.muted}; }
+      .rsv2-day {
+        position: relative;
+        font: inherit;
+        border: 1px solid ${S.border};
+        background: ${S.surface};
+        border-radius: 12px;
+        padding: 10px 0 14px;
+        cursor: pointer;
+        color: ${S.text};
+        text-align: center;
+        min-height: 48px;
+      }
+      .rsv2-day:disabled { opacity: .35; cursor: default; }
+      .rsv2-day-selected { background: ${COLORS.glassNavy}; color: ${COLORS.white}; border-color: ${COLORS.glassNavy}; }
+      .rsv2-day-num { font-size: 16px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      .rsv2-day-dots { position: absolute; left: 0; right: 0; bottom: 5px; display: flex; justify-content: center; gap: 3px; }
+      .rsv2-day-dots i { width: 5px; height: 5px; border-radius: 999px; background: ${COLORS.yellow}; border: .5px solid rgba(4,57,94,.3); }
+      .rsv2-day-dots i.rsv2-dot-nearby { background: ${COLORS.green}; border-color: transparent; }
+      .rsv2-day-pad { min-height: 48px; }
+      .rsv2-legend { display: flex; gap: 16px; margin-top: 12px; font-size: 14px; color: ${S.muted}; flex-wrap: wrap; }
+      .rsv2-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 999px; margin-right: 6px; }
+      .rsv2-legend .rsv2-legend-open { background: ${COLORS.yellow}; border: .5px solid rgba(4,57,94,.3); }
+      .rsv2-legend .rsv2-legend-nearby { background: ${COLORS.green}; }
+
+      .rsv2-slot-col { display: flex; flex-direction: column; gap: 8px; }
+      .rsv2-slot { display: grid; grid-template-columns: 1fr; gap: 8px; }
+      .rsv2-slot-picked { grid-template-columns: 1fr 1.2fr; }
+      .rsv2-time-btn {
+        font: inherit;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        background: ${S.surface};
+        border: 2px solid ${S.border};
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 15px;
+        font-weight: 700;
+        color: ${S.text};
+        cursor: pointer;
+        font-variant-numeric: tabular-nums;
+      }
+      .rsv2-slot-picked .rsv2-time-btn { border-color: ${COLORS.glassNavy}; }
+      .rsv2-nearby-pill {
+        font-size: 12px;
+        font-weight: 700;
+        color: ${COLORS.green};
+        background: ${COLORS.greenLight};
+        padding: 2px 8px;
+        border-radius: 999px;
+        letter-spacing: .02em;
+      }
+      .rsv2-confirm-btn {
+        font: inherit;
+        border: 1px solid ${COLORS.glassNavy};
+        border-radius: 12px;
+        background: ${COLORS.yellow};
+        color: ${COLORS.glassNavy};
+        font-size: 15px;
+        font-weight: 800;
+        padding: 12px 14px;
+        cursor: pointer;
+      }
+      .rsv2-confirm-btn:disabled { opacity: .6; cursor: default; }
+
+      @media (min-width: 880px) {
+        .rsv2-layout { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 0 16px; align-items: start; }
+        .rsv2-layout > .rsv2-col-left, .rsv2-layout > .rsv2-col-right { min-width: 0; }
+      }
+    `}</style>
+  );
+}
+
 export default function ReschedulePage() {
   const { token } = useParams();
+  const [searchParams] = useSearchParams();
+  // Dark-ship gate for the approved 2026-07-13 redesign — ?v2=1 renders the
+  // new layout; the legacy layout stays the default until the owner flips.
+  const isV2 = searchParams.has('v2');
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -263,6 +791,10 @@ export default function ReschedulePage() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [result, setResult] = useState(null);
+  // V2 only: which day's times are showing. Kept valid against the current
+  // availability by the effect below (initial load, AI filter, SLOT_TAKEN
+  // refresh) — always falls back to the first day with openings.
+  const [selectedDate, setSelectedDate] = useState(null);
   // True while the day list shows an AI search's results instead of the full
   // window — gates the "Show all open times" reset.
   const [aiFiltered, setAiFiltered] = useState(false);
@@ -304,6 +836,17 @@ export default function ReschedulePage() {
     load();
     return () => loadAbortRef.current?.abort();
   }, [load]);
+
+  // Keep the V2 selected day valid whenever availability changes (first load,
+  // AI filter/reset, SLOT_TAKEN refresh). Runs harmlessly on the legacy path.
+  useEffect(() => {
+    const days = data?.availability?.days || [];
+    if (!days.length) {
+      setSelectedDate(null);
+      return;
+    }
+    setSelectedDate((prev) => (days.some((d) => d.date === prev) ? prev : days[0].date));
+  }, [data]);
 
   // Waves AI date/time search — replaces the day list with the matching
   // window's slots (same availability shape the GET returns) and hands the
@@ -388,6 +931,88 @@ export default function ReschedulePage() {
 
   const days = data?.availability?.days || [];
   const current = data?.current || {};
+
+  if (isV2) {
+    const byDate = new Map(days.map((d) => [d.date, d]));
+    const selectedDay = byDate.get(selectedDate) || days[0] || null;
+    return (
+      <Page wide>
+        <V2Styles />
+        <V2FloatingAsk key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
+        <div className="rsv2-layout">
+          <div className="rsv2-col-left">
+            <Card>
+              <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
+                {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
+              </div>
+              <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+                Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit is currently
+                scheduled for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>
+                {current.windowStart ? <>, arrival window <strong style={{ color: S.text }}>{arrivalWindowLabel(current.windowStart)}</strong></> : null}.
+              </div>
+              {data.isRecurring ? (
+                <div data-glass="soft" style={{
+                  marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
+                  borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
+                }}>
+                  Only this visit will move — the rest of your regular service schedule stays the same.
+                </div>
+              ) : null}
+            </Card>
+            {aiFiltered ? null : (
+              <V2BestTimes
+                slots={data?.availability?.slots}
+                days={days}
+                onPick={(slot, day) => {
+                  setSelectedDate(slot.date);
+                  setSelectedSlot({ ...slot, fullDate: slot.fullDate || day.fullDate });
+                  setSubmitError(null);
+                }}
+              />
+            )}
+            {days.length > 0 ? (
+              <V2DayGrid
+                availability={data?.availability}
+                selectedDate={selectedDay?.date || null}
+                onSelectDay={(date) => {
+                  setSelectedDate(date);
+                  setSelectedSlot(null);
+                  setSubmitError(null);
+                }}
+              />
+            ) : null}
+          </div>
+          <div className="rsv2-col-right">
+            {days.length === 0 ? (
+              <Card>
+                <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+                  {aiFiltered
+                    ? 'No open times match that search — try another day, or show all open times above.'
+                    : "We don't have open times to offer online right now. Text or call us and we'll find a time that works."}
+                </div>
+                {aiFiltered ? null : <ContactRow />}
+              </Card>
+            ) : (
+              <V2TimesPanel
+                day={selectedDay}
+                selectedSlot={selectedSlot}
+                onSelect={setSelectedSlot}
+                onConfirm={confirm}
+                submitting={submitting}
+                submitError={submitError}
+              />
+            )}
+            <Card data-glass="soft" style={{ background: S.page }}>
+              <div style={{ fontSize: 14, color: S.body, lineHeight: 1.55 }}>
+                Don't see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.
+              </div>
+              <ContactRow />
+            </Card>
+          </div>
+        </div>
+      </Page>
+    );
+  }
 
   return (
     <Page>
