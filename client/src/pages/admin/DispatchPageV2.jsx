@@ -2472,7 +2472,13 @@ export default function DispatchPageV2({
             // all happens without leaving the schedule.
             if (p?.id) {
               setContinueProjectId(p.id);
-              setContinueProjectService(svc);
+              // Seed the snapshot with the created project (Codex r5 P2):
+              // week rows (and day rows before the refetch lands) carry no
+              // linkedProject yet, so Details → Complete project would
+              // treat the visit as unlinked and mint a duplicate report.
+              setContinueProjectService(
+                svc ? { ...svc, linkedProject: p } : svc,
+              );
             }
           }}
         />
@@ -2634,11 +2640,26 @@ export default function DispatchPageV2({
             // active project-backed row and can mint a project against a
             // cancelled visit (Codex r4 P2). Same pattern as onRescheduled.
             setScheduleRefreshKey((k) => k + 1);
+            // A week-origin continue snapshot never re-points off the day
+            // payload, so retire it directly — otherwise the editor's
+            // Details pill reopens the sheet with stale active status
+            // (Codex r5 P2). Same move as the project-close path.
+            setContinueProjectService((s) =>
+              s && detailService && String(s.id) === String(detailService.id)
+                ? { ...s, status: "cancelled" }
+                : s,
+            );
           }}
           onNoShow={() => {
             fetchSchedule(date);
             // Same week-cache staleness as onCancelled (Codex r4 P2).
             setScheduleRefreshKey((k) => k + 1);
+            // Same week-origin snapshot retirement as onCancelled (Codex r5).
+            setContinueProjectService((s) =>
+              s && detailService && String(s.id) === String(detailService.id)
+                ? { ...s, status: "no_show" }
+                : s,
+            );
           }}
           onRescheduled={() => {
             fetchSchedule(date);
