@@ -35,6 +35,7 @@ function isGeozoneEvent(eventType) {
 // POST /api/bouncie/webhook
 async function handleBouncieWebhook(req, res) {
   // Return 2xx after a valid secret so Bouncie does not retry handler errors.
+  let staffMaintenanceSuppressed = false;
   try {
     const payload = req.body || {};
     const eventType = eventTypeFromPayload(payload);
@@ -104,11 +105,17 @@ async function handleBouncieWebhook(req, res) {
       }
     } else if (isGeozoneEvent(eventType)) {
       try {
-        await geofenceHandler.handleGeozoneEvent(payload);
+        const result = await geofenceHandler.handleGeozoneEvent(payload);
+        staffMaintenanceSuppressed = result?.staffMaintenanceSuppressed === true;
         if (logId) {
           await db('bouncie_webhook_log').where('id', logId).update({ processed: true });
         }
-        logger.info(`[bouncie-webhook] Processed userGeozone for ${imei}`);
+        if (staffMaintenanceSuppressed) {
+          // Structural marker only: no payload, identity, location, or token.
+          logger.info('[bouncie-webhook] Staff maintenance suppressed geozone timer automation');
+        } else {
+          logger.info(`[bouncie-webhook] Processed userGeozone for ${imei}`);
+        }
       } catch (processErr) {
         logger.error(`[bouncie-webhook] Error processing userGeozone: ${processErr.message}`);
         if (logId) {
@@ -129,7 +136,10 @@ async function handleBouncieWebhook(req, res) {
   }
 
   // Handler errors are logged above; valid webhook attempts still get 200.
-  res.status(200).json({ received: true });
+  res.status(200).json({
+    received: true,
+    ...(staffMaintenanceSuppressed ? { staffMaintenanceSuppressed: true } : {}),
+  });
 }
 
 router.post('/', handleBouncieWebhook);

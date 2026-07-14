@@ -14,6 +14,7 @@ const timeTracking = require('./time-tracking');
 const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
 const { parseETDateTime } = require('../utils/datetime-et');
+const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 
 /**
  * Insert a notification for the tech PWA to poll.
@@ -58,6 +59,18 @@ async function markCompleteFromGeofence(scheduledServiceId, eventTime = new Date
  * Main entry point — process one Bouncie userGeozone payload.
  */
 async function handleGeozoneEvent(payload) {
+  // Bouncie geozone webhooks are not Staff-authenticated HTTP requests, but in
+  // automatic mode they can still start/end a Staff timer. Keep the webhook
+  // receiver online for authentication, dedupe, and audit logging while making
+  // its timer automation a no-op throughout the Phase-B maintenance window.
+  if (isStaffMaintenanceEnabled()) {
+    logger.info('[geofence-handler] Staff maintenance suppressed geozone timer automation');
+    return {
+      staffMaintenanceSuppressed: true,
+      code: 'STAFF_MAINTENANCE',
+    };
+  }
+
   const imei = payload.imei || (payload.data && payload.data.imei);
   const geozone = payload.geozone || (payload.data && payload.data.geozone) || {};
   const event = String(geozone.event || '').toUpperCase();
