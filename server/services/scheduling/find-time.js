@@ -160,7 +160,28 @@ async function findAvailableSlots(opts) {
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
     );
 
-  const dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
+  let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
+
+  // Owner blackout days (admin Settings → Scheduling → Blackout days) are
+  // removed here — the single date-enumeration point behind every
+  // customer-facing offer surface (/book, the reschedule page, estimate
+  // slots, the Waves AI searches). Admin manual scheduling stays unblocked
+  // by design (the owner can knowingly book his own day off). Fail-open:
+  // an errored lookup must never take the whole offer pipeline down.
+  if (dates.length) {
+    try {
+      const blackoutRows = await db('schedule_blackout_dates')
+        .whereBetween('date', [dates[0], dates[dates.length - 1]])
+        .select('date');
+      if (blackoutRows.length) {
+        const blackout = new Set(blackoutRows.map((r) => toDateStr(r.date)));
+        dates = dates.filter((d) => !blackout.has(d));
+      }
+    } catch (err) {
+      logger.warn(`[find-time] blackout-date lookup failed (offering all dates): ${err.message}`);
+    }
+  }
+
   const candidates = [];
   let evaluated = 0;
 

@@ -7021,6 +7021,56 @@ router.get('/next-visit', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// ── Blackout days (owner ask 2026-07-14) ─────────────────────────────────
+// Dates the business takes off: any date here is removed from every
+// customer-facing offer surface (enforced at the single date-enumeration
+// point in scheduling/find-time.js). Admin manual scheduling stays
+// unblocked by design. Managed from /admin/settings?tab=blackout-days.
+
+router.get('/blackout-dates', requireAdmin, async (req, res, next) => {
+  try {
+    const rows = await db('schedule_blackout_dates')
+      .where('date', '>=', db.raw("(now() AT TIME ZONE 'America/New_York')::date - interval '30 days'"))
+      .orderBy('date', 'asc')
+      .select('id', 'date', 'reason', 'created_at');
+    res.json({
+      blackouts: rows.map((r) => ({
+        id: r.id,
+        date: typeof r.date === 'string' ? r.date.split('T')[0] : r.date.toISOString().split('T')[0],
+        reason: r.reason || null,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) { next(err); }
+});
+
+router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
+  try {
+    const date = typeof req.body?.date === 'string' ? req.body.date.trim() : '';
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'date (YYYY-MM-DD) required' });
+    }
+    // Upsert keeps the button idempotent — re-adding a date just updates
+    // the reason instead of tripping the unique constraint.
+    const [row] = await db('schedule_blackout_dates')
+      .insert({ date, reason: reason || null })
+      .onConflict('date')
+      .merge({ reason: reason || null })
+      .returning(['id', 'date', 'reason']);
+    logger.info(`[schedule] blackout date ${date} set${reason ? ` (${reason})` : ''}`);
+    res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
+  } catch (err) { next(err); }
+});
+
+router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
+  try {
+    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    if (!deleted) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
 router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,

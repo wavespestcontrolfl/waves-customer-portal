@@ -75,3 +75,40 @@ test('a coordless stop (divergent stamped rental) degrades to zero drive, not hi
   expect(starts.some((t) => t < '10:00')).toBe(true);
   expect(starts.some((t) => t >= '11:00')).toBe(true);
 });
+
+test('blackout dates are removed from the offer enumeration', async () => {
+  // 2026-09-01 blacked out: the only requested day yields zero candidates.
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'A' }]);
+    if (table === 'schedule_blackout_dates') return chain([{ date: '2026-09-01' }]);
+    return chain([]);
+  });
+  const { slots } = await findAvailableSlots(BASE);
+  expect(slots.length).toBe(0);
+});
+
+test('blackout removes only the blacked-out day from a range', async () => {
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'A' }]);
+    if (table === 'schedule_blackout_dates') return chain([{ date: '2026-09-01' }]);
+    return chain([]);
+  });
+  const { slots } = await findAvailableSlots({ ...BASE, dateTo: '2026-09-02', topN: 50 });
+  const dates = new Set(slots.map((s) => s.date));
+  expect(dates.has('2026-09-01')).toBe(false);
+  expect(dates.has('2026-09-02')).toBe(true);
+});
+
+test('a failed blackout lookup fails OPEN — all dates still offered', async () => {
+  db.mockImplementation((table) => {
+    if (table === 'technicians') return chain([{ id: 't1', name: 'A' }]);
+    if (table === 'schedule_blackout_dates') {
+      const c = chain([]);
+      c.select = async () => { throw new Error('relation does not exist'); };
+      return c;
+    }
+    return chain([]);
+  });
+  const { slots } = await findAvailableSlots(BASE);
+  expect(slots.length).toBeGreaterThan(0);
+});
