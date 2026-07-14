@@ -407,6 +407,40 @@ describe('same-mailbox short-circuit', () => {
     expect(out.verdict).toBe('review');
   });
 
+  test('ownership hit on ANY same-mailbox variant blocks the collapse — the group is one inbox', async () => {
+    // Only the NON-preferred (dotted) spelling is on file for another
+    // customer; the dot-free pick delivers to that same inbox, so the
+    // short-circuit must not adopt it.
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.3, reasoning: 'owned elsewhere' }));
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: {
+        ...GMAIL_DNS,
+        ownedByOther: (email) => Promise.resolve(email === 'charlesw.robb@gmail.com'),
+        createMessage,
+      },
+    });
+    expect(createMessage).toHaveBeenCalled();
+    expect(out.verdict).toBe('review');
+  });
+
+  test('model adopting an unflagged variant of an owned mailbox is downgraded to review', async () => {
+    // Even past the short-circuit, the verdict gate applies the group rule:
+    // the model picks the dot-free spelling while the dotted variant of the
+    // SAME mailbox is on file for another customer.
+    const out = await arbitrateQuarantinedEmail({
+      entry: GMAIL_ENTRY,
+      deps: {
+        ...GMAIL_DNS,
+        ownedByOther: (email) => Promise.resolve(email === 'charlesw.robb@gmail.com'),
+        createMessage: modelSaying({ verdict: 'adopt', chosen_value: 'charleswrobb@gmail.com', confidence: 0.95, reasoning: 'unflagged variant' }),
+      },
+    });
+    expect(out.verdict).toBe('review');
+    expect(out.chosenValue).toBeNull();
+    expect(out.reasoning).toContain('same-mailbox variant');
+  });
+
   test('unknown deliverability caps the collapse at adopt_with_confirmation', async () => {
     const timeoutErr = () => { const e = new Error('queryMx timeout'); e.code = 'ETIMEOUT'; return Promise.reject(e); };
     const out = await arbitrateQuarantinedEmail({
@@ -448,6 +482,21 @@ describe('same-mailbox short-circuit', () => {
     expect(createMessage).toHaveBeenCalled();
   });
 
+  test('candidates differing only inside a +tag never collapse', async () => {
+    const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'tag ambiguity' }));
+    await arbitrateQuarantinedEmail({
+      entry: {
+        ...GMAIL_ENTRY,
+        candidates: [
+          { value: 'jane+lead.1@gmail.com', confidence: 0.8, basis: [], risks: [] },
+          { value: 'jane+lead1@gmail.com', confidence: 0.7, basis: [], risks: [] },
+        ],
+      },
+      deps: { ...GMAIL_DNS, ownedByOther: () => Promise.resolve(false), createMessage },
+    });
+    expect(createMessage).toHaveBeenCalled();
+  });
+
   test('v2_email reaches the model prompt as caller context', async () => {
     const createMessage = jest.fn(modelSaying({ verdict: 'review', chosen_value: null, confidence: 0.4, reasoning: 'coin flip' }));
     await arbitrateQuarantinedEmail({
@@ -473,11 +522,24 @@ describe('gmailCanonicalMailbox', () => {
 
   test('plus-tags are preserved — tags are deliberate, not mishears', () => {
     expect(gmailCanonicalMailbox('a.b+leads@gmail.com')).toBe('ab+leads@gmail.com');
+    // Dots INSIDE the tag stay significant: these are different candidates,
+    // not one canonical mailbox — filters can key on the exact tag text.
+    expect(gmailCanonicalMailbox('jane+lead.1@gmail.com')).not.toBe(gmailCanonicalMailbox('jane+lead1@gmail.com'));
   });
 
   test('dotSpokenInDictation matches the word, not punctuation', () => {
     expect(dotSpokenInDictation('Charles W. Robb at Gmail.')).toBe(false);
     expect(dotSpokenInDictation('charles w dot robb at gmail')).toBe(true);
     expect(dotSpokenInDictation('a period after the w')).toBe(true);
+  });
+
+  test('the domain\'s own "dot com" is not local-part dot evidence', () => {
+    // Ordinary dictation — the ONLY spoken dot is the domain separator.
+    expect(dotSpokenInDictation('charles w robb at gmail dot com')).toBe(false);
+    // A local-part dot before the spoken "at" still counts.
+    expect(dotSpokenInDictation('charles w dot robb at gmail dot com')).toBe(true);
+    // No spoken "at" to anchor on: domain-suffix mentions are ignored.
+    expect(dotSpokenInDictation('charleswrobb gmail dot com')).toBe(false);
+    expect(dotSpokenInDictation('charles dot w robb gmail dot com')).toBe(true);
   });
 });

@@ -74,15 +74,29 @@ const GOOGLE_DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
 function gmailCanonicalMailbox(email) {
   const [local, domain] = String(email || '').toLowerCase().split('@');
   if (!local || !domain || !GOOGLE_DOT_INSENSITIVE_DOMAINS.has(domain)) return null;
-  return `${local.replace(/\./g, '')}@gmail.com`;
+  // Strip dots only from the mailbox name BEFORE any +tag: the tag is the
+  // deliberate part (filters can key on its exact text), so tag spellings
+  // that differ by a dot stay distinct candidates for the model to weigh.
+  const plusAt = local.indexOf('+');
+  const mailbox = plusAt === -1 ? local : local.slice(0, plusAt);
+  const tag = plusAt === -1 ? '' : local.slice(plusAt);
+  return `${mailbox.replace(/\./g, '')}${tag}@gmail.com`;
 }
 
-// Did the caller actually SAY a dot? A dotted candidate is dictation-faithful
-// only when the word was spoken — otherwise the dot is transcription
-// punctuation leaking into the address (a spoken initial "W" rendered as
-// "W." became charlesw.robb@ on a real call, 2026-07-13).
+// Did the caller actually SAY a dot IN THE LOCAL PART? A dotted candidate is
+// dictation-faithful only when the word was spoken there — otherwise the dot
+// is transcription punctuation leaking into the address (a spoken initial
+// "W" rendered as "W." became charlesw.robb@ on a real call, 2026-07-13).
+// The domain's own separators don't count: nearly every dictation ends
+// "... at gmail dot com", so only the portion before the spoken "at" is
+// evidence about the local part. With no spoken "at" to anchor on, ignore
+// domain-suffix mentions ("dot com") before testing.
 function dotSpokenInDictation(rawSpoken) {
-  return /\b(?:dot|period)\b/i.test(String(rawSpoken || ''));
+  let s = String(rawSpoken || '');
+  const at = s.search(/\s(?:at|@)\s/i);
+  if (at !== -1) s = s.slice(0, at);
+  else s = s.replace(/\b(?:dot|period)\s+(?:com|net|org|edu|gov|co|io|us|biz|info)\b/gi, '');
+  return /\b(?:dot|period)\b/i.test(s);
 }
 
 // ── Evidence gathering (deterministic, no model) ─────────────────────────────
@@ -320,7 +334,14 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
           || candidates.find((c) => c.value.split('@')[0].includes('.') === dotSpoken)
           || candidates[0];
         const ev = evidence.find((e) => e.value === pick.value);
-        if (ev && ev.deliverable !== false && !ev.owned_by_other_customer) {
+        // Ownership gates the WHOLE canonical group, not just the picked
+        // spelling: these candidates were just proven to be one mailbox, so
+        // another customer owning ANY variant owns the inbox every variant
+        // delivers to — adopting the unflagged spelling would still mail
+        // their inbox. Any hit falls through to the model path (whose own
+        // verdict gate applies the same group rule below).
+        const groupOwned = evidence.some((e) => e.owned_by_other_customer);
+        if (ev && ev.deliverable !== false && !groupOwned) {
           logger.info(`[quarantine-arbiter] Same-mailbox collapse (gmail dot-equivalence): adopted deterministically without model`);
           return {
             // Unknown deliverability keeps the read-back card, mirroring the
@@ -383,6 +404,13 @@ async function arbitrateQuarantinedEmail({ entry, demotedEmail = null, transcrip
         downgrade = 'chosen domain has no MX/A records (authoritative)';
       } else if (match.owned_by_other_customer) {
         downgrade = 'chosen address is on file for another customer';
+      } else if (gmailCanonicalMailbox(match.value)
+          && evidence.some((e) => e.owned_by_other_customer
+            && gmailCanonicalMailbox(e.value) === gmailCanonicalMailbox(match.value))) {
+        // Google dot-equivalence: a same-mailbox variant owned by another
+        // customer means the chosen spelling delivers to that customer's
+        // inbox too — the flag on the variant IS a flag on the choice.
+        downgrade = 'a same-mailbox variant of the chosen address is on file for another customer';
       } else if (ruling.confidence < STORE_CONFIDENCE_FLOOR) {
         downgrade = `confidence ${ruling.confidence} below storing floor`;
       }
