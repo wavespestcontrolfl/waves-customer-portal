@@ -60,10 +60,10 @@ const PRIMARY_CTA = {
   textDecoration: 'none',
 };
 
-function Page({ children, wide = false }) {
+function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: wide ? 960 : 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
         <BrandFooter />
       </div>
@@ -810,10 +810,6 @@ function V2Styles() {
       }
       .rsv2-confirm-btn:disabled { opacity: .6; cursor: default; }
 
-      @media (min-width: 880px) {
-        .rsv2-layout { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 0 16px; align-items: start; }
-        .rsv2-layout > .rsv2-col-left, .rsv2-layout > .rsv2-col-right { min-width: 0; }
-      }
     `}</style>
   );
 }
@@ -979,7 +975,10 @@ export default function ReschedulePage() {
     const byDate = new Map(days.map((d) => [d.date, d]));
     const selectedDay = byDate.get(selectedDate) || days[0] || null;
     return (
-      <Page wide>
+      // Single column at every width (owner ask 2026-07-14) — the page keeps
+      // the standard 640px reading measure on desktop instead of a two-pane
+      // split, so the flow reads identically on phone and desktop.
+      <Page>
         <V2Styles />
         <V2FloatingAsk key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
         <div className="rsv2-layout">
