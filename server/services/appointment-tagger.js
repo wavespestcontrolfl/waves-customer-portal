@@ -512,7 +512,19 @@ class AppointmentTagger {
         || 'there';
 
       const executor = require('./email-template-automation-executor');
+      // Tokened public prep page (2026-07-14 audit): the guide email's CTA
+      // must land on the durable, printable /prep/:token page — not the
+      // login-gated portal visits tab. Mint fails soft: a token hiccup
+      // degrades the CTA back to the portal link rather than blocking the
+      // send.
       const portalVisitsUrl = portalUrl('/?tab=visits');
+      let prepUrl = portalVisitsUrl;
+      try {
+        const { ensureServicePrepToken } = require('./project-email');
+        prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(service.id, automationKey)}`);
+      } catch (tokenErr) {
+        logger.warn(`[appointment-tagger] prep token mint failed for service ${service.id}: ${tokenErr.message}`);
+      }
       const trigger = await executor.processTrigger({
         triggerEventKey: 'appointment.booked',
         triggerEventId: `appointment_booked:${service.id}`,
@@ -530,7 +542,7 @@ class AppointmentTagger {
           service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),
           service_date_ymd: serviceDateStr,
           property_address: [service.address_line1, service.city, service.zip].filter(Boolean).join(', '),
-          prep_url: portalVisitsUrl,
+          prep_url: prepUrl,
           customer_portal_url: portalVisitsUrl,
         },
         executeImmediately: false,

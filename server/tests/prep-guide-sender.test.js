@@ -11,6 +11,9 @@ jest.mock('../services/project-email', () => ({
     name: customer.service_contact_name || customer.first_name || '',
     role: customer.service_contact_email ? 'service_contact' : 'primary',
   }),
+  // Real implementation (against the mocked db) so the tokened prep_url
+  // path is exercised end-to-end.
+  ensureServicePrepToken: jest.requireActual('../services/project-email').ensureServicePrepToken,
 }));
 
 const db = require('../models/db');
@@ -25,11 +28,20 @@ function customersQuery() {
   const q = { where: jest.fn(() => q), whereNull: jest.fn(() => q), first: jest.fn(async () => customerRow) };
   return q;
 }
-// nextServiceDate lookup — no upcoming visit by default.
+// nextUpcomingVisit lookup — no upcoming visit by default. When a test sets
+// upcomingVisitRow, the same table also serves ensureServicePrepToken's
+// chains (.select()…first() token read + .update().returning() mint).
+let upcomingVisitRow = null;
+let servicePrepRow = null;
 function scheduledQuery() {
+  let tokenMode = false;
   const q = {
+    select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
-    orderBy: jest.fn(() => q), first: jest.fn(async () => null),
+    whereNull: jest.fn(() => q), update: jest.fn(() => q),
+    returning: jest.fn(async () => [{}]),
+    orderBy: jest.fn(() => q),
+    first: jest.fn(async () => (tokenMode ? servicePrepRow : upcomingVisitRow)),
   };
   return q;
 }
@@ -49,6 +61,8 @@ beforeEach(() => {
     if (table === 'customer_interactions') return { insert: interactionsInsert };
     return customersQuery();
   });
+  upcomingVisitRow = null;
+  servicePrepRow = { prep_token: null, prep_template_key: null };
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
   renderSmsTemplate.mockResolvedValue('Flea prep steps...');
   sendCustomerMessage.mockResolvedValue({ sent: true });
@@ -193,5 +207,26 @@ describe('sendPrepToCustomer', () => {
     expect(renderSmsTemplate).toHaveBeenCalledWith(
       'auto_flea_no_email', { first_name: 'Megan' }, expect.any(Object),
     );
+  });
+
+  test('upcoming visit → prep_url is the tokened public prep page', async () => {
+    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    expect(result.ok).toBe(true);
+    const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    expect(payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
+    expect(payload.customer_portal_url).toContain('?tab=visits');
+    expect(payload.service_date).not.toBe('To be confirmed');
+  });
+
+  test('no upcoming visit → prep_url stays the portal visits tab', async () => {
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    expect(result.ok).toBe(true);
+    const payload = EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    expect(payload.prep_url).toContain('?tab=visits');
+    expect(payload.service_date).toBe('To be confirmed');
   });
 });

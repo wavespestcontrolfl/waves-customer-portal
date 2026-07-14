@@ -328,6 +328,7 @@ router.get('/:token', async (req, res, next) => {
         's.cancelled_at',
         's.cancellation_reason',
         's.track_token_expires_at',
+        's.prep_token',
         'c.first_name as cust_first_name',
         'c.last_name as cust_last_name',
         // Service-contact slots (unaliased — getServiceContactSlots reads
@@ -443,13 +444,17 @@ router.get('/:token', async (req, res, next) => {
       },
     };
 
+    // Prep-guide link for the pre-visit cards: a project-based token wins
+    // (project prep guides are richer), else the visit's own token (minted
+    // when the booking-triggered or manual prep email went out). Visits
+    // that never had prep sent stay null — the card renders no link.
     if (row.id) {
       const linkedProject = await db('projects')
         .where({ scheduled_service_id: row.id })
         .whereNotNull('prep_token')
         .orderBy('created_at', 'desc')
         .first('prep_token');
-      if (linkedProject) response.prepToken = linkedProject.prep_token;
+      response.prepToken = linkedProject?.prep_token || row.prep_token || null;
     }
 
     res.json(response);

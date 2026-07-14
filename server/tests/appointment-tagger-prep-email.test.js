@@ -66,6 +66,8 @@ let customerRow;
 let priorBookingRow;
 let automationActiveRow;
 let priorPrepInteraction;
+let servicePrepRow;
+let servicePrepUpdateResult;
 let trxRaw;
 
 // isPrepAutomationActive lookup (email_template_automations) — a row = active.
@@ -96,15 +98,22 @@ function customersQuery() {
   return q;
 }
 
-// First-time gate lookup (hasPriorSameTypeBooking) — resolves the prior
-// same-family scheduled_services row, null = first-time treatment.
+// scheduled_services serves two chains: the first-time gate lookup
+// (hasPriorSameTypeBooking — .where()…first(), null = first-time) and the
+// ensureServicePrepToken mint (.select('prep_token',…)…first() +
+// .update().returning()). The .select() call marks token mode.
 function priorBookingQuery() {
+  let tokenMode = false;
   const q = {
+    select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q),
     whereIn: jest.fn(() => q),
     whereNot: jest.fn(() => q),
     whereNotIn: jest.fn(() => q),
-    first: jest.fn(async () => priorBookingRow),
+    whereNull: jest.fn(() => q),
+    update: jest.fn(() => q),
+    returning: jest.fn(async () => servicePrepUpdateResult),
+    first: jest.fn(async () => (tokenMode ? servicePrepRow : priorBookingRow)),
   };
   return q;
 }
@@ -124,6 +133,8 @@ describe('appointment tagger prep email automation', () => {
     priorBookingRow = null;
     automationActiveRow = { id: 'auto-1' };
     priorPrepInteraction = null;
+    servicePrepRow = { prep_token: null, prep_template_key: null };
+    servicePrepUpdateResult = [{}];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return interactionsQuery();
@@ -159,8 +170,39 @@ describe('appointment tagger prep email automation', () => {
       service_date: formatDisplayDate(FUTURE_DATE),
       property_address: '123 Palm Ave, Bradenton, 34211',
     });
-    expect(call.payload.prep_url).toContain('?tab=visits');
+    // prep_url is the tokened public prep page; only the portal link keeps
+    // pointing at the login-gated visits tab.
+    expect(call.payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
     expect(call.payload.customer_portal_url).toContain('?tab=visits');
+  });
+
+  test('prep_url reuses an existing service prep token', async () => {
+    const existing = 'ab'.repeat(16);
+    servicePrepRow = { prep_token: existing, prep_template_key: 'prep.cockroach' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.payload.prep_url).toContain(`/prep/${existing}`);
+  });
+
+  test('prep_url degrades to the portal visits tab when the token mint fails', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        const q = priorBookingQuery();
+        q.select = jest.fn(() => { throw new Error('boom'); });
+        return q;
+      }
+      if (table === 'customer_interactions') return interactionsQuery();
+      if (table === 'email_template_automations') return automationsQuery();
+      return customersQuery();
+    });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.payload.prep_url).toContain('?tab=visits');
   });
 
   test('flea booking maps to prep.flea and renders the auto_flea SMS companion', async () => {

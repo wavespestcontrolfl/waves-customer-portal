@@ -245,6 +245,47 @@ async function ensurePrepToken(projectId) {
   return afterRace.prep_token;
 }
 
+// Service-based twin of ensurePrepToken: the booking-triggered and manual
+// prep sends hang off scheduled_services rows with no project attached, so
+// the public /prep/:token page needs a token minted there. Same race-safe
+// shape (atomic whereNull update, post-race re-read). prep_template_key is
+// stamped alongside so the page renders the exact guide the email carried,
+// even if the automation's template mapping changes later.
+async function ensureServicePrepToken(serviceId, templateKey) {
+  const key = clean(templateKey);
+  if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
+
+  const existing = await db('scheduled_services')
+    .select('prep_token', 'prep_template_key')
+    .where({ id: serviceId })
+    .first();
+  if (existing?.prep_token) {
+    if (!existing.prep_template_key) {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .whereNull('prep_template_key')
+        .update({ prep_template_key: key });
+    }
+    return existing.prep_token;
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  const updated = await db('scheduled_services')
+    .where({ id: serviceId })
+    .whereNull('prep_token')
+    .update({ prep_token: token, prep_template_key: key })
+    .returning(['prep_token']);
+
+  if (updated?.length) return updated[0].prep_token || token;
+
+  const afterRace = await db('scheduled_services')
+    .select('prep_token')
+    .where({ id: serviceId })
+    .first();
+  if (!afterRace?.prep_token) throw new Error(`Failed to ensure prep_token for service ${serviceId}`);
+  return afterRace.prep_token;
+}
+
 async function sendProjectReportReady({
   project,
   customer,
@@ -382,6 +423,7 @@ module.exports = {
   PREP_TEMPLATE_BY_PROJECT_TYPE,
   buildProjectPayload,
   ensurePrepToken,
+  ensureServicePrepToken,
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,

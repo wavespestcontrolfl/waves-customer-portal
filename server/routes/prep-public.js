@@ -157,6 +157,93 @@ const PRIVACY_HEADERS = {
   'Referrer-Policy': 'no-referrer',
 };
 
+// Family key for the upcoming-visits band on scheduled-service tokens:
+// the service row carries a template key, not a project_type, so map it
+// back to a representative project_type for VISIT_FAMILY_KEYWORDS.
+const VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY = {
+  'prep.flea': 'flea',
+  'prep.cockroach': 'cockroach',
+  'prep.bed_bug': 'bed_bug',
+  'prep.rodent': 'rodent_trapping',
+  'prep.termite': 'termite_treatment',
+  'prep.mosquito': 'mosquito_event',
+  'prep.lawn': 'one_time_lawn_treatment',
+  'prep.interior_pest': 'one_time_pest_treatment',
+  'prep.wildlife': 'wildlife_trapping',
+};
+
+// Resolve the token owner: projects first (the original prep surface),
+// then scheduled_services (booking-triggered and manual pest prep, which
+// have no project row — 20260714100000). Returns null when neither owns
+// the token or the guide can't render; the route answers a uniform 404
+// so unknown/expired/unmapped stay indistinguishable.
+async function resolvePrepSource(token) {
+  const now = new Date();
+
+  const project = await db('projects').where({ prep_token: token }).first();
+  if (project) {
+    if (project.prep_expires_at && new Date(project.prep_expires_at) < now) return null;
+    const customer = project.customer_id
+      ? await db('customers').where({ id: project.customer_id }).first()
+      : null;
+    const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
+    if (!templateKey) return null;
+    return {
+      customer,
+      templateKey,
+      customerId: project.customer_id,
+      familyType: project.project_type,
+      typeLabel: getProjectType(project.project_type)?.label || project.project_type || 'Waves service',
+      serviceDate: formatDisplayDate(project.project_date || project.created_at, { fallback: '' }),
+      techName: String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician',
+      serviceAddress: null,
+      viewRow: { project_id: project.id },
+      countView: () => db('projects').where({ id: project.id }).update({
+        prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+        prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+      }),
+    };
+  }
+
+  const service = await db('scheduled_services as s')
+    .leftJoin('technicians as t', 's.technician_id', 't.id')
+    .where('s.prep_token', token)
+    .first(
+      's.id', 's.customer_id', 's.service_type', 's.scheduled_date',
+      's.prep_template_key', 's.prep_expires_at',
+      's.service_address_line1', 's.service_address_city', 's.service_address_state', 's.service_address_zip',
+      't.name as tech_name',
+    );
+  if (!service) return null;
+  if (service.prep_expires_at && new Date(service.prep_expires_at) < now) return null;
+  if (!service.prep_template_key) return null;
+  const customer = service.customer_id
+    ? await db('customers').where({ id: service.customer_id }).first()
+    : null;
+  const serviceAddress = service.service_address_line1
+    ? [
+      service.service_address_line1,
+      [service.service_address_city, service.service_address_state].filter(Boolean).join(', '),
+      service.service_address_zip,
+    ].filter(Boolean).join(' ')
+    : null;
+  return {
+    customer,
+    templateKey: service.prep_template_key,
+    customerId: service.customer_id,
+    familyType: VISIT_FAMILY_TYPE_BY_TEMPLATE_KEY[service.prep_template_key] || null,
+    typeLabel: String(service.service_type || '').trim() || 'Waves service',
+    serviceDate: formatDisplayDate(service.scheduled_date, { fallback: '' }),
+    techName: String(service.tech_name || '').trim() || 'your Waves technician',
+    serviceAddress,
+    viewRow: { scheduled_service_id: service.id },
+    countView: () => db('scheduled_services').where({ id: service.id }).update({
+      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
+      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
+    }),
+  };
+}
+
 router.get('/:token', async (req, res) => {
   res.set(PRIVACY_HEADERS);
 
@@ -164,23 +251,10 @@ router.get('/:token', async (req, res) => {
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
 
   try {
-    const project = await db('projects')
-      .where({ prep_token: token })
-      .first();
-    if (!project) return res.status(404).json({ error: 'Not found' });
+    const source = await resolvePrepSource(token);
+    if (!source) return res.status(404).json({ error: 'Not found' });
 
-    if (project.prep_expires_at && new Date(project.prep_expires_at) < new Date()) {
-      return res.status(404).json({ error: 'Not found' });
-    }
-
-    const customer = project.customer_id
-      ? await db('customers').where({ id: project.customer_id }).first()
-      : null;
-
-    const templateKey = project.prep_template_key || prepTemplateForProjectType(project.project_type);
-    if (!templateKey) {
-      return res.status(404).json({ error: 'Not found' });
-    }
+    const { customer, templateKey } = source;
 
     const loaded = await loadTemplateByKey(templateKey);
     if (!loaded?.activeVersion) {
@@ -201,17 +275,15 @@ router.get('/:token', async (req, res) => {
     const filteredBlocks = blocks.filter((b) => !EMAIL_ONLY_BLOCK_TYPES.has(b.type));
 
     const customerFirstName = String(customer?.first_name || '').trim().split(/\s+/)[0] || 'there';
-    const typeLabel = getProjectType(project.project_type)?.label || project.project_type || 'Waves service';
-    const serviceDate = formatDisplayDate(project.project_date || project.created_at, { fallback: '' });
-    const techName = String(project.tech_name || project.technician_name || '').trim() || 'your Waves technician';
+    const { typeLabel, serviceDate, techName } = source;
 
-    const propertyAddress = customer
+    const propertyAddress = source.serviceAddress || (customer
       ? [
         customer.address_line1,
         [customer.city, customer.state].filter(Boolean).join(', '),
         customer.zip,
       ].filter(Boolean).join(' ')
-      : '';
+      : '');
 
     const vars = {
       first_name: customerFirstName,
@@ -224,20 +296,18 @@ router.get('/:token', async (req, res) => {
     };
 
     const renderedBlocks = filteredBlocks.map((b) => interpolateBlock(b, vars));
-    const upcomingVisits = await fetchUpcomingFamilyVisits(project.customer_id, project.project_type);
+    const upcomingVisits = await fetchUpcomingFamilyVisits(source.customerId, source.familyType);
 
     const ipHash = req.ip
       ? crypto.createHash('sha256').update(req.ip).digest('hex').slice(0, 16)
       : null;
     void db('prep_guide_views').insert({
-      project_id: project.id,
+      ...source.viewRow,
       ip_hash: ipHash,
       user_agent: String(req.get('user-agent') || '').slice(0, 512) || null,
     }).catch((err) => logger.warn(`[prep-public] view log failed: ${err.message}`));
-    void db('projects').where({ id: project.id }).update({
-      prep_view_count: db.raw('COALESCE(prep_view_count, 0) + 1'),
-      prep_first_viewed_at: db.raw('COALESCE(prep_first_viewed_at, now())'),
-    }).catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
+    void source.countView()
+      .catch((err) => logger.warn(`[prep-public] view count update failed: ${err.message}`));
 
     return res.json({
       customerFirstName,
@@ -258,9 +328,12 @@ router.get('/:token', async (req, res) => {
       blocks: renderedBlocks,
     });
   } catch (err) {
-    logger.error(`[prep-public] Error for token ${token}: ${err.message}`);
+    // Token prefix only — a full capability token in the logs is a leak.
+    logger.error(`[prep-public] Error for token ${token.slice(0, 8)}…: ${err.message}`);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+router._test = { resolvePrepSource };
 
 module.exports = router;
