@@ -171,11 +171,38 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // untouched.
     // Same ownership rule as enrollments: recipient-linked rows only —
     // email-only matching could retarget another person's queued sends.
-    counts.templateRuns += await conn('email_template_automation_runs')
+    // Per-row instead of set-based: the stored payload can carry the email
+    // as a TEMPLATE VARIABLE ({{customer_email}} in portal.invite et al.),
+    // and the executor renders from that payload — syncing the recipient
+    // while the body still displays the typo would be half a fix. Only
+    // payload keys whose value equals the OLD email are rewritten; each
+    // update re-asserts status/recipient so a concurrent claim wins.
+    const runRows = await conn('email_template_automation_runs')
       .whereIn('status', ['queued', 'scheduled', 'retry_scheduled'])
       .where({ recipient_id: String(customerId) })
       .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
-      .update({ recipient_email: newEmail, updated_at: now });
+      .select('id', 'payload');
+    for (const row of runRows) {
+      const payload = row.payload && typeof row.payload === 'object' ? { ...row.payload } : null;
+      let payloadPatched = false;
+      if (payload) {
+        for (const key of ['customer_email', 'recipient_email', 'email']) {
+          if (emailKey(payload[key]) === oldEmail) {
+            payload[key] = newEmail;
+            payloadPatched = true;
+          }
+        }
+      }
+      counts.templateRuns += await conn('email_template_automation_runs')
+        .where({ id: row.id, recipient_id: String(customerId) })
+        .whereIn('status', ['queued', 'scheduled', 'retry_scheduled'])
+        .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
+        .update({
+          recipient_email: newEmail,
+          ...(payloadPatched ? { payload: JSON.stringify(payload) } : {}),
+          updated_at: now,
+        });
+    }
 
     // Referral promoter rows snapshot the email at enrollment; reward
     // notifications send directly to it (referral-engine).
@@ -206,8 +233,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // Abandoned-booking recovery sends its ~24h second touch directly to
     // booking_intents.email. Only rows still awaiting that touch matter:
     // unconverted, email touch unsent, not suppressed.
+    // IS NOT TRUE mirrors the recovery sender's own pending predicate —
+    // the flags are nullable and NULL counts as unsent there.
     counts.bookingIntents += await conn('booking_intents')
-      .where({ customer_id: customerId, followup_email_sent: false, suppressed: false })
+      .where({ customer_id: customerId })
+      .whereRaw('followup_email_sent IS NOT TRUE')
+      .whereRaw('suppressed IS NOT TRUE')
       .whereRaw('LOWER(email) = ?', [oldEmail])
       .whereNull('converted_at')
       .update({ email: newEmail, updated_at: now });
@@ -339,6 +370,6 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
 // render THIS string, so the disclosure can never silently drift from the
 // service's actual side effects — extend it in the same commit that adds a
 // new synced surface.
-const EMAIL_FANOUT_DISCLOSURE = 'an email change also syncs every open copy of the old address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
+const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send still targeting the old email address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
 
 module.exports = { propagateCustomerEmailChange, resendPendingConfirmation, emailKey, EMAIL_FANOUT_DISCLOSURE };

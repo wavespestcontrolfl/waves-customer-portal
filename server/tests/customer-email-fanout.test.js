@@ -56,6 +56,9 @@ describe('propagateCustomerEmailChange', () => {
   test('syncs lead, estimate, and newsletter copies and resolves the email review card', async () => {
     const conn = makeConn({
       newsletter_subscribers: { firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com' }, null] },
+      email_template_automation_runs: {
+        rows: [{ id: 'run-1', payload: { customer_email: 'charlesw.robb@gmail.com', first_name: 'Charles' } }],
+      },
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -73,7 +76,11 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'where'
       && c.arg && c.arg.status === 'sending')).toBe(true);
     expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('email_template_automation_runs')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
+    const runSync = conn.__updates('email_template_automation_runs')[0].arg;
+    expect(runSync.recipient_email).toBe('charleswrobb@gmail.com');
+    // Payload template variables carrying the old email are rewritten too —
+    // the executor renders the body from the stored payload.
+    expect(JSON.parse(runSync.payload)).toEqual({ customer_email: 'charleswrobb@gmail.com', first_name: 'Charles' });
     expect(conn.__updates('referral_promoters')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('notification_prefs')[0].arg.billing_email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('customer_contracts')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
@@ -219,12 +226,24 @@ describe('propagateCustomerEmailChange', () => {
     expect(result.pendingConfirmation).toBeUndefined();
   });
 
-  test('booking-intent sync targets only unconverted, unsent, unsuppressed rows', async () => {
+  test('booking-intent sync mirrors the sender predicate — NULL flags count as unsent', async () => {
     const conn = makeConn();
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    const guard = conn.__calls.find((c) => c.table === 'booking_intents' && c.op === 'where'
-      && c.arg && typeof c.arg === 'object' && 'followup_email_sent' in c.arg);
-    expect(guard.arg).toEqual({ customer_id: 'cust-1', followup_email_sent: false, suppressed: false });
+    const raws = conn.__calls
+      .filter((c) => c.table === 'booking_intents' && c.op === 'whereRaw')
+      .map((c) => c.arg.sql);
+    expect(raws).toContain('followup_email_sent IS NOT TRUE');
+    expect(raws).toContain('suppressed IS NOT TRUE');
+  });
+
+  test('a payload without email keys gets a recipient-only run sync', async () => {
+    const conn = makeConn({
+      email_template_automation_runs: { rows: [{ id: 'run-2', payload: { first_name: 'Charles' } }] },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const runSync = conn.__updates('email_template_automation_runs')[0].arg;
+    expect(runSync.recipient_email).toBe('charleswrobb@gmail.com');
+    expect(runSync.payload).toBeUndefined();
   });
 
   test('contract sync skips terminal statuses', async () => {
