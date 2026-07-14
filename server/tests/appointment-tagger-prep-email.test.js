@@ -197,8 +197,9 @@ describe('appointment tagger prep email automation', () => {
 
     await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
 
-    // Last send wins: the page must render what THIS email promised.
-    expect(serviceUpdates).toContainEqual({ prep_template_key: 'prep.cockroach' });
+    // Last send wins, and the OLD guide's sent-marker is cleared with it —
+    // the tracker must not expose the new guide on the old send's proof.
+    expect(serviceUpdates).toContainEqual({ prep_template_key: 'prep.cockroach', prep_sent_at: null });
   });
 
   test('a queued guide email stamps prep_sent_at; a skipped one does not', async () => {

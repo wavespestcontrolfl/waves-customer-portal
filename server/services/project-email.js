@@ -259,15 +259,22 @@ async function ensureServicePrepToken(serviceId, templateKey) {
     .select('prep_token', 'prep_template_key')
     .where({ id: serviceId })
     .first();
+  // Last send wins: the page must render the guide the most recent email
+  // promised, so a resend after reclassification (or a mapping change)
+  // realigns the stored key instead of silently serving the stale guide.
+  // The prior prep_sent_at is cleared with it — that marker proved the OLD
+  // guide went out, and carrying it over would let the tracker expose the
+  // new guide before its send is confirmed. The caller re-stamps it once
+  // the matching delivery succeeds.
+  const realignKey = async (storedKey) => {
+    if (storedKey === key) return;
+    await db('scheduled_services')
+      .where({ id: serviceId })
+      .update({ prep_template_key: key, prep_sent_at: null });
+  };
+
   if (existing?.prep_token) {
-    // Last send wins: the page must render the guide the most recent email
-    // promised, so a resend after reclassification (or a mapping change)
-    // realigns the stored key instead of silently serving the stale guide.
-    if (existing.prep_template_key !== key) {
-      await db('scheduled_services')
-        .where({ id: serviceId })
-        .update({ prep_template_key: key });
-    }
+    await realignKey(existing.prep_template_key);
     return existing.prep_token;
   }
 
@@ -281,10 +288,11 @@ async function ensureServicePrepToken(serviceId, templateKey) {
   if (updated?.length) return updated[0].prep_token || token;
 
   const afterRace = await db('scheduled_services')
-    .select('prep_token')
+    .select('prep_token', 'prep_template_key')
     .where({ id: serviceId })
     .first();
   if (!afterRace?.prep_token) throw new Error(`Failed to ensure prep_token for service ${serviceId}`);
+  await realignKey(afterRace.prep_template_key);
   return afterRace.prep_token;
 }
 
