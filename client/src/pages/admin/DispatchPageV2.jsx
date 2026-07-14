@@ -1242,6 +1242,11 @@ export default function DispatchPageV2({
   // the footer keeps the stale billing block and Close project stays
   // disabled (Codex r10 P2).
   const [projectReloadKey, setProjectReloadKey] = useState(0);
+  // Mirrors ProjectDetail's dirty state (via onDirtyChange) so the overlay
+  // backdrop can confirm before discarding unsaved report edits
+  // (Codex r14 P2). Re-synced on every editor mount; stale values after
+  // unmount are unreachable (the backdrop only exists while mounted).
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
   // ProjectDetail needs the types registry for form labels/fields; fetched
   // once on first open, then cached for the session.
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
@@ -2534,6 +2539,15 @@ export default function DispatchPageV2({
         <div
           className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
           onClick={() => {
+            // A stray scrim tap must not silently discard unsaved report
+            // edits — the editor keeps them only in component state
+            // (Codex r14 P2).
+            if (
+              projectEditorDirty
+              && !confirm("Discard unsaved report edits?")
+            ) {
+              return;
+            }
             setContinueProjectId(null);
             setContinueProjectService(null);
             fetchSchedule(date);
@@ -2578,6 +2592,7 @@ export default function DispatchPageV2({
             <ProjectDetail
               projectId={continueProjectId}
               reloadKey={projectReloadKey}
+              onDirtyChange={setProjectEditorDirty}
               typesRegistry={projectTypesRegistry}
               onClose={() => {
                 setContinueProjectId(null);
@@ -2626,6 +2641,13 @@ export default function DispatchPageV2({
           onClose={() => setEditingService(null)}
           onSaved={async () => {
             const editedId = editingService?.id;
+            // Captured pre-refetch: was the edited visit a DAY row? A
+            // successful refresh miss then means it MOVED (retire the
+            // snapshot); week-origin rows are never in the day payload,
+            // so their miss means nothing (keep) — Codex r14 P2.
+            const wasDayRow = (data?.services || []).some(
+              (r) => String(r.id) === String(editedId),
+            );
             setEditingService(null);
             // Week rows cache their own /week payload — invalidate it so a
             // saved date/price/tech change can't be re-served pre-edit from
@@ -2651,16 +2673,17 @@ export default function DispatchPageV2({
             // appointment.
             setContinueProjectService((s) => {
               if (!s || String(s.id) !== String(editedId)) return s;
-              // A miss is NOT a retire here (house review): week-origin
-              // rows are never in the day payload and a failed silent
-              // refresh returns null — neither means the visit is gone,
-              // and nulling killed the Details pill for the rest of the
-              // editor session. Only a found row re-points.
+              // A failed refresh keeps the snapshot (house review). On a
+              // successful refresh: a found row re-points; a miss retires
+              // only DAY-origin visits (the edit moved them off this day)
+              // and keeps week-origin ones, which are never in the day
+              // payload to begin with (house review + Codex r14 P2).
               if (!fresh) return s;
               const row = (fresh.services || []).find(
                 (r) => String(r.id) === String(s.id),
               );
-              return row || s;
+              if (row) return row;
+              return wasDayRow ? null : s;
             });
           }}
           onMarkPrepaid={(svc) => {

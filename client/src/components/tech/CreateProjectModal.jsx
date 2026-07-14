@@ -1194,7 +1194,12 @@ export default function CreateProjectModal({
                   <button
                     key={key}
                     type="button"
-                    onClick={() => { setProjectType(key); setFindings({}); setRecommendations(''); }}
+                    onClick={() => {
+                      // Click-driven content selection — no input event
+                      // fires, so mark the draft dirty here (Codex r14 P3).
+                      userDirtyRef.current = true;
+                      setProjectType(key); setFindings({}); setRecommendations('');
+                    }}
                     style={{
                       padding: '10px 10px', borderRadius: 8, cursor: 'pointer',
                       background: active ? P.accent : (theme === 'light' ? P.bg : P.bg),
@@ -1264,6 +1269,9 @@ export default function CreateProjectModal({
                         key={c.id}
                         type="button"
                         onClick={() => {
+                          // Same click-driven-selection class as the type
+                          // picker (Codex r14 P3).
+                          userDirtyRef.current = true;
                           setCustomerId(c.id);
                           setSelectedCustomer(c);
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();

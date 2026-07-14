@@ -1448,6 +1448,7 @@ export function ProjectDetail({
   onChanged,
   canAdminActions = false,
   reloadKey = 0,
+  onDirtyChange,
 }) {
   const [confirmAsk, confirmDialog] = useConfirmDialog();
   const [data, setData] = useState(null);
@@ -1539,6 +1540,13 @@ export function ProjectDetail({
     consumedReloadKeyRef.current = reloadKey;
     load({ preserveEdits: true, background: true });
   }, [reloadKey]);
+
+  // Host-visible dirty signal (Codex r14 P2 on #2717): the dispatch
+  // overlay's backdrop close needs to know when discarding would lose
+  // unsaved edits — this editor keeps them only in component state.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const project = data?.project;
   const typeCfg =
