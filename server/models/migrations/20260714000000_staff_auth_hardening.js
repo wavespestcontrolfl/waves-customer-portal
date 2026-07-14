@@ -17,11 +17,15 @@ const MAX_STAFF_EMAIL_LENGTH = 150;
 
 function assertMaintenanceInterlock(env = process.env) {
   // Railway's pre-deploy environment is the authority for this production
-  // migration. NODE_ENV is still checked for non-Railway production runs, but
-  // it must not be possible to bypass the interlock by omitting or mis-setting
-  // NODE_ENV on the production Railway environment.
-  const isProduction = env.NODE_ENV === 'production'
-    || String(env.RAILWAY_ENVIRONMENT_NAME || '').trim().toLowerCase() === 'production';
+  // migration. Every Railway deploy runs the production Node build, including
+  // isolated PR/staging databases, so NODE_ENV alone cannot identify the live
+  // environment. Fall back to NODE_ENV only when Railway did not provide an
+  // environment name; a missing/blank name therefore still fails closed for a
+  // non-Railway production migration.
+  const railwayEnvironment = String(env.RAILWAY_ENVIRONMENT_NAME || '').trim().toLowerCase();
+  const isProduction = railwayEnvironment
+    ? railwayEnvironment === 'production'
+    : env.NODE_ENV === 'production';
   if (isProduction && env.STAFF_MAINTENANCE_MODE !== 'true') {
     throw new Error(
       'STAFF_MAINTENANCE_MODE=true is required for the production Staff auth migration',
