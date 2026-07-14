@@ -1447,6 +1447,8 @@ export function ProjectDetail({
   onClose,
   onChanged,
   canAdminActions = false,
+  reloadKey = 0,
+  onDirtyChange,
 }) {
   const [confirmAsk, confirmDialog] = useConfirmDialog();
   const [data, setData] = useState(null);
@@ -1467,9 +1469,17 @@ export function ProjectDetail({
   const [productCatalog, setProductCatalog] = useState([]);
 
   async function load(options = {}) {
-    const { preserveEdits = false } = options;
-    setLoading(true);
-    setError("");
+    const { preserveEdits = false, background = false } = options;
+    // background: refresh without tripping the full-editor loading swap —
+    // the render gate is `loading || !project`, so a loud reload behind a
+    // mounted, possibly-dirty editor replaced the whole form with a
+    // "Loading project…" card and invited a no-confirm backdrop close
+    // (house review on #2717). Background failures also stay quiet: the
+    // decision-time preview re-fetch in handleClose still guards closeout.
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const [projectRes, activityRes] = await Promise.all([
         adminFetch(`/admin/projects/${projectId}`),
@@ -1500,16 +1510,43 @@ export function ProjectDetail({
       }
       setDelivery(d.project.delivery_channels || null);
     } catch (e) {
-      setError(e.message || "Could not load project");
-      setData(null);
+      // A background/preserveEdits refresh must never blank or error-swap a
+      // mounted editor (Codex r11 P2 + house review): keep the stale data,
+      // and only surface the failure when this was a foreground load.
+      if (!background) setError(e.message || "Could not load project");
+      if (!preserveEdits) setData(null);
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();  
+    load();
   }, [projectId]);
+
+  // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
+  // payment detour (Details → checkout) resolves billing, the mounted
+  // editor kept its stale closeoutPreview and left Close project disabled
+  // — the decision-time preview fetch never runs off a disabled button.
+  // preserveEdits keeps unsaved findings/recommendations intact;
+  // background keeps the loading gate from swapping the form out.
+  // The ref makes this fire only on post-mount CHANGES: the host's key is
+  // a page-lifetime counter bumped by pest checkouts too, so an effect
+  // keyed on truthiness double-loaded every mount after the session's
+  // first payment (house review).
+  const consumedReloadKeyRef = useRef(reloadKey);
+  useEffect(() => {
+    if (reloadKey === consumedReloadKeyRef.current) return;
+    consumedReloadKeyRef.current = reloadKey;
+    load({ preserveEdits: true, background: true });
+  }, [reloadKey]);
+
+  // Host-visible dirty signal (Codex r14 P2 on #2717): the dispatch
+  // overlay's backdrop close needs to know when discarding would lose
+  // unsaved edits — this editor keeps them only in component state.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const project = data?.project;
   const typeCfg =
@@ -1938,20 +1975,36 @@ export function ProjectDetail({
       setError("Admin access required to close projects.");
       return;
     }
-    if (billingBlocksClose) {
+    // Re-check the closeout preview at decision time (Codex r6 P3 on
+    // #2717): the mounted preview goes stale when the linked visit is
+    // cancelled/no-showed out-of-band (e.g. the schedule's overlaid
+    // appointment sheet while this editor stays mounted), so the gates
+    // below would promise "complete linked service" and then 409. Only
+    // the preview is refreshed — data/edit state stay untouched so
+    // unsaved edits survive; falls back to the mounted preview if the
+    // fetch fails.
+    let preview = closeoutPreview;
+    try {
+      const pr = await adminFetch(`/admin/projects/${projectId}`);
+      const pd = await readJsonResponse(pr, "Could not refresh closeout preview");
+      if (pd?.closeoutPreview) preview = pd.closeoutPreview;
+    } catch {
+      /* keep the mounted preview */
+    }
+    if (preview?.billing?.required && !preview?.billing?.resolved) {
       setError(
-        `${closeoutBillingLabel(closeoutPreview.billing)}. Create or collect the invoice before closing this project.`,
+        `${closeoutBillingLabel(preview.billing)}. Create or collect the invoice before closing this project.`,
       );
       return;
     }
-    if (followupBlocksClose) {
+    if (preview?.followup?.unsupported) {
       setError(
         "Auto-schedule follow-up is not available yet. Change the follow-up policy to alert or schedule the follow-up manually before closing.",
       );
       return;
     }
-    if (previewBlocksClose) {
-      const status = closeoutPreview?.serviceCompletion?.status;
+    if (preview?.canClose === false) {
+      const status = preview?.serviceCompletion?.status;
       setError(
         status
           ? `This project cannot close while the linked service is ${status}.`
@@ -1960,13 +2013,13 @@ export function ProjectDetail({
       return;
     }
     const closeoutLines = [
-      closeoutPreview?.serviceCompletion?.willCompleteService
-        ? `Service: complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
+      preview?.serviceCompletion?.willCompleteService
+        ? `Service: complete ${preview.serviceCompletion.serviceType || "linked service"}`
         : null,
-      closeoutPreview?.billing ? `Billing: ${closeoutBillingLabel(closeoutPreview.billing)}` : null,
-      closeoutPreview?.followup ? `Follow-up: ${closeoutFollowupLabel(closeoutPreview.followup)}` : null,
-      closeoutPreview?.portal
-        ? `Portal: ${closeoutPreview.portal.attached ? "attached" : "token-only"}`
+      preview?.billing ? `Billing: ${closeoutBillingLabel(preview.billing)}` : null,
+      preview?.followup ? `Follow-up: ${closeoutFollowupLabel(preview.followup)}` : null,
+      preview?.portal
+        ? `Portal: ${preview.portal.attached ? "attached" : "token-only"}`
         : null,
     ].filter(Boolean);
     const confirmText = [
@@ -1983,8 +2036,6 @@ export function ProjectDetail({
         method: "POST",
       });
       const d = await readJsonResponse(r, "Could not close project");
-      await load();
-      onChanged?.();
       const serviceText = d.serviceCompleted ? " Service marked completed." : "";
       const portalText = d.portalAttached
         ? " Report attached to the customer portal."
@@ -1996,7 +2047,20 @@ export function ProjectDetail({
         : d.followup?.alert?.existingAlertId
           ? " Existing follow-up alert kept."
           : "";
+      // Notice BEFORE the host signal (house review): on a filtered Jobs
+      // list onChanged's refetch can drop this project and unmount the
+      // panel — a later setNotice would land on an unmounted component and
+      // the operator would never see the close confirmation.
       setNotice(`Project closed.${serviceText}${portalText}${followupText}`);
+      // Close also completes the linked visit — tell the host so schedule
+      // embeds can retire their visit snapshot (DispatchPageV2 Details
+      // handoff, Codex P1 on #2717). Emitted BEFORE the project reload:
+      // during that await the host still rendered the Details pill off
+      // the stale active snapshot, and a quick tap could cancel the
+      // just-completed visit (Codex r10 P1). Consumers that take no args
+      // (loadProjects) are unaffected by the earlier emission.
+      onChanged?.({ visitCompleted: !!d.serviceCompleted });
+      await load();
     } catch (e) {
       if (e.payload?.code === "project_completion_billing_required") {
         setError(
