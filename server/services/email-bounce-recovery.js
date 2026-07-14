@@ -350,6 +350,56 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
 }
 
 /**
+ * Gmail-aware ownership: Google ignores local-part dots and everything after
+ * '+', so EVERY dot/tag variant of one mailbox name delivers to one inbox.
+ * The exact-string check above cannot see those aliases — john.doe@gmail.com
+ * passes it even when another customer is on file as johndoe@gmail.com or
+ * johndoe+billing@gmail.com. This compares by INBOX IDENTITY (mailbox name
+ * before '+', dots stripped) across the same sources, with the same
+ * fail-closed contract. Non-Google addresses return false — dots and tags
+ * are significant everywhere else, so the exact check is the right one there.
+ */
+async function gmailMailboxOwnedByOther(email, ownCustomerId) {
+  const s = String(email || '').trim().toLowerCase();
+  const [local, domain] = s.split('@');
+  if (!local || !domain || !['gmail.com', 'googlemail.com'].includes(domain)) return false;
+  const mailbox = local.split('+')[0].replace(/\./g, '');
+  if (!mailbox) return false;
+  const own = String(ownCustomerId || '');
+  const isOther = (rowCustomerId) => !own || String(rowCustomerId || '') !== own;
+  // Column names come from the hardcoded field lists below — never user input.
+  const CANON = (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`;
+  const GOOGLE = (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`;
+  try {
+    const customerRows = await db('customers')
+      .where((q) => {
+        for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`(${GOOGLE(f)} AND ${CANON(f)} = ?)`, [mailbox]);
+      })
+      .select('id');
+    if (customerRows.some((r) => String(r.id) !== own)) return true;
+
+    const estRows = await db('estimates')
+      .whereRaw(`${GOOGLE('customer_email')} AND ${CANON('customer_email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (estRows.some((r) => isOther(r.customer_id))) return true;
+
+    const leadRows = await db('leads')
+      .whereRaw(`${GOOGLE('email')} AND ${CANON('email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (leadRows.some((r) => isOther(r.customer_id))) return true;
+
+    const prefRows = await db('notification_prefs')
+      .whereRaw(`${GOOGLE('billing_email')} AND ${CANON('billing_email')} = ?`, [mailbox])
+      .select('customer_id');
+    if (prefRows.some((r) => isOther(r.customer_id))) return true;
+  } catch (err) {
+    logger.warn(`[bounce-recovery] gmail mailbox ownership lookup failed — treating as owned by other: ${err.message}`);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Insert (or reuse) the QUEUED recovery email_messages row. Deliberately does
  * NOT publish a provider_message_id — the caller links the ledger first, then
  * dispatches. The SendGrid webhook can only match this row once provider_message_id
@@ -1060,6 +1110,7 @@ module.exports = {
   resolveCustomerEmailField,
   correctedAddressSuppressed,
   correctedAddressOwnedByOther,
+  gmailMailboxOwnedByOther,
   bouncedAddressStillOnFile,
   CUSTOMER_EMAIL_FIELDS,
 };
