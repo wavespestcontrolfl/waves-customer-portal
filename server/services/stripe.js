@@ -1814,7 +1814,24 @@ const StripeService = {
             }),
           });
         } catch { /* non-fatal */ }
-        throw new Error(err.message || 'Card charge failed');
+        const chargeFailed = new Error(err.message || 'Card charge failed');
+        // Structured decline facts for customer-facing notices. ONLY a real
+        // processor decline on the confirm carries them (StripeCardError /
+        // decline_code) — the guard errors above re-throw plain and config/DB
+        // failures land here without the marker, so callers can key "tell
+        // the customer their payment failed" strictly off this and never text
+        // a false decline for an internal error. attemptedAmount is the
+        // surcharge-inclusive total computeChargeAmount priced (what the
+        // customer actually saw attempted), never the pre-surcharge base.
+        if (err.type === 'StripeCardError' || err.code === 'card_declined' || err.decline_code) {
+          chargeFailed.wavesCardDecline = {
+            attemptedAmount: Number.isFinite(total) ? total : null,
+            cardBrand: card.card_brand || null,
+            cardLast4: card.last_four || null,
+            declineCode: err.decline_code || err.code || null,
+          };
+        }
+        throw chargeFailed;
       }
 
       logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${err.message}`);
