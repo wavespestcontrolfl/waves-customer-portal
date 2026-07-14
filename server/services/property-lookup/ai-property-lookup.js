@@ -822,9 +822,16 @@ function buildCadastralRecord(parcel, address) {
   if (!parcel) return null;
   const isCountyGis = Boolean(parcel.gisProvider);
   const provider = parcel.gisProvider || 'fdor_cadastral';
-  const useDescType = countyUseDescToPropertyType(parcel.landUseDescription);
-  const cadastralType = useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode));
-  const commercialSized = isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
+  // A stacked-parcel association aggregate is ALWAYS Multifamily — never let
+  // the "condo" wording in its synthesized land-use map to the residential
+  // Condo type, which would price 100k+ sf of association buildings as one
+  // condo unit.
+  const isAggregate = parcel.aggregated === true;
+  const useDescType = isAggregate ? null : countyUseDescToPropertyType(parcel.landUseDescription);
+  const cadastralType = isAggregate
+    ? 'Multifamily'
+    : (useDescType || dorUcPropertyType(dorMajorCategory(parcel.dorUseCode)));
+  const commercialSized = isAggregate || isCommercialBuildingType(cadastralType) || parcelLooksCommercial(parcel);
   const parsed = {
     squareFootage: coerceBuildingSqft(parcel.livingAreaSqft, commercialSized),
     lotSize: clampLotSqft(Number(parcel.lotSqft)),
@@ -884,6 +891,12 @@ function buildCadastralRecord(parcel, address) {
   record.zipCode = parcel.situsZip || '';
   record.county = parcel.county;
   record._aiProviders = [provider];
+  if (isAggregate) {
+    // Association-level unit total (detectCategory's unitCount>4 vote and the
+    // per-unit commercial pricers read this). Bounded: a runaway aggregation
+    // must not claim thousands of units off a bad layer response.
+    record.unitCount = coerceInt(parcel.residentialUnits, 2, 2000) || 1;
+  }
   return record;
 }
 
@@ -927,6 +940,12 @@ function attachParcelMeta(merged, parcel) {
     dorUseCode: parcel.dorUseCode,
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
+    // Stacked-parcel association aggregate extras (buildEnrichedProfile reads
+    // buildingCount for the multi-building perimeter estimate).
+    aggregated: parcel.aggregated === true || undefined,
+    aggregateUnitParcels: parcel.aggregateUnitParcels ?? undefined,
+    buildingCount: parcel.buildingCount ?? undefined,
+    groundAreaSqft: parcel.groundAreaSqft ?? undefined,
   };
   return merged;
 }

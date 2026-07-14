@@ -1,0 +1,255 @@
+/**
+ * Stacked-parcel condo/HOA association aggregation.
+ *
+ * Real case this encodes: 1555 Tarpon Center Dr, Venice — a 118-unit condo
+ * association whose units each own zero land. The Sarasota layer returns 151
+ * parcels stacked on one polygon at any point inside the complex; the picker
+ * can't choose a unit, so the lookup deferred and the panel came back 0/100
+ * even though the roll knows units, sqft, year built, and the land geometry.
+ *
+ * Aggregation rules:
+ *   - association-sized stacks (≥5 units) aggregate: units and living sqft
+ *     summed, land from a master row's roll figure or the shared polygon,
+ *     building count from distinct unit street numbers;
+ *   - small stacks (a paired villa's 2 identical rows) still defer;
+ *   - the aggregate is ALWAYS Multifamily → commercial lane (the synthesized
+ *     "condo" wording must never map to the residential Condo type);
+ *   - the enriched profile prices perimeter per building (N buildings of
+ *     footprint/N each ≈ √N × one combined slab's perimeter).
+ */
+
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+
+const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
+const { _private: aiPrivate } = require('../services/property-lookup/ai-property-lookup');
+const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+
+const { buildCadastralRecord, attachParcelMeta } = aiPrivate;
+
+const PT = { lat: 27.11, lng: -82.464 };
+const RING = [[
+  [-82.465, 27.109], [-82.463, 27.109], [-82.463, 27.111], [-82.465, 27.111], [-82.465, 27.109],
+]];
+
+function unitFeature(num, unit, overrides = {}) {
+  return {
+    geometry: { rings: RING },
+    attributes: {
+      id: `01731220${unit}`,
+      fulladdress: `${num} TARPON CENTER DR ${unit}, VENICE FL, 34285`,
+      loccity: 'VENICE',
+      loczip: '34285',
+      lsqft: 0,
+      living: 920,
+      grnd_area: 1000,
+      livunits: 1,
+      yrbl: 1970,
+      stcd: '0403',
+      subd: '7090',
+      pool: null,
+      ...overrides,
+    },
+  };
+}
+
+const MASTER_FEATURE = {
+  geometry: { rings: RING },
+  attributes: {
+    id: '0000007090',
+    fulladdress: '0 GIBBS RD VENICE FL, 34285',
+    loccity: 'VENICE',
+    loczip: '34285',
+    lsqft: 0,
+    living: null,
+    grnd_area: null,
+    livunits: 0,
+    yrbl: null,
+    stcd: '0900',
+    subd: '7090',
+    pool: null,
+  },
+};
+
+function mockArcgis(features) {
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ features }),
+  });
+}
+
+const realFetch = global.fetch;
+afterEach(() => { global.fetch = realFetch; jest.clearAllMocks(); });
+
+describe('stacked-parcel association aggregation (county GIS)', () => {
+  test('an association-sized stack aggregates units, sqft, land, and buildings', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1575, 201), unitFeature(1575, 202),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel).toMatchObject({
+      county: 'Sarasota',
+      aggregated: true,
+      residentialUnits: 6,
+      livingAreaSqft: 6 * 920,
+      groundAreaSqft: 6 * 1000,
+      buildingCount: 2, // 1555 + 1575
+      situsAddress: '1555 TARPON CENTER DR',
+      situsZip: '34285',
+      yearBuilt: 1970,
+      parcelId: '0000007090', // the master/common row keys the aggregate
+      gisProvider: 'sarasota_gis',
+    });
+    // Units own no land — the shared polygon supplies the association's lot.
+    expect(parcel.lotSqft).toBeGreaterThan(10000);
+    expect(parcel.lotSqft).toBe(parcel.polygonAreaSqft);
+    expect(parcel.landUseDescription).toMatch(/Multifamily.*6 units.*2 buildings/);
+  });
+
+  test('a master row carrying a roll land figure beats the polygon area', async () => {
+    mockArcgis([
+      { ...MASTER_FEATURE, attributes: { ...MASTER_FEATURE.attributes, lsqft: 98084 } },
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.lotSqft).toBe(98084);
+    expect(parcel.buildingCount).toBe(1);
+  });
+
+  test('a small stack (paired villa) still defers — aggregation must not swallow a duplex', async () => {
+    mockArcgis([unitFeature(1555, 101), unitFeature(1555, 102)]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel).toBeNull();
+  });
+});
+
+describe('association aggregate → cadastral record → enriched profile', () => {
+  function aggregateParcel(overrides = {}) {
+    return {
+      parcelId: '0000007090',
+      county: 'Sarasota',
+      gisProvider: 'sarasota_gis',
+      situsAddress: '1555 TARPON CENTER DR',
+      situsCity: 'VENICE',
+      situsZip: '34285',
+      lotSqft: 98084,
+      livingAreaSqft: 104096,
+      groundAreaSqft: 115086,
+      stories: null,
+      yearBuilt: 1970,
+      residentialUnits: 118,
+      dorUseCode: '0403',
+      landUseDescription: 'Multifamily condo/HOA association — 118 units, 3 buildings (county aggregate)',
+      subdivision: '7090',
+      poolFlag: true,
+      imperviousAreaSf: null,
+      aggregated: true,
+      aggregateUnitParcels: 118,
+      buildingCount: 3,
+      sourceUrl: 'https://ags3.scgov.net/server/rest/services/Hosted/Parcels/FeatureServer/0',
+      ...overrides,
+    };
+  }
+
+  test('the aggregate is Multifamily with the summed sqft — never residential Condo', () => {
+    const record = buildCadastralRecord(aggregateParcel(), '1555 Tarpon Center Dr, Venice, FL 34285');
+
+    expect(record.propertyType).toBe('Multifamily');
+    expect(record.squareFootage).toBe(104096); // commercial-sized, not nulled at 15k
+    expect(record.lotSize).toBe(98084);
+    expect(record.unitCount).toBe(118);
+    expect(record._raw.landUse).toMatch(/multifamily/i);
+  });
+
+  test('the enriched profile routes COMMERCIAL and carries units + multi-building perimeter', () => {
+    const record = attachParcelMeta(
+      buildCadastralRecord(aggregateParcel(), '1555 Tarpon Center Dr, Venice, FL 34285'),
+      aggregateParcel(),
+    );
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.category).toBe('COMMERCIAL');
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.unitCount).toBe(118);
+    expect(profile.buildingCount).toBe(3);
+    expect(profile.homeSqFt).toBe(104096);
+    expect(profile.lotSqFt).toBe(98084);
+
+    // 3 buildings of footprint/3 each: √3 × the single-slab perimeter.
+    const footprint = 104096; // stories default 1
+    const single = Math.round(4 * Math.sqrt(footprint) * 1.35);
+    const multi = Math.round(3 * 4 * Math.sqrt(footprint / 3) * 1.35);
+    expect(profile.estimatedPerimeterLF).toBe(multi);
+    expect(profile.estimatedPerimeterLF).toBeGreaterThan(single);
+  });
+
+  test('a normal single-parcel profile keeps the single-building perimeter formula', () => {
+    const profile = buildEnrichedProfile({
+      propertyType: 'Single Family',
+      lotSize: 10000,
+      squareFootage: 2400,
+      stories: 2,
+    }, null, 27.4, -82.4);
+
+    expect(profile.buildingCount).toBe(1);
+    expect(profile.estimatedPerimeterLF).toBe(Math.round(4 * Math.sqrt(1200) * 1.35));
+  });
+});
+
+describe('commercial county turf prior', () => {
+  test('a county-dimensioned commercial record seeds the turf prior (was vision-only)', () => {
+    const profile = buildEnrichedProfile({
+      propertyType: 'Warehouse',
+      _source: 'county',
+      lotSize: 50000,
+      squareFootage: 20000,
+      stories: 1,
+      imperviousAreaSf: 10000,
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+      },
+    }, null, 27.4, -82.4);
+
+    expect(profile.category).toBe('COMMERCIAL');
+    // ceiling = 50000 − 20000 − 10000 = 20000; prior = 50%
+    expect(profile.countyTurfPriorSf).toBe(10000);
+    expect(profile.estimatedTurfSf).toBe(10000);
+    expect(profile.turfSource).toBe('county_prior');
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'estimatedTurfSf', priority: 'HIGH' }),
+    ]));
+  });
+
+  test('a residential shared-turf type (condo unit) still gets NO prior', () => {
+    const profile = buildEnrichedProfile({
+      propertyType: 'Condo',
+      _source: 'county',
+      lotSize: 50000,
+      squareFootage: 1200,
+      stories: 1,
+      imperviousAreaSf: 10000,
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+      },
+    }, null, 27.4, -82.4);
+
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.countyTurfPriorSf).toBeNull();
+  });
+});

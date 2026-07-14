@@ -1342,13 +1342,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // trustedCountyTurfCeiling. Anything weaker stays on the existing
   // fallback/verify path (codex P2s).
   const countyCeiling = trustedCountyTurfCeiling(rc);
+  // Commercial profiles get the same county-facts prior under the same trust
+  // bar: an association's or warehouse's grounds are the CUSTOMER'S grounds,
+  // and vision-only turf left commercial lawn/mosquito pricing with nothing
+  // when satellite imagery missed. The shared-turf type exclusion is a
+  // residential concern (a condo UNIT doesn't own the lawn) — a commercial
+  // profile IS the association/owner, so it doesn't apply there.
   const countyTurfPriorSf = (
     !visionTurfKnown
-    && !commercialProfile
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
-    && !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase())
+    && (commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase()))
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
@@ -1370,8 +1375,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // estimator's Perimeter LF box; a field-measured value overrides it.
   const perimeterLayoutFactor =
     (landscapeComplexity === 'MODERATE' || landscapeComplexity === 'COMPLEX') ? 1.35 : 1.25;
+  // Multi-building complexes (stacked-parcel association aggregates): N
+  // buildings of footprint/N each have √N × the perimeter of one combined
+  // slab — one 104k sf square is ~1,290 LF, but three separate buildings of
+  // ~35k sf are ~2,235 LF of exterior wall to treat.
+  const buildingCount = Math.max(1, Math.round(Number(rc?._parcel?.buildingCount) || 1));
   const estimatedPerimeterLF = footprintSf > 0
-    ? Math.round(4 * Math.sqrt(footprintSf) * perimeterLayoutFactor)
+    ? Math.round(buildingCount * 4 * Math.sqrt(footprintSf / buildingCount) * perimeterLayoutFactor)
     : null;
 
   const profile = {
@@ -1388,7 +1398,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     isCommercial: commercialProfile,
     commercialSubtype,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
-    unitCount: rc?.unitCount || 1,
+    unitCount: rc?.unitCount
+      || (rc?._parcel?.aggregated ? Number(rc._parcel.residentialUnits) || 0 : 0)
+      || 1,
+    // Stacked-parcel association aggregate: distinct unit street numbers on
+    // the roll (1 when the whole association shares one address).
+    buildingCount,
 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,

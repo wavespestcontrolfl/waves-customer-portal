@@ -106,6 +106,105 @@ function pickParcelFeature(features, lng, lat) {
   return pool[0]?.feature || null;
 }
 
+// ── Stacked-parcel condo/HOA association aggregation ─────────────────────
+// A condo association returns DOZENS of unit "parcels" stacked on one shared
+// polygon (each unit owns no land — live probe: 1555 Tarpon Center Dr, Venice
+// = 118 unit parcels + common elements, 151 stacked at one point). The picker
+// can't choose a unit, so these lookups used to defer and the panel came back
+// empty even though the roll knows everything. When the stack is clearly an
+// association, aggregate it instead: total units, summed living sqft, the
+// shared polygon (or roll figure) for land, a building count from distinct
+// unit street numbers, and an explicit multifamily land-use so the profile
+// routes COMMERCIAL. Small stacks (a paired villa's 2 identical rows) stay on
+// the old defer path — aggregating a duplex would misprice it.
+const AGGREGATE_MIN_UNITS = 5;
+
+function modalValue(values) {
+  const counts = new Map();
+  let best = null;
+  let bestCount = 0;
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const count = (counts.get(value) || 0) + 1;
+    counts.set(value, count);
+    if (count > bestCount) { best = value; bestCount = count; }
+  }
+  return best;
+}
+
+function buildStackedAggregate(county, layer, features, lng, lat) {
+  const rows = [];
+  for (const feature of features) {
+    const rings = feature?.geometry?.rings || null;
+    if (!rings || !polygonContainsPoint(rings, lng, lat)) continue;
+    rows.push({ parsed: layer.parse(ciAttr(feature.attributes || {})), rings });
+  }
+  if (rows.length < AGGREGATE_MIN_UNITS) return null;
+
+  const unitRows = rows.filter((row) => (row.parsed.residentialUnits || 0) > 0
+    || (row.parsed.livingAreaSqft || 0) > 0);
+  const units = unitRows.reduce((sum, row) => sum + (row.parsed.residentialUnits || 0), 0)
+    || unitRows.length;
+  if (units < AGGREGATE_MIN_UNITS) return null;
+
+  const livingAreaSqft = unitRows.reduce((sum, row) => sum + (row.parsed.livingAreaSqft || 0), 0);
+  const groundAreaSqft = unitRows.reduce((sum, row) => sum + (row.parsed.groundAreaSqft || 0), 0);
+
+  // Distinct leading street numbers among the unit situs addresses — the
+  // roll's only building signal ("1535 / 1555 / 1575 Tarpon Center Dr" = 3
+  // buildings). Single shared number → 1; satellite vision refines later.
+  const streetNumbers = new Set();
+  for (const row of unitRows) {
+    const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
+    if (m) streetNumbers.add(m[1]);
+  }
+  const buildingCount = Math.max(1, streetNumbers.size);
+
+  // Land: a stacked master/common row carrying a roll land figure wins; else
+  // the shared polygon's own area (units all carry lsqft 0 by design).
+  const masterRow = rows.find((row) => (row.parsed.lotSqft || 0) > 0 && !(row.parsed.residentialUnits > 0))
+    || rows.find((row) => !(row.parsed.residentialUnits > 0) && !(row.parsed.livingAreaSqft > 0))
+    || rows[0];
+  const polyArea = polygonAreaSqft(masterRow.rings);
+  const lotSqft = masterRow.parsed.lotSqft || polyArea;
+
+  const yearBuilt = modalValue(unitRows.map((row) => row.parsed.yearBuilt));
+  const stories = unitRows.reduce((max, row) => Math.max(max, row.parsed.stories || 0), 0) || null;
+  // Situs without the trailing unit designator — the modal "NUMBER STREET".
+  const situsAddress = modalValue(unitRows.map((row) => {
+    const m = String(row.parsed.situsAddress || '').match(/^(\d+\s+[^,]*?)(?:\s+\d+)?(?:,|$)/);
+    return m ? m[1] : row.parsed.situsAddress;
+  })) || masterRow.parsed.situsAddress || null;
+
+  return {
+    parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,
+    situsAddress,
+    situsCity: modalValue(rows.map((row) => row.parsed.situsCity)),
+    situsZip: modalValue(rows.map((row) => row.parsed.situsZip)),
+    lotSqft,
+    livingAreaSqft: livingAreaSqft > 0 ? livingAreaSqft : null,
+    groundAreaSqft: groundAreaSqft > 0 ? groundAreaSqft : null,
+    stories,
+    yearBuilt,
+    residentialUnits: units,
+    dorUseCode: modalValue(unitRows.map((row) => row.parsed.dorUseCode)),
+    // Human-readable AND machine-routing: "multifamily" is the token
+    // detectCategory/commercialSignalText key on. buildCadastralRecord
+    // branches on `aggregated` for the propertyType, so the word
+    // "condominium" here can never trip the residential Condo mapping.
+    landUseDescription: `Multifamily condo/HOA association — ${units} units, ${buildingCount} building${buildingCount === 1 ? '' : 's'} (county aggregate)`,
+    subdivision: modalValue(rows.map((row) => row.parsed.subdivision)),
+    poolFlag: rows.some((row) => row.parsed.poolFlag === true) ? true : null,
+    rollYear: modalValue(rows.map((row) => row.parsed.rollYear)),
+    imperviousAreaSf: masterRow.parsed.imperviousAreaSf ?? null,
+    aggregated: true,
+    aggregateUnitParcels: unitRows.length,
+    buildingCount,
+    _masterRings: masterRow.rings,
+    _polyArea: polyArea,
+  };
+}
+
 // ArcGIS servers can return attribute keys in a different case than the field
 // definitions / requested outFields (hosted FeatureServers especially), and a
 // silent case mismatch would zero out a whole county's parse and quietly fall
@@ -168,6 +267,9 @@ const COUNTY_LAYERS = {
       situsZip: zip5(g('loczip')),
       lotSqft: positiveOrNull(g('lsqft')),
       livingAreaSqft: positiveOrNull(g('living')),
+      // Per-unit built ground area (includes lanai/garage) — summed by the
+      // stacked-parcel aggregate as a footprint signal for associations.
+      groundAreaSqft: positiveOrNull(g('grnd_area')),
       stories: null, // not in the Sarasota layer
       yearBuilt: positiveOrNull(g('yrbl')),
       residentialUnits: positiveOrNull(g('livunits')),
@@ -322,9 +424,35 @@ async function queryCountyLayer(county, lat, lng, timeoutMs) {
     if (!features.length) return null;
 
     // Smallest containing polygon = the unit's own parcel, not a master/common
-    // parcel; identical stacked footprints return null (defer to address search).
+    // parcel. Identical stacked footprints: an association-sized stack
+    // aggregates (units/sqft/land summed); a small stack (paired villa)
+    // still returns null and defers to the address search.
     const feature = pickParcelFeature(features, lng, lat);
     if (!feature) {
+      const aggregate = buildStackedAggregate(county, layer, features, lng, lat);
+      if (aggregate && aggregate.parcelId) {
+        const parcel = {
+          ...aggregate,
+          county,
+          paoParcelId: paoParcelIdFrom(aggregate.parcelId),
+          polygon: aggregate._masterRings,
+          polygonAreaSqft: aggregate._polyArea,
+          assessmentYear: aggregate.rollYear || null,
+          sourceUrl: layer.url.replace(/\/query\/?$/, ''),
+          gisProvider: `${county.toLowerCase()}_gis`,
+        };
+        delete parcel._masterRings;
+        delete parcel._polyArea;
+        logger.info('[county-parcel-gis] aggregated stacked association', {
+          county,
+          stacked: features.length,
+          units: parcel.residentialUnits,
+          buildings: parcel.buildingCount,
+          lotSqft: parcel.lotSqft,
+          elapsedMs: Date.now() - t0,
+        });
+        return parcel;
+      }
       logger.info('[county-parcel-gis] ambiguous stacked parcels at point — deferring', {
         county, count: features.length, elapsedMs: Date.now() - t0,
       });
