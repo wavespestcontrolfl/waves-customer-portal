@@ -750,6 +750,10 @@ function normalizeDensityValue(value) {
 }
 
 function lookupTermiteFootprintSqFt(data = {}) {
+  // Association aggregates with unknown stories publish footprintUnknown —
+  // deriving homeSqFt/stories here would prefill a summed-living-area
+  // "slab" the lookup explicitly refused to claim (codex P1 #2721).
+  if (data.footprintUnknown === true) return undefined;
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
     data.footprintSqFt,

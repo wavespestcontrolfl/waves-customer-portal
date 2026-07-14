@@ -1457,6 +1457,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // record/search source; 'default' = nobody knew, we fell back to 1.
     storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
     footprint: aggregateStoriesUnknown ? 0 : footprintSf,
+    // Machine-readable twin of the HIGH footprint flag: BOTH the estimator's
+    // termite autofill and calculatePropertyProfile re-derive a footprint
+    // from homeSqFt/stories when footprint is 0, which would resurrect the
+    // summed-living-area slab this suppression exists to prevent (codex P1
+    // r4 #2721). Consumers skip derivation when this is set.
+    footprintUnknown: aggregateStoriesUnknown || undefined,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
@@ -3200,6 +3206,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     storiesSource: p.storiesSource || null,
     lotSqFt,
     footprintSqFt: p.footprintSqFt ?? p.footprint,
+    footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,

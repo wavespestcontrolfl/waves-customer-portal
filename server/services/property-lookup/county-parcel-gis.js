@@ -159,9 +159,15 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   // roll's only building signal ("1535 / 1555 / 1575 Tarpon Center Dr" = 3
   // buildings). Single shared number → 1; satellite vision refines later.
   const streetNumbers = new Set();
+  // Full "NUMBER STREET" situs lines (unit designators stripped) — the situs
+  // guard needs street identity, not just the number: "1555 Harbor Dr" must
+  // not ride a 1555 that only exists on Tarpon Center Dr (codex P2 r4).
+  const situsLines = new Set();
   for (const row of unitRows) {
     const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
     if (m) streetNumbers.add(m[1]);
+    const line = String(row.parsed.situsAddress || '').match(/^(\d+\s+[^,]*?)(?:\s+\d+)?(?:,|$)/);
+    if (line) situsLines.add(line[1].toUpperCase().replace(/\s+/g, ' ').trim());
   }
   const buildingCount = Math.max(1, streetNumbers.size);
 
@@ -193,6 +199,7 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   return {
     parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,
     masterIsCommon: Boolean(commonRow),
+    situsLines: [...situsLines].sort(),
     // Every building number in the association — the situs-mismatch guard
     // must accept a lookup for ANY of them, not just the modal one
     // (codex P2 #2721: entering 1575 in a 1535/1555/1575 association).

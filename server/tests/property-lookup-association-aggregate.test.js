@@ -519,3 +519,77 @@ describe('codex round-3 hardening (#2721)', () => {
     expect(profile.estimatedPerimeterLF).toBeGreaterThan(0);
   });
 });
+
+describe('codex round-4 hardening (#2721)', () => {
+  const { aggregateSitusVerdict } = aiPrivate;
+  const AGG = {
+    aggregated: true,
+    situsHouseNumbers: ['1535', '1555', '1575'],
+    situsLines: ['1535 TARPON CENTER DR', '1555 TARPON CENTER DR', '1575 TARPON CENTER DR'],
+  };
+
+  test('a BARE trailing unit token drops the aggregate (unit lookup, not the HOA)', () => {
+    expect(aggregateSitusVerdict(AGG, '1555 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1555 Tarpon Center Dr 101, Venice, FL 34285')).toBe('drop');
+  });
+
+  test('a matching number on a DIFFERENT street drops the aggregate', () => {
+    expect(aggregateSitusVerdict(AGG, '1555 Tarpon Center Dr, Venice, FL', 'rooftop',
+      '1555 Harbor Dr, Venice, FL 34285')).toBe('drop');
+  });
+
+  test('a full number+street match keeps the aggregate (rooftop and interpolated)', () => {
+    expect(aggregateSitusVerdict(AGG, '1575 Tarpon Center Dr, Venice, FL 34285', 'rooftop',
+      '1575 Tarpon Center Dr, Venice, FL 34285')).toBe('keep');
+    expect(aggregateSitusVerdict(AGG, '1575 Tarpon Center Dr, Venice, FL 34285', 'interpolated',
+      '1575 Tarpon Center Dr, Venice, FL 34285')).toBe('keep');
+  });
+
+  test('the aggregate carries full situs lines', async () => {
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(1555, 101), unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1575, 204), unitFeature(1575, 205),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.situsLines).toEqual(['1555 TARPON CENTER DR', '1575 TARPON CENTER DR']);
+  });
+
+  test('footprintUnknown rides the profile and blocks pricing-side re-derivation', () => {
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+
+    const profile = buildEnrichedProfile({
+      propertyType: 'Multifamily',
+      _source: 'county',
+      squareFootage: 122696,
+      lotSize: 200000,
+      stories: null,
+      _parcel: { aggregated: true, residentialUnits: 150, buildingCount: 3 },
+    }, null, PT.lat, PT.lng);
+
+    expect(profile.footprintUnknown).toBe(true);
+    // calculatePropertyProfile must NOT re-derive homeSqFt/stories into a slab.
+    const property = calculatePropertyProfile({
+      homeSqFt: profile.homeSqFt,
+      stories: profile.stories,
+      lotSqFt: profile.lotSqFt,
+      footprintSqFt: profile.footprint,
+      footprintUnknown: profile.footprintUnknown,
+      propertyType: 'commercial',
+    });
+    expect(property.footprint || 0).toBe(0);
+  });
+
+  test('known-footprint paths are untouched by the footprintUnknown guard', () => {
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+    const property = calculatePropertyProfile({
+      homeSqFt: 2400,
+      stories: 2,
+      lotSqFt: 10000,
+      propertyType: 'Single Family',
+    });
+    expect(property.footprint).toBe(1200);
+  });
+});

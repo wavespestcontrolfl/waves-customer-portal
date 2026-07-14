@@ -949,6 +949,7 @@ function attachParcelMeta(merged, parcel) {
     // Association-level living area — survives a merge a PAO unit record
     // wins, so the profile can prefer the aggregate dimensions (codex P2 r2).
     livingAreaSqft: parcel.livingAreaSqft ?? undefined,
+    situsLines: parcel.situsLines ?? undefined,
   };
   return merged;
 }
@@ -1353,7 +1354,30 @@ function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress
   // snap a mistyped number onto one of the association's buildings, and the
   // canonical (snapped) address would then read as in-association (codex P2
   // r2 #2721). Same rule as situsHouseNumberExactMatch.
-  const typedNumber = leadingHouseNumber(typedAddress) || leadingHouseNumber(searchAddress);
+  const anchored = leadingHouseNumber(typedAddress) ? typedAddress : searchAddress;
+  const typedNumber = leadingHouseNumber(anchored);
+
+  // Membership by full "NUMBER STREET" line, not number alone: "1555 Harbor
+  // Dr" must not ride a 1555 that only exists on Tarpon Center Dr, and a
+  // bare trailing unit token ("1555 Tarpon Center Dr 101") means a UNIT
+  // lookup — both fall back to the address search (codex P2s r4 #2721).
+  const situsLines = Array.isArray(parcel?.situsLines) ? parcel.situsLines : [];
+  if (typedNumber && situsLines.length) {
+    const typedLine = stripUnitDesignators(normalizeCountyStreetLine(anchored));
+    const lineMatches = situsLines.some((line) => {
+      const norm = normalizeCountyStreetLine(line);
+      return norm === typedLine;
+    });
+    const extendsAsUnit = situsLines.some((line) => {
+      const norm = normalizeCountyStreetLine(line);
+      return typedLine.startsWith(`${norm} `) && /^\d[\w-]*$/.test(typedLine.slice(norm.length + 1));
+    });
+    if (extendsAsUnit) return 'drop'; // unit-level lookup, not the HOA
+    if (!lineMatches) return 'drop'; // wrong street or number for this association
+    return 'keep';
+  }
+
+  // No line data (defensive) — legacy number-only membership.
   const buildingNumbers = Array.isArray(parcel?.situsHouseNumbers)
     ? parcel.situsHouseNumbers.map(String)
     : [];
