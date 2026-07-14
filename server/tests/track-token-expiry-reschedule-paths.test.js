@@ -19,6 +19,9 @@ function chain(overrides = {}) {
     orWhere: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    // Booster-safe sibling select + advisory-lock probes (PR #2725/#2733).
+    whereRaw: jest.fn().mockReturnThis(),
+    whereBetween: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
@@ -139,8 +142,11 @@ describe('track token expiry on reschedule paths', () => {
     const firstUpdate = chain();
     const secondUpdate = chain();
     const logInsert = chain();
+    // Same-series date-collision probe (codex r6 on #2725) runs once before
+    // any row updates — no clash here.
+    const collisionProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
 
-    const scheduledQueries = [siblingsQuery, firstUpdate, secondUpdate];
+    const scheduledQueries = [siblingsQuery, collisionProbe, firstUpdate, secondUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;
@@ -151,8 +157,12 @@ describe('track token expiry on reschedule paths', () => {
     db.transaction = jest.fn(async (callback) => callback(trx));
 
     const dbQueries = [anchorLookup, parentLookup];
+    // Post-commit escalation check reads reschedule_log via db — serve an
+    // under-threshold count.
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
       throw new Error(`Unexpected db table ${table}`);
     });
 
