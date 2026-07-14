@@ -835,25 +835,6 @@ function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
   const warnings = [];
-  // footprintUnknown: the lookup explicitly refused to claim a ground-floor
-  // footprint (association aggregate with an unknown story count). The
-  // homeSqFt/livingAreaSqFt aliases below would divide the summed living
-  // area by a DEFAULTED story count and fabricate a 100k+ sf "slab" — take
-  // the defaulted/manual-review path instead, which commercial pest (and its
-  // mirrors) turns into a quote-required line until a real building size is
-  // measured (codex P1 #2721).
-  if (property.footprintUnknown === true) {
-    manualReviewReasons.push('footprint_unknown_field_measurement_required');
-    warnings.push('footprint_unknown_field_measurement_required');
-    return {
-      footprint: fallback,
-      source: 'footprint_unknown_fallback',
-      wasDefaulted: true,
-      requiresManualReview: true,
-      manualReviewReasons,
-      warnings,
-    };
-  }
   const aliases = [
     ['footprint', property.footprint, positiveFiniteNumber],
     ['footprintSqFt', property.footprintSqFt, positiveFiniteNumber],
@@ -861,8 +842,18 @@ function resolvePestFootprint(property = {}, options = {}) {
     ['buildingSqFt', property.buildingSqFt, positiveFiniteNumber],
     ['livingAreaSqFt', property.livingAreaSqFt, value => livingAreaToFootprint(value, property.stories)],
   ];
+  // footprintUnknown: the lookup explicitly refused to claim a ground-floor
+  // footprint (association aggregate with an unknown story count) — only the
+  // EXPLICIT footprint aliases may price. The derived aliases would divide
+  // the summed living area by a DEFAULTED story count and fabricate a 100k+
+  // sf "slab" (buildingSqFt carries the same summed-interior ambiguity), but
+  // an explicit measured footprint — e.g. the rep's termite measurement
+  // injected as property.footprint/footprintSqFt — is exactly the field
+  // measurement this flag asks for and must win (codex P1 r7 #2721).
+  const EXPLICIT_FOOTPRINT_SOURCES = new Set(['footprint', 'footprintSqFt']);
 
   for (const [source, value, parser] of aliases) {
+    if (property.footprintUnknown === true && !EXPLICIT_FOOTPRINT_SOURCES.has(source)) continue;
     const parsed = parser(value);
     if (parsed !== null) {
       return {
@@ -874,6 +865,23 @@ function resolvePestFootprint(property = {}, options = {}) {
         warnings,
       };
     }
+  }
+
+  // No explicit measurement under footprintUnknown — take the defaulted /
+  // manual-review path, which commercial pest (and its mirrors) turns into a
+  // quote-required line until a real building size is measured (codex P1
+  // #2721).
+  if (property.footprintUnknown === true) {
+    manualReviewReasons.push('footprint_unknown_field_measurement_required');
+    warnings.push('footprint_unknown_field_measurement_required');
+    return {
+      footprint: fallback,
+      source: 'footprint_unknown_fallback',
+      wasDefaulted: true,
+      requiresManualReview: true,
+      manualReviewReasons,
+      warnings,
+    };
   }
 
   const hadInvalidFootprint = aliases.some(([, value]) => hasValue(value));

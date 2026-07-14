@@ -828,3 +828,55 @@ describe('codex round-6 hardening (#2721)', () => {
     expect(priced.annual).toBeGreaterThan(0);
   });
 });
+
+describe('codex round-7 hardening (#2721)', () => {
+  test('a measured termite footprint beats footprintUnknown (no 2,000 sf fallback pricing)', () => {
+    const { priceCommercialTermiteBait, priceCommercialPest } = require('../services/pricing-engine/service-pricing');
+
+    // Rep measured the building on site: options.footprintSqFt is injected
+    // onto property.footprint/footprintSqFt — the explicit measurement must
+    // win over the footprintUnknown suppression.
+    const line = priceCommercialTermiteBait({
+      homeSqFt: 122696,
+      stories: 1,
+      footprintUnknown: true,
+    }, {
+      termiteScope: 'monitoring_only',
+      footprintSqFt: 30000,
+    });
+
+    expect(line.quoteRequired).not.toBe(true);
+    expect(line.footprint).toBe(30000);
+    // Perimeter re-derived from the MEASURED footprint (4·√30000), never
+    // from the 2,000 sf fallback or the summed living area.
+    expect(line.perimeter).toBeCloseTo(4 * Math.sqrt(30000), 0);
+
+    // Same rule on commercial pest via an explicit property footprint.
+    const pest = priceCommercialPest({
+      homeSqFt: 122696,
+      stories: 1,
+      footprint: 30000,
+      footprintUnknown: true,
+    }, {});
+    expect(pest.quoteRequired).not.toBe(true);
+    expect(pest.annual).toBeGreaterThan(0);
+
+    // Without a measurement the quote-required gate still holds.
+    const gated = priceCommercialPest({ homeSqFt: 122696, stories: 1, footprintUnknown: true }, {});
+    expect(gated.quoteRequired).toBe(true);
+  });
+
+  test('verified sqft covers the aggregate/commercial range', () => {
+    const { sanitizeVerifiedValue } = require('../services/property-lookup/lookup-cache');
+
+    // A rep correcting a 122k aggregate down to 90k must not be silently
+    // dropped by the old 50k cap.
+    expect(sanitizeVerifiedValue('squareFootage', 90000)).toBe(90000);
+    expect(sanitizeVerifiedValue('squareFootage', 200000)).toBe(200000);
+    expect(sanitizeVerifiedValue('squareFootage', 200001)).toBeUndefined();
+    // A verified story count on a mid-rise (>4 floors) must persist — it is
+    // exactly how an unknown-stories aggregate resolves.
+    expect(sanitizeVerifiedValue('stories', 6)).toBe(6);
+    expect(sanitizeVerifiedValue('stories', 51)).toBeUndefined();
+  });
+});

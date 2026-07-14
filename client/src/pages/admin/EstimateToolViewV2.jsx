@@ -2714,8 +2714,10 @@ export default function EstimateToolViewV2({
         // unknown): homeSqFt is the summed living area and stories a
         // default — deriving a "footprint" here re-arms the fake-slab
         // autofill the lookup suppressed (codex P1 #2721). Manual entry
-        // stays possible; the box just never self-fills.
-        if (f._footprintUnknownLookup) return f;
+        // stays possible; the box just never self-fills. A MANUALLY entered
+        // story count supplies the missing datum, so derivation resumes
+        // (codex P2 r7 #2721).
+        if (f._footprintUnknownLookup && !f._storiesEdited) return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -3640,7 +3642,12 @@ export default function EstimateToolViewV2({
       // footprintUnknown (association aggregate, story count unknown): the
       // summed living area over a defaulted story count is NOT a ground-floor
       // footprint — deriving one here would hand pricing the exact fake slab
-      // the lookup suppressed (codex P1 #2721).
+      // the lookup suppressed (codex P1 #2721). A story count the operator
+      // MANUALLY entered supplies exactly the missing datum, so the flag
+      // clears and derivation (and footprint-driven pricing) resumes off the
+      // corrected value (codex P2 r7 #2721).
+      if (profile.footprintUnknown === true && form._storiesEdited)
+        profile.footprintUnknown = false;
       if (profile.homeSqFt && profile.footprintUnknown !== true)
         profile.footprint = Math.round(
           profile.homeSqFt / (profile.stories || 1),
