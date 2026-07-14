@@ -2,16 +2,18 @@ const express = require('express');
 const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const approval = require('../services/timesheet-approval');
+const {
+  addStaffWorkDays,
+  staffWeekStartForWorkDate,
+  staffWorkDate,
+} = require('../utils/staff-time-work-date');
 
 // Weekly approval is admin-only (not tech). requireAdmin excludes techs.
 router.use(adminAuthenticate, requireAdmin);
 
-function mondayOf(dateStr) {
-  const d = dateStr ? new Date(dateStr) : new Date();
-  const day = d.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  d.setDate(d.getDate() + diff);
-  return d.toISOString().split('T')[0];
+function defaultPendingWeekStart(now = new Date()) {
+  const previousWeekDate = addStaffWorkDays(staffWorkDate(now), -7);
+  return staffWeekStartForWorkDate(previousWeekDate);
 }
 
 // GET /pending?weekStart=YYYY-MM-DD — all techs' weekly rollups (defaults to last week)
@@ -19,9 +21,7 @@ router.get('/pending', async (req, res, next) => {
   try {
     let weekStart = req.query.weekStart;
     if (!weekStart) {
-      const prev = new Date();
-      prev.setDate(prev.getDate() - 7);
-      weekStart = mondayOf(prev.toISOString().split('T')[0]);
+      weekStart = defaultPendingWeekStart();
     }
     const weeks = await approval.getPendingWeeks(weekStart);
     res.json({ weekStart, techs: weeks });
@@ -40,29 +40,39 @@ router.get('/week-detail', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /approve { technicianId, weekStart, notes? }
+// POST /approve { technicianId, weekStart, reviewToken, notes? }
 router.post('/approve', async (req, res, next) => {
   try {
-    const { technicianId, weekStart, notes } = req.body || {};
-    if (!technicianId || !weekStart) {
-      return res.status(400).json({ error: 'technicianId and weekStart required' });
+    const { technicianId, weekStart, reviewToken, notes } = req.body || {};
+    if (!technicianId || !weekStart || !reviewToken) {
+      return res.status(400).json({
+        error: 'technicianId, weekStart, and reviewToken required',
+      });
     }
     const result = await approval.approveWeek({
-      technicianId, weekStart, adminId: req.technicianId, notes,
+      technicianId, weekStart, adminId: req.technicianId, notes, reviewToken,
     });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
 });
 
-// POST /bulk-approve { technicianIds: [...], weekStart, notes? }
+// POST /bulk-approve { technicianIds: [...], weekStart, reviewTokens, notes? }
 router.post('/bulk-approve', async (req, res, next) => {
   try {
-    const { technicianIds, weekStart, notes } = req.body || {};
-    if (!Array.isArray(technicianIds) || !technicianIds.length || !weekStart) {
-      return res.status(400).json({ error: 'technicianIds[] and weekStart required' });
+    const { technicianIds, weekStart, reviewTokens, notes } = req.body || {};
+    if (
+      !Array.isArray(technicianIds)
+      || !technicianIds.length
+      || !weekStart
+      || !reviewTokens
+      || technicianIds.some(id => !reviewTokens[id])
+    ) {
+      return res.status(400).json({
+        error: 'technicianIds[], weekStart, and every review token required',
+      });
     }
     const result = await approval.bulkApproveWeeks({
-      technicianIds, weekStart, adminId: req.technicianId, notes,
+      technicianIds, weekStart, adminId: req.technicianId, notes, reviewTokens,
     });
     res.json(result);
   } catch (err) { next(err); }
@@ -78,15 +88,17 @@ router.post('/dispute', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /unlock { technicianId, weekStart, reason }
+// POST /unlock { technicianId, weekStart, reviewToken, reason }
 router.post('/unlock', async (req, res, next) => {
   try {
-    const { technicianId, weekStart, reason } = req.body || {};
-    if (!technicianId || !weekStart) {
-      return res.status(400).json({ error: 'technicianId and weekStart required' });
+    const { technicianId, weekStart, reviewToken, reason } = req.body || {};
+    if (!technicianId || !weekStart || !reviewToken) {
+      return res.status(400).json({
+        error: 'technicianId, weekStart, and reviewToken required',
+      });
     }
     const result = await approval.unlockWeek({
-      technicianId, weekStart, adminId: req.technicianId, reason,
+      technicianId, weekStart, adminId: req.technicianId, reason, reviewToken,
     });
     res.json({ success: true, ...result });
   } catch (err) { next(err); }
@@ -103,5 +115,7 @@ router.get('/export', async (req, res, next) => {
     res.send(csv);
   } catch (err) { next(err); }
 });
+
+router._test = { defaultPendingWeekStart };
 
 module.exports = router;

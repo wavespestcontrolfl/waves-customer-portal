@@ -3,7 +3,13 @@ const db = require('../models/db');
 const logger = require('./logger');
 const timeTracking = require('./time-tracking');
 const TwilioService = require('./twilio');
-const { etDateString, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const {
+  STAFF_WORK_DATE_SQL,
+  addStaffWorkDays,
+  staffWeekRange,
+  staffWeekStartForWorkDate,
+  staffWorkDate,
+} = require('../utils/staff-time-work-date');
 const { runExclusive } = require('../utils/cron-lock');
 
 /**
@@ -17,7 +23,7 @@ function initTimeTrackingCrons() {
   cron.schedule('0 0 * * *', async () => {
     logger.info('[time-tracking-cron] Running nightly daily summary computation');
     try {
-      const dateStr = etDateString(addETDays(new Date(), -1));
+      const dateStr = addStaffWorkDays(staffWorkDate(new Date()), -1);
 
       const techs = await db('technicians').where({ active: true }).select('id', 'name');
       let computed = 0;
@@ -28,7 +34,7 @@ function initTimeTrackingCrons() {
           const hasEntries = await db('time_entries')
             .where({ technician_id: tech.id })
             .where('status', '!=', 'voided')
-            .whereRaw("DATE(clock_in) = ?", [dateStr])
+            .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [dateStr])
             .first();
 
           if (hasEntries) {
@@ -53,8 +59,9 @@ function initTimeTrackingCrons() {
     logger.info('[time-tracking-cron] Running weekly summary + approval SMS');
     try {
       // Previous week's Monday (ET calendar)
-      const weekStartStr = etWeekStart(addETDays(new Date(), -7));
-      const weekEndStr = etDateString(addETDays(parseETDateTime(weekStartStr + 'T12:00'), 6));
+      const previousWeekDate = addStaffWorkDays(staffWorkDate(new Date()), -7);
+      const weekStartStr = staffWeekStartForWorkDate(previousWeekDate);
+      const { end: weekEndStr } = staffWeekRange(weekStartStr);
 
       const techs = await db('technicians').where({ active: true }).select('id', 'name');
       let computed = 0;
@@ -148,48 +155,30 @@ function initTimeTrackingCrons() {
 
       for (const shift of activeShifts) {
         try {
-          const now = new Date();
+          const closed = await timeTracking.closeActiveShiftAtomically(shift.technician_id, {
+            shiftId: shift.id,
+            childNoteSuffix: ' [auto-closed 11PM]',
+            shiftNote: 'AUTO CLOCK-OUT: 11 PM cron',
+          });
+          if (!closed) continue;
 
-          // Close sub-entries
-          await db('time_entries')
-            .where({ technician_id: shift.technician_id, status: 'active' })
-            .whereIn('entry_type', ['job', 'break', 'drive', 'admin_time'])
-            .update({
-              status: 'completed',
-              clock_out: now,
-              duration_minutes: db.raw("CASE WHEN clock_in IS NOT NULL THEN EXTRACT(EPOCH FROM (? - clock_in)) / 60 ELSE 0 END", [now]),
-              notes: db.raw("COALESCE(notes, '') || ' [auto-closed 11PM]'"),
-              updated_at: now,
-            });
-
-          // Close shift
-          const duration = (now - new Date(shift.clock_in)) / 60000;
-          await db('time_entries')
-            .where({ id: shift.id })
-            .update({
-              status: 'completed',
-              clock_out: now,
-              duration_minutes: Math.round(duration * 100) / 100,
-              notes: (shift.notes ? shift.notes + '; ' : '') + 'AUTO CLOCK-OUT: 11 PM cron',
-              updated_at: now,
-            });
-
-          const workDate = etDateString(new Date(shift.clock_in));
-          await timeTracking.computeDailySummary(shift.technician_id, workDate);
+          await timeTracking.computeDailySummary(shift.technician_id, closed.workDate);
 
           // Notify tech
           if (shift.tech_phone) {
             try {
               await TwilioService.sendSMS(shift.tech_phone,
                 `Hi ${shift.tech_name}, your shift has been automatically closed at 11 PM. ` +
-                `Total: ${(duration / 60).toFixed(1)} hours. If this is incorrect, contact admin.`
+                `Total: ${(closed.duration / 60).toFixed(1)} hours. If this is incorrect, contact admin.`
               );
             } catch (smsErr) {
               logger.error(`[time-tracking-cron] Failed to send auto-close SMS`, { error: smsErr.message });
             }
           }
 
-          logger.info(`[time-tracking-cron] Force clocked out ${shift.tech_name}`, { duration: Math.round(duration) });
+          logger.info(`[time-tracking-cron] Force clocked out ${shift.tech_name}`, {
+            duration: Math.round(closed.duration),
+          });
         } catch (entryErr) {
           logger.error(`[time-tracking-cron] Failed to force clock-out shift ${shift.id}`, { error: entryErr.message });
         }

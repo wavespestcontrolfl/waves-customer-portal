@@ -46,6 +46,7 @@
     "backlink:sync-strategy-agent": "node scripts/create-backlink-strategy-agent.js",
     "seo:pipeline:run": "node server/scripts/run-seo-pipeline.js",
     "seo:pipeline:worker": "node server/scripts/run-seo-pipeline-worker.js",
+    "audit:staff-rollout": "node server/scripts/audit-staff-rollout-readiness.js",
     "audit:waveguard-materials": "node server/scripts/audit-waveguard-protocol-material-costs.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
     "hooks:install": "git config core.hooksPath scripts/hooks",

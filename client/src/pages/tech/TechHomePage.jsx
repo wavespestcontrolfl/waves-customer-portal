@@ -835,6 +835,7 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
 function TimecardSignoffCard({ techName }) {
   const [weekly, setWeekly] = useState(null);
   const [weekStart, setWeekStart] = useState(null);
+  const [reviewToken, setReviewToken] = useState(null);
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
@@ -855,10 +856,12 @@ function TimecardSignoffCard({ techName }) {
       if (!res.ok) {
         setWeekly(null);
         setPending(false);
+        setReviewToken(null);
       } else {
         const data = await res.json();
         setWeekly(data.weekly || null);
         setWeekStart(data.weekStart || null);
+        setReviewToken(data.reviewToken || null);
         setPending(data.pending === true);
         // Functional setter so we don't depend on `signature` here —
         // including it in the useCallback deps would cause this to
@@ -869,6 +872,7 @@ function TimecardSignoffCard({ techName }) {
       }
     } catch {
       setWeekly(null);
+      setReviewToken(null);
     } finally {
       // Always clear loading — a non-OK fetch used to early-return
       // before this line, leaving loading stuck true and the card
@@ -917,7 +921,11 @@ function TimecardSignoffCard({ techName }) {
       const r = await fetch(`${API}/api/tech/timetracking/sign-week`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ weekStart, signature: signature.trim() }),
+        body: JSON.stringify({
+          weekStart,
+          signature: signature.trim(),
+          reviewToken,
+        }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);

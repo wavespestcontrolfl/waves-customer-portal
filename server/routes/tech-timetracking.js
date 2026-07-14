@@ -1,10 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const logger = require('../services/logger');
 const timeTracking = require('../services/time-tracking');
+const timesheetApproval = require('../services/timesheet-approval');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etDateString, addETDays, parseETDateTime, etWeekStart } = require('../utils/datetime-et');
+const { STAFF_WORK_DATE_SQL } = require('../utils/staff-time-work-date');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -16,15 +17,6 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 function mondayOfET(dateStr) {
   const ref = dateStr ? parseETDateTime(`${dateStr}T00:00`) : new Date();
   return etWeekStart(ref);
-}
-
-// Sunday of the ET week starting at `mondayStr` (YYYY-MM-DD). Pure
-// calendar +6 — no timezone enters because we never read hours from
-// the YYYY-MM-DD string.
-function sundayOfETWeek(mondayStr) {
-  const [y, m, d] = mondayStr.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d + 6));
-  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
 // Convert whatever a SQL DATE column gives us (JS Date at UTC
@@ -103,7 +95,10 @@ router.post('/start-break', async (req, res, next) => {
     const entry = await timeTracking.startBreak(req.technicianId);
     res.json(entry);
   } catch (err) {
-    if (err.message.includes('Must be clocked in')) return res.status(409).json({ error: err.message });
+    if (
+      err.message.includes('Must be clocked in')
+      || err.message.includes('Already on break')
+    ) return res.status(409).json({ error: err.message });
     next(err);
   }
 });
@@ -197,9 +192,15 @@ router.get('/pending-signoff', async (req, res, next) => {
       .where('work_date', '<', thisMonday)
       .where(b => b.where('total_shift_minutes', '>', 0).orWhere('job_count', '>', 0))
       .select('work_date');
-    if (workDays.length) {
+    const entryWorkDays = await db('time_entries')
+      .where({ technician_id: req.technicianId })
+      .where('status', '!=', 'voided')
+      .whereRaw(`${STAFF_WORK_DATE_SQL} >= ?::date`, [lookbackStart])
+      .whereRaw(`${STAFF_WORK_DATE_SQL} < ?::date`, [thisMonday])
+      .select(db.raw(`${STAFF_WORK_DATE_SQL} AS work_date`));
+    if (workDays.length || entryWorkDays.length) {
       const weekMondays = new Set();
-      for (const row of workDays) {
+      for (const row of [...workDays, ...entryWorkDays]) {
         const ymd = dateColumnToYMD(row.work_date);
         weekMondays.add(etWeekStart(parseETDateTime(`${ymd}T12:00`)));
       }
@@ -211,7 +212,7 @@ router.get('/pending-signoff', async (req, res, next) => {
       // prompt. computeWeeklySummary is idempotent and cheap;
       // bounded at ~12 calls per /pending-signoff hit.
       for (const ws of weekMondays) {
-        try { await timeTracking.computeWeeklySummary(req.technicianId, ws); } catch (_) { /* noop */ }
+        try { await timesheetApproval.getWeekDetail(req.technicianId, ws); } catch (_) { /* noop */ }
       }
     }
 
@@ -236,16 +237,10 @@ router.get('/pending-signoff', async (req, res, next) => {
     // UTC-midnight Date back into the prior ET day.
     const weekStartStr = dateColumnToYMD(candidate.week_start);
 
-    // Always recompute the weekly summary before returning it. Existing
-    // rows can be stale after late clock-outs or admin entry edits —
-    // mutation paths clear tech_signed_at but don't all re-run
-    // computeWeeklySummary, so total_shift_minutes / overtime_minutes
-    // / job_count may not match the current dailies. Recompute is
-    // idempotent and cheap.
-    try { await timeTracking.computeWeeklySummary(req.technicianId, weekStartStr); } catch (_) { /* noop */ }
-    const weekly = await db('time_weekly_summary')
-      .where({ id: candidate.id })
-      .first();
+    // Refresh entries → dailies → weekly under the payroll week lock, then
+    // return a token for exactly the snapshot rendered by the tech.
+    const detail = await timesheetApproval.getWeekDetail(req.technicianId, weekStartStr);
+    const weekly = detail.weekly;
     if (!weekly) return res.json({ weekly: null, weekStart: weekStartStr });
 
     // Recompute may have flipped this row's eligibility — re-check the
@@ -253,10 +248,28 @@ router.get('/pending-signoff', async (req, res, next) => {
     // sign), or total_shift_minutes now zero (admin voided everything)
     // -> not pending anymore.
     const hours = parseFloat(weekly.total_shift_minutes || 0);
-    if (weekly.status === 'approved' || weekly.tech_signed_at || hours === 0) {
-      return res.json({ weekly, weekStart: weekStartStr, pending: false });
+    const blockedReviewState = detail.entries.some(
+      entry => (entry.approval_status || 'pending') === 'disputed',
+    ) || detail.dailies.some(daily => ['disputed', 'rejected'].includes(daily.status));
+    if (
+      weekly.status === 'approved'
+      || weekly.tech_signed_at
+      || hours === 0
+      || blockedReviewState
+    ) {
+      return res.json({
+        weekly,
+        weekStart: weekStartStr,
+        pending: false,
+        reviewToken: detail.reviewToken,
+      });
     }
-    res.json({ weekly, weekStart: weekStartStr, pending: true });
+    res.json({
+      weekly,
+      weekStart: weekStartStr,
+      pending: true,
+      reviewToken: detail.reviewToken,
+    });
   } catch (err) { next(err); }
 });
 
@@ -270,104 +283,18 @@ router.get('/pending-signoff', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.post('/sign-week', async (req, res, next) => {
   try {
-    const { weekStart, signature } = req.body || {};
-    if (!signature || !String(signature).trim()) {
-      return res.status(400).json({ error: 'signature required (typed name)' });
-    }
-    if (weekStart) {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
-        return res.status(400).json({ error: 'weekStart must be YYYY-MM-DD' });
-      }
-      // Calendar-validity check — regex passes 2026-02-31, but
-      // parseETDateTime / Date.UTC silently overflow that to 2026-03-03,
-      // letting a malformed payload sign the wrong week. Round-trip
-      // the parsed parts and reject if they don't match the input.
-      const [y, m, d] = weekStart.split('-').map(Number);
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      if (dt.getUTCFullYear() !== y || dt.getUTCMonth() + 1 !== m || dt.getUTCDate() !== d) {
-        return res.status(400).json({ error: 'weekStart must be a valid calendar date' });
-      }
-    }
-    const start = mondayOfET(weekStart);
-
-    // Reject current/future weeks. Sign-off only makes sense for a
-    // completed week (Monday last week or earlier) — otherwise a tech
-    // could sign hours that haven't happened yet, polluting the audit
-    // trail.
-    const todayET = etDateString(new Date());
-    if (start >= mondayOfET(todayET)) {
-      return res.status(400).json({ error: 'Cannot sign current or future weeks' });
-    }
-
-    // Require actual worked time in this week before signing.
-    // computeDailySummary leaves zero-total rows in place after admin
-    // voids/edits (services/time-tracking.js: existing rows are
-    // updated, never deleted), so a row's mere existence isn't enough
-    // — total_shift_minutes>0 or job_count>0 is. computeWeeklySummary
-    // would also happily create a zero row, which we want to refuse.
-    const weekEndStr = sundayOfETWeek(start);
-    const workedDay = await db('time_entry_daily_summary')
-      .where({ technician_id: req.technicianId })
-      .where('work_date', '>=', start)
-      .where('work_date', '<=', weekEndStr)
-      .where(b => b.where('total_shift_minutes', '>', 0).orWhere('job_count', '>', 0))
-      .first();
-    if (!workedDay) {
-      return res.status(404).json({ error: 'No worked time on that week' });
-    }
-
-    // Recompute before reading so the tech is signing the latest
-    // totals, not whatever was stored before the most recent
-    // clock-out / entry edit. Idempotent.
-    try { await timeTracking.computeWeeklySummary(req.technicianId, start); } catch (_) { /* noop */ }
-
-    const weekly = await db('time_weekly_summary')
-      .where({ technician_id: req.technicianId, week_start: start })
-      .first();
-    if (!weekly) return res.status(404).json({ error: 'No timecard for that week' });
-
-    if (weekly.status === 'approved') {
-      return res.status(409).json({ error: 'Week already approved by admin — cannot sign after lock' });
-    }
-    if (weekly.tech_signed_at) {
-      // Friendly idempotent path — the read showed a signature already.
-      // Don't error; return the existing row so a double-click or stale
-      // tab reload sees the same shape it would after a fresh sign.
-      return res.json({ success: true, weekly, alreadySigned: true });
-    }
-
-    // Atomic guard: if either an admin approves or a concurrent sign
-    // request lands between our read above and this update, the
-    // predicates make the update affect 0 rows so we don't (a) stamp
-    // tech_signed_at onto a now-locked week or (b) overwrite a prior
-    // signature timestamp from a double-submit / second-tab race.
-    const updatedRows = await db('time_weekly_summary')
-      .where({ id: weekly.id })
-      .whereNot({ status: 'approved' })
-      .whereNull('tech_signed_at')
-      .update({
-        tech_signed_at: new Date(),
-        tech_signature: String(signature).trim().slice(0, 200),
-        updated_at: new Date(),
-      })
-      .returning('*');
-
-    if (!updatedRows.length) {
-      // Race lost — re-read to figure out which guard tripped so the
-      // tech sees the right state instead of a generic error.
-      const fresh = await db('time_weekly_summary').where({ id: weekly.id }).first();
-      if (fresh?.tech_signed_at) {
-        return res.json({ success: true, weekly: fresh, alreadySigned: true });
-      }
-      return res.status(409).json({ error: 'Week was approved before sign-off completed — refresh and try again' });
-    }
-
-    // Structural identifiers only — no typed signature or name-bearing
-    // context per AGENTS.md. tech UUID + weekly_summary id are enough
-    // to reconstruct the event from DB if needed.
-    logger.info(`[timetracking] sign-week tech=${req.technicianId} weekly_id=${updatedRows[0].id}`);
-    res.json({ success: true, weekly: updatedRows[0] });
-  } catch (err) { next(err); }
+    const { weekStart, signature, reviewToken } = req.body || {};
+    const result = await timesheetApproval.signWeek({
+      technicianId: req.technicianId,
+      weekStart,
+      signature,
+      reviewToken,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 module.exports = router;
