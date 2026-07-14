@@ -68,6 +68,7 @@ let automationActiveRow;
 let priorPrepInteraction;
 let servicePrepRow;
 let servicePrepUpdateResult;
+let serviceUpdates;
 let trxRaw;
 
 // isPrepAutomationActive lookup (email_template_automations) — a row = active.
@@ -111,8 +112,9 @@ function priorBookingQuery() {
     whereNot: jest.fn(() => q),
     whereNotIn: jest.fn(() => q),
     whereNull: jest.fn(() => q),
-    update: jest.fn(() => q),
+    update: jest.fn((patch) => { serviceUpdates.push(patch); return q; }),
     returning: jest.fn(async () => servicePrepUpdateResult),
+    catch: jest.fn(async () => undefined),
     first: jest.fn(async () => (tokenMode ? servicePrepRow : priorBookingRow)),
   };
   return q;
@@ -135,6 +137,7 @@ describe('appointment tagger prep email automation', () => {
     priorPrepInteraction = null;
     servicePrepRow = { prep_token: null, prep_template_key: null };
     servicePrepUpdateResult = [{}];
+    serviceUpdates = [];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return interactionsQuery();
@@ -147,6 +150,7 @@ describe('appointment tagger prep email automation', () => {
     trxRaw = jest.fn(async () => ({}));
     trx.raw = trxRaw;
     db.transaction = jest.fn(async (fn) => fn(trx));
+    db.fn = { now: jest.fn(() => 'NOW()') };
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -184,6 +188,31 @@ describe('appointment tagger prep email automation', () => {
 
     const call = executor.processTrigger.mock.calls[0][0];
     expect(call.payload.prep_url).toContain(`/prep/${existing}`);
+    // Same key → no realignment write.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
+  });
+
+  test('a reused token realigns a stale prep_template_key to the requested guide', async () => {
+    servicePrepRow = { prep_token: 'cd'.repeat(16), prep_template_key: 'prep.flea' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    // Last send wins: the page must render what THIS email promised.
+    expect(serviceUpdates).toContainEqual({ prep_template_key: 'prep.cockroach' });
+  });
+
+  test('a queued guide email stamps prep_sent_at; a skipped one does not', async () => {
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(true);
+
+    serviceUpdates = [];
+    executor.processTrigger.mockResolvedValueOnce({
+      automation_count: 1,
+      results: [{ automation_key: 'prep', run: { id: 'run-2', status: 'skipped' }, deduped: false }],
+    });
+    priorPrepInteraction = null;
+    await AppointmentTagger.triggerPestPrep(service({ id: 'svc-2' }), 'cockroach');
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
   test('prep_url degrades to the portal visits tab when the token mint fails', async () => {

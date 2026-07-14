@@ -260,10 +260,12 @@ async function ensureServicePrepToken(serviceId, templateKey) {
     .where({ id: serviceId })
     .first();
   if (existing?.prep_token) {
-    if (!existing.prep_template_key) {
+    // Last send wins: the page must render the guide the most recent email
+    // promised, so a resend after reclassification (or a mapping change)
+    // realigns the stored key instead of silently serving the stale guide.
+    if (existing.prep_template_key !== key) {
       await db('scheduled_services')
         .where({ id: serviceId })
-        .whereNull('prep_template_key')
         .update({ prep_template_key: key });
     }
     return existing.prep_token;

@@ -33,13 +33,15 @@ function customersQuery() {
 // chains (.select()…first() token read + .update().returning() mint).
 let upcomingVisitRow = null;
 let servicePrepRow = null;
+let serviceUpdates = [];
 function scheduledQuery() {
   let tokenMode = false;
   const q = {
     select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q), whereRaw: jest.fn(() => q), whereNotIn: jest.fn(() => q),
-    whereNull: jest.fn(() => q), update: jest.fn(() => q),
+    whereNull: jest.fn(() => q), update: jest.fn((patch) => { serviceUpdates.push(patch); return q; }),
     returning: jest.fn(async () => [{}]),
+    catch: jest.fn(async () => undefined),
     orderBy: jest.fn(() => q),
     first: jest.fn(async () => (tokenMode ? servicePrepRow : upcomingVisitRow)),
   };
@@ -61,8 +63,10 @@ beforeEach(() => {
     if (table === 'customer_interactions') return { insert: interactionsInsert };
     return customersQuery();
   });
+  db.fn = { now: jest.fn(() => 'NOW()') };
   upcomingVisitRow = null;
   servicePrepRow = { prep_token: null, prep_template_key: null };
+  serviceUpdates = [];
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
   renderSmsTemplate.mockResolvedValue('Flea prep steps...');
   sendCustomerMessage.mockResolvedValue({ sent: true });
@@ -219,6 +223,17 @@ describe('sendPrepToCustomer', () => {
     expect(payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
     expect(payload.customer_portal_url).toContain('?tab=visits');
     expect(payload.service_date).not.toBe('To be confirmed');
+    // Confirmed send → the track page's "prep actually went out" marker.
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(true);
+  });
+
+  test('a rejected email never stamps prep_sent_at', async () => {
+    upcomingVisitRow = { id: 'svc-9', scheduled_date: '2026-08-01' };
+    EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
+
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea' });
+
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at)).toBe(false);
   });
 
   test('no upcoming visit → prep_url stays the portal visits tab', async () => {

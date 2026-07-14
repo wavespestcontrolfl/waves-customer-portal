@@ -15,20 +15,25 @@
  */
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('scheduled_services')) {
-    const [hasToken, hasKey, hasExpires, hasFirstViewed, hasViewCount] = await Promise.all([
+    const [hasToken, hasKey, hasExpires, hasFirstViewed, hasViewCount, hasSentAt] = await Promise.all([
       knex.schema.hasColumn('scheduled_services', 'prep_token'),
       knex.schema.hasColumn('scheduled_services', 'prep_template_key'),
       knex.schema.hasColumn('scheduled_services', 'prep_expires_at'),
       knex.schema.hasColumn('scheduled_services', 'prep_first_viewed_at'),
       knex.schema.hasColumn('scheduled_services', 'prep_view_count'),
+      knex.schema.hasColumn('scheduled_services', 'prep_sent_at'),
     ]);
-    if (!hasToken || !hasKey || !hasExpires || !hasFirstViewed || !hasViewCount) {
+    if (!hasToken || !hasKey || !hasExpires || !hasFirstViewed || !hasViewCount || !hasSentAt) {
       await knex.schema.alterTable('scheduled_services', (t) => {
         if (!hasToken) t.string('prep_token', 32).nullable().unique();
         if (!hasKey) t.string('prep_template_key', 64).nullable();
         if (!hasExpires) t.timestamp('prep_expires_at').nullable();
         if (!hasFirstViewed) t.timestamp('prep_first_viewed_at').nullable();
         if (!hasViewCount) t.integer('prep_view_count').defaultTo(0);
+        // Stamped only after a prep email was actually queued/sent — the
+        // token alone must not read as "prep was sent" (it is minted
+        // before the send is confirmed). track-public gates on this.
+        if (!hasSentAt) t.timestamp('prep_sent_at').nullable();
       });
     }
   }
@@ -59,7 +64,7 @@ exports.down = async function down(knex) {
   }
 
   if (await knex.schema.hasTable('scheduled_services')) {
-    const columns = ['prep_token', 'prep_template_key', 'prep_expires_at', 'prep_first_viewed_at', 'prep_view_count'];
+    const columns = ['prep_token', 'prep_template_key', 'prep_expires_at', 'prep_first_viewed_at', 'prep_view_count', 'prep_sent_at'];
     const present = await Promise.all(columns.map((c) => knex.schema.hasColumn('scheduled_services', c)));
     if (present.some(Boolean)) {
       await knex.schema.alterTable('scheduled_services', (t) => {

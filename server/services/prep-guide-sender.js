@@ -127,6 +127,14 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
         company_email: CONTACT_EMAIL,
       },
     });
+    if (result?.sent && visit?.id) {
+      // The track page gates its prep link on prep_sent_at — the token is
+      // minted before this send, so only a confirmed send stamps it.
+      await db('scheduled_services')
+        .where({ id: visit.id })
+        .update({ prep_sent_at: db.fn.now() })
+        .catch((stampErr) => logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`));
+    }
     return !!result?.sent;
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
