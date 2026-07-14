@@ -1532,7 +1532,16 @@ const StripeService = {
    * @param {string} paymentMethodId — payment_methods.id (our internal UUID)
    * @returns {object} payments row
    */
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId) {
+  // opts.deferReceiptDelivery — the dispatch completion flow sets this when
+  // its combined report+receipt SMS is armed: the receipt job is enqueued a
+  // few minutes out instead of immediately, giving the completion text the
+  // window to deliver the receipt facts and claim receipt_sent_at AFTER
+  // confirmed delivery. Crash-safe by construction: nothing is stamped up
+  // front, so if the combined text never delivers (crash, block, template
+  // deactivated), the deferred job sends the classic receipt when it comes
+  // due. The email leg rides the same job — a few minutes late, unchanged
+  // otherwise.
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -1814,7 +1823,24 @@ const StripeService = {
             }),
           });
         } catch { /* non-fatal */ }
-        throw new Error(err.message || 'Card charge failed');
+        const chargeFailed = new Error(err.message || 'Card charge failed');
+        // Structured decline facts for customer-facing notices. ONLY a real
+        // processor decline on the confirm carries them (StripeCardError /
+        // decline_code) — the guard errors above re-throw plain and config/DB
+        // failures land here without the marker, so callers can key "tell
+        // the customer their payment failed" strictly off this and never text
+        // a false decline for an internal error. attemptedAmount is the
+        // surcharge-inclusive total computeChargeAmount priced (what the
+        // customer actually saw attempted), never the pre-surcharge base.
+        if (err.type === 'StripeCardError' || err.code === 'card_declined' || err.decline_code) {
+          chargeFailed.wavesCardDecline = {
+            attemptedAmount: Number.isFinite(total) ? total : null,
+            cardBrand: card.card_brand || null,
+            cardLast4: card.last_four || null,
+            declineCode: err.decline_code || err.code || null,
+          };
+        }
+        throw chargeFailed;
       }
 
       logger.error(`[stripe] CRITICAL: chargeInvoiceWithSavedCard succeeded at Stripe (PI ${paymentIntent.id}) but DB write failed: ${err.message}`);
@@ -1907,12 +1933,37 @@ const StripeService = {
 
       try {
         const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
-        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+        // See the deferReceiptDelivery doc on this method. 3 minutes covers
+        // the completion request's report/SMS work with slack; the extra
+        // delayed drain makes the deferred job self-serve even on a quiet
+        // instance (any later payment event also drains due jobs).
+        const RECEIPT_DEFER_MS = 3 * 60_000;
+        const deferredUntil = new Date(Date.now() + RECEIPT_DEFER_MS);
+        const enqueueResult = await ReceiptDeliveryQueue.enqueueReceiptDelivery({
           invoiceId,
           stripePaymentIntentId: paymentIntent.id,
           source: 'card_on_file',
+          ...(deferReceiptDelivery ? { nextAttemptAt: deferredUntil } : {}),
         });
-        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+        if (deferReceiptDelivery && !enqueueResult.enqueued) {
+          // The payment_intent.succeeded webhook enqueues the same invoice
+          // immediately and the queue dedupes on invoice_id — if the webhook
+          // won the insert, its NOW-due job would text the classic receipt
+          // before the combined completion SMS delivers. Push the existing
+          // job out to the deferral (only while still queued and earlier; a
+          // job already running is past helping — the acknowledged race
+          // sliver, worst case a duplicate receipt mention).
+          await db('receipt_delivery_jobs')
+            .where({ invoice_id: invoiceId, status: 'queued' })
+            .where('next_attempt_at', '<', deferredUntil)
+            .update({ next_attempt_at: deferredUntil, updated_at: db.fn.now() })
+            .catch((deferErr) => logger.warn(`[stripe] receipt-job deferral update failed for invoice ${invoiceId}: ${deferErr.message}`));
+        }
+        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain(
+          deferReceiptDelivery
+            ? { delayMs: RECEIPT_DEFER_MS + 5_000, limit: 5 }
+            : { delayMs: 1000, limit: 5 },
+        );
       } catch (err) {
         logger.error(`[stripe] Card-on-file receipt queue failed for invoice ${invoice.invoice_number}: ${err.message}`);
       }

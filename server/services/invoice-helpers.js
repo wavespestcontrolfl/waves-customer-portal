@@ -84,6 +84,18 @@ function assertInvoiceVoidable(currentStatus) {
   }
 }
 
+/**
+ * The " (Visa ending 4242)" clause customer-facing payment texts append after
+ * an amount. One formatter for every sender (receipt SMS, combined completion
+ * receipt, decline notice) so the card always reads the same; empty string
+ * when either part is missing so templates can interpolate it unconditionally.
+ */
+function formatCardLine(brand, last4) {
+  if (!brand || !last4) return '';
+  const b = String(brand);
+  return ` (${b.charAt(0).toUpperCase() + b.slice(1)} ending ${last4})`;
+}
+
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
@@ -91,4 +103,5 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceAmountDue,
+  formatCardLine,
 };
