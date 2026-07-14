@@ -63,6 +63,31 @@ function BlockRenderer({ blocks }) {
           </h2>
         );
       case 'details':
+        // FAQ variant (prep content refresh): multi-sentence answers read as
+        // question-over-answer, single column — the two-column service-info
+        // layout squeezes long answers beside long questions on mobile.
+        if (block.variant === 'faq') {
+          return (
+            <div key={i} data-glass="soft" style={{
+              background: SURFACE.detailBg, borderRadius: RADIUS.input,
+              padding: `${SP.md}px ${SP.lg}px`, margin: `0 0 ${SP.lg}px`,
+            }}>
+              {(block.rows || []).map((row, j) => (
+                <div key={j} style={{
+                  padding: `${SP.sm}px 0`,
+                  borderBottom: j < block.rows.length - 1 ? `1px solid ${SURFACE.border}` : 'none',
+                }}>
+                  <div style={{ fontSize: FS.body, fontWeight: FW.semibold, color: SURFACE.text, lineHeight: LH.body }}>
+                    {row.label}
+                  </div>
+                  <div style={{ fontSize: FS.body, color: SURFACE.body, lineHeight: LH.body, marginTop: SP.xxs }}>
+                    {row.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        }
         return (
           <div key={i} data-glass="soft" style={{
             background: SURFACE.detailBg, borderRadius: RADIUS.input,

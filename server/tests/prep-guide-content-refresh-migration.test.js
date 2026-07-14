@@ -72,6 +72,27 @@ describe('prep guide content compliance', () => {
       expect(t.blocks.filter((b) => b.type === 'details').length).toBeGreaterThanOrEqual(2); // service info + FAQ
     }
   });
+
+  test('every guide keeps the email CTA button (label + url_variable) and marks FAQs', () => {
+    for (const t of TEMPLATES) {
+      // renderBlocks skips a cta without url/url_variable and renderTemplate
+      // only appends the default CTA when there is NO cta block — a bare
+      // {type:'cta'} silently loses the "Open prep guide" button.
+      const cta = t.blocks.find((b) => b.type === 'cta');
+      expect(cta).toEqual({ type: 'cta', label: 'Open prep guide', url_variable: 'prep_url' });
+      // The FAQ block carries the single-column page variant.
+      const faqBlocks = t.blocks.filter((b) => b.type === 'details' && b.variant === 'faq');
+      expect(faqBlocks.length).toBe(1);
+    }
+  });
+
+  test('sequence step-0 bodies carry the EPA-registered phrasing when they describe products', () => {
+    for (const s of STEP_SWAPS) {
+      if (/\bproducts?\b/i.test(s.toHtml.replace(/over-the-counter products/g, ''))) {
+        expect(s.toHtml).toMatch(/EPA-registered/);
+      }
+    }
+  });
 });
 
 describe('publish mechanics', () => {
