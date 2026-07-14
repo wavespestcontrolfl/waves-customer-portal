@@ -41,6 +41,7 @@ function makeConn(cfg = {}) {
     };
     return qb;
   };
+  conn.raw = (sql) => ({ __raw: sql });
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
@@ -56,10 +57,13 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 1, newsletter: 1, reviewCards: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 1, newsletter: 1, automations: 1, reviewCards: 1 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
+    // The stale "PDF emailed" marker (stamped for the OLD address) drops with the sync.
+    expect(conn.__updates('estimates')[0].arg.estimate_data.__raw).toContain("- 'proposalDelivery'");
+    expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('charleswrobb@gmail.com');
 
     const cardUpdate = conn.__updates('triage_items')[0].arg;
@@ -86,7 +90,7 @@ describe('propagateCustomerEmailChange', () => {
       before: { id: 'cust-1', email: 'Charleswrobb@Gmail.com' },
       after: AFTER,
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -96,7 +100,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: null },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -104,15 +108,46 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
-          { id: 739, email: 'charlesw.robb@gmail.com' }, // old row
-          { id: 900, email: 'charleswrobb@gmail.com' },  // target already exists
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' },   // old row
+          { id: 900, email: 'charleswrobb@gmail.com', customer_id: 'cust-other' }, // target, already linked elsewhere
         ],
       },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(counts.newsletter).toBe(1);
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
+    // A row linked to ANOTHER customer is never re-linked.
     expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+  });
+
+  test('newsletter: an UNLINKED row on the corrected spelling is adopted before the misspelled row is deleted', async () => {
+    // Public signup with the correct spelling while customers.email held the
+    // typo → linkToCustomer never matched it. Deleting the misspelled row
+    // must not sever the customer's only linked subscription.
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' }, // old row
+          { id: 900, email: 'charleswrobb@gmail.com', customer_id: null },      // unlinked target
+        ],
+      },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const adoption = conn.__updates('newsletter_subscribers')[0].arg;
+    expect(adoption.customer_id).toBe('cust-1');
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
+  });
+
+  test('an INVALID replacement email never fans out or resolves cards', async () => {
+    const conn = makeConn({
+      triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
+    });
+    const counts = await propagateCustomerEmailChange({
+      before: BEFORE,
+      after: { id: 'cust-1', email: 'foo@bar' },
+    }, conn);
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
+    expect(conn.__calls).toHaveLength(0);
   });
 
   test('filling a previously EMPTY email skips snapshots but still resolves review cards', async () => {

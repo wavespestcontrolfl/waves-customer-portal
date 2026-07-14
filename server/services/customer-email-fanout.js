@@ -10,6 +10,9 @@
  *     even after the customer record is corrected.
  *   - newsletter_subscribers.email — the call pipeline auto-subscribes
  *     callers, so a misheard address becomes a subscriber row of its own.
+ *   - automation_enrollments.email — denormalized at enrollment; the
+ *     automation runner sends every remaining step to it, so an ACTIVE
+ *     enrollment keeps mailing the misspelling after the record is fixed.
  *   - triage_items (email_unverified / email_invalid) — the read-back card
  *     asks "which spelling is right?"; an operator saving a DIFFERENT email
  *     on the customer record is the authoritative answer, so the card
@@ -33,6 +36,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 
 // Mirrors customer-address-fanout (which mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js and CLOSED_STATUSES in intelligence-bar/leads-tools.js).
@@ -62,13 +66,16 @@ function emailKey(value) {
  *   when the email did not actually change or was removed.
  */
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, reviewCards: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 };
   const customerId = (after && after.id) || (before && before.id);
+  // OLD is a loose match key (the stored copy may itself be malformed — that
+  // is exactly what gets corrected); NEW must be a syntactically VALID
+  // address before it fans out anywhere or settles a review card — an
+  // operator typo like "foo@bar" must not overwrite deliverable copies or
+  // resolve an email_invalid card with another invalid value.
   const oldEmail = emailKey(before && before.email);
-  const newEmail = emailKey(after && after.email);
+  const newEmail = cleanValidEmailOrNull(after && after.email) || '';
   if (!customerId || !newEmail || oldEmail === newEmail) return counts;
-  // The stored value keeps the caller's normalization (cleanEmail already
-  // lowercases); newEmail is the comparison key AND the written value.
 
   const now = new Date();
 
@@ -86,7 +93,23 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .whereRaw('LOWER(customer_email) = ?', [oldEmail])
       .whereIn('status', OPEN_ESTIMATE_STATUSES)
       .whereNull('archived_at')
-      .update({ customer_email: newEmail, updated_at: now });
+      .update({
+        customer_email: newEmail,
+        // proposalDelivery claims "the proposal PDF was emailed" — to the OLD
+        // address. Stale after the correction, so it drops with the sync
+        // (same rule as the address fan-out); the next send re-stamps it.
+        // jsonb minus is a no-op when the key is absent and NULL stays NULL.
+        estimate_data: conn.raw("estimate_data - 'proposalDelivery'"),
+        updated_at: now,
+      });
+
+    // Active automation enrollments send every remaining step to their
+    // denormalized email — terminal enrollments (completed/cancelled/failed)
+    // are history and stay untouched.
+    counts.automations += await conn('automation_enrollments')
+      .where({ customer_id: customerId, status: 'active' })
+      .whereRaw('LOWER(email) = ?', [oldEmail])
+      .update({ email: newEmail, updated_at: now });
 
     // newsletter_subscribers.email is UNIQUE. Check-first instead of
     // update-and-catch: a caught unique violation would poison the caller's
@@ -103,7 +126,18 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       if (targetSub) {
         // The corrected spelling already has a subscriber row — the
         // misspelled row is redundant (same person), so it goes away rather
-        // than colliding with the unique index.
+        // than colliding with the unique index. But first: a public-signup
+        // row commonly has customer_id NULL (the typo on customers.email kept
+        // linkToCustomer from matching it) — adopt it onto this customer so
+        // deleting the misspelled row doesn't sever their only linked
+        // subscription. A row already linked to ANOTHER customer is left
+        // alone (never steal a link).
+        if (!targetSub.customer_id) {
+          await conn('newsletter_subscribers')
+            .where({ id: targetSub.id })
+            .whereNull('customer_id')
+            .update({ customer_id: customerId, updated_at: now });
+        }
         counts.newsletter += await conn('newsletter_subscribers').where({ id: oldSub.id }).del();
       } else {
         counts.newsletter += await conn('newsletter_subscribers')
@@ -145,9 +179,9 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     }
   }
 
-  if (counts.leads || counts.estimates || counts.newsletter || counts.reviewCards) {
+  if (counts.leads || counts.estimates || counts.newsletter || counts.automations || counts.reviewCards) {
     // Counts only — never the email values (PII stays out of logs).
-    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter row(s); resolved ${counts.reviewCards} email review card(s)`);
+    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter row(s), ${counts.automations} automation enrollment(s); resolved ${counts.reviewCards} email review card(s)`);
   }
   return counts;
 }

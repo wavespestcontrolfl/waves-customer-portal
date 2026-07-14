@@ -184,7 +184,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
   {
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
-Changing the email also ripples automatically: open lead/estimate/newsletter copies of the OLD email are updated to match, and any open email-review card for this customer's calls is resolved (the correction answers it). Mention this ripple when proposing an email change.
+Changing the email also ripples automatically: open lead/estimate/newsletter/active-automation copies of the OLD email are updated to match, and any open email-review card for this customer's calls is resolved (the correction answers it). Mention this ripple when proposing an email change.
 IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
     input_schema: {
       type: 'object',
@@ -1061,7 +1061,7 @@ async function updateCustomer(customerId, updates) {
     // Operator-visible ripple of an email change (zeros/absent = no ripple):
     // how many open lead/estimate/newsletter copies were synced and how many
     // email review cards the correction resolved.
-    ...(emailSync && (emailSync.leads || emailSync.estimates || emailSync.newsletter || emailSync.reviewCards)
+    ...(emailSync && (emailSync.leads || emailSync.estimates || emailSync.newsletter || emailSync.automations || emailSync.reviewCards)
       ? { email_sync: emailSync } : {}),
   };
 }

@@ -292,12 +292,16 @@ function summarizeProposal(toolName, params) {
     }
   }
   let summary = flat.length ? `${toolName} — ${flat.join(', ')}` : toolName;
-  if (toolName === 'update_customer' && params?.updates?.email) {
-    // Disclose the deterministic ripple of an email change (see
-    // customer-email-fanout): the operator's Confirm covers these too.
-    summary += ' — also syncs open lead/newsletter/estimate email copies and resolves open email review cards';
-  }
-  return summary.length > 300 ? `${summary.slice(0, 297)}...` : summary;
+  // Disclose the deterministic ripple of an email change (see
+  // customer-email-fanout): the operator's Confirm covers these too. The
+  // ripple note is appended AFTER the length cap so long notes/many fields
+  // can never truncate the disclosure off the confirmation card.
+  const ripple = toolName === 'update_customer' && params?.updates?.email
+    ? ' — also syncs open lead/newsletter/estimate/automation email copies and resolves open email review cards'
+    : '';
+  const cap = 300 - ripple.length;
+  if (summary.length > cap) summary = `${summary.slice(0, cap - 3)}...`;
+  return summary + ripple;
 }
 
 /**
