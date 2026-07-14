@@ -421,13 +421,21 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
 // rule as the estimate surface's nearby label.
 function V2BestTimes({ slots, days, onPick }) {
   const byDate = new Map((days || []).map((d) => [d.date, d]));
-  // Nearby days lead (that steer is the strip's whole job); the engine's
-  // rank order is preserved within each group. Stable sort keeps ties honest.
+  // Only recommend slots the day panel actually renders — the ranked
+  // top-level list and days[].slots are built separately server-side, and a
+  // pick with no matching panel row would select a slot whose Confirm never
+  // appears. Resolving to the day's own slot object keeps the confirm
+  // payload identical to a manual tap. Nearby days lead (that steer is the
+  // strip's whole job); the engine's rank order is preserved within each
+  // group via a stable sort.
   const picks = (slots || [])
-    .filter((s) => s.date && byDate.has(s.date))
-    .map((s, i) => ({ s, i, nearby: !!byDate.get(s.date)?.nearby }))
+    .map((s, i) => {
+      const day = s.date ? byDate.get(s.date) : null;
+      const panelSlot = day?.slots?.find((x) => x.start_time === s.start_time);
+      return panelSlot ? { s: panelSlot, day, i, nearby: !!day.nearby } : null;
+    })
+    .filter(Boolean)
     .sort((a, b) => (Number(b.nearby) - Number(a.nearby)) || (a.i - b.i))
-    .map((x) => x.s)
     .slice(0, 3);
   if (!picks.length) return null;
   return (
@@ -439,27 +447,23 @@ function V2BestTimes({ slots, days, onPick }) {
         These fit our route near you best — easiest for everyone.
       </div>
       <div className="rsv2-best-row">
-        {picks.map((slot) => {
-          const day = byDate.get(slot.date);
-          const nearby = !!day?.nearby;
-          return (
-            <button
-              type="button"
-              data-glass="chip"
-              key={`${slot.date}|${slot.start_time}`}
-              className="rsv2-best-chip"
-              onClick={() => onPick(slot, day)}
-            >
-              <span>
-                <span className="rsv2-best-when">{day.fullDate} {'·'} {slot.start_label}</span>
-                <span className="rsv2-best-why">
-                  {nearby ? "We're servicing a property close to you that day" : 'Our soonest opening'}
-                </span>
+        {picks.map(({ s: slot, day, nearby }) => (
+          <button
+            type="button"
+            data-glass="chip"
+            key={`${day.date}|${slot.start_time}`}
+            className="rsv2-best-chip"
+            onClick={() => onPick(slot, day)}
+          >
+            <span>
+              <span className="rsv2-best-when">{day.fullDate} {'·'} {slot.start_label}</span>
+              <span className="rsv2-best-why">
+                {nearby ? "We're servicing a property close to you that day" : 'Our soonest opening'}
               </span>
-              <span className="rsv2-best-go">Pick {'→'}</span>
-            </button>
-          );
-        })}
+            </span>
+            <span className="rsv2-best-go">Pick {'→'}</span>
+          </button>
+        ))}
       </div>
     </Card>
   );
@@ -817,9 +821,11 @@ function V2Styles() {
 export default function ReschedulePage() {
   const { token } = useParams();
   const [searchParams] = useSearchParams();
-  // Dark-ship gate for the approved 2026-07-13 redesign — ?v2=1 renders the
-  // new layout; the legacy layout stays the default until the owner flips.
-  const isV2 = searchParams.has('v2');
+  // Dark-ship gate for the approved 2026-07-13 redesign — exactly ?v2=1
+  // renders the new layout (a false-valued or empty v2 param must NOT flip
+  // the kill switch); the legacy layout stays the default until the owner
+  // flips.
+  const isV2 = searchParams.get('v2') === '1';
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1011,8 +1017,12 @@ export default function ReschedulePage() {
                 slots={data?.availability?.slots}
                 days={days}
                 onPick={(slot, day) => {
-                  setSelectedDate(slot.date);
-                  setSelectedSlot({ ...slot, fullDate: slot.fullDate || day.fullDate });
+                  // slot is the day panel's own row (no date/fullDate fields
+                  // of its own) — stamp them from the day so confirm and the
+                  // picked-state comparison see the same shape a manual tap
+                  // produces.
+                  setSelectedDate(day.date);
+                  setSelectedSlot({ ...slot, date: day.date, fullDate: day.fullDate });
                   setSubmitError(null);
                 }}
               />
