@@ -1257,8 +1257,17 @@ export default function DispatchPageV2({
     // an empty registry, which blanked every findings field in the
     // in-place editor (Codex round-2 P2).
     adminFetch("/admin/projects/types")
-      .then((d) => setProjectTypesRegistry(d?.types || {}))
-      .catch(() => setProjectTypesRegistry({}));
+      .then((d) => {
+        // Only cache a real registry (Codex r15 P2): caching {} on a
+        // transient failure or empty payload satisfied the loaded-guard
+        // above and permanently blanked every findings field in the
+        // in-place editor. Left null, the next editor open retries.
+        const types = d?.types;
+        if (types && Object.keys(types).length) {
+          setProjectTypesRegistry(types);
+        }
+      })
+      .catch(() => {});
   }, [continueProjectId, projectTypesRegistry]);
   const [rescheduleService, setRescheduleService] = useState(null);
   const [editingService, setEditingService] = useState(null);
@@ -2595,6 +2604,15 @@ export default function DispatchPageV2({
               onDirtyChange={setProjectEditorDirty}
               typesRegistry={projectTypesRegistry}
               onClose={() => {
+                // Same dirty guard as the backdrop (Codex r15 P2): the
+                // header × inside ProjectDetail routes through this prop
+                // and must not silently discard unsaved edits either.
+                if (
+                  projectEditorDirty
+                  && !confirm("Discard unsaved report edits?")
+                ) {
+                  return;
+                }
                 setContinueProjectId(null);
                 setContinueProjectService(null);
                 fetchSchedule(date);
