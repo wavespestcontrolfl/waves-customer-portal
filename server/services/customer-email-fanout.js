@@ -157,13 +157,16 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
     // Queued/delayed email-template automation runs deliver to the stored
     // recipient_email at claim time (email-template-automation-executor).
-    // Pre-send states sync (queued/scheduled/retry_scheduled) plus 'running':
-    // the in-flight attempt already claimed its recipient in memory, but a
-    // failed attempt re-reads the row for the retry — same never-heals
-    // argument as the 'sending' estimates above. Completed/skipped runs are
-    // an audit trail and stay untouched.
+    // Only NOT-YET-CLAIMED states sync (queued/scheduled/retry_scheduled).
+    // 'running' is deliberately excluded: the claimed attempt sends to its
+    // in-memory copy, so rewriting the row mid-flight would make the run
+    // record show the corrected address for an email that actually went to
+    // the typo — delivery audit beats retry healing here. Residual: a
+    // mid-flight failure retries to the old spelling (bounded by
+    // max_attempts). Completed/skipped runs are an audit trail and stay
+    // untouched.
     counts.templateRuns += await conn('email_template_automation_runs')
-      .whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running'])
+      .whereIn('status', ['queued', 'scheduled', 'retry_scheduled'])
       .where((q) => q.where({ recipient_id: String(customerId) }).orWhereNull('recipient_id'))
       .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
       .update({ recipient_email: newEmail, updated_at: now });
@@ -305,9 +308,19 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
     return true;
   } catch (e) {
-    logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.message}`);
+    // Provider error bodies can echo the recipient address — log only the
+    // subscriber id and a sanitized code (this path exists BECAUSE the email
+    // is being corrected; it must not leak into logs).
+    logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
     return false;
   }
 }
 
-module.exports = { propagateCustomerEmailChange, resendPendingConfirmation, emailKey };
+// Operator-facing disclosure of everything this fan-out touches. The IB
+// confirmation-card summary AND the update_customer tool description both
+// render THIS string, so the disclosure can never silently drift from the
+// service's actual side effects — extend it in the same commit that adds a
+// new synced surface.
+const EMAIL_FANOUT_DISCLOSURE = 'an email change also syncs every open copy of the old address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
+
+module.exports = { propagateCustomerEmailChange, resendPendingConfirmation, emailKey, EMAIL_FANOUT_DISCLOSURE };

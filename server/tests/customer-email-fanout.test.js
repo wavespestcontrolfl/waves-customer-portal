@@ -152,11 +152,11 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
   });
 
-  test('queued template-automation runs sync only in pre-send/running states', async () => {
+  test('queued template-automation runs sync only in not-yet-claimed states', async () => {
     const conn = makeConn();
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const statusFilter = conn.__calls.find((c) => c.table === 'email_template_automation_runs' && c.op === 'whereIn' && c.arg.col === 'status');
-    expect(statusFilter.arg.vals).toEqual(['queued', 'scheduled', 'retry_scheduled', 'running']);
+    expect(statusFilter.arg.vals).toEqual(['queued', 'scheduled', 'retry_scheduled']);
   });
 
   test('enrollment sync includes customer_id-NULL rows via the old-email guard', async () => {

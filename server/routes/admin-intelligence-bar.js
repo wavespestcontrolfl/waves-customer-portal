@@ -297,9 +297,12 @@ function summarizeProposal(toolName, params) {
   // ripple note is appended AFTER the length cap so long notes/many fields
   // can never truncate the disclosure off the confirmation card.
   const ripple = toolName === 'update_customer' && params?.updates?.email
-    ? ' — also syncs open lead/newsletter/estimate/automation email copies and resolves open email review cards'
+    ? ` — ${require('../services/customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`
     : '';
-  const cap = 300 - ripple.length;
+  // The ripple is long by design (it names every synced surface) — widen the
+  // total budget when it applies so the base summary (who + what changes)
+  // stays readable alongside the always-intact disclosure.
+  const cap = (ripple ? 400 : 300) - ripple.length;
   if (summary.length > cap) summary = `${summary.slice(0, cap - 3)}...`;
   return summary + ripple;
 }
