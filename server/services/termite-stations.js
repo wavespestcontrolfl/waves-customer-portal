@@ -556,9 +556,17 @@ function buildStationMapReportContext({
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
   // The visit's typed flow picks the PROGRAM: a rodent bait report renders
   // rodent pins only, a termite report termite pins only — a property with
-  // both programs never co-renders them on one visit's map.
+  // both programs never co-renders them on one visit's map. typedTypes
+  // arrives PRIMARY-FIRST from report-data ([snapshot.type, ...companions]),
+  // and the primary's program must win when both station flows appear on
+  // one visit (codex P2: probing STATION_PROGRAMS order selected termite
+  // for a rodent-primary report with a termite companion) — mirroring
+  // stationProgramForProfile's primary-wins doctrine.
   const types = Array.isArray(typedTypes) ? typedTypes : [];
-  const program = STATION_PROGRAMS.find((p) => types.includes(PROGRAM_TYPED_FLOW[p])) || null;
+  const stationType = types.find((t) => STATION_PROGRAMS.some((p) => PROGRAM_TYPED_FLOW[p] === t)) || null;
+  const program = stationType
+    ? STATION_PROGRAMS.find((p) => PROGRAM_TYPED_FLOW[p] === stationType)
+    : null;
   if (!program) return { available: false, reason: 'not_station_visit' };
   const programRows = (Array.isArray(stationRows) ? stationRows : [])
     .filter((row) => normalizeProgram(row.program) === program);

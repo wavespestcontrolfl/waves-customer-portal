@@ -477,6 +477,45 @@ test('the report map picks the program from the visit type and never co-renders 
   })).toMatchObject({ available: false, reason: 'no_stations' });
 });
 
+test('the PRIMARY typed flow wins the program when both station flows appear on one visit', () => {
+  const rows = [
+    stationRow('st-t1', 1, pin(0.2, 0.3), { program: 'termite' }),
+    stationRow('st-r1', 1, pin(0.7, 0.6), { program: 'rodent' }),
+  ];
+  // rodent primary + termite companion → rodent pins (typedTypes is
+  // primary-first from report-data; STATION_PROGRAMS order must not win)
+  const rodentPrimary = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [{ station_id: 'st-r1', status: 'activity' }],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_bait_station', 'termite_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(rodentPrimary.program).toBe('rodent');
+  expect(rodentPrimary.stations.map((s) => s.id)).toEqual(['st-r1']);
+  // termite primary + rodent companion → termite pins (order symmetric)
+  const termitePrimary = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [{ station_id: 'st-t1', status: 'ok' }],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['termite_bait_station', 'rodent_bait_station'],
+    serviceDate: '2026-07-13',
+  });
+  expect(termitePrimary.program).toBe('termite');
+  expect(termitePrimary.stations.map((s) => s.id)).toEqual(['st-t1']);
+  // a non-station primary ahead of a station companion still resolves
+  expect(buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping', 'rodent_bait_station'],
+    serviceDate: '2026-07-13',
+  }).program).toBe('rodent');
+});
+
 test('check rows upsert on replay (same station + record) instead of duplicating', async () => {
   const { db, state } = makeFakeDb({
     stations: [
