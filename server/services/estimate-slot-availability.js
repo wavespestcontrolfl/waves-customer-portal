@@ -1538,11 +1538,21 @@ function invalidateEstimate(estimateId) {
   return dropped;
 }
 
+// Global flush — a schedule-wide fact changed (owner blackout added/removed),
+// so EVERY estimate's cached slot list may now offer a wrong date. The cache
+// is small (5-min TTL) and recomputes lazily; correctness beats warmth.
+function invalidateAllEstimates() {
+  const dropped = wrapperCache.size;
+  wrapperCache.clear();
+  return dropped;
+}
+
 module.exports = {
   getAvailableSlots,
   findEstimateSlots,
   getSlotDebug,
   invalidateEstimate,
+  invalidateAllEstimates,
   resolveEstimateSlotProfile,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.

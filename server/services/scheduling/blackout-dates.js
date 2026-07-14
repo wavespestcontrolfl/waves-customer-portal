@@ -39,11 +39,15 @@ async function getBlackoutDates(fromStr, toStr) {
   }
 }
 
-// True when a single YYYY-MM-DD date is blacked out.
-async function isBlackoutDate(dateStr) {
+// True when a single date is blacked out. Accepts YYYY-MM-DD strings OR JS
+// Date values (pg DATE columns arrive as either depending on the caller) —
+// String() on a Date is a locale string that would silently never match.
+async function isBlackoutDate(dateVal) {
+  const dateStr = toDateStr(dateVal);
+  if (!dateStr) return false;
   try {
     const row = await db('schedule_blackout_dates')
-      .where('date', String(dateStr).split('T')[0])
+      .where('date', dateStr)
       .first('id');
     return !!row;
   } catch (err) {

@@ -241,6 +241,14 @@ class AvailabilityEngine {
     if (etParts(parseETDateTime(`${dateStr}T12:00`)).dayOfWeek === 0) {
       throw bookingError('We are closed on Sundays — please pick another day', 'INVALID_DATE', 400);
     }
+    // Owner blackout re-check at COMMIT — the quoted option may predate the
+    // blackout (AI book_appointment confirms options quoted earlier).
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(dateStr)) {
+        throw bookingError('That day is no longer available — please pick another day', 'INVALID_DATE', 409);
+      }
+    }
     const startMin = this.timeToMin(startTime);
     const endMin = this.timeToMin(endTime);
     if (dateStr === todayStr) {

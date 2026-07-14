@@ -7061,6 +7061,7 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     // Reason is free-form admin text — never log it (PII rule): a staffer
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
+    flushEstimateSlotCaches();
     res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
   } catch (err) { next(err); }
 });
@@ -7069,9 +7070,22 @@ router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
     const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
     if (!deleted) return res.status(404).json({ error: 'Not found' });
+    flushEstimateSlotCaches();
     res.json({ success: true });
   } catch (err) { next(err); }
 });
+
+// A blackout mutation changes a schedule-wide fact — flush the estimate
+// slot wrapper cache (5-min TTL) so no cached list keeps offering (or
+// hiding) the toggled date until expiry. Best-effort.
+function flushEstimateSlotCaches() {
+  try {
+    const { invalidateAllEstimates } = require('../services/estimate-slot-availability');
+    invalidateAllEstimates();
+  } catch (err) {
+    logger.warn(`[schedule] estimate slot cache flush failed: ${err.message}`);
+  }
+}
 
 router._test = {
   buildAssignedScheduleEtaQuery,
