@@ -221,8 +221,11 @@ export default function PrepGuidePage() {
       ? <NotFound />
       : (
         <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: DOC_FONT, color: SURFACE.text }}>
-          {/* No server-side prep-guide PDF render — Share + Print only. */}
-          <DocumentActionBar shareTitle={`Waves ${data.projectTypeLabel || ''} prep guide`.replace(/\s+/g, ' ')} />
+          <DocumentActionBar
+            shareTitle={`Waves ${data.projectTypeLabel || ''} prep guide`.replace(/\s+/g, ' ')}
+            pdfUrl={`${API_BASE}/public/prep/${token}/pdf`}
+            pdfFileName={`Waves_${String(data.projectTypeLabel || 'Prep_Guide').replace(/[^A-Za-z0-9]+/g, '_')}_Prep_Guide.pdf`}
+          />
           <div
             className="prep-card"
             data-glass="card"
