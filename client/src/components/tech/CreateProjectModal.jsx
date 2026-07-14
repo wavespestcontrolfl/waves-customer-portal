@@ -766,10 +766,15 @@ export default function CreateProjectModal({
   }, [chemAuto, findings.concentration_pct, findings.gallons_applied]);
 
   function handleFindingChange(key, value) {
+    // Every field control routes here — including chips, steppers, and
+    // selects, which don't bubble an input event to the container
+    // listener (Codex r13 P2).
+    userDirtyRef.current = true;
     setFindings(prev => ({ ...prev, [key]: value }));
   }
 
   function handleApplicatorChange(value) {
+    userDirtyRef.current = true;
     // Option values are technician ids. No match means the injected
     // current-value option (a restored draft's free-text name) — keep it as
     // the name and leave the ID alone.
@@ -785,6 +790,7 @@ export default function CreateProjectModal({
   }
 
   function handleProductSelect(fieldKey, product) {
+    userDirtyRef.current = true;
     const productName = product?.name || product?.product_name || '';
     const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || '';
     const activeIngredient = product?.active_ingredient || product?.activeIngredient || '';
@@ -800,6 +806,7 @@ export default function CreateProjectModal({
 
   function fillWdoAddressFromCustomer() {
     if (!selectedCustomer) return;
+    userDirtyRef.current = true;
     // Explicit action — overwrite address + contact fields from the customer.
     // After an explicit replace, every field holding the customer's value IS
     // customer-sourced, so record them all for the Change-clears map.
@@ -816,6 +823,7 @@ export default function CreateProjectModal({
     if (!addressFieldKey) return;
     const address = formatCustomerAddress(selectedCustomer);
     if (!address) return;
+    userDirtyRef.current = true;
     projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
     setFindings(prev => ({ ...prev, [addressFieldKey]: address }));
   }
