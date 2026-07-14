@@ -2382,6 +2382,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // address (matching rules in the fan-out service header).
             await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedAfter }, trx);
           }
+          if (updates.email !== undefined) {
+            // Email has the same snapshot problem (leads.email,
+            // estimates.customer_email, the newsletter subscription), and a
+            // CHANGED email also answers any open email read-back card for
+            // this customer's calls. Diff-gated inside the service — an
+            // unchanged resave is a no-op, so an incidental full-form save
+            // never resolves a review card by accident.
+            await require('../services/customer-email-fanout').propagateCustomerEmailChange(
+              { before: lockedBefore, after: lockedAfter, source: 'Customer 360 edit' }, trx
+            );
+          }
         });
       } catch (e) {
         if (e && e.code === '23505') {

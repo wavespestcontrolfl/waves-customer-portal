@@ -184,6 +184,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
   {
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
+Changing the email also ripples automatically: open lead/estimate/newsletter copies of the OLD email are updated to match, and any open email-review card for this customer's calls is resolved (the correction answers it). Mention this ripple when proposing an email change.
 IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
     input_schema: {
       type: 'object',
@@ -995,6 +996,7 @@ async function updateCustomer(customerId, updates) {
   const merged = { ...before, ...clean };
   const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
     .some((f) => clean[f] !== undefined);
+  let emailSync = null;
   try {
     await db.transaction(async (trx) => {
       // Row lock serializes overlapping address edits (see the Customers
@@ -1011,6 +1013,15 @@ async function updateCustomer(customerId, updates) {
         // triggered like the mirror above, so resubmitting the same address
         // also self-heals copies left stale by a pre-fix edit.
         await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+      }
+      if (clean.email !== undefined) {
+        // Email snapshots (leads.email, estimates.customer_email, the
+        // newsletter subscription) sync too, and a CHANGED email resolves any
+        // open email read-back card for this customer's calls. Diff-gated
+        // inside the service — an unchanged resave is a no-op.
+        emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
+          { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar update_customer' }, trx
+        );
       }
     });
   } catch (e) {
@@ -1047,6 +1058,11 @@ async function updateCustomer(customerId, updates) {
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    // Operator-visible ripple of an email change (zeros/absent = no ripple):
+    // how many open lead/estimate/newsletter copies were synced and how many
+    // email review cards the correction resolved.
+    ...(emailSync && (emailSync.leads || emailSync.estimates || emailSync.newsletter || emailSync.reviewCards)
+      ? { email_sync: emailSync } : {}),
   };
 }
 

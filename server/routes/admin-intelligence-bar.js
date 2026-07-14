@@ -277,12 +277,27 @@ function uiConfirmEnabled() {
 }
 
 function summarizeProposal(toolName, params) {
-  const pairs = Object.entries(params || {})
-    .filter(([, v]) => v !== undefined && v !== null && typeof v !== 'object')
-    .map(([k, v]) => `${k}: ${String(v)}`)
-    .join(', ');
-  const summary = pairs ? `${toolName} — ${pairs}` : toolName;
-  return summary.length > 200 ? `${summary.slice(0, 197)}...` : summary;
+  // One level of plain-object params flattens into the summary — without it
+  // an update_customer card reads "customer_id: X" and hides WHAT is being
+  // changed (the confirmation card must show everything the commit will do).
+  const flat = [];
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        if (v2 !== undefined && v2 !== null && typeof v2 !== 'object') flat.push(`${k}.${k2}: ${String(v2)}`);
+      }
+    } else if (typeof v !== 'object') {
+      flat.push(`${k}: ${String(v)}`);
+    }
+  }
+  let summary = flat.length ? `${toolName} — ${flat.join(', ')}` : toolName;
+  if (toolName === 'update_customer' && params?.updates?.email) {
+    // Disclose the deterministic ripple of an email change (see
+    // customer-email-fanout): the operator's Confirm covers these too.
+    summary += ' — also syncs open lead/newsletter/estimate email copies and resolves open email review cards';
+  }
+  return summary.length > 300 ? `${summary.slice(0, 297)}...` : summary;
 }
 
 /**
