@@ -1397,23 +1397,58 @@ router.post('/', async (req, res, next) => {
     await validateProjectCreateScope(req, { customer_id, service_record_id, scheduled_service_id });
     const projectDate = await resolveProjectDate({ project_date, service_record_id, scheduled_service_id });
 
-    const [row] = await db('projects').insert({
-      customer_id,
-      project_type,
-      project_date: projectDate,
-      title: title || null,
-      findings: findings || null,
-      recommendations: recommendations || null,
-      service_record_id: service_record_id || null,
-      // Persist the DERIVED link too (record-only callers): the linked-only
-      // gate accepted this create because the record resolved to a scheduled
-      // visit, and the schedule/tech continuation path looks projects up by
-      // projects.scheduled_service_id — dropping it here would let the same
-      // visit mint a duplicate report (Codex round-2 P2).
-      scheduled_service_id: linkedScheduledServiceId || null,
-      status: 'draft',
-      created_by_tech_id: req.technicianId,
-    }).returning('*');
+    // One visit, one report (#2717 server hardening): stale client caches
+    // (week rows, continue snapshots) repeatedly re-offered the create
+    // sheet for already-linked visits, and nothing here prevented a second
+    // row. Return the existing project instead — callers already route
+    // linked projects into the continue editor, so an idempotent create is
+    // transparent to them.
+    if (linkedScheduledServiceId) {
+      const existing = await db('projects')
+        .where({ scheduled_service_id: linkedScheduledServiceId })
+        .orderBy('created_at', 'asc')
+        .first();
+      if (existing) {
+        logger.info(`[projects] create for visit ${linkedScheduledServiceId} returned existing project ${existing.id} (idempotent)`);
+        return res.json({ project: existing, existing: true });
+      }
+    }
+
+    let row;
+    try {
+      [row] = await db('projects').insert({
+        customer_id,
+        project_type,
+        project_date: projectDate,
+        title: title || null,
+        findings: findings || null,
+        recommendations: recommendations || null,
+        service_record_id: service_record_id || null,
+        // Persist the DERIVED link too (record-only callers): the linked-only
+        // gate accepted this create because the record resolved to a scheduled
+        // visit, and the schedule/tech continuation path looks projects up by
+        // projects.scheduled_service_id — dropping it here would let the same
+        // visit mint a duplicate report (Codex round-2 P2).
+        scheduled_service_id: linkedScheduledServiceId || null,
+        status: 'draft',
+        created_by_tech_id: req.technicianId,
+      }).returning('*');
+    } catch (insertErr) {
+      // Unique-violation on the partial index (migration 20260714000010) =
+      // we lost a same-visit create race — return the winner, same
+      // idempotent contract as the pre-insert check above.
+      if (insertErr?.code === '23505' && linkedScheduledServiceId) {
+        const winner = await db('projects')
+          .where({ scheduled_service_id: linkedScheduledServiceId })
+          .orderBy('created_at', 'asc')
+          .first();
+        if (winner) {
+          logger.info(`[projects] create race for visit ${linkedScheduledServiceId} resolved to existing project ${winner.id}`);
+          return res.json({ project: winner, existing: true });
+        }
+      }
+      throw insertErr;
+    }
 
     logger.info(`[projects] created ${row.id} (${project_type}) by tech ${req.technicianId}`);
     await logProjectActivity(

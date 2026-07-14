@@ -1488,3 +1488,97 @@ describe('admin projects routes', () => {
     });
   });
 });
+
+// #2717 server hardening: one visit, one report. POST /admin/projects is
+// idempotent on the visit link — an existing linked project is returned
+// instead of inserting a duplicate, and a lost create race (unique index
+// 23505) resolves to the winner with the same contract.
+describe('POST /admin/projects idempotent visit link', () => {
+  afterEach(() => {
+    delete db.schema;
+  });
+
+  const wdoBody = JSON.stringify({
+    customer_id: 'customer-1',
+    project_type: 'wdo_inspection',
+    scheduled_service_id: 'svc-legacy',
+  });
+
+  function mockTables(projectsFactory) {
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-legacy', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({ flipped: [], backed: [], first: undefined });
+      if (table === 'projects') return projectsFactory();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  test('returns the existing linked project instead of inserting a duplicate', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const existing = {
+      id: 'project-existing', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'draft', scheduled_service_id: 'svc-legacy',
+    };
+    const projectsInsert = jest.fn();
+    mockTables(() => chain({
+      first: jest.fn().mockResolvedValue(existing),
+      insert: projectsInsert,
+    }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.id).toBe('project-existing');
+      expect(body.existing).toBe(true);
+      expect(projectsInsert).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a lost same-visit create race (unique-violation 23505) resolves to the winner', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const winner = {
+      id: 'project-winner', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'draft', scheduled_service_id: 'svc-legacy',
+    };
+    let projectsCalls = 0;
+    mockTables(() => {
+      projectsCalls += 1;
+      // 1st: pre-insert lookup misses (the race window); 2nd: insert hits
+      // the partial unique index; 3rd: post-conflict lookup finds the winner.
+      if (projectsCalls === 1) return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (projectsCalls === 2) {
+        const dupErr = Object.assign(
+          new Error('duplicate key value violates unique constraint "projects_scheduled_service_id_unique"'),
+          { code: '23505' },
+        );
+        return chain({ returning: jest.fn().mockRejectedValue(dupErr) });
+      }
+      return chain({ first: jest.fn().mockResolvedValue(winner) });
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.project.id).toBe('project-winner');
+      expect(body.existing).toBe(true);
+    });
+  });
+});

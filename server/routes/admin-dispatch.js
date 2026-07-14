@@ -1715,6 +1715,28 @@ router.put('/:serviceId/status', async (req, res, next) => {
       });
     }
 
+    // ALL terminal statuses are one-way, not just no_show (#2717 server
+    // hardening): fromStatus is read fresh from the row, so a stale board
+    // on another device could flip a completed compliance visit to
+    // cancelled (firing a contradictory customer notice) hours after the
+    // work was done — the client cannot guard the two-device case. Same
+    // shape as the no_show block: re-sending the same status is idempotent
+    // success; any other target is a 409.
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, toStatus);
+      if (terminal?.idempotent) {
+        return res.json({ success: true, alreadyTerminal: terminal.status });
+      }
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit is already ${terminal.status}. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
+    }
+
     // No-show is only valid FROM an active visit state, and only once the
     // visit window has actually started. The mobile detail sheet exposes
     // "Mark as no-show" on every same-day row, so without these guards an
