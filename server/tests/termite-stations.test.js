@@ -25,6 +25,7 @@ const {
   loadStationsForPropertyMap,
   buildStationMapReportContext,
   rodentConsumptionConflict,
+  trapCaptureConflict,
 } = require('../services/termite-stations');
 
 // Minimal knex-shaped fake for the exact chains the service uses
@@ -507,12 +508,14 @@ test('the PRIMARY typed flow wins the program when both station flows appear on 
   expect(termitePrimary.program).toBe('termite');
   expect(termitePrimary.stations.map((s) => s.id)).toEqual(['st-t1']);
   // a non-station primary ahead of a station companion still resolves
+  // (rodent_trapping graduated to a station flow of its own — 'trapping' —
+  // so the non-station example here is rodent_inspection)
   expect(buildStationMapReportContext({
     stationRows: rows,
     checkRows: [],
     satelliteMap: SATELLITE,
     imageContext: IMAGE_CONTEXT,
-    typedTypes: ['rodent_trapping', 'rodent_bait_station'],
+    typedTypes: ['rodent_inspection', 'rodent_bait_station'],
     serviceDate: '2026-07-13',
   }).program).toBe('rodent');
   // non-station primary with BOTH station companions: the companion
@@ -524,9 +527,90 @@ test('the PRIMARY typed flow wins the program when both station flows appear on 
     checkRows: [],
     satelliteMap: SATELLITE,
     imageContext: IMAGE_CONTEXT,
-    typedTypes: ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station'],
+    typedTypes: ['rodent_inspection', 'rodent_bait_station', 'termite_bait_station'],
     serviceDate: '2026-07-13',
   }).program).toBe('termite');
+});
+
+test('trapping is a first-class program: authorization, report selection, isolation', async () => {
+  // profile authorization: rodent_trapping primary → trapping program
+  expect(stationProgramForProfile({ findingsType: 'rodent_trapping' })).toBe('trapping');
+  // primary still beats a station companion; companion tie-break keeps
+  // termite/rodent ahead of trapping (STATION_PROGRAMS order)
+  expect(stationProgramForProfile({
+    findingsType: 'rodent_trapping',
+    companions: [{ type: 'rodent_bait_station' }],
+  })).toBe('trapping');
+  expect(stationProgramForProfile({
+    findingsType: 'rodent_inspection',
+    companions: [{ type: 'rodent_trapping' }, { type: 'rodent_bait_station' }],
+  })).toBe('rodent');
+
+  // report selection renders trapping pins only for a trapping visit
+  const rows = [
+    stationRow('st-t1', 1, pin(0.2, 0.3), { program: 'termite' }),
+    stationRow('st-tr1', 1, pin(0.5, 0.7), { program: 'trapping' }),
+  ];
+  const context = buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [{ station_id: 'st-tr1', status: 'activity' }],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping'],
+    serviceDate: '2026-07-14',
+  });
+  expect(context.available).toBe(true);
+  expect(context.program).toBe('trapping');
+  expect(context.stations.map((s) => s.id)).toEqual(['st-tr1']);
+
+  // sync isolation: a trapping entry can never touch another program's pin
+  const { db, state } = makeFakeDb({
+    stations: [
+      { id: 'st-r1', customer_id: CUSTOMER, station_number: 1, program: 'rodent', is_active: true, geometry_image: pin(0.1, 0.1) },
+    ],
+  });
+  const summary = await syncStationsForCompletion(db, {
+    customerId: CUSTOMER,
+    serviceRecordId: 'record-trap-1',
+    entries: [{ id: 'st-r1', retire: true }],
+    program: 'trapping',
+  });
+  expect(summary.retired).toBe(0);
+  expect(summary.skipped).toContain('retire:st-r1');
+  expect(state.stations.find((row) => row.id === 'st-r1').is_active).toBe(true);
+});
+
+test('trapCaptureConflict flags an explicit 0 beside a capture-marked trap', () => {
+  const captureEntries = [{ id: 'st-tr1', status: 'activity' }];
+  expect(trapCaptureConflict({
+    program: 'trapping',
+    entries: captureEntries,
+    findings: { captures: '0' },
+  })).toMatch(/reconcile/i);
+  // a real count is consistent (one trap can hold several captures)
+  expect(trapCaptureConflict({
+    program: 'trapping',
+    entries: captureEntries,
+    findings: { captures: '3' },
+  })).toBeNull();
+  // unset count means "not recorded", never 0 → no conflict
+  expect(trapCaptureConflict({
+    program: 'trapping',
+    entries: captureEntries,
+    findings: {},
+  })).toBeNull();
+  // no capture pins → an explicit 0 is fine
+  expect(trapCaptureConflict({
+    program: 'trapping',
+    entries: [{ id: 'st-tr1', status: 'ok' }],
+    findings: { captures: '0' },
+  })).toBeNull();
+  // other programs out of scope
+  expect(trapCaptureConflict({
+    program: 'rodent',
+    entries: captureEntries,
+    findings: { captures: '0' },
+  })).toBeNull();
 });
 
 test('rodentConsumptionConflict flags "None" beside a consumption-marked station', () => {
