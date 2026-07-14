@@ -160,7 +160,23 @@ async function findAvailableSlots(opts) {
       db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
     );
 
-  const dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
+  let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
+
+  // Owner blackout days (admin Settings → Scheduling → Blackout days) are
+  // removed from the offer enumeration here — /book, the reschedule page,
+  // route-aware estimate slots, and the Waves AI searches all generate
+  // through this function. (Surfaces that enumerate their own dates —
+  // estimate ASAP capacity, rain-out SMS options — and the offer-redemption
+  // commits consume the same shared helper.) Admin manual scheduling stays
+  // unblocked by design — staff callers (the dispatch Find-best-times tool)
+  // pass includeBlackoutDates:true to keep their recommendations complete.
+  // The helper fails open.
+  if (dates.length && !opts.includeBlackoutDates) {
+    const { getBlackoutDates } = require('./blackout-dates');
+    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
+    if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
+  }
+
   const candidates = [];
   let evaluated = 0;
 

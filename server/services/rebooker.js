@@ -140,6 +140,14 @@ class SmartRebooker {
     const options = [];
     const today = new Date();
 
+    // Rain-out SMS alternates enumerate their own dates (not via find-time)
+    // — skip owner blackout days here too (shared helper, fail-open).
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const blackout = await getBlackoutDates(
+      etDateString(addETDays(today, 1)),
+      etDateString(addETDays(today, 10)),
+    );
+
     for (let d = 1; d <= 10; d++) {
       // ET calendar math — toISOString() reads the UTC date while displayDate
       // below formats in ET, so between 8 PM and midnight ET the customer would
@@ -147,6 +155,7 @@ class SmartRebooker {
       const candidateDate = addETDays(today, d); // anchored at noon UTC on the ET calendar day
 
       const dateStr = etDateString(candidateDate);
+      if (blackout.has(dateStr)) continue;
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)
@@ -219,6 +228,22 @@ class SmartRebooker {
         isOperational: true,
         code: 'INVALID_DATE',
       });
+    }
+
+    // Owner blackout re-check at COMMIT for every non-admin initiator
+    // (customer self-serve, SMS replies, rain-out/auto flows): the option
+    // being confirmed may have been generated before the owner blocked the
+    // date. Admin-initiated moves stay unblocked BY DESIGN — the owner can
+    // knowingly book his own day off from dispatch. Fail-open helper.
+    if (initiatedBy !== 'admin') {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(newDateStr)) {
+        throw Object.assign(new Error('That day is no longer available'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
     }
 
     const originalDate = service.scheduled_date;
@@ -456,6 +481,17 @@ class SmartRebooker {
         code: 'INVALID_DATE',
       });
     }
+    // Same non-admin blackout commit guard as reschedule() — see there.
+    if (initiatedBy !== 'admin') {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(seriesDateStr)) {
+        throw Object.assign(new Error('That day is no longer available'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'SLOT_TAKEN',
+        });
+      }
+    }
     if (seriesDateStr === etDateString()) {
       const cutoff = win.end || service.window_end || win.start || service.window_start;
       if (cutoff) {
@@ -599,6 +635,22 @@ class SmartRebooker {
               isOperational: true,
               code: 'SLOT_TAKEN',
             });
+          }
+          // Owner blackout days for NON-admin shifts cover every projected
+          // date, not just the anchor — a re-anchored sibling must not land
+          // on a day off either. Sorted probe range, fail-open helper; a
+          // hit aborts so the customer picks a different anchor slot.
+          if (initiatedBy !== 'admin') {
+            const { getBlackoutDates } = require('./scheduling/blackout-dates');
+            const sorted = [...projectedDates].sort();
+            const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1]);
+            if (projectedDates.some((d) => blackout.has(d))) {
+              throw Object.assign(new Error('That schedule would land a visit on an unavailable day — pick a different time'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
           }
         }
       }

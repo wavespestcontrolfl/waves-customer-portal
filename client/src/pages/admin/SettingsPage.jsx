@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   Activity,
   Building2,
+  CalendarOff,
   ChevronRight,
   DollarSign,
   KeyRound,
@@ -134,6 +135,7 @@ const VALID_TABS = [
   "gates",
   "team",
   "service-reports",
+  "blackout-days",
   "kpi-targets",
   "operating-costs",
   "system",
@@ -146,6 +148,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "general", label: "General", Icon: Building2, tabs: ["general", "team"] },
   { key: "integrations", label: "Integrations", Icon: Plug, tabs: ["integrations"] },
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
+  { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
   { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
   { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
 ];
@@ -156,6 +159,7 @@ const SETTINGS_LEAF_META = {
   team: { label: "Team", Icon: Users },
   integrations: { label: "Integrations", Icon: Plug },
   "service-reports": { label: "Service Reports", Icon: MapPinned },
+  "blackout-days": { label: "Blackout Days", Icon: CalendarOff },
   "kpi-targets": { label: "KPI Targets", Icon: Target },
   "operating-costs": { label: "Operating Costs", Icon: DollarSign },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
@@ -582,6 +586,7 @@ export default function SettingsPage() {
         </Card>
       )}
       {tab === "service-reports" && <ServiceCoverageSettingsTab />}
+      {tab === "blackout-days" && <BlackoutDaysTab />}
       {tab === "kpi-targets" && (
         <KpiTargetsSettingsTab canAdmin={user?.role === "admin"} />
       )}
@@ -1308,6 +1313,164 @@ function KpiTargetsSettingsTab({ canAdmin }) {
         </div>
       </Card>
     </div>
+  );
+}
+
+// ── Blackout days (owner ask 2026-07-14) ─────────────────────────────────
+// Take a day off: any date added here disappears from every customer-facing
+// offer surface (booking funnel, reschedule links, estimate slots, Waves AI
+// searches) — enforced server-side at the slot engine's date enumeration.
+// Admin manual scheduling stays possible on purpose.
+function BlackoutDaysTab() {
+  const [blackouts, setBlackouts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [date, setDate] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = () => {
+    adminFetch("/admin/schedule/blackout-dates")
+      .then((d) => setBlackouts(d.blackouts || []))
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
+  useEffect(load, []);
+
+  const add = async () => {
+    if (!date || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const d = await adminFetch("/admin/schedule/blackout-dates", {
+        method: "POST",
+        body: JSON.stringify({ date, reason: reason || null }),
+      });
+      if (d.error) throw new Error(d.error);
+      setDate("");
+      setReason("");
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (id) => {
+    try {
+      // adminFetch resolves parsed JSON even for non-401 HTTP errors — check
+      // the body before mutating state, or a failed DELETE would show the
+      // date as unblocked while it still blocks prod.
+      const d = await adminFetch(`/admin/schedule/blackout-dates/${id}`, { method: "DELETE" });
+      if (d?.error) throw new Error(d.error);
+      setBlackouts((prev) => prev.filter((b) => b.id !== id));
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const fmtDay = (d) => {
+    try {
+      const [y, m, day] = d.split("-").map(Number);
+      return new Date(Date.UTC(y, m - 1, day, 12)).toLocaleDateString("en-US", {
+        weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC",
+      });
+    } catch { return d; }
+  };
+
+  return (
+    <Card>
+      <div style={{ fontSize: 16, fontWeight: 600, color: D.heading, marginBottom: 4 }}>
+        Blackout Days
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginBottom: 16 }}>
+        Days off. Customers can't book, reschedule into, or be offered these
+        dates anywhere — booking funnel, reschedule links, estimate slots, and
+        Waves AI searches all skip them. You can still schedule manually from
+        dispatch if you choose to.
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          aria-label="Blackout date"
+          style={{
+            background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8,
+            color: D.text, padding: "9px 12px", fontSize: 13, colorScheme: "dark",
+          }}
+        />
+        <input
+          type="text"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Reason (optional — e.g. Vacation)"
+          maxLength={200}
+          aria-label="Blackout reason"
+          style={{
+            flex: 1, minWidth: 180, background: D.bg, border: `1px solid ${D.border}`,
+            borderRadius: 8, color: D.text, padding: "9px 12px", fontSize: 13,
+          }}
+        />
+        <button
+          type="button"
+          onClick={add}
+          disabled={!date || saving}
+          style={{
+            background: D.teal, border: "none", borderRadius: 8, color: "#fff",
+            fontWeight: 700, fontSize: 13, padding: "9px 18px",
+            cursor: !date || saving ? "default" : "pointer",
+            opacity: !date || saving ? 0.5 : 1,
+          }}
+        >
+          {saving ? "Saving…" : "Block day"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 12, color: D.red, marginBottom: 12 }}>{error}</div>
+      )}
+
+      {loading ? (
+        <div style={{ fontSize: 13, color: D.muted }}>Loading…</div>
+      ) : blackouts.length === 0 ? (
+        <div style={{ fontSize: 13, color: D.muted }}>
+          No blackout days set — every working day is offered.
+        </div>
+      ) : (
+        blackouts.map((b) => (
+          <div
+            key={b.id}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "10px 0", borderBottom: `1px solid ${D.border}`,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: D.heading }}>
+                {fmtDay(b.date)}
+              </div>
+              {b.reason && (
+                <div style={{ fontSize: 12, color: D.muted }}>{b.reason}</div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => remove(b.id)}
+              style={{
+                background: "transparent", border: `1px solid ${D.border}`,
+                borderRadius: 8, color: D.muted, fontSize: 12, fontWeight: 600,
+                padding: "6px 12px", cursor: "pointer",
+              }}
+            >
+              Unblock
+            </button>
+          </div>
+        ))
+      )}
+    </Card>
   );
 }
 

@@ -77,6 +77,14 @@ class AvailabilityEngine {
     const days = [];
     const today = new Date();
 
+    // Owner blackout days apply to this legacy engine too — it feeds the
+    // lead-response availability tool, which quotes days to customers.
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const blackout = await getBlackoutDates(
+      etDateString(addETDays(today, config.advance_days_min)),
+      etDateString(addETDays(today, config.advance_days_max)),
+    );
+
     for (let i = config.advance_days_min; i <= config.advance_days_max; i++) {
       // ET calendar math — toISOString() reads the UTC date (already tomorrow
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
@@ -85,6 +93,7 @@ class AvailabilityEngine {
       if (etParts(date).dayOfWeek === 0) continue; // skip Sunday (ET)
 
       const dateStr = etDateString(date);
+      if (blackout.has(dateStr)) continue;
 
       // Find techs working in this zone on this day
       const techBlocks = await db('tech_schedule_blocks')
@@ -231,6 +240,14 @@ class AvailabilityEngine {
     }
     if (etParts(parseETDateTime(`${dateStr}T12:00`)).dayOfWeek === 0) {
       throw bookingError('We are closed on Sundays — please pick another day', 'INVALID_DATE', 400);
+    }
+    // Owner blackout re-check at COMMIT — the quoted option may predate the
+    // blackout (AI book_appointment confirms options quoted earlier).
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(dateStr)) {
+        throw bookingError('That day is no longer available — please pick another day', 'INVALID_DATE', 409);
+      }
     }
     const startMin = this.timeToMin(startTime);
     const endMin = this.timeToMin(endTime);
