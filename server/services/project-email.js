@@ -245,6 +245,67 @@ async function ensurePrepToken(projectId) {
   return afterRace.prep_token;
 }
 
+// Service-based twin of ensurePrepToken: the booking-triggered and manual
+// prep sends hang off scheduled_services rows with no project attached, so
+// the public /prep/:token page needs a token minted there. Same race-safe
+// shape (atomic whereNull update, post-race re-read). prep_template_key is
+// stamped alongside so the page renders the exact guide the email carried,
+// even if the automation's template mapping changes later.
+async function ensureServicePrepToken(serviceId, templateKey) {
+  const key = clean(templateKey);
+  if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
+
+  const existing = await db('scheduled_services')
+    .select('prep_token', 'prep_template_key')
+    .where({ id: serviceId })
+    .first();
+  // A reused token with a DIFFERENT stored key is deliberately left alone
+  // here: the stored key is what the last DELIVERED guide rendered, and
+  // flipping it before the new send is confirmed would retarget an
+  // already-emailed URL onto a guide the customer never received. The key
+  // (and the tracker's prep_sent_at proof) move together at confirmed
+  // delivery — markServicePrepSent. An existing token with NO key yet is
+  // just initialized (nothing rendered before a key existed).
+  if (existing?.prep_token) {
+    if (!existing.prep_template_key) {
+      await db('scheduled_services')
+        .where({ id: serviceId })
+        .whereNull('prep_template_key')
+        .update({ prep_template_key: key });
+    }
+    return existing.prep_token;
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  const updated = await db('scheduled_services')
+    .where({ id: serviceId })
+    .whereNull('prep_token')
+    .update({ prep_token: token, prep_template_key: key })
+    .returning(['prep_token']);
+
+  if (updated?.length) return updated[0].prep_token || token;
+
+  const afterRace = await db('scheduled_services')
+    .select('prep_token')
+    .where({ id: serviceId })
+    .first();
+  if (!afterRace?.prep_token) throw new Error(`Failed to ensure prep_token for service ${serviceId}`);
+  return afterRace.prep_token;
+}
+
+// Confirmed-delivery marker for a scheduled-service prep guide: stamps the
+// tracker's "prep actually went out" proof AND aligns the rendered guide to
+// the template that was just delivered, in one write. Last DELIVERED guide
+// wins — a queued-but-skipped or failed resend never moves either field, so
+// the emailed URL keeps rendering the guide the customer actually received.
+async function markServicePrepSent(serviceId, templateKey) {
+  const key = clean(templateKey);
+  if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
+  await db('scheduled_services')
+    .where({ id: serviceId })
+    .update({ prep_sent_at: db.fn.now(), prep_template_key: key });
+}
+
 async function sendProjectReportReady({
   project,
   customer,
@@ -340,7 +401,7 @@ async function sendPrepGuide({
     await db('projects').where({ id: project.id }).update({ prep_template_key: resolvedTemplateKey });
   }
   const payload = buildProjectPayload({ project, customer });
-  return sendProjectTemplate({
+  const result = await sendProjectTemplate({
     project,
     customer,
     templateKey: resolvedTemplateKey,
@@ -350,6 +411,17 @@ async function sendPrepGuide({
     triggerEventId: `project_prep.ready:${project?.id || 'unknown'}:${resolvedTemplateKey}`,
     idempotencyKey: idempotencyKey || `project.prep:${project?.id || 'unknown'}:${resolvedTemplateKey}:${sendAttemptKey()}`,
   });
+  if (result?.ok && project?.id) {
+    // Confirmed-send marker: the token above is minted BEFORE the send, so
+    // the tracker gates its project prep link on prep_sent_at, not on the
+    // token existing. Fail-soft — a stamp hiccup never fails a sent guide.
+    try {
+      await db('projects').where({ id: project.id }).update({ prep_sent_at: db.fn.now() });
+    } catch (stampErr) {
+      logger.warn(`[project-email] prep_sent_at stamp failed for project ${project.id}: ${stampErr.message}`);
+    }
+  }
+  return result;
 }
 
 async function sendPortalInvite({
@@ -382,6 +454,8 @@ module.exports = {
   PREP_TEMPLATE_BY_PROJECT_TYPE,
   buildProjectPayload,
   ensurePrepToken,
+  ensureServicePrepToken,
+  markServicePrepSent,
   isPrepTemplateKey,
   prepTemplateForProjectType,
   resolveProjectEmailRecipient,

@@ -13,9 +13,9 @@
  *   • no email → send the self-contained prep text that carries the steps
  *     inline (auto_*_no_email), so phone-only customers still get prep.
  *
- * "Flea only for now": PREP_CONFIG carries bed bug / cockroach too (their
- * templates already exist), but the Communications route allow-lists flea —
- * enabling another pest is a one-line change there.
+ * The Communications route allow-lists every PREP_CONFIG pest (flea, bed
+ * bug, cockroach) — see admin-communications.js. Wire a new pest by adding
+ * its config here.
  */
 
 const db = require('../models/db');
@@ -23,7 +23,7 @@ const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { resolveProjectEmailRecipient } = require('./project-email');
+const { resolveProjectEmailRecipient, ensureServicePrepToken, markServicePrepSent } = require('./project-email');
 const { portalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
@@ -61,9 +61,9 @@ function isSupportedPestType(pestType) {
 }
 
 // Soonest upcoming visit of this pest family, so the emailed guide's "Service
-// date" row references the real appointment. Blank (optional field) when there
-// is no matching upcoming visit.
-async function nextServiceDate(customerId, serviceKeyword) {
+// date" row references the real appointment and the prep token can hang off
+// the visit row. Null when there is no matching upcoming visit.
+async function nextUpcomingVisit(customerId, serviceKeyword) {
   try {
     const row = await db('scheduled_services')
       .where({ customer_id: customerId })
@@ -74,11 +74,11 @@ async function nextServiceDate(customerId, serviceKeyword) {
       // email would say "To be confirmed" despite a real upcoming appointment.
       .where('scheduled_date', '>=', etDateString())
       .orderBy('scheduled_date', 'asc')
-      .first('scheduled_date');
-    return row?.scheduled_date ? formatDisplayDate(row.scheduled_date, { fallback: '' }) : '';
+      .first('id', 'scheduled_date');
+    return row || null;
   } catch (err) {
     logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customerId}: ${err.message}`);
-    return '';
+    return null;
   }
 }
 
@@ -90,7 +90,20 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
     // service_date is a REQUIRED prep-template var (PREP_REQUIRED in
     // 20260526000014) — sendTemplate rejects an empty one. Fall back to a
     // non-empty placeholder when the customer has no matching upcoming visit.
-    const serviceDate = (await nextServiceDate(customer.id, config.serviceKeyword)) || 'To be confirmed';
+    const visit = await nextUpcomingVisit(customer.id, config.serviceKeyword);
+    const serviceDate = (visit?.scheduled_date
+      ? formatDisplayDate(visit.scheduled_date, { fallback: '' }) : '') || 'To be confirmed';
+    // Tokened public prep page when a real visit exists to hang it on; a
+    // customer with no matching upcoming visit keeps the portal link (there
+    // is no appointment for the page to describe). Mint fails soft.
+    let prepUrl = portalVisitsUrl;
+    if (visit?.id) {
+      try {
+        prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(visit.id, config.emailTemplateKey)}`);
+      } catch (tokenErr) {
+        logger.warn(`[prep-guide-sender] prep token mint failed for service ${visit.id}: ${tokenErr.message}`);
+      }
+    }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: config.emailTemplateKey,
       to: recipient.email,
@@ -109,11 +122,21 @@ async function sendPrepEmail({ customer, recipient, firstName, config }) {
         service_date: serviceDate,
         property_address: address,
         customer_portal_url: portalVisitsUrl,
-        prep_url: portalVisitsUrl,
+        prep_url: prepUrl,
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
       },
     });
+    if (result?.sent && visit?.id) {
+      // Confirmed delivery: stamp the tracker's prep_sent_at proof and
+      // align the rendered guide to what THIS email delivered. The token
+      // is minted before the send, so only a confirmed send moves these.
+      try {
+        await markServicePrepSent(visit.id, config.emailTemplateKey);
+      } catch (stampErr) {
+        logger.warn(`[prep-guide-sender] prep_sent_at stamp failed for service ${visit.id}: ${stampErr.message}`);
+      }
+    }
     return !!result?.sent;
   } catch (err) {
     // Sanitized: never log err.message — provider errors can carry the email.
