@@ -2507,8 +2507,15 @@ export default function DispatchPageV2({
             className="max-w-4xl mx-auto my-6 px-4"
             onClick={(e) => e.stopPropagation()}
           >
+            {/* cancelled/no_show retirements aren't "closed" to
+                projectCompletionIsClosed (it only knows completed/closed) —
+                gate the handoff on the terminal visit set too, or the pill
+                reopens appointment actions for a dead visit (Codex r7 P2). */}
             {isMobile && continueProjectService
-              && !projectCompletionIsClosed(continueProjectService) && (
+              && !projectCompletionIsClosed(continueProjectService)
+              && !TERMINAL_VISIT_STATUSES.has(
+                String(continueProjectService.status),
+              ) && (
               <div className="flex justify-end mb-2">
                 <button
                   type="button"
@@ -2672,11 +2679,28 @@ export default function DispatchPageV2({
                 : s,
             );
           }}
-          onRescheduled={() => {
-            fetchSchedule(date);
+          onRescheduled={async () => {
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);
+            const fresh = await fetchSchedule(date);
+            // Re-seat (or retire) the continue snapshot off the refreshed
+            // day payload (Codex r7 P2): a rain-out/reschedule moves the
+            // visit, and a day-miss would otherwise keep serving the old
+            // date/status through the Details pill.
+            setContinueProjectService((s) => {
+              if (
+                !s
+                || !detailService
+                || String(s.id) !== String(detailService.id)
+              ) {
+                return s;
+              }
+              const row = (fresh?.services || []).find(
+                (r) => String(r.id) === String(s.id),
+              );
+              return row || null;
+            });
           }}
         />
       )}
@@ -2694,7 +2718,12 @@ export default function DispatchPageV2({
             if (Number(amount || 0) <= 0) {
               setCheckoutService(null);
               setDetailService(null);
-              setCompletingService({
+              // Route through handleComplete, not straight to the generic
+              // CompletionPanel: project-backed visits (WDO/cert) must land
+              // in their project lanes — /complete rejects them (Codex r7
+              // P1). Pest visits take the same setCompletingService path
+              // as before.
+              handleComplete({
                 ...svc,
                 checkoutInvoiceId: invoiceId,
                 checkoutInvoiceToken: invoiceToken,
@@ -2745,7 +2774,9 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            setCompletingService(svc);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            handleComplete(svc);
             fetchSchedule(date);
           }}
           onChargeSuccess={async () => {
@@ -2763,7 +2794,9 @@ export default function DispatchPageV2({
             setDetailService(null);
             const fresh = await fetchSchedule(date);
             const updated = fresh?.services?.find((s) => s.id === svc.id);
-            setCompletingService(updated ? { ...updated, ...svc } : svc);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            handleComplete(updated ? { ...updated, ...svc } : svc);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
             // Cash / Check tender marked the pre-minted invoice paid server-side;
@@ -2779,7 +2812,9 @@ export default function DispatchPageV2({
             setDetailService(null);
             const fresh = await fetchSchedule(date);
             const updated = fresh?.services?.find((s) => s.id === svc.id);
-            setCompletingService(updated ? { ...updated, ...svc } : svc);
+            // Same project-backed routing as the primary Complete action
+            // (Codex r7 P1).
+            handleComplete(updated ? { ...updated, ...svc } : svc);
           }}
         />
       )}
@@ -2803,7 +2838,9 @@ export default function DispatchPageV2({
               const updated = fresh?.services?.find((s) => s.id === svc.id);
               if (updated) setEditingService(updated);
             } else {
-              setCompletingService(svc);
+              // Same project-backed routing as the primary Complete action
+              // (Codex r7 P1).
+              handleComplete(svc);
             }
           }}
         />
