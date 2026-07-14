@@ -2365,6 +2365,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       // gated on GATE_CUSTOMER_PROPERTIES: the table is migration-backfilled
       // regardless of the flag; syncPrimaryAddress is a no-op when no primary
       // row exists.
+      let emailSync = null;
       try {
         await db.transaction(async (trx) => {
           // Serialize overlapping address edits on the same customer: the row
@@ -2382,6 +2383,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // address (matching rules in the fan-out service header).
             await require('../services/customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedAfter }, trx);
           }
+          if (updates.email !== undefined) {
+            // Email has the same snapshot problem (leads.email,
+            // estimates.customer_email, the newsletter subscription), and a
+            // CHANGED email also answers any open email read-back card for
+            // this customer's calls. Diff-gated inside the service — an
+            // unchanged resave is a no-op, so an incidental full-form save
+            // never resolves a review card by accident.
+            emailSync = await require('../services/customer-email-fanout').propagateCustomerEmailChange(
+              { before: lockedBefore, after: lockedAfter, source: 'Customer 360 edit' }, trx
+            );
+          }
         });
       } catch (e) {
         if (e && e.code === '23505') {
@@ -2391,6 +2403,13 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           });
         }
         return next(e);
+      }
+      if (emailSync?.pendingConfirmation) {
+        // The moved DOI row's confirmation went to the old typo — re-send to
+        // the corrected address now that the edit is committed
+        // (fire-and-forget; the helper stamps confirmation_sent_at on
+        // success and never throws).
+        void require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation);
       }
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {
