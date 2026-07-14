@@ -71,6 +71,9 @@ const TURF_PRICED_SERVICES = new Set(['LAWN', 'OT_LAWN', 'TOPDRESS', 'DETHATCH',
 // Kill switch: TURF_COUNTY_PRIOR_DISABLED=1 (no deploy).
 const TURF_COUNTY_PRIOR_RATIO = 0.5;
 const TURF_COUNTY_PRIOR_MIN_CEILING_SF = 500;
+// Association-aggregate dimension ceiling — mirrors the lookup's own
+// building/lot caps (COMMERCIAL_BUILDING_SQFT_MAX / LOT_SQFT_MAX = 200k).
+const AGGREGATE_DIM_CAP_SQFT = 200000;
 const turfCountyPriorDisabled = () => ['1', 'true'].includes(String(process.env.TURF_COUNTY_PRIOR_DISABLED || '').toLowerCase());
 // Shared-turf residential types whose treatable lawn legitimately spans
 // beyond their own parcel — one pattern for the parcel turf cap and the
@@ -1289,6 +1292,21 @@ function applySatelliteAttachmentType(rc, ai) {
 }
 
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null) {
+  // Association aggregate dimensions survive in _parcel even when a
+  // same-weight PAO record (a single condo unit) won the merge — prefer them
+  // for EVERY downstream read (footprint, turf ceiling, termite boxes), not
+  // just unitCount, or the commercial profile prices off one unit while
+  // showing the association's unit count (codex P2 r2 #2721). Capped like
+  // the lookup's own record caps.
+  if (rc?._parcel?.aggregated) {
+    const aggLiving = Math.min(Number(rc._parcel.livingAreaSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    const aggLot = Math.min(Number(rc._parcel.lotSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    rc = {
+      ...rc,
+      squareFootage: Math.max(Number(rc.squareFootage) || 0, aggLiving) || rc.squareFootage,
+      lotSize: Math.max(Number(rc.lotSize) || 0, aggLot) || rc.lotSize,
+    };
+  }
   // Record-bearing lookups carry the audit on the cached record (_addressAudit,
   // like _floodZone); record-less lookups pass it alongside since there is no
   // record to ride.
@@ -1434,8 +1452,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // gates for trenching/pre-slab, and these reach pricing only through
     // the operator-visible, editable boxes (manual entries override).
     estimatedPerimeterLF,
-    estimatedAtticSqFt: footprintSf > 0 ? footprintSf : null,
-    estimatedSlabSqFt: footprintSf > 0 ? footprintSf : null,
+    // Same stories guard as the perimeter: an unknown-stories aggregate's
+    // footprintSf is the FULL summed living area — a 100k+ sf attic/slab
+    // prefill in the termite boxes would be wildly wrong (codex P2 r2).
+    estimatedAtticSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
+    estimatedSlabSqFt: footprintSf > 0 && !aggregateStoriesUnknown ? footprintSf : null,
 
     // ── CONSTRUCTION (merged property record + satellite AI) ──
     yearBuilt: rc?.yearBuilt || null,

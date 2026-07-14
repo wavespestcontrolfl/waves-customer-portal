@@ -353,3 +353,95 @@ describe('codex round-1 hardening (#2721)', () => {
     expect(aggregateSitusVerdict(parcel, 'Tarpon Center Dr, Venice, FL 34285', 'rooftop')).toBe('keep');
   });
 });
+
+describe('codex round-2 hardening (#2721)', () => {
+  const { aggregateSitusVerdict } = aiPrivate;
+
+  test('interpolated verdict anchors to the RAW typed address, not the snapped canonical', () => {
+    const parcel = { aggregated: true, situsHouseNumbers: ['1535', '1555', '1575'] };
+
+    // Google snapped a nonexistent 1560 onto 1555 — the canonical says 1555
+    // (in-association) but the customer typed 1560: drop.
+    expect(aggregateSitusVerdict(
+      parcel,
+      '1555 Tarpon Center Dr, Venice, FL 34285',
+      'interpolated',
+      '1560 Tarpon Center Dr, Venice, FL 34285',
+    )).toBe('drop');
+    // Rooftop with the same snap: also a positive mismatch → drop.
+    expect(aggregateSitusVerdict(
+      parcel,
+      '1555 Tarpon Center Dr, Venice, FL 34285',
+      'rooftop',
+      '1560 Tarpon Center Dr, Venice, FL 34285',
+    )).toBe('drop');
+    // Typed address with no number → canonical anchors (old behavior).
+    expect(aggregateSitusVerdict(
+      parcel,
+      '1555 Tarpon Center Dr, Venice, FL 34285',
+      'interpolated',
+      'Tarpon Center Dr, Venice, FL 34285',
+    )).toBe('keep');
+  });
+
+  test('a living-only unit row with a land figure can NOT become the master/common row', async () => {
+    mockArcgis([
+      // Looks land-bearing but is a UNIT (living area, no livunits) — must
+      // not key PAO detail.
+      unitFeature(1555, 101, { livunits: null, lsqft: 5000 }),
+      unitFeature(1555, 102), unitFeature(1555, 103),
+      unitFeature(1555, 104), unitFeature(1555, 105),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.masterIsCommon).toBe(false);
+    expect(parcel.paoParcelId).toBeNull();
+  });
+
+  test('aggregate dimensions survive a PAO-won merge (profile prices the association, not one unit)', () => {
+    // Simulate the merged record a winning PAO unit record produces: unit
+    // dimensions on the record, aggregate facts only in _parcel.
+    const record = {
+      propertyType: 'Multifamily',
+      _source: 'hybrid',
+      squareFootage: 920,
+      lotSize: 0,
+      stories: 2,
+      unitCount: 1,
+      _raw: { landUse: 'Multifamily condo/HOA association — 150 units, 3 buildings (county aggregate)' },
+      _parcel: {
+        aggregated: true,
+        residentialUnits: 150,
+        buildingCount: 3,
+        livingAreaSqft: 122696,
+        lotSqft: 240741,
+      },
+    };
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.homeSqFt).toBe(122696);
+    expect(profile.lotSqFt).toBe(200000); // capped like the record caps
+    expect(profile.unitCount).toBe(150);
+    expect(profile.footprint).toBe(Math.round(122696 / 2));
+  });
+
+  test('unknown-stories aggregates get NO attic/slab prefill either', () => {
+    const record = {
+      propertyType: 'Multifamily',
+      _source: 'county',
+      squareFootage: 122696,
+      lotSize: 200000,
+      stories: null,
+      _parcel: { aggregated: true, residentialUnits: 150, buildingCount: 3 },
+    };
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.estimatedPerimeterLF).toBeNull();
+    expect(profile.estimatedAtticSqFt).toBeNull();
+    expect(profile.estimatedSlabSqFt).toBeNull();
+  });
+});

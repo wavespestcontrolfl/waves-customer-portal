@@ -946,6 +946,9 @@ function attachParcelMeta(merged, parcel) {
     aggregateUnitParcels: parcel.aggregateUnitParcels ?? undefined,
     buildingCount: parcel.buildingCount ?? undefined,
     groundAreaSqft: parcel.groundAreaSqft ?? undefined,
+    // Association-level living area — survives a merge a PAO unit record
+    // wins, so the profile can prefer the aggregate dimensions (codex P2 r2).
+    livingAreaSqft: parcel.livingAreaSqft ?? undefined,
   };
   return merged;
 }
@@ -1334,8 +1337,12 @@ function situsHouseNumberMismatch(searchAddress, situsAddress) {
 // outside the building set; interpolated points (a guess along the street)
 // additionally require positive membership — mirroring the single-parcel
 // exact-match rule.
-function aggregateSitusVerdict(parcel, searchAddress, gisPrecision) {
-  const typedNumber = leadingHouseNumber(searchAddress);
+function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress) {
+  // Anchor to the ORIGINALLY TYPED address when one is supplied — Google can
+  // snap a mistyped number onto one of the association's buildings, and the
+  // canonical (snapped) address would then read as in-association (codex P2
+  // r2 #2721). Same rule as situsHouseNumberExactMatch.
+  const typedNumber = leadingHouseNumber(typedAddress) || leadingHouseNumber(searchAddress);
   const buildingNumbers = Array.isArray(parcel?.situsHouseNumbers)
     ? parcel.situsHouseNumbers.map(String)
     : [];
@@ -1541,7 +1548,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
       }
     }
     if (parcel && parcel.aggregated === true) {
-      if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision) === 'drop') {
+      if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address) === 'drop') {
         logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
         parcel = null;
       }

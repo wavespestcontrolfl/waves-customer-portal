@@ -170,8 +170,13 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   // GENUINE common row may key PAO detail fetches — advertising an arbitrary
   // unit's parcel id would let a by-parcel unit record collapse the aggregate
   // back to single-unit dimensions on merge ties (codex P2 #2721).
-  const commonRow = rows.find((row) => (row.parsed.lotSqft || 0) > 0 && !(row.parsed.residentialUnits > 0))
-    || rows.find((row) => !(row.parsed.residentialUnits > 0) && !(row.parsed.livingAreaSqft > 0))
+  // A common row must carry NO unit/living facts at all — a living-only
+  // unit row with a land figure must never become the "master" and expose
+  // its unit parcel id to the by-parcel PAO lookup (codex P2 r2 #2721).
+  const isCommonRow = (row) => !(row.parsed.residentialUnits > 0)
+    && !((row.parsed.livingAreaSqft || 0) > 0);
+  const commonRow = rows.find((row) => isCommonRow(row) && (row.parsed.lotSqft || 0) > 0)
+    || rows.find(isCommonRow)
     || null;
   const masterRow = commonRow || rows[0];
   const polyArea = polygonAreaSqft(masterRow.rings);
