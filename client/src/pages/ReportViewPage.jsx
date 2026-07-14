@@ -4,6 +4,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -2255,12 +2256,42 @@ function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = t
  */
 // Bait station map (station-map-v1) — numbered station pins over the live
 // satellite image, colored by this visit's per-station checks. Data-driven:
-// the server only marks stationMap available for termite-bait-typed visits
-// on properties with mapped stations, so the card is inert everywhere else.
-// Live web only — the PDF/static render has no satellite basemap (provider
-// ToS), so the render site skips it there rather than painting pins on a
-// blank frame. Copy rule: this card states NUMBERS only; activity claims
+// the server only marks stationMap available for station-typed visits
+// (termite or rodent — `program` on the context) on properties with mapped
+// stations, so the card is inert everywhere else. Live web only — the
+// PDF/static render has no satellite basemap (provider ToS), so the render
+// site skips it there rather than painting pins on a blank frame. Copy
+// rule: this card states NUMBERS only; activity/consumption claims
 // (including the zero state) belong to the typed report's ratified wording.
+// Rodent copy follows the owner wording rules: exterior bait consumption
+// language, never anything implying interior infestation.
+const STATION_CARD_PROGRAM_META = {
+  termite: {
+    title: 'Bait station map',
+    intro: 'Numbered pins show where your termite bait stations sit around the home. Colors reflect this visit.',
+    ariaLabel: 'Termite bait station locations marked on a satellite view of the property',
+    activityLegend: 'Termite activity observed',
+    activitySummary: 'with termite activity',
+  },
+  rodent: {
+    title: 'Rodent bait station map',
+    intro: 'Numbered pins show where the exterior rodent bait stations sit around the home. Colors reflect this visit.',
+    ariaLabel: 'Exterior rodent bait station locations marked on a satellite view of the property',
+    activityLegend: 'Bait consumption observed',
+    activitySummary: 'with bait consumption',
+  },
+  // Trapping copy states factual capture/removal counts only — never
+  // absence or elimination claims (BANNED_CUSTOMER_COPY), and no
+  // exterior-pressure phrasing (that rule is scoped to bait stations;
+  // traps legitimately sit interior too).
+  trapping: {
+    title: 'Rodent trap map',
+    intro: 'Numbered pins show where the traps in your rodent program are placed. Colors reflect this visit.',
+    ariaLabel: 'Rodent trap locations marked on a satellite view of the property',
+    activityLegend: 'Capture recorded',
+    activitySummary: 'with captures recorded',
+  },
+};
 const STATION_STATUS_META = {
   ok: { color: '#10B981', label: 'Checked — no activity' },
   activity: { color: '#DC2626', label: 'Termite activity observed' },
@@ -2269,7 +2300,19 @@ const STATION_STATUS_META = {
 };
 const STATION_ON_FILE_META = { color: '#64748B', label: 'On file (not checked this visit)' };
 
-function stationSummaryLine(summary) {
+function stationStatusMeta(status, programMeta) {
+  const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
+  if (status === 'activity') return { ...base, label: programMeta.activityLegend };
+  if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.rodent) {
+    return { ...base, label: 'Checked — no consumption' };
+  }
+  if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.trapping) {
+    return { ...base, label: 'Checked — no capture' };
+  }
+  return base;
+}
+
+function stationSummaryLine(summary, programMeta) {
   if (!summary || !summary.total) return null;
   const parts = [];
   if (summary.checked > 0) {
@@ -2277,7 +2320,7 @@ function stationSummaryLine(summary) {
   } else {
     parts.push(`${summary.total} station${summary.total === 1 ? '' : 's'} on file`);
   }
-  if (summary.activity > 0) parts.push(`${summary.activity} with termite activity`);
+  if (summary.activity > 0) parts.push(`${summary.activity} ${programMeta.activitySummary}`);
   if (summary.serviced > 0) parts.push(`${summary.serviced} serviced`);
   if (summary.inaccessible > 0) parts.push(`${summary.inaccessible} not accessible`);
   return parts.join(' · ');
@@ -2286,6 +2329,7 @@ function stationSummaryLine(summary) {
 function StationMapCard({ stationMap, sectionId = 'station-map' }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
+  const programMeta = STATION_CARD_PROGRAM_META[stationMap.program] || STATION_CARD_PROGRAM_META.termite;
   const width = stationMap.image.width || 640;
   const height = stationMap.image.height || 340;
   const legendKeys = [];
@@ -2295,25 +2339,26 @@ function StationMapCard({ stationMap, sectionId = 'station-map' }) {
   });
   const legend = legendKeys.map((key) => (key === 'on_file'
     ? { key, ...STATION_ON_FILE_META }
-    : { key, ...STATION_STATUS_META[key] }));
-  const summaryLine = stationSummaryLine(stationMap.summary);
+    : { key, ...stationStatusMeta(key, programMeta) }));
+  const summaryLine = stationSummaryLine(stationMap.summary, programMeta);
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="station-map">
-      <h2>Bait station map</h2>
+      <h2>{programMeta.title}</h2>
       <p style={{ fontSize: 15, color: 'var(--muted)', lineHeight: 1.5, margin: '0 0 12px' }}>
-        Numbered pins show where your termite bait stations sit around the home.
-        Colors reflect this visit.
+        {programMeta.intro}
       </p>
       <div style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1px solid var(--line)' }}>
         <svg
           viewBox={`0 0 ${width} ${height}`}
           role="img"
-          aria-label="Termite bait station locations marked on a satellite view of the property"
+          aria-label={programMeta.ariaLabel}
           style={{ display: 'block', width: '100%' }}
         >
           <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
           {stations.map((station) => {
-            const meta = STATION_STATUS_META[station.status] || STATION_ON_FILE_META;
+            const meta = STATION_STATUS_META[station.status]
+              ? stationStatusMeta(station.status, programMeta)
+              : STATION_ON_FILE_META;
             const cx = station.cx * width;
             const cy = station.cy * height;
             return (
@@ -5147,7 +5192,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // hides it too (the "Where we protected" diagram replaces the lettered map).
   const hideCoverageCard = data.serviceLine === 'lawn'
     || /tree|shrub/.test(String(data.serviceLine || ''))
-    || Boolean(data.pestReportV2);
+    || Boolean(data.pestReportV2)
+    // Mosquito V2's habitat diagram replaces the lettered map the same way.
+    || Boolean(data.mosquitoReportV2);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
@@ -8230,6 +8277,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
+        {/* Mosquito Report V2 — yard-usability dashboard, same slot and same
+            suppression rules as Pest V2. Mutually exclusive with pestReportV2
+            (one service line per report), so the visit-summary anchor is never
+            duplicated. */}
+        {data.mosquitoReportV2 && (
+          <div id="visit-summary">
+            <MosquitoReportV2Section data={data.mosquitoReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+          </div>
+        )}
+
         {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
@@ -8256,10 +8313,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </>
         )}
 
-        {/* Pest V2 owns the summary slot (the protection-first dashboard above
-            carries the id="visit-summary" anchor), so the legacy Visit Summary
-            paragraph is suppressed for pest V2 to avoid showing the report twice. */}
-        {!data.pestReportV2 && (
+        {/* Pest/Mosquito V2 own the summary slot (the dashboard above carries
+            the id="visit-summary" anchor), so the legacy Visit Summary
+            paragraph is suppressed for them to avoid showing the report twice. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
@@ -8319,9 +8376,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
-        {/* Pest V2 surfaces the pressure/activity reading in the dashboard hero,
-            so the standalone meter is suppressed for pest V2 (no double report). */}
-        {!data.pestReportV2 && (data.activity
+        {/* Pest/Mosquito V2 surface the pressure/activity reading in the dashboard
+            hero, so the standalone meter is suppressed for them (no double report). */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && (data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
 
@@ -8386,9 +8443,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             data={data}
             hasProducts={hasApplications}
             hasVisitTimeline={normalizedVisitTimeline.enabled}
-            hasPestPressure={hasPestPressure && !data.pestReportV2}
+            hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
             hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasActivity={Boolean(data.activity) && !data.pestReportV2 && !data.mosquitoReportV2}
             hasCoverageMap={!hideCoverageCard}
           />
         )}
@@ -8526,7 +8583,7 @@ export default function ReportViewPage() {
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only.
-    const staffToken = localStorage.getItem('waves_admin_token') || localStorage.getItem('adminToken');
+    const staffToken = localStorage.getItem('waves_admin_token');
     fetch(dataUrl, {
       cache: 'no-store',
       headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,

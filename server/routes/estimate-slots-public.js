@@ -82,6 +82,7 @@ const {
   createRecurringCardSetupIntentForEstimate,
   resolveRecurringCardPolicyForEstimate,
 } = require('../services/recurring-card-on-file');
+const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
 
 const TOKEN_RE = /^[a-f0-9]{64}$|^[a-z0-9-]{3,80}$/i;
 // Accept both the legacy admin slug tokens (nameSlug-8hex) AND the new
@@ -911,6 +912,10 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
+    // The customer reached the save-a-card step — the only local evidence of
+    // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
+    // payment-step-abandoned follow-up stage.
+    await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.CARD_HOLD, intent.setupIntentId);
     return res.json({
       success: true,
       clientSecret: intent.clientSecret,
@@ -1003,6 +1008,10 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }
+    // The customer reached the save-a-card step — the only local evidence of
+    // it (the SetupIntent lives in Stripe). Non-throwing; feeds the
+    // payment-step-abandoned follow-up stage.
+    await recordCheckoutStepReached(estimate.id, CHECKOUT_KIND.RECURRING_CARD, intent.setupIntentId);
     return res.json({
       success: true,
       clientSecret: intent.clientSecret,

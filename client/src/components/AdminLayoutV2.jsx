@@ -183,6 +183,7 @@ export default function AdminLayoutV2() {
   const location = useLocation();
   const isMobile = useIsMobile();
   const [user, setUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Restore route if we just returned from WavesPay (iOS often evicts the
@@ -202,16 +203,36 @@ export default function AdminLayoutV2() {
       navigate("/admin/login", { replace: true });
       return;
     }
-    const u = localStorage.getItem("waves_admin_user");
-    if (u) setUser(JSON.parse(u));
-    adminFetch("/admin/auth/me").catch((err) => {
-      if (err?.status === 401) {
-        localStorage.removeItem("waves_admin_token");
-        localStorage.removeItem("waves_admin_user");
-        refetchFlags();
-        navigate("/admin/login", { replace: true });
-      }
-    });
+    adminFetch("/admin/auth/me")
+      .then((profile) => {
+        if (!profile) {
+          setAuthStatus("error");
+          return;
+        }
+        if (profile.mustChangePassword) {
+          localStorage.removeItem("waves_admin_token");
+          localStorage.removeItem("waves_admin_user");
+          refetchFlags().catch(() => {});
+          navigate("/admin/forgot-password", {
+            replace: true,
+            state: { email: profile.email, resetRequired: true },
+          });
+          return;
+        }
+        setUser(profile);
+        setAuthStatus("ready");
+        localStorage.setItem("waves_admin_user", JSON.stringify(profile));
+      })
+      .catch((err) => {
+        if (err?.status === 401) {
+          localStorage.removeItem("waves_admin_token");
+          localStorage.removeItem("waves_admin_user");
+          refetchFlags().catch(() => {});
+          navigate("/admin/login", { replace: true });
+          return;
+        }
+        setAuthStatus("error");
+      });
   }, [navigate]);
 
   // Auto-close sidebar on route change (mobile) + when viewport grows to desktop.
@@ -232,7 +253,7 @@ export default function AdminLayoutV2() {
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
-    refetchFlags();
+    refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };
 
@@ -629,7 +650,15 @@ export default function AdminLayoutV2() {
         className="admin-main"
         ref={mainRef}
       >
-        <Outlet />
+        {authStatus === "ready" ? (
+          <Outlet context={{ user }} />
+        ) : (
+          <div role={authStatus === "error" ? "alert" : "status"}>
+            {authStatus === "error"
+              ? "Unable to verify staff access. Refresh to try again."
+              : "Verifying staff access…"}
+          </div>
+        )}
       </div>
 
       {/* Mobile bottom tab bar */}

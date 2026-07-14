@@ -325,6 +325,16 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Payment-step-abandonment follow-up EMAIL — emails customers who reached
+  // the save-a-card step of accepting an estimate (Auto Pay card on a
+  // recurring accept, or the one-time card hold; estimate_checkout_events
+  // row) but never completed the acceptance. Successor to the deposit-
+  // abandonment recovery above — deposits are retired from the accept flow.
+  // Customer-facing auto-send: explicit opt-in in EVERY environment. Until
+  // the gate is on, the follow-up cron only logs candidate counts (shadow)
+  // and never claims or sends.
+  paymentStepFollowup: process.env.GATE_PAYMENT_STEP_FOLLOWUP === 'true',
+
   // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
   // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
   // it texts ADAM_PHONE, never a customer — but the owner paused health

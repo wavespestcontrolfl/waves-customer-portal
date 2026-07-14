@@ -17,6 +17,7 @@
  *   3. socket.handshake.headers.authorization  — Bearer JWT fallback
  *
  * Outcomes:
+ *   - maintenance + Staff JWT → reject with code STAFF_MAINTENANCE
  *   - missing token        → reject with code AUTH_FAILED
  *   - JWT invalid          → reject with code AUTH_FAILED
  *   - JWT expired          → reject with code TOKEN_EXPIRED
@@ -61,6 +62,11 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const {
+  isSignedStaffJwt,
+  isStaffMaintenanceEnabled,
+} = require('../middleware/staff-maintenance');
+const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 
 // Track tokens are 64-char lowercase hex — generated as
 // encode(gen_random_bytes(32), 'hex') in
@@ -99,6 +105,16 @@ function rejectionError(message, code) {
 
 async function socketAuth(socket, next) {
   const { jwtToken, trackToken } = extractAuth(socket);
+
+  // Leave customer JWT and public tracking sockets online during Phase-B
+  // maintenance, but reject any handshake carrying a valid Staff JWT before a
+  // technicians lookup or room join can occur.
+  if (isStaffMaintenanceEnabled() && isSignedStaffJwt(jwtToken)) {
+    return next(rejectionError(
+      'Staff access is temporarily unavailable',
+      'STAFF_MAINTENANCE',
+    ));
+  }
 
   // Track-token path: public TrackPage. Doesn't go through jwt.verify;
   // the token is opaque + non-JWT (random hex) and is matched against
@@ -149,6 +165,14 @@ async function socketAuth(socket, next) {
     return next(rejectionError('Invalid token', 'AUTH_FAILED'));
   }
 
+  if (decoded.type === 'refresh') {
+    return next(rejectionError('Invalid token type', 'AUTH_FAILED'));
+  }
+
+  if (decoded.technicianId && (!isStaffAccessToken(decoded) || decoded.scope === 'terminal')) {
+    return next(rejectionError('Invalid token type', 'AUTH_FAILED'));
+  }
+
   if (decoded.technicianId) {
     // Staff (admin or technician). Verify the row still exists, is
     // active, and the JWT's role claim still matches the DB. See the
@@ -158,7 +182,7 @@ async function socketAuth(socket, next) {
     try {
       tech = await db('technicians')
         .where({ id: decoded.technicianId })
-        .first('id', 'active', 'role');
+        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
     } catch (err) {
       logger.error(`[socket-auth] technicians lookup failed: ${err.message}`);
       // Closed-fail: a DB blip shouldn't grant a stale token access.
@@ -167,6 +191,10 @@ async function socketAuth(socket, next) {
 
     if (!tech || !tech.active) {
       logger.warn(`[socket-auth] rejecting staff token: tech_id=${decoded.technicianId} active=${tech?.active}`);
+      return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
+    }
+
+    if (!staffTokenVersionMatches(decoded, tech) || tech.must_change_password) {
       return next(rejectionError('Identity revoked', 'IDENTITY_REVOKED'));
     }
 
@@ -188,6 +216,8 @@ async function socketAuth(socket, next) {
 
     socket.userType = tech.role;       // 'admin' | 'technician', sourced from DB
     socket.userId = decoded.technicianId;
+    socket.staffTokenVersion = decoded.tokenVersion;
+    socket.staffTokenExpiresAt = Number.isInteger(decoded.exp) ? decoded.exp * 1000 : null;
     return next();
   }
 

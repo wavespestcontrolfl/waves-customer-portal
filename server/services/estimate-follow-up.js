@@ -8,6 +8,10 @@
  *   - Started the deposit payment step but never completed it (2-72h after
  *     the last pending PaymentIntent; gated by
  *     GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS — shadow-logs counts until on)
+ *   - Reached the save-a-card accept step (Auto Pay card / one-time hold)
+ *     but never accepted (2-72h after the last estimate_checkout_events
+ *     touch; email-only; gated by GATE_PAYMENT_STEP_FOLLOWUP —
+ *     shadow-logs counts until on)
  *
  * Runs via cron every 2 hours. SMS is primary, email is a second channel —
  * each stage's flag flips once either channel attempts so we don't re-nudge.
@@ -488,6 +492,290 @@ async function checkDepositAbandoned(now = new Date()) {
   return sent;
 }
 
+// ── Stage 6: reached the save-a-card step but never accepted ────────────
+// The card-on-file accept flow (recurring Auto Pay card / one-time card
+// hold) replaced the retired deposit step. Its SetupIntents live only in
+// Stripe; the two intent endpoints stamp estimate_checkout_events, and that
+// row's updated_at ("last time the customer touched the payment step") is
+// this stage's 2–72h window anchor — same semantics the deposit stage got
+// from PaymentIntent reuse. EMAIL-ONLY: the estimate follow-up SMS lane is
+// owner-paused. Gated by GATE_PAYMENT_STEP_FOLLOWUP; until it's on,
+// candidates are shadow-counted and nothing is claimed or sent.
+const PAYMENT_STEP_FOLLOWUP_WINDOW = { minAgeHours: 2, maxAgeHours: 72 };
+const PAYMENT_STEP_RULE_KEY = "payment_step_abandoned";
+const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
+
+// Atomic claim on the estimate_followup_sends ledger: the unique
+// (estimate_id, rule_key) index means exactly one concurrent cron wins the
+// insert. The INSERT selects FROM estimates gated on archived_at, so an
+// archive landing between the candidate read and this claim blocks the send
+// in the same statement — the same at-claim-time re-check the boolean
+// claimStage path does (codex 2729 r2). A send failure deletes the row so
+// the next tick retries — the ledger row is the claim AND the attribution
+// record.
+async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger) {
+  const result = await db.raw(
+    `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
+     SELECT id, ?, ?, ?::jsonb FROM estimates
+     WHERE id = ? AND archived_at IS NULL
+     ON CONFLICT (estimate_id, rule_key) DO NOTHING
+     RETURNING id`,
+    [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId],
+  );
+  return (result?.rows?.length || 0) === 1;
+}
+
+async function releaseFollowupSend(estimateId, ruleKey) {
+  await db("estimate_followup_sends")
+    .where({ estimate_id: estimateId, rule_key: ruleKey })
+    .del();
+}
+
+// Fail-CLOSED re-check that the abandoned payment step is still the thing
+// standing between this customer and acceptance. Runs the SAME policy
+// resolvers the intent endpoints ran (lazy-required to avoid loading the
+// route module at boot): an estimate that expired, went invoice-mode,
+// gained a saved consented card, or otherwise no longer owes a card must
+// not get a "finish saving your card" email. Any resolver error skips the
+// send — an unprompted email is never sent on unverifiable policy.
+async function paymentStepStillRequiresCard(est, checkoutKind) {
+  try {
+    const {
+      isEstimateAcceptActive,
+      isStructuralOneTimeOnlyEstimate,
+      resolveEstimateInvoiceMode,
+      buildPricingBundle,
+      resolveEstimateQuoteRequirement,
+      estimateTrenchingReviewRequired,
+      reconcileFrozenMembershipSnapshot,
+      resolveAcceptOneTimeTotal,
+      commercialAcceptDepositExempt,
+      isCommercialAutoAcceptEstimate,
+      matchAcceptCustomerByPhone,
+    } = require("../routes/estimate-public");
+    const { commercialLowConfidenceRange } = require("./estimate-delivery-options");
+    const { resolveRecurringCardPolicyForEstimate } = require("./recurring-card-on-file");
+    const { resolveCardHoldPolicy } = require("./estimate-card-holds");
+    const { buildEstimateMembershipContext } = require("./estimate-membership-context");
+
+    if (!isEstimateAcceptActive(est)) return false;
+    // Both intent endpoints reconcile the frozen membership snapshot before
+    // any pricing/policy read (codex 2729 r3): a stale "existing customer"
+    // snapshot would make this re-check disagree with the live endpoint in
+    // either direction (skip a customer the endpoint would still card, or
+    // vice versa). Mutates est.estimate_data in place, so estData parses
+    // AFTER it — same order as the endpoints.
+    await reconcileFrozenMembershipSnapshot(est);
+    let estData = {};
+    try {
+      estData = typeof est.estimate_data === "string"
+        ? JSON.parse(est.estimate_data)
+        : (est.estimate_data || {});
+    } catch {
+      estData = {};
+    }
+    // Mirror the intent endpoints' self-serve gates (codex 2729 r2): an
+    // estimate edited into quote-required or trenching-review state after
+    // the customer touched the payment step can no longer be accepted
+    // online — the endpoints 409 before minting, so don't email the
+    // customer back into a card step that's now a dead end.
+    if (estimateTrenchingReviewRequired(estData)) return false;
+    const pricingBundle = await buildPricingBundle(est);
+    if (resolveEstimateQuoteRequirement(pricingBundle, estData).quoteRequired) return false;
+    // Contact gate, BOTH lanes (codex 2729 r2 + r3): recurring accept is
+    // phone-keyed (CUSTOMER_CONTACT_REQUIRED), and a required hold binds a
+    // slot/appointment, which accept also refuses without a customer/phone.
+    // Don't nudge an email-only estimate into a card step that can't
+    // complete online.
+    if (!est.customer_id && !est.customer_phone) return false;
+    const billByInvoice = resolveEstimateInvoiceMode(est, estData);
+    // The event kind records which accept lane the customer was in; a
+    // structurally one-time-only estimate can only ever be the hold lane.
+    const structurallyOneTime = isStructuralOneTimeOnlyEstimate(estData, est);
+    const oneTimeLane = checkoutKind === "card_hold" || structurallyOneTime;
+    if (oneTimeLane) {
+      // One-time availability (codex 2729 r3): the abandoned intent was a
+      // one_time request (the event kind proves it), and /card-hold-intent
+      // still 400s that request on a mixed estimate whose one-time choice
+      // is now hidden or unpriced — same predicate as the endpoint.
+      if (!structurallyOneTime) {
+        const oneTimeChoicePrice = resolveAcceptOneTimeTotal(est, pricingBundle);
+        const canChooseOneTime = !!est.show_one_time_option && oneTimeChoicePrice > 0;
+        if (!canChooseOneTime) return false;
+      }
+      const hold = resolveCardHoldPolicy({
+        treatAsOneTime: true,
+        billByInvoice,
+        paymentMethodPreference: null,
+      });
+      if (!hold.required) return false;
+      // Mirror the intent endpoint's saved-card auto-satisfy (codex 2729
+      // r1): resolveCardHoldPolicy is config-level only — the endpoints
+      // additionally 409 ('saved_method') when a consented chargeable card
+      // already covers the booking. A customer who gained a saved card
+      // after abandoning the hold step owes no capture, so never nudge
+      // them to save one. Customer resolution mirrors the endpoint
+      // (customer_id, else accept's phone match). Errors fall to the outer
+      // catch → fail closed.
+      const { findConsentedChargeableCard } = require("./payment-method-consents");
+      let holdCustomerId = est.customer_id || null;
+      if (!holdCustomerId && est.customer_phone) {
+        const { match } = await matchAcceptCustomerByPhone(est);
+        holdCustomerId = match?.id || null;
+      }
+      if (holdCustomerId) {
+        const savedCard = await findConsentedChargeableCard(holdCustomerId);
+        if (savedCard?.stripe_payment_method_id) return false;
+      }
+      return true;
+    }
+    // Commercial manual-billing exemption (codex 2729 r3): the SAME
+    // commercialAcceptDepositExempt predicate /recurring-card-intent 409s
+    // with 'commercial_manual_billing' — an estimate edited into an
+    // auto-priced commercial/manual-billing or site-confirmation-held state
+    // collects nothing at accept, so it owes no card nudge.
+    const lc = commercialLowConfidenceRange(estData);
+    if (commercialAcceptDepositExempt({
+      isCommercialAccept: isCommercialAutoAcceptEstimate(est),
+      siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+      treatAsOneTime: false,
+      billByInvoice,
+    })) return false;
+    const membership = await buildEstimateMembershipContext(est);
+    const policy = await resolveRecurringCardPolicyForEstimate({
+      estimate: est,
+      membership,
+      treatAsOneTime: false,
+      billByInvoice,
+      paymentMethodPreference: null,
+    });
+    return !!policy.required;
+  } catch (e) {
+    logger.warn(
+      `[est-followup] payment-step policy re-check failed for estimate ${est.id}: ${e.message}`,
+    );
+    return false;
+  }
+}
+
+async function checkPaymentStepAbandoned(now = new Date()) {
+  let sent = 0;
+  const nowMs = now.getTime();
+  // Latest touch per estimate. distinctOn keeps the row's kind (which accept
+  // lane the customer was in) — a plain groupBy/max would lose it.
+  const latestByEstimate = db("estimate_checkout_events")
+    .distinctOn("estimate_id")
+    .select("estimate_id", "kind", "updated_at")
+    .orderBy([
+      { column: "estimate_id" },
+      { column: "updated_at", order: "desc" },
+    ])
+    .as("ce");
+  const candidates = await db("estimates")
+    .join(latestByEstimate, "ce.estimate_id", "estimates.id")
+    .whereIn("estimates.status", ["sent", "viewed"])
+    .whereNull("estimates.archived_at")
+    // Email is this stage's ONLY channel.
+    .whereNotNull("estimates.customer_email")
+    .where("ce.updated_at", "<", new Date(nowMs - PAYMENT_STEP_FOLLOWUP_WINDOW.minAgeHours * 3600000))
+    .where("ce.updated_at", ">", new Date(nowMs - PAYMENT_STEP_FOLLOWUP_WINDOW.maxAgeHours * 3600000))
+    .whereNotExists(function excludeAlreadySent() {
+      this.select(db.raw("1"))
+        .from("estimate_followup_sends")
+        .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+        .where("estimate_followup_sends.rule_key", PAYMENT_STEP_RULE_KEY);
+    })
+    .select("estimates.*", "ce.kind as checkout_kind", "ce.updated_at as checkout_last_touch_at");
+
+  if (!candidates.length) return 0;
+  if (!isEnabled("paymentStepFollowup")) {
+    logger.info(
+      `[est-followup] Payment-step shadow: ${candidates.length} candidate(s), gate off — no sends`,
+    );
+    return 0;
+  }
+
+  for (const est of candidates) {
+    let claimed = false;
+    try {
+      const gate = await safetyGate(est, now);
+      if (gate.skip) {
+        logger.info(
+          `[est-followup] Payment-step skip ${est.id}: ${gate.reason}`,
+        );
+        continue;
+      }
+      if (!(await paymentStepStillRequiresCard(est, est.checkout_kind))) {
+        logger.info(
+          `[est-followup] Payment-step skip ${est.id}: card-no-longer-required`,
+        );
+        continue;
+      }
+      // Portal-wide email opt-out for customer-linked estimates — same gate
+      // the deposit stage applies. Fails CLOSED: an unreadable pref means no
+      // send this tick (email is the only leg), retry next tick.
+      if (est.customer_id) {
+        try {
+          const prefs = await db("notification_prefs")
+            .where({ customer_id: est.customer_id })
+            .first("email_enabled");
+          if (prefs?.email_enabled === false) {
+            logger.info(
+              `[est-followup] Payment-step skip ${est.id}: email disabled in prefs`,
+            );
+            continue;
+          }
+        } catch (err) {
+          logger.warn(
+            `[est-followup] Payment-step skip ${est.id}: prefs unverifiable: ${err.message}`,
+          );
+          continue;
+        }
+      }
+      if (!(await claimFollowupSend(est.id, PAYMENT_STEP_RULE_KEY, PAYMENT_STEP_TEMPLATE_KEY, {
+        kind: est.checkout_kind,
+        last_touch_at: est.checkout_last_touch_at,
+      }))) {
+        logger.info(`[est-followup] Payment-step skip ${est.id}: lost-claim`);
+        continue;
+      }
+      claimed = true;
+      const firstName = (est.customer_name || "").split(" ")[0] || "there";
+      const { emailUrl } = await mintStageLinks(est, "estimate_followup_payment_step");
+      const ok = await sendDualChannel(est, {
+        email: {
+          templateKey: PAYMENT_STEP_TEMPLATE_KEY,
+          stage: "payment_step",
+          payload: estimateEmailPayload(est, firstName, emailUrl),
+        },
+      });
+      if (ok) {
+        await db("estimates")
+          .where({ id: est.id })
+          .update({
+            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
+            last_follow_up_at: db.fn.now(),
+          });
+        sent++;
+        claimed = false;
+      }
+    } catch (e) {
+      logger.error(`[est-followup] Payment-step send failed: ${e.message}`);
+    } finally {
+      if (claimed) {
+        try {
+          await releaseFollowupSend(est.id, PAYMENT_STEP_RULE_KEY);
+        } catch (e) {
+          logger.error(
+            `[est-followup] Payment-step release failed: ${e.message}`,
+          );
+        }
+      }
+    }
+  }
+  return sent;
+}
+
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
@@ -840,6 +1128,13 @@ const EstimateFollowUp = {
       /* columns may not exist */
     }
 
+    // 6. Reached the save-a-card step but never accepted
+    try {
+      sent += await checkPaymentStepAbandoned();
+    } catch {
+      /* tables may not exist */
+    }
+
     if (sent > 0)
       logger.info(`[est-followup] Sent ${sent} follow-ups (SMS+email)`);
     return { sent };
@@ -852,6 +1147,10 @@ module.exports._private = {
   estimateEmailPayload,
   renderTemplate,
   checkDepositAbandoned,
+  checkPaymentStepAbandoned,
+  paymentStepStillRequiresCard,
+  claimFollowupSend,
+  releaseFollowupSend,
   safetyGate,
   claimStage,
   mintStageLinks,

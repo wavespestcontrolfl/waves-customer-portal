@@ -2,12 +2,12 @@
 //
 // Call recordings + transcription panel. Lists Twilio recordings by
 // callSid, surfaces classification (spam / voicemail / new lead),
-// renders the AI synopsis, plays audio via the JWT-on-querystring
+// renders the AI synopsis, plays audio via an authenticated Blob URL
 // proxy, and lets the operator manually trigger OpenAI transcription
 // for any call missing one.
 //
 // Endpoints:
-//   GET  /api/admin/call-recordings/audio/:id?token=…  (JWT in URL!)
+//   GET  /api/admin/call-recordings/audio/:id
 //   GET  /api/admin/call-recordings/stats
 //   GET  /api/admin/call-recordings/recordings
 //   POST /api/admin/call-recordings/process/:callSid    (OpenAI transcript + Gemini extraction)
@@ -20,10 +20,8 @@
 //   POST /api/webhooks/twilio/transcription
 //
 // Audit focus:
-// - JWT in URL query string for /audio/:id is unusual. Browser will
-//   embed it in DOM (audio src=…). Confirm: short token TTL, no
-//   server-side logging that captures the full URL, no leakage in
-//   referer headers when audio plays cross-origin (S3 / Twilio).
+// - Audio is fetched with a Bearer header and converted to a local Blob URL;
+//   keep the staff token out of media URLs, DOM attributes, and Referers.
 // - process-all: bulk OpenAI transcription. Confirm rate-limit /
 //   confirmation gate so an accidental click doesn't run hundreds
 //   of paid transcription calls.
@@ -40,6 +38,7 @@
 //   classification or write recordings to disk are an attack
 //   surface — flag any path missing the signature check.
 import { useState, useEffect, useCallback } from "react";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { formatAddress } from "../../utils/format-address";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -883,12 +882,11 @@ function RecordingDetail({ recording, onClose, onUpdate }) {
           </span>{" "}
         </div>
         {/* Audio player */}
-        {(r.recording_url || r.recording_sid) && (
+        {(r.recording_available || r.recording_sid) && (
           <div style={{ marginBottom: 16 }}>
             {" "}
-            <audio
-              controls
-              src={`${API_BASE}/admin/call-recordings/audio/${r.recording_sid || r.id}?token=${encodeURIComponent(localStorage.getItem("waves_admin_token") || "")}`}
+            <AuthenticatedCallAudio
+              recordingId={r.recording_sid || r.id}
               style={{ width: "100%", height: 36 }}
             />{" "}
           </div>

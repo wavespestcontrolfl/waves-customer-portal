@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
+import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
 // (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
@@ -99,6 +100,104 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     // Shared sections still render exactly once in the V2 lead layout.
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
+  it('renders the dashboard and suppresses the legacy summary, meter, and coverage map', async () => {
+    const { container } = renderReport(mosquitoReportV2);
+    // Hero status from the mosquitoReportV2 payload.
+    await screen.findByText('One step recommended');
+
+    // The dashboard owns the summary slot — the legacy Visit Summary paragraph
+    // must not render alongside it, and the anchor exists exactly once.
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    // Habitat map + next step + outlook cards render. ("Standing water"
+    // legitimately appears twice: the SVG node label and its legend row.)
+    expect(await screen.findAllByText('Standing water')).toHaveLength(2);
+    await screen.findByText('Tip and toss standing water once a week');
+    await screen.findByText('Mosquito outlook for July');
+    // The hero carries the pressure reading; the standalone meter and the
+    // lettered coverage map are suppressed (the habitat diagram replaces it).
+    expect(container.querySelectorAll('#map')).toHaveLength(0);
+  });
+
+  it('mosquito visit without the payload keeps the legacy layout', async () => {
+    const { mosquitoReportV2: _omit, ...gatedOff } = mosquitoReportV2;
+    renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
+  });
+
+  it('rating submit refreshes the pressure pill from the recalculated response', async () => {
+    // Insufficient reading: no score pill, rating picker only. The POST
+    // returns a recalculated pestPressure the hero must surface (the
+    // standalone PestPressureCard that used to own this is suppressed).
+    const insufficient = JSON.parse(JSON.stringify(mosquitoReportV2));
+    insufficient.mosquitoReportV2.supportingMetric = {
+      kind: 'pressure', score: null, max: 5, label: null, trend: null,
+      caption: 'Mosquito pressure',
+      rating: { question: 'How much mosquito activity have you noticed?' },
+      submittedRating: null,
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      if (opts && opts.method === 'POST' && String(url).includes('pest-pressure/client-rating')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ pestPressure: { displayScore: '2.4', maxScore: 5, label: 'Moderate', trend: 'stable' }, submittedRating: 2 }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => insufficient };
+    }));
+    render(
+      <MemoryRouter initialEntries={['/report/test-mosquito-v2']}>
+        <Routes>
+          <Route path="/report/:token" element={<ReportViewPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('How much mosquito activity have you noticed?');
+    expect(screen.queryByText('2.4')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rating 2 of 5' }));
+    await screen.findByText('Thanks — your input helps us calibrate your protection plan.');
+    await screen.findByText('2.4');
+    await screen.findByText(/Moderate/); // renders as "· Moderate" beside the score
+  });
+});
+
+describe('ReportViewPage — trapping station map card (program labels)', () => {
+  it('renders the trap map with capture labels for program "trapping"', async () => {
+    const payload = {
+      ...legacyLawnReport,
+      serviceLine: 'rodent',
+      serviceLineDisplay: 'Rodent control',
+      serviceDisplayName: 'Rodent Trapping Visit',
+      stationMap: {
+        available: true,
+        program: 'trapping',
+        image: { url: 'https://example.test/satellite.png', width: 640, height: 340 },
+        summary: { total: 2, checked: 2, activity: 1, serviced: 0, inaccessible: 0 },
+        stations: [
+          { id: 'st-tr1', number: 1, cx: 0.3, cy: 0.4, status: 'activity' },
+          { id: 'st-tr2', number: 2, cx: 0.6, cy: 0.5, status: 'ok' },
+        ],
+      },
+    };
+    delete payload.lawnAssessment;
+    delete payload.lawnProgramOverview;
+    delete payload.reportV2;
+    renderReport(payload);
+    await screen.findByText('Rodent trap map');
+    // trapping legend labels (presentation-only relabels of the shared
+    // enum) — each appears in the pin's SVG title AND its legend row
+    expect((await screen.findAllByText(/Capture recorded/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Checked — no capture/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/termite activity/i)).toBeNull();
+    expect(screen.queryByText(/consumption/i)).toBeNull();
+    // numbers-only summary discipline with the trapping counter
+    await screen.findByText(/1 with captures recorded/);
   });
 });
 

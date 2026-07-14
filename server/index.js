@@ -25,6 +25,7 @@ const logger = require('./services/logger');
 const { errorHandler, notFound } = require('./middleware/errors');
 const { initScheduledJobs, initBankingSync } = require('./services/scheduler');
 const { applySensitiveSpaHeaders } = require('./utils/sensitive-spa-headers');
+const { redactRequestUrl } = require('./utils/redact-request-url');
 
 // Fail closed on missing critical secrets in production. A missing JWT_SECRET
 // would otherwise let the app boot and then break auth at runtime — jwt.sign
@@ -155,7 +156,9 @@ const cspDirectives = {
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
   frameSrc: ["'self'", "blob:", "https://www.google.com", "https://js.stripe.com", "https://hooks.stripe.com", "https://challenges.cloudflare.com"],
-  mediaSrc: ["'self'", "https:"],
+  // Authenticated call recordings are fetched with a Bearer header and played
+  // from short-lived, script-created Blob URLs (revoked when the player leaves).
+  mediaSrc: ["'self'", "https:", "blob:"],
   // PostHog session replay records via a web worker created from a blob URL.
   workerSrc: ["'self'", "blob:"],
 };
@@ -200,9 +203,21 @@ app.use(cors({
   credentials: true,
 }));
 
+// Phase-B Staff maintenance interlock. This must run before every API route,
+// rate limiter, and body parser so login, timer writes, and Staff bearer tokens
+// on otherwise-public routes all fail closed with the same response.
+const {
+  isStaffMaintenanceEnabled,
+  staffMaintenance,
+} = require('./middleware/staff-maintenance');
+app.use(staffMaintenance);
+
 // Rate limiting — key generator shared with route-level limiters (JWT subject
 // when authenticated, /64-collapsed IP otherwise; full rationale in the module).
-const { rateLimitKey } = require('./middleware/rate-limit-key');
+const {
+  rateLimitKey,
+  unauthenticatedAuthLimitKey,
+} = require('./middleware/rate-limit-key');
 
 const limiter = rateLimit({
   windowMs: config.rateLimit.windowMs,
@@ -217,7 +232,7 @@ const limiter = rateLimit({
 // GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
 // gate + per-route limiter still apply when the feature is enabled.
 app.use('/api/pay/statement', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('payerStatements')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -227,7 +242,7 @@ app.use('/api/pay/statement', (req, res, next) => {
 // contract: while the gate is off the surface must read 404 even for an IP
 // that already exhausted the global /api/ limiter (a 429 would reveal it).
 app.use('/api/public/lawn-assessment', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -239,7 +254,7 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   // invalid token 404s exactly like the dark surface (see the matching
   // carve-out in routes/public-pest-identifier.js).
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -262,6 +277,9 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10, // 10 attempts per window
   message: { error: 'Too many login attempts, please try again in 15 minutes.' },
+  // These routes are unauthenticated. Ignore any attached JWT so a caller
+  // cannot mint extra buckets, while still collapsing IPv6 clients by /64.
+  keyGenerator: unauthenticatedAuthLimitKey,
 });
 app.use('/api/auth/send-code', authLimiter);
 app.use('/api/auth/verify-code', authLimiter);
@@ -343,6 +361,12 @@ app.use('/api/webhooks/sendgrid', require('./routes/webhooks-sendgrid'));
 // reason as SendGrid; verifies a Svix HMAC-SHA256 signature.
 app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 
+// Staff authentication is unauthenticated by definition and accepts only
+// tiny credential payloads. Parse/cap it before the legacy 50 MB global body
+// parsers so login/reset floods cannot force large JSON parsing work.
+const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
+app.use('/api/admin/auth', ...staffAuthBodyParsers);
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -355,7 +379,15 @@ app.use(express.static(path.join(__dirname, '..', 'client', 'public'), {
 }));
 
 // Request logging
-app.use(morgan('combined', {
+morgan.token('redacted-url', (req) => redactRequestUrl(req.originalUrl || req.url || ''));
+morgan.token('redacted-referrer', (req) => {
+  const referrer = req.headers?.referer || req.headers?.referrer;
+  return referrer ? redactRequestUrl(referrer) : '-';
+});
+const REDACTED_COMBINED_LOG = ':remote-addr - :remote-user [:date[clf]] '
+  + '":method :redacted-url HTTP/:http-version" :status :res[content-length] '
+  + '":redacted-referrer" ":user-agent"';
+app.use(morgan(REDACTED_COMBINED_LOG, {
   stream: { write: (message) => logger.info(message.trim()) },
 }));
 
@@ -600,11 +632,13 @@ app.use('/api/admin', require('./routes/admin-billing-health'));
 // Health check
 app.get('/api/health', (req, res) => {
   const { gates } = require('./config/feature-gates');
+  res.set('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
     service: 'waves-customer-portal',
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
+    staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
     gates,
   });
 });

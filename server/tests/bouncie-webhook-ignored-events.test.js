@@ -21,6 +21,7 @@ jest.mock('../services/bouncie-webhook-security', () => ({
 }));
 
 const db = require('../models/db');
+const logger = require('../services/logger');
 const mileageService = require('../services/bouncie-mileage');
 const geofenceHandler = require('../services/geofence-handler');
 const webhookSecurity = require('../services/bouncie-webhook-security');
@@ -121,6 +122,42 @@ describe('legacy Bouncie webhook ignored events', () => {
     expect(geofenceHandler.handleGeozoneEvent).not.toHaveBeenCalled();
     expect(update.update).toHaveBeenCalledWith({ processed: true });
     expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('keeps a suppressed maintenance geozone webhook logged and acknowledged', async () => {
+    const insert = insertMock({ id: 44 });
+    const update = updateMock();
+    db
+      .mockReturnValueOnce(insert)
+      .mockReturnValueOnce(update);
+    geofenceHandler.handleGeozoneEvent.mockResolvedValueOnce({
+      staffMaintenanceSuppressed: true,
+      code: 'STAFF_MAINTENANCE',
+    });
+
+    const res = resMock();
+    await router._test.handleBouncieWebhook({
+      body: {
+        eventType: 'userGeozone',
+        imei: 'imei-1',
+        geozone: { event: 'ENTER' },
+      },
+    }, res);
+
+    expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: 'userGeozone',
+      processed: false,
+    }));
+    expect(geofenceHandler.handleGeozoneEvent).toHaveBeenCalledTimes(1);
+    expect(update.update).toHaveBeenCalledWith({ processed: true });
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json).toHaveBeenCalledWith({
+      received: true,
+      staffMaintenanceSuppressed: true,
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      '[bouncie-webhook] Staff maintenance suppressed geozone timer automation',
+    );
   });
 
   test('extracts nested vehicle ids consistently', () => {

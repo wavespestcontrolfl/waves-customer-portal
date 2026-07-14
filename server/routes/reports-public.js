@@ -14,6 +14,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 const { buildReportV1Data } = require('../services/service-report/report-data');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
+const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -31,14 +32,38 @@ function suppressedTypedReport(record) {
   return Boolean(mode) && mode !== 'auto_send';
 }
 
+// Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
+// Best-effort with a hard 4s cap — a forecast/network hiccup must never
+// block or slow a report render.
+async function fetchSeasonalForecastSafe(zip) {
+  try {
+    const { getForecast } = require('../services/pest-forecast/forecast');
+    const timer = new Promise((resolve) => {
+      const t = setTimeout(() => resolve(null), 4000);
+      if (t.unref) t.unref();
+    });
+    return await Promise.race([getForecast({ zip }), timer]);
+  } catch {
+    return null;
+  }
+}
+
 async function staffCanViewSuppressed(req) {
   try {
     const header = String(req.headers.authorization || '');
     if (!header.startsWith('Bearer ')) return false;
     const decoded = jwt.verify(header.slice(7), config.jwt.secret);
-    if (!decoded.technicianId || decoded.scope === 'terminal') return false;
-    const tech = await db('technicians').where({ id: decoded.technicianId }).first('id', 'active');
-    return Boolean(tech && tech.active);
+    if (!isStaffAccessToken(decoded) || !decoded.technicianId || decoded.scope === 'terminal') return false;
+    const tech = await db('technicians')
+      .where({ id: decoded.technicianId })
+      .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+    return Boolean(
+      tech
+      && tech.active
+      && ['admin', 'technician'].includes(tech.role)
+      && !tech.must_change_password
+      && staffTokenVersionMatches(decoded, tech)
+    );
   } catch {
     return false;
   }
@@ -92,6 +117,12 @@ const {
   reportPdfStorageKey,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const {
+  mosquitoReportV2PdfSignature,
+  buildMosquitoReportV2,
+  isRecurringMosquitoServiceType,
+} = require('../services/service-report/mosquito-report-v2');
+const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
@@ -293,15 +324,7 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   ) {
     try {
       const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
-      let forecast = null;
-      try {
-        const { getForecast } = require('../services/pest-forecast/forecast');
-        const timer = new Promise((resolve) => {
-          const t = setTimeout(() => resolve(null), 4000);
-          if (t.unref) t.unref();
-        });
-        forecast = await Promise.race([getForecast({ zip: service.zip }), timer]);
-      } catch { forecast = null; }
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -315,6 +338,39 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
           : null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
+    } catch { /* best-effort — never block the report */ }
+  }
+
+  // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits
+  // (flag-gated), same family as Pest V2 but with habitat semantics instead of
+  // entry points (mosquito-report-v2.js explains the reframe). Mutually
+  // exclusive with pestReportV2 by service line. One-time reports are
+  // excluded two ways (codex P2 ×2): typed snapshots (mosquito_event) own
+  // the purpose-built activity gauge the dashboard would suppress, and
+  // legacy pre-typed-cutover one-time labels must not get recurring
+  // "between visits" copy. Best-effort, never blocks.
+  if (
+    process.env.MOSQUITO_REPORT_V2 === 'true'
+    && data.serviceLine === 'mosquito'
+    && !data.typedReport
+    && isRecurringMosquitoServiceType(service.service_type)
+    && dynamicContext.premiumExperience
+  ) {
+    try {
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
+      const mosquitoReportV2 = buildMosquitoReportV2({
+        premiumExperience: dynamicContext.premiumExperience,
+        pestPressure: data.pestPressure,
+        activity: data.activity,
+        findings: data.findings || [],
+        applications: data.applications || [],
+        forecast,
+        // Same typed-report double-print guard as the pest hero.
+        technicianReport: !data.typedReport && data.summarySource === 'technician_report'
+          ? data.summary
+          : null,
+      });
+      if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
   }
 
@@ -929,8 +985,14 @@ router.get('/:token', async (req, res, next) => {
       // mass cache bust. Derived from the immutable record, so no re-check
       // is needed in the render race loop below.
       const summarySignature = summaryCopySignature(service);
+      // Mosquito V2 gate flips must invalidate cached mosquito-report PDFs
+      // (key change → cache miss → re-render with the dashboard).
+      const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
+      // PEST_REPORT_V2 predates this key component — pest PDFs cached before
+      // the pest V2 flip re-render once on next view.
+      const pestV2Signature = pestReportV2PdfSignature(service);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -984,7 +1046,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

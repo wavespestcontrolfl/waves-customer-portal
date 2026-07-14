@@ -22,6 +22,7 @@ const detector = require('../services/gps-arrival-detector');
 
 const SAMPLE_TIME = new Date().toISOString();
 const EN_ROUTE_TIME = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+const originalMaintenanceMode = process.env.STAFF_MAINTENANCE_MODE;
 
 function serviceQueryMock(service) {
   return {
@@ -83,12 +84,37 @@ function basePoint(overrides = {}) {
 describe('gps-arrival-detector', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    delete process.env.STAFF_MAINTENANCE_MODE;
     detector._test.resetConfigCache();
     trackTransitions.markOnProperty.mockResolvedValue({
       ok: true,
       state: 'on_property',
       arrivedAt: new Date('2026-05-21T14:00:00.000Z'),
     });
+  });
+
+  afterAll(() => {
+    if (originalMaintenanceMode === undefined) delete process.env.STAFF_MAINTENANCE_MODE;
+    else process.env.STAFF_MAINTENANCE_MODE = originalMaintenanceMode;
+  });
+
+  test('suppresses automatic arrival before any lifecycle work during Staff maintenance', async () => {
+    process.env.STAFF_MAINTENANCE_MODE = 'true';
+
+    await expect(detector.maybeMarkArrivedFromGps({
+      techStatus: baseTechStatus(),
+      point: basePoint(),
+      configOverride: detector._test.DEFAULT_CONFIG,
+    })).resolves.toEqual({
+      ok: false,
+      reason: 'staff_maintenance',
+      code: 'STAFF_MAINTENANCE',
+    });
+
+    expect(db).not.toHaveBeenCalled();
+    expect(ensureCustomerGeocoded).not.toHaveBeenCalled();
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   test('arrival decision requires proximity and avoids fast drive-bys', () => {

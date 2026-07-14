@@ -220,6 +220,11 @@ export default function CreateProjectModal({
   // context locked (no type/customer pickers, no title field) — the exact
   // same fields and save behavior, presented like the pest completion.
   presentation = 'modal',
+  // Sheet-mode parity with the pest CompletionPanel's top-right Details
+  // pill (owner ask 2026-07-13): opens the appointment detail sheet
+  // (cancel / no-show / reschedule / rain-out / price edit) for the linked
+  // visit. Caller-owned, rendered only when provided.
+  onViewDetails = null,
 }) {
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
@@ -357,32 +362,74 @@ export default function CreateProjectModal({
   // Debounced auto-save of the typed fields. Held off while the restore
   // prompt is showing so we don't clobber the saved draft before the tech
   // chooses, and skipped entirely when the form is still empty.
+  // draftFlushRef mirrors the CURRENT eligible payload so the unmount flush
+  // below can write it synchronously — the Details handoff (and any other
+  // unmount) inside the 700ms window was silently dropping the last edits
+  // (Codex P2 on #2717).
+  const draftFlushRef = useRef(null);
+  // True only after the tech actually contributed content: typing anywhere
+  // in the body (container onInput), an AI fill/append, a library pick, or
+  // restoring a saved draft. Autofill EFFECTS (type defaults → title/
+  // findings, customer autofill) deliberately do not set it — counting
+  // effect output as content re-armed the flush on untouched sheets and
+  // rewrote just-discarded drafts (Codex r12 P2).
+  const userDirtyRef = useRef(false);
   useEffect(() => {
     // Stop once the project exists on the server — the server draft is then
     // the source of truth and a local draft would risk a duplicate on restore.
-    if (!draftReadyRef.current || showDraftPrompt || createdProject) return;
+    if (!draftReadyRef.current || showDraftPrompt || createdProject) {
+      draftFlushRef.current = null;
+      return;
+    }
+    // Prefill alone must NOT arm a draft write (house review on #2717):
+    // sheet mode always seeds projectType/customerId from props, and a
+    // defaults-only draft made the unmount flush rewrite what the tech had
+    // just discarded — a deterministic discard → close → restore-prompt
+    // loop. Only content the tech actually entered counts.
     const hasContent = Boolean(
-      projectType
-      || customerId
-      || (title && title.trim())
+      (title && title.trim())
       || (recommendations && recommendations.trim())
-      || Object.values(findings).some((v) => String(v || '').trim()),
+      || Object.values(findings).some((v) => String(v || '').trim())
+      || (projectType && projectType !== (defaultProjectType || ''))
+      || (customerId && String(customerId) !== String(defaultCustomerId || '')),
     );
-    if (!hasContent) return;
+    if (!hasContent || !userDirtyRef.current) {
+      draftFlushRef.current = null;
+      return;
+    }
+    const payload = {
+      savedAt: new Date().toISOString(),
+      projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
+    };
+    draftFlushRef.current = { key: draftKey, payload };
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(draftKey, JSON.stringify({
-          savedAt: new Date().toISOString(),
-          projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
-        }));
+        localStorage.setItem(draftKey, JSON.stringify(payload));
       } catch { /* quota / serialization — non-blocking */ }
     }, 700);
     return () => clearTimeout(timer);
-  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+  }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations, defaultProjectType, defaultCustomerId]);
+
+  // Unmount-only flush of a pending draft write. The debounce cleanup above
+  // cancels the timer on EVERY dep change, which is correct while mounted —
+  // but on unmount the cancelled write must still land or the newest
+  // keystrokes vanish. The ref is nulled whenever a write would be
+  // ineligible (empty form, restore prompt showing, project created), so
+  // this can never resurrect a cleared draft.
+  useEffect(() => () => {
+    const pending = draftFlushRef.current;
+    if (!pending) return;
+    try {
+      localStorage.setItem(pending.key, JSON.stringify(pending.payload));
+    } catch { /* quota / serialization — non-blocking */ }
+  }, []);
 
   function restoreDraft() {
     const d = savedDraft;
     if (!d) return;
+    // Restored content is user content — keep the draft armed so further
+    // edits stay protected.
+    userDirtyRef.current = true;
     // Only restore the type (and its findings) if it's permitted in this modal;
     // findings are type-specific, so drop them when the type isn't restored.
     const typeAllowed = d.projectType && (!allowedProjectTypes || allowedProjectTypes.includes(d.projectType));
@@ -719,10 +766,15 @@ export default function CreateProjectModal({
   }, [chemAuto, findings.concentration_pct, findings.gallons_applied]);
 
   function handleFindingChange(key, value) {
+    // Every field control routes here — including chips, steppers, and
+    // selects, which don't bubble an input event to the container
+    // listener (Codex r13 P2).
+    userDirtyRef.current = true;
     setFindings(prev => ({ ...prev, [key]: value }));
   }
 
   function handleApplicatorChange(value) {
+    userDirtyRef.current = true;
     // Option values are technician ids. No match means the injected
     // current-value option (a restored draft's free-text name) — keep it as
     // the name and leave the ID alone.
@@ -738,6 +790,7 @@ export default function CreateProjectModal({
   }
 
   function handleProductSelect(fieldKey, product) {
+    userDirtyRef.current = true;
     const productName = product?.name || product?.product_name || '';
     const epaRegistration = product?.epa_reg_number || product?.epaRegNumber || '';
     const activeIngredient = product?.active_ingredient || product?.activeIngredient || '';
@@ -753,6 +806,7 @@ export default function CreateProjectModal({
 
   function fillWdoAddressFromCustomer() {
     if (!selectedCustomer) return;
+    userDirtyRef.current = true;
     // Explicit action — overwrite address + contact fields from the customer.
     // After an explicit replace, every field holding the customer's value IS
     // customer-sourced, so record them all for the Change-clears map.
@@ -769,6 +823,7 @@ export default function CreateProjectModal({
     if (!addressFieldKey) return;
     const address = formatCustomerAddress(selectedCustomer);
     if (!address) return;
+    userDirtyRef.current = true;
     projectAddressAutoFillRef.current = { key: addressFieldKey, value: address };
     setFindings(prev => ({ ...prev, [addressFieldKey]: address }));
   }
@@ -796,14 +851,17 @@ export default function CreateProjectModal({
   }
 
   function applyWdoSuggestions(suggestions, options = {}) {
+    userDirtyRef.current = true;
     setFindings(prev => mergeSuggestionsIntoFindings(prev, suggestions, options.overwrite));
   }
 
   function applyWdoProfile(profile) {
+    userDirtyRef.current = true;
     setFindings(prev => applyProfileToWdoFindings(prev, profile, { overwrite: true }));
   }
 
   function applyWdoHistory(history) {
+    userDirtyRef.current = true;
     setFindings(prev => applyHistoryToWdoFindings(prev, history, { overwrite: true }));
   }
 
@@ -828,7 +886,10 @@ export default function CreateProjectModal({
       });
       const data = await d.json();
       if (!d.ok) throw new Error(data?.error || 'AI draft failed');
-      if (data.report) setRecommendations(data.report.trim());
+      if (data.report) {
+        userDirtyRef.current = true;
+        setRecommendations(data.report.trim());
+      }
     } catch (e) {
       setError(e.message || 'AI draft failed');
     } finally {
@@ -891,6 +952,11 @@ export default function CreateProjectModal({
         // The project now lives server-side as a draft — it's the source of
         // truth. Drop the local draft so a later restore can't re-POST a
         // duplicate (e.g. if photo uploads below fail and the tech reopens).
+        // Null the flush ref imperatively too: if the parent unmounts this
+        // modal in the same render batch as onCreated, the effect that
+        // normally nulls it never re-runs, and the unmount flush would
+        // resurrect the draft we just deleted.
+        draftFlushRef.current = null;
         try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       } else {
         const r = await adminFetch(`/admin/projects/${data.project.id}`, {
@@ -1029,23 +1095,54 @@ export default function CreateProjectModal({
                 : 'Inspection or documentation-heavy job'}
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => !saving && onClose?.()}
-            aria-label="Close"
-            style={{
-              background: 'transparent', border: 'none', color: P.muted,
-              fontSize: 24, cursor: 'pointer', padding: '4px 10px',
-            }}
-          >×</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {isSheet && onViewDetails && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (saving) return;
+                  // Queued photos are File objects — they can't ride the
+                  // localStorage draft that survives this handoff, so make
+                  // the tech choose instead of silently dropping evidence
+                  // shots (Codex r3 P2).
+                  if (photoQueue.length
+                    && !confirm(`${photoQueue.length} queued photo${photoQueue.length === 1 ? '' : 's'} will be discarded if you open appointment details before saving. Continue?`)) {
+                    return;
+                  }
+                  onViewDetails();
+                }}
+                style={{
+                  height: 36, minWidth: 72, borderRadius: 999,
+                  background: P.card, border: `1px solid ${P.border}`,
+                  color: P.text, fontSize: 13, fontWeight: wMed,
+                  cursor: 'pointer', padding: '0 14px',
+                }}
+              >Details</button>
+            )}
+            <button
+              type="button"
+              onClick={() => !saving && onClose?.()}
+              aria-label="Close"
+              style={{
+                background: 'transparent', border: 'none', color: P.muted,
+                fontSize: 24, cursor: 'pointer', padding: '4px 10px',
+              }}
+            >×</button>
+          </div>
         </div>
 
-        {/* Body — in sheet mode this is the scroll region (header/footer pinned) */}
-        <div style={{
-          padding: isEstimateStyle ? 22 : 16,
-          display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
-          ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
-        }}>
+        {/* Body — in sheet mode this is the scroll region (header/footer pinned).
+            onInput marks the draft user-dirty: every keystroke in any field
+            bubbles here, while autofill EFFECTS don't fire input events —
+            the cheap way to tell typed content from effect output. */}
+        <div
+          onInput={() => { userDirtyRef.current = true; }}
+          style={{
+            padding: isEstimateStyle ? 22 : 16,
+            display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
+            ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+          }}
+        >
           {/* Restore saved draft */}
           {showDraftPrompt && (
             <div style={{
@@ -1097,7 +1194,12 @@ export default function CreateProjectModal({
                   <button
                     key={key}
                     type="button"
-                    onClick={() => { setProjectType(key); setFindings({}); setRecommendations(''); }}
+                    onClick={() => {
+                      // Click-driven content selection — no input event
+                      // fires, so mark the draft dirty here (Codex r14 P3).
+                      userDirtyRef.current = true;
+                      setProjectType(key); setFindings({}); setRecommendations('');
+                    }}
                     style={{
                       padding: '10px 10px', borderRadius: 8, cursor: 'pointer',
                       background: active ? P.accent : (theme === 'light' ? P.bg : P.bg),
@@ -1167,6 +1269,9 @@ export default function CreateProjectModal({
                         key={c.id}
                         type="button"
                         onClick={() => {
+                          // Same click-driven-selection class as the type
+                          // picker (Codex r14 P3).
+                          userDirtyRef.current = true;
                           setCustomerId(c.id);
                           setSelectedCustomer(c);
                           const name = `${c.firstName || c.first_name || ''} ${c.lastName || c.last_name || ''}`.trim();
@@ -1229,6 +1334,7 @@ export default function CreateProjectModal({
                         key={s.id}
                         type="button"
                         onClick={() => {
+                          userDirtyRef.current = true;
                           setTitle(s.name || '');
                           setServiceSearch('');
                           setServiceResults([]);
@@ -1430,7 +1536,10 @@ export default function CreateProjectModal({
                   <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
                     <DictationButton
                       palette={P}
-                      onAppend={(text) => setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text)}
+                      onAppend={(text) => {
+                        userDirtyRef.current = true;
+                        setRecommendations(prev => prev.trim() ? `${prev.replace(/\s+$/, '')} ${text}` : text);
+                      }}
                     />
                   </div>
                 </div>

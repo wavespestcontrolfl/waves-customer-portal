@@ -5,7 +5,7 @@
 // the Staff application commit advances this constant to 2. Older application
 // generations then fail closed if they attempt to start/reopen a timer during
 // Railway's pre-deploy/cutover overlap.
-const ACTIVE_WRITE_GENERATION = 1;
+const ACTIVE_WRITE_GENERATION = 2;
 const WEEKLY_OT_THRESHOLD_MINUTES = 40 * 60;
 
 module.exports = {

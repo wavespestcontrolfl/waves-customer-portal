@@ -23,6 +23,7 @@
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
+const { detectServiceLine } = require('./service-line-configs');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -95,13 +96,19 @@ function buildBugFiles(bugFiles) {
 function buildSupportingMetric({ pestPressure, activity }) {
   if (pestPressure && pestPressure.showOnCustomerReport !== false && pestPressure.enabled !== false) {
     const score = pestPressure.displayScore ?? pestPressure.score;
-    if (score != null) {
+    // A visible-but-insufficient pressure view (score still null) can still
+    // carry the one-shot client-rating calibration. Since the dashboard
+    // suppresses the standalone PestPressureCard, the rating prompt must
+    // ride this metric or first/insufficient reports lose the calibration
+    // flow entirely (parity with the same codex finding on Mosquito V2).
+    // The client hides the score pill when score is null.
+    if (score != null || pestPressure.canCaptureClientRating) {
       return {
         kind: 'pressure',
-        score: String(score),
+        score: score != null ? String(score) : null,
         max: pestPressure.maxScore || 5,
-        label: pestPressure.label || null,
-        trend: pestPressure.trend || null,
+        label: score != null ? (pestPressure.label || null) : null,
+        trend: score != null ? (pestPressure.trend || null) : null,
         caption: 'Pest pressure',
         // Keep the one-shot client-rating calibration flow that the suppressed
         // legacy PestPressureCard used to own.
@@ -229,8 +236,20 @@ function buildPestReportV2({
   };
 }
 
+// PDF cache-key component (mirrors mosquitoReportV2PdfSignature — see that
+// function's comment). PEST_REPORT_V2 was never part of the key, so pest
+// PDFs cached before the pest V2 flip still serve the pre-dashboard render
+// on permanent links; including the gate re-renders each once on next view.
+// Scoped to pest-line records so nothing else mass-invalidates.
+function pestReportV2PdfSignature(service = {}) {
+  if (process.env.PEST_REPORT_V2 !== 'true') return '';
+  const line = service.service_line || detectServiceLine(service.service_type);
+  return line === 'pest' ? '-pestv2' : '';
+}
+
 module.exports = {
   buildPestReportV2,
+  pestReportV2PdfSignature,
   // exported for tests
   stripZoneLetter,
   buildForecast,

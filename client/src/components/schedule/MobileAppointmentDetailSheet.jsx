@@ -608,26 +608,35 @@ export default function MobileAppointmentDetailSheet({
           </div>
         )}
 
-        {/* Action buttons */}
+        {/* Action buttons — Cancel/No-show only while the visit is still
+            active (Codex P1 on #2717): the status route reads the CURRENT
+            row as fromStatus, so offering these on a completed/cancelled
+            visit lets one tap flip a finished (possibly compliance) visit
+            terminal in the other direction. canCompleteService is the
+            sheet's active-status predicate. */}
         <section className="mt-6 border-t border-hairline border-zinc-200 pt-4 flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={cancelAppointment}
-            disabled={!!actionBusy}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
-            style={{ padding: '14px 20px', fontSize: 16 }}
-          >
-            {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
-          </button>
-          <button
-            type="button"
-            onClick={markNoShow}
-            disabled={!!actionBusy}
-            className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
-            style={{ padding: '14px 20px', fontSize: 16 }}
-          >
-            {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
-          </button>
+          {canCompleteService && (
+            <>
+              <button
+                type="button"
+                onClick={cancelAppointment}
+                disabled={!!actionBusy}
+                className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                style={{ padding: '14px 20px', fontSize: 16 }}
+              >
+                {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
+              </button>
+              <button
+                type="button"
+                onClick={markNoShow}
+                disabled={!!actionBusy}
+                className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                style={{ padding: '14px 20px', fontSize: 16 }}
+              >
+                {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
+              </button>
+            </>
+          )}
           {canRainOut && (
             <button
               type="button"

@@ -44,17 +44,86 @@ function isStationMapReportEnabled() {
   return !['0', 'false', 'no', 'off'].includes(String(raw).toLowerCase());
 }
 
+// Station programs: termite in-ground bait stations and exterior rodent
+// bait stations share the registry/check tables and every write path —
+// numbering, dedupe, occupancy, and report scoping are all per-program.
+// Program order is ALSO the companion tie-break order (see
+// stationProgramForProfile) — append new programs at the end so existing
+// tie-break behavior never shifts.
+const STATION_PROGRAMS = ['termite', 'rodent', 'trapping'];
+const PROGRAM_TYPED_FLOW = {
+  termite: 'termite_bait_station',
+  rodent: 'rodent_bait_station',
+  // Trap placements are registry assets too: persistent, numbered,
+  // per-visit status — the typed flow that authorizes them is the trapping
+  // completion itself (there is no separate "trap station" findings type).
+  trapping: 'rodent_trapping',
+};
+
+function normalizeProgram(value) {
+  return STATION_PROGRAMS.includes(value) ? value : 'termite';
+}
+
 // A completion may write stations only when the SERVER-resolved completion
-// profile carries the termite_bait_station typed flow — as the primary
-// findingsType or a declared companion. The profile is authoritative, never
-// the client payload (same doctrine as the companionFindings authorization):
-// a stale or crafted non-termite completion body must not be able to mutate
-// the customer's station registry or mint check rows.
-function profileAllowsStationSync(profile) {
-  if (!profile || typeof profile !== 'object') return false;
-  if (profile.findingsType === 'termite_bait_station') return true;
+// profile carries a station typed flow — as the primary findingsType or a
+// declared companion. The profile is authoritative, never the client
+// payload (same doctrine as the companionFindings authorization): a stale
+// or crafted non-station completion body must not be able to mutate the
+// customer's station registry or mint check rows. Returns the PROGRAM the
+// profile authorizes ('termite' | 'rodent'), or null; the primary
+// findingsType wins if a profile ever carried both.
+function stationProgramForProfile(profile) {
+  if (!profile || typeof profile !== 'object') return null;
+  for (const program of STATION_PROGRAMS) {
+    if (profile.findingsType === PROGRAM_TYPED_FLOW[program]) return program;
+  }
   const companions = Array.isArray(profile.companions) ? profile.companions : [];
-  return companions.some((companion) => companion && companion.type === 'termite_bait_station');
+  for (const program of STATION_PROGRAMS) {
+    if (companions.some((companion) => companion && companion.type === PROGRAM_TYPED_FLOW[program])) {
+      return program;
+    }
+  }
+  return null;
+}
+
+function profileAllowsStationSync(profile) {
+  return stationProgramForProfile(profile) != null;
+}
+
+// Pre-commit report-consistency guard (codex r2): a rodent visit whose
+// station entries record bait consumption (status 'activity') must not ship
+// beside an EXPLICIT bait_consumption of 'None' in the rodent typed
+// findings — the customer report would state "None" and "K with bait
+// consumption" on one page. Rodent-only by design: termite's station
+// 'activity' status also covers live termites/mud tubing, which is not a
+// strict contradiction of its bait-consumption select. An absent/unset
+// select is left alone (nothing contradictory renders). Returns an error
+// string for the route's 400, or null.
+function rodentConsumptionConflict({ program, entries = [], findings = {} } = {}) {
+  if (normalizeProgram(program) !== 'rodent') return null;
+  const hasConsumption = (Array.isArray(entries) ? entries : [])
+    .some((entry) => entry && entry.status === 'activity');
+  if (!hasConsumption) return null;
+  const consumption = String(findings?.bait_consumption ?? '').trim().toLowerCase();
+  if (consumption !== 'none') return null;
+  return 'a station is marked with bait consumption this visit, but the Bait consumption level reads "None" — reconcile them before completing';
+}
+
+// Trapping analog of rodentConsumptionConflict: a trap pin marked
+// 'activity' (capture recorded) must not ship beside an EXPLICIT captures
+// count of 0 in the rodent_trapping findings — the report would state
+// "found no new captures" and "K with captures recorded" on one page. An
+// empty/unset count passes (count fields mean "not recorded", never 0),
+// and captures above zero are never checked against the pin count — one
+// trap can hold multiple captures.
+function trapCaptureConflict({ program, entries = [], findings = {} } = {}) {
+  if (normalizeProgram(program) !== 'trapping') return null;
+  const hasCapturePin = (Array.isArray(entries) ? entries : [])
+    .some((entry) => entry && entry.status === 'activity');
+  if (!hasCapturePin) return null;
+  const captures = String(findings?.captures ?? '').trim();
+  if (captures !== '0') return null;
+  return 'a trap is marked with a capture this visit, but the Captures count reads 0 — reconcile them before completing';
 }
 
 // Station marks are point pins: the circle capture shape only, never rects.
@@ -174,13 +243,13 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
  * so they net to zero and the retry sails through to the stored-response
  * path instead of 400ing an already-committed completion.
  */
-async function stationCapWouldOverflow(db, customerId, entries = []) {
+async function stationCapWouldOverflow(db, customerId, entries = [], program = 'termite') {
   const list = Array.isArray(entries) ? entries : [];
   const creates = list.filter((entry) => entry && entry.retire !== true
     && (entry.id == null || String(entry.id).trim() === '') && entry.shape != null);
   if (!creates.length) return false;
   const activeRows = await db('termite_stations')
-    .where({ customer_id: customerId, is_active: true })
+    .where({ customer_id: customerId, is_active: true, program: normalizeProgram(program) })
     .select('id', 'geometry_image')
     .catch(() => null);
   if (!activeRows) return false; // pre-migration — the sync no-ops anyway
@@ -210,11 +279,12 @@ async function stationCapWouldOverflow(db, customerId, entries = []) {
  *          stationIdByIndex maps payload index → station id (created or
  *          existing) so check rows can be written for new stations too.
  */
-async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {}) {
+async function upsertStationsForCustomer(trx, { customerId, entries = [], program = 'termite' } = {}) {
   const summary = {
     created: 0, moved: 0, retired: 0, deduped: 0, skipped: [], stationIdByIndex: new Map(),
   };
   if (!customerId || !Array.isArray(entries) || !entries.length) return summary;
+  const stationProgram = normalizeProgram(program);
 
   // Number allocation reads max(station_number) below, and the occupancy /
   // replay-dedupe guards read a point-in-time position snapshot — two
@@ -228,11 +298,14 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
   const hasGeometryWrites = entries.some((entry) => entry && entry.retire !== true
     && entry.shape != null);
   if (hasGeometryWrites) {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}`]);
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}:${stationProgram}`]);
   }
 
+  // Program-scoped throughout: numbering, ownership, dedupe, occupancy and
+  // the active cap are each per (customer, program) — a rodent save can
+  // never renumber, move, or retire a termite pin, and vice versa.
   const existing = await trx('termite_stations')
-    .where({ customer_id: customerId })
+    .where({ customer_id: customerId, program: stationProgram })
     .orderBy('station_number');
   const activeById = new Map(existing
     .filter((row) => row.is_active !== false)
@@ -357,7 +430,7 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
       .insert({
         customer_id: customerId,
         station_number: nextNumber,
-        program: 'termite',
+        program: stationProgram,
         label: normalizeLabel(entry.label),
         geometry_image: JSON.stringify(shape),
       })
@@ -381,12 +454,12 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [] } = {})
  * transaction. Check rows upsert on (station_id, service_record_id) so a
  * completion replay/resume lands the same state instead of throwing.
  */
-async function syncStationsForCompletion(db, { customerId, serviceRecordId, entries = [] } = {}) {
+async function syncStationsForCompletion(db, { customerId, serviceRecordId, entries = [], program = 'termite' } = {}) {
   if (!customerId || !Array.isArray(entries) || !entries.length) {
     return { created: 0, moved: 0, retired: 0, checksApplied: 0, skipped: [] };
   }
   return db.transaction(async (trx) => {
-    const summary = await upsertStationsForCustomer(trx, { customerId, entries });
+    const summary = await upsertStationsForCustomer(trx, { customerId, entries, program });
     let checksApplied = 0;
     if (serviceRecordId) {
       for (let i = 0; i < entries.length; i += 1) {
@@ -418,31 +491,42 @@ async function syncStationsForCompletion(db, { customerId, serviceRecordId, entr
   });
 }
 
-// Capture-UI payload slice: the customer's active stations, drift-resolved
-// against the image being served (same contract as the zones list on
-// /property-map). `staleMark` flags a stored pin hidden by drift resolution
-// so the UI can ask for a re-drop instead of showing it as absent.
-// `nextStationNumber` spans retired rows (numbers are never reused) so the
-// client's provisional numbering for new pins matches what the completion
-// sync will allocate in payload order.
+// Capture-UI payload slice: the customer's active stations across BOTH
+// programs (each tagged), drift-resolved against the image being served
+// (same contract as the zones list on /property-map). The marking surfaces
+// filter to their visit's program. `staleMark` flags a stored pin hidden by
+// drift resolution so the UI can ask for a re-drop instead of showing it as
+// absent. `nextStationNumberByProgram` spans retired rows per program
+// (numbers are never reused within a program) so the client's provisional
+// numbering for new pins matches what the sync will allocate in payload
+// order; `nextStationNumber` keeps the termite value for shape stability.
 async function loadStationsForPropertyMap(db, customerId, imageContext) {
   const rows = await db('termite_stations')
     .where({ customer_id: customerId })
     .orderBy('station_number')
     .catch(() => []);
-  const nextStationNumber = rows.reduce((max, row) => Math.max(max, Number(row.station_number) || 0), 0) + 1;
+  const nextStationNumberByProgram = {};
+  for (const program of STATION_PROGRAMS) {
+    nextStationNumberByProgram[program] = rows
+      .filter((row) => normalizeProgram(row.program) === program)
+      .reduce((max, row) => Math.max(max, Number(row.station_number) || 0), 0) + 1;
+  }
   const active = rows.filter((row) => row.is_active !== false);
-  if (!active.length) return { stations: [], nextStationNumber };
+  if (!active.length) {
+    return { stations: [], nextStationNumber: nextStationNumberByProgram.termite, nextStationNumberByProgram };
+  }
   const resolved = resolveZoneRowsImageDrift(active, imageContext);
   return {
     stations: resolved.map((row, i) => ({
       id: row.id,
       number: row.station_number,
+      program: normalizeProgram(row.program),
       label: row.label || null,
       geometryImage: row.geometry_image || null,
       staleMark: Boolean(active[i]?.geometry_image) && !row.geometry_image,
     })),
-    nextStationNumber,
+    nextStationNumber: nextStationNumberByProgram.termite,
+    nextStationNumberByProgram,
   };
 }
 
@@ -513,10 +597,23 @@ function buildStationMapReportContext({
   serviceDate = null,
 } = {}) {
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
-  if (!Array.isArray(typedTypes) || !typedTypes.includes('termite_bait_station')) {
-    return { available: false, reason: 'not_station_visit' };
-  }
-  if (!Array.isArray(stationRows) || !stationRows.length) {
+  // The visit's typed flow picks the PROGRAM: a rodent bait report renders
+  // rodent pins only, a termite report termite pins only — a property with
+  // both programs never co-renders them on one visit's map. typedTypes
+  // arrives PRIMARY-FIRST from report-data ([snapshot.type, ...companions]),
+  // and this selection must be IDENTICAL to what /complete's
+  // stationProgramForProfile resolved when the checks were written (codex
+  // r1+r2): a station PRIMARY wins outright; among COMPANIONS the tie
+  // breaks in STATION_PROGRAMS order (termite first) — otherwise the report
+  // renders one program's pins over the other program's recorded checks.
+  const types = Array.isArray(typedTypes) ? typedTypes : [];
+  const primaryProgram = STATION_PROGRAMS.find((p) => PROGRAM_TYPED_FLOW[p] === types[0]) || null;
+  const companionProgram = STATION_PROGRAMS.find((p) => types.slice(1).includes(PROGRAM_TYPED_FLOW[p])) || null;
+  const program = primaryProgram || companionProgram;
+  if (!program) return { available: false, reason: 'not_station_visit' };
+  const programRows = (Array.isArray(stationRows) ? stationRows : [])
+    .filter((row) => normalizeProgram(row.program) === program);
+  if (!programRows.length) {
     return { available: false, reason: 'no_stations' };
   }
   if (!satelliteMap?.available || !satelliteMap.live?.url) {
@@ -530,7 +627,7 @@ function buildStationMapReportContext({
     }
   }
 
-  const visitRows = selectStationRowsForVisit(stationRows, statusByStationId, serviceDate);
+  const visitRows = selectStationRowsForVisit(programRows, statusByStationId, serviceDate);
   if (!visitRows.length) return { available: false, reason: 'no_stations' };
 
   const resolved = resolveZoneRowsImageDrift(visitRows, imageContext);
@@ -571,6 +668,7 @@ function buildStationMapReportContext({
 
   return {
     available: true,
+    program,
     image: {
       url: satelliteMap.live.url,
       width: satelliteMap.live.width || 640,
@@ -584,11 +682,15 @@ function buildStationMapReportContext({
 
 module.exports = {
   STATION_STATUSES,
+  STATION_PROGRAMS,
   MAX_STATION_ENTRIES,
   MAX_ACTIVE_STATIONS,
   sanitizeStationShape,
   validateStationEntriesBody,
   profileAllowsStationSync,
+  stationProgramForProfile,
+  rodentConsumptionConflict,
+  trapCaptureConflict,
   stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,

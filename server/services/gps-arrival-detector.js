@@ -4,6 +4,7 @@ const trackTransitions = require('./track-transitions');
 const { ensureCustomerGeocoded } = require('./geocoder');
 const { recordAuditEvent } = require('./audit-log');
 const { stampedAddressDiverges } = require('./stamped-address');
+const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 
 const SETTINGS_KEYS = [
   'gps_arrival.enabled',
@@ -314,6 +315,20 @@ async function auditArrival({ service, techStatus, destination, distance, point,
 }
 
 async function maybeMarkArrivedFromGps({ techStatus, point, configOverride = null } = {}) {
+  // The live-tracking Bouncie receiver stays online during Staff maintenance
+  // so customer maps and raw location freshness keep working. Its arrival
+  // detector is nevertheless a Staff lifecycle writer: markOnProperty changes
+  // the scheduled service and semantic tech status. Suppress that transition
+  // before config/database work while the Phase-B interlock is closed.
+  if (isStaffMaintenanceEnabled()) {
+    logger.info('[gps-arrival] Staff maintenance suppressed automatic arrival transition');
+    return {
+      ok: false,
+      reason: 'staff_maintenance',
+      code: 'STAFF_MAINTENANCE',
+    };
+  }
+
   const config = await loadConfig(configOverride);
   if (!config.enabled) return { ok: false, reason: 'disabled' };
 

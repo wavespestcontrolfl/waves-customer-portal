@@ -1,5 +1,4 @@
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -8,6 +7,10 @@ const linkedin = require('../services/linkedin');
 const logger = require('../services/logger');
 const { recordAuditEvent } = require('../services/audit-log');
 const { publicPortalUrl } = require('../utils/portal-url');
+const {
+  createStaffOAuthState,
+  withClaimedStaffOAuthState,
+} = require('../services/staff-oauth-state');
 const {
   DEFAULT_SERVICE_COVERAGE_CONFIG,
   SERVICE_COVERAGE_CONFIG_KEY,
@@ -35,74 +38,27 @@ const GBP_OAUTH_STATE_LEGACY_KEY = 'gbp.oauth_state';
 const GBP_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const GOOGLE_BUSINESS_LOCATION_IDS = new Set(['bradenton', 'parrish', 'sarasota', 'venice']);
 
-function parseJsonObject(value) {
-  if (!value) return {};
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value !== 'string') return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-async function createGoogleOAuthState(locationId, technicianId) {
-  const state = crypto.randomBytes(32).toString('base64url');
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + GBP_OAUTH_STATE_TTL_MS);
-
-  // Sweep the deprecated single-key row and any expired pending states so
-  // rows don't accumulate. The current attempt gets its own nonce-keyed row.
-  const cutoff = new Date(now.getTime() - GBP_OAUTH_STATE_TTL_MS);
-  await db('system_settings')
-    .where('key', GBP_OAUTH_STATE_LEGACY_KEY)
-    .orWhere((b) =>
-      b.where('key', 'like', `${GBP_OAUTH_STATE_PREFIX}%`).andWhere('updated_at', '<', cutoff),
-    )
-    .del();
-
-  await db('system_settings').insert({
-    key: `${GBP_OAUTH_STATE_PREFIX}${state}`,
-    value: JSON.stringify({
-      state,
-      locationId,
-      technicianId: technicianId || null,
-      expiresAt: expiresAt.toISOString(),
-    }),
-    category: 'integrations',
+async function createGoogleOAuthState(locationId, technician) {
+  await db('system_settings').where({ key: GBP_OAUTH_STATE_LEGACY_KEY }).del();
+  return createStaffOAuthState({
+    prefix: GBP_OAUTH_STATE_PREFIX,
+    technician,
+    ttlMs: GBP_OAUTH_STATE_TTL_MS,
+    metadata: { locationId },
     description: 'Google Business Profile OAuth one-time state',
-    created_at: now,
-    updated_at: now,
   });
-  return state;
 }
 
-async function consumeGoogleOAuthState(rawState) {
-  const state = String(rawState || '');
-  if (!state) {
-    logger.warn('[admin-settings] GBP OAuth callback rejected: missing state');
-    throw new Error('Invalid or expired OAuth state');
-  }
-  const key = `${GBP_OAUTH_STATE_PREFIX}${state}`;
-  const row = await db('system_settings').where({ key }).first();
-  const saved = parseJsonObject(row?.value);
-  const expiresAt = saved.expiresAt ? new Date(saved.expiresAt) : null;
-  if (
-    !saved.state
-    || saved.state !== state
-    || !saved.locationId
-    || !GOOGLE_BUSINESS_LOCATION_IDS.has(saved.locationId)
-    || !expiresAt
-    || expiresAt < new Date()
-  ) {
-    logger.warn('[admin-settings] GBP OAuth callback rejected: invalid or expired state');
-    if (row) await db('system_settings').where({ key }).del();
-    throw new Error('Invalid or expired OAuth state');
-  }
-
-  await db('system_settings').where({ key }).del(); // one-time use
-  return saved.locationId;
+async function consumeGoogleOAuthState(rawState, credentialMutation) {
+  return withClaimedStaffOAuthState({
+    prefix: GBP_OAUTH_STATE_PREFIX,
+    rawState: String(rawState || ''),
+    validatePayload: (payload) => GOOGLE_BUSINESS_LOCATION_IDS.has(payload.locationId),
+    callback: async (payload) => {
+      await credentialMutation(payload.locationId);
+      return payload.locationId;
+    },
+  });
 }
 
 // =========================================================================
@@ -121,7 +77,7 @@ router.get('/google/auth-url', adminAuthenticate, requireAdmin, async (req, res)
     if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) {
       return res.status(400).json({ error: 'Unknown location. Use: bradenton, parrish, sarasota, or venice' });
     }
-    const state = await createGoogleOAuthState(locationId, req.technicianId);
+    const state = await createGoogleOAuthState(locationId, req.technician);
     const url = gbp.getAuthUrl(locationId, state);
     res.json({ url });
   } catch (err) {
@@ -138,7 +94,7 @@ router.get('/google/auth', adminAuthenticate, requireAdmin, async (req, res) => 
     if (!locationId) return res.status(400).send('Missing ?location= parameter. Use: bradenton, parrish, sarasota, or venice');
     if (!GOOGLE_BUSINESS_LOCATION_IDS.has(locationId)) return res.status(400).send('Unknown location. Use: bradenton, parrish, sarasota, or venice');
 
-    const state = await createGoogleOAuthState(locationId, req.technicianId);
+    const state = await createGoogleOAuthState(locationId, req.technician);
     const authUrl = gbp.getAuthUrl(locationId, state);
     res.redirect(authUrl);
   } catch (err) {
@@ -152,9 +108,10 @@ router.get('/google/callback', async (req, res) => {
   try {
     const { code, state } = req.query;
     if (!code) return res.status(400).send('Missing authorization code');
-    const locationId = await consumeGoogleOAuthState(state);
-
-    await gbp.handleCallback(code, locationId);
+    const locationId = await consumeGoogleOAuthState(
+      state,
+      (claimedLocationId) => gbp.handleCallback(code, claimedLocationId),
+    );
     logger.info(`[admin-settings] GBP OAuth connected for ${locationId}`);
 
     const clientUrl = publicPortalUrl();
@@ -171,44 +128,21 @@ router.get('/google/callback', async (req, res) => {
 const LINKEDIN_OAUTH_STATE_PREFIX = 'linkedin.oauth_state:';
 const LINKEDIN_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
-async function createLinkedInOAuthState(technicianId) {
-  const state = crypto.randomBytes(32).toString('base64url');
-  const now = new Date();
-  const cutoff = new Date(now.getTime() - LINKEDIN_OAUTH_STATE_TTL_MS);
-  // Sweep expired pending states so rows don't accumulate.
-  await db('system_settings')
-    .where('key', 'like', `${LINKEDIN_OAUTH_STATE_PREFIX}%`)
-    .andWhere('updated_at', '<', cutoff)
-    .del();
-  await db('system_settings').insert({
-    key: `${LINKEDIN_OAUTH_STATE_PREFIX}${state}`,
-    value: JSON.stringify({
-      state,
-      technicianId: technicianId || null,
-      expiresAt: new Date(now.getTime() + LINKEDIN_OAUTH_STATE_TTL_MS).toISOString(),
-    }),
-    category: 'integrations',
+async function createLinkedInOAuthState(technician) {
+  return createStaffOAuthState({
+    prefix: LINKEDIN_OAUTH_STATE_PREFIX,
+    technician,
+    ttlMs: LINKEDIN_OAUTH_STATE_TTL_MS,
     description: 'LinkedIn OAuth one-time state',
-    created_at: now,
-    updated_at: now,
   });
-  return state;
 }
 
-async function consumeLinkedInOAuthState(rawState) {
-  const state = String(rawState || '');
-  if (!state) throw new Error('Invalid or expired OAuth state');
-  const key = `${LINKEDIN_OAUTH_STATE_PREFIX}${state}`;
-  const row = await db('system_settings').where({ key }).first();
-  const saved = parseJsonObject(row?.value);
-  const expiresAt = saved.expiresAt ? new Date(saved.expiresAt) : null;
-  if (!saved.state || saved.state !== state || !expiresAt || expiresAt < new Date()) {
-    if (row) await db('system_settings').where({ key }).del();
-    logger.warn('[admin-settings] LinkedIn OAuth callback rejected: invalid or expired state');
-    throw new Error('Invalid or expired OAuth state');
-  }
-  await db('system_settings').where({ key }).del(); // one-time use
-  return true;
+async function consumeLinkedInOAuthState(rawState, credentialMutation) {
+  return withClaimedStaffOAuthState({
+    prefix: LINKEDIN_OAUTH_STATE_PREFIX,
+    rawState: String(rawState || ''),
+    callback: () => credentialMutation(),
+  });
 }
 
 // GET /api/admin/settings/linkedin/auth-url — SPA fetches this (bearer), then
@@ -218,7 +152,7 @@ router.get('/linkedin/auth-url', adminAuthenticate, requireAdmin, async (req, re
     if (!linkedin.configured) {
       return res.status(400).json({ error: 'LinkedIn not configured — set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET.' });
     }
-    const state = await createLinkedInOAuthState(req.technicianId);
+    const state = await createLinkedInOAuthState(req.technician);
     res.json({ url: linkedin.getAuthUrl(state) });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -240,8 +174,7 @@ router.get('/linkedin/callback', async (req, res) => {
       return res.redirect(settingsUrl('error'));
     }
     if (!code) return res.redirect(settingsUrl('error'));
-    await consumeLinkedInOAuthState(state);
-    await linkedin.handleCallback(code);
+    await consumeLinkedInOAuthState(state, () => linkedin.handleCallback(code));
     logger.info('[admin-settings] LinkedIn OAuth connected');
     return res.redirect(settingsUrl('success'));
   } catch (err) {

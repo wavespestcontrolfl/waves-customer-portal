@@ -277,12 +277,34 @@ function uiConfirmEnabled() {
 }
 
 function summarizeProposal(toolName, params) {
-  const pairs = Object.entries(params || {})
-    .filter(([, v]) => v !== undefined && v !== null && typeof v !== 'object')
-    .map(([k, v]) => `${k}: ${String(v)}`)
-    .join(', ');
-  const summary = pairs ? `${toolName} — ${pairs}` : toolName;
-  return summary.length > 200 ? `${summary.slice(0, 197)}...` : summary;
+  // One level of plain-object params flattens into the summary — without it
+  // an update_customer card reads "customer_id: X" and hides WHAT is being
+  // changed (the confirmation card must show everything the commit will do).
+  const flat = [];
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      for (const [k2, v2] of Object.entries(v)) {
+        if (v2 !== undefined && v2 !== null && typeof v2 !== 'object') flat.push(`${k}.${k2}: ${String(v2)}`);
+      }
+    } else if (typeof v !== 'object') {
+      flat.push(`${k}: ${String(v)}`);
+    }
+  }
+  let summary = flat.length ? `${toolName} — ${flat.join(', ')}` : toolName;
+  // Disclose the deterministic ripple of an email change (see
+  // customer-email-fanout): the operator's Confirm covers these too. The
+  // ripple note is appended AFTER the length cap so long notes/many fields
+  // can never truncate the disclosure off the confirmation card.
+  const ripple = toolName === 'update_customer' && params?.updates?.email
+    ? ` — ${require('../services/customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`
+    : '';
+  // The ripple is long by design (it names every synced surface) — widen the
+  // total budget when it applies so the base summary (who + what changes)
+  // stays readable alongside the always-intact disclosure.
+  const cap = (ripple ? 400 : 300) - ripple.length;
+  if (summary.length > cap) summary = `${summary.slice(0, cap - 3)}...`;
+  return summary + ripple;
 }
 
 /**

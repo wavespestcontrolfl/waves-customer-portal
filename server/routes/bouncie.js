@@ -1,14 +1,19 @@
 const express = require('express');
 const router = express.Router();
-const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const tokenStore = require('../services/bouncie-token-store');
+const {
+  createStaffOAuthState,
+  withClaimedStaffOAuthState,
+} = require('../services/staff-oauth-state');
 
 const BOUNCIE_API = config.bouncie.apiBase;
 const AUTH_BASE = config.bouncie.authBase;
+const BOUNCIE_OAUTH_STATE_PREFIX = 'bouncie.oauth_state:';
+const BOUNCIE_OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
 
 // In-memory token (refreshes automatically)
 let currentToken = config.bouncie.accessToken;
@@ -96,6 +101,66 @@ async function bouncieRequest(path) {
   return res.json();
 }
 
+async function exchangeBouncieAuthorizationCode(code, redirectUri) {
+  logger.info(`[bouncie] Token exchange started for redirect_uri=${redirectUri}`);
+  let tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: config.bouncie.clientId,
+      client_secret: config.bouncie.clientSecret,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    // Some Bouncie deployments require form encoding. Do not log the provider
+    // response body: it can echo authorization credentials.
+    logger.warn(`[bouncie] JSON token exchange failed (status=${tokenRes.status}); retrying form-encoded`);
+    tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.bouncie.clientId,
+        client_secret: config.bouncie.clientSecret,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri,
+      }).toString(),
+    });
+  }
+
+  if (!tokenRes.ok) {
+    const error = new Error('Bouncie token exchange failed');
+    error.statusCode = tokenRes.status;
+    throw error;
+  }
+
+  const tokenData = await tokenRes.json();
+  currentToken = tokenData.access_token;
+  if (tokenData.refresh_token) currentRefresh = tokenData.refresh_token;
+  hydratedTokens = true;
+  await tokenStore.saveTokens({
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
+    expiresIn: tokenData.expires_in,
+  });
+
+  try {
+    const bouncieService = require('../services/bouncie');
+    if (bouncieService.updateTokens) {
+      await bouncieService.updateTokens(tokenData.access_token, tokenData.refresh_token, {
+        persist: false,
+        expiresIn: tokenData.expires_in,
+      });
+    }
+  } catch { /* service may not expose this yet */ }
+
+  logger.info('[bouncie] OAuth token exchanged and persisted');
+}
+
 // =========================================================================
 // GET /api/bouncie/vehicles — List all vehicles
 // =========================================================================
@@ -144,25 +209,27 @@ router.get('/location', authenticate, async (req, res, next) => {
 });
 
 // =========================================================================
-// GET /api/bouncie/auth — Admin-only OAuth start with signed state
+// GET /api/bouncie/auth — Admin-only OAuth start with one-time state
 // =========================================================================
-router.get('/auth', adminAuthenticate, requireAdmin, (req, res) => {
-  const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
-  const state = jwt.sign(
-    {
-      type: 'bouncie_oauth',
-      technicianId: req.technicianId,
-    },
-    config.jwt.secret,
-    { expiresIn: '15m' }
-  );
-  const params = new URLSearchParams({
-    client_id: config.bouncie.clientId,
-    redirect_uri: redirectUri,
-    response_type: 'code',
-    state,
-  });
-  res.redirect(`${AUTH_BASE}/dialog/authorize?${params.toString()}`);
+router.get('/auth', adminAuthenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
+    const state = await createStaffOAuthState({
+      prefix: BOUNCIE_OAUTH_STATE_PREFIX,
+      technician: req.technician,
+      ttlMs: BOUNCIE_OAUTH_STATE_TTL_MS,
+      description: 'Bouncie OAuth one-time state',
+    });
+    const params = new URLSearchParams({
+      client_id: config.bouncie.clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      state,
+    });
+    return res.redirect(`${AUTH_BASE}/dialog/authorize?${params.toString()}`);
+  } catch (error) {
+    return next(error);
+  }
 });
 
 // =========================================================================
@@ -176,93 +243,32 @@ router.get('/callback', async (req, res, next) => {
       return res.status(400).send('<h2>Error: Missing OAuth state</h2><p>Start the connection from /api/bouncie/auth.</p>');
     }
 
-    const staticState = process.env.BOUNCIE_OAUTH_STATE;
-    try {
-      if (staticState && String(state) === String(staticState)) {
-        logger.warn('[bouncie] OAuth callback accepted static BOUNCIE_OAUTH_STATE');
-      } else {
-        const decoded = jwt.verify(state, config.jwt.secret);
-        if (decoded?.type !== 'bouncie_oauth') throw new Error('invalid state type');
-      }
-    } catch {
-      return res.status(400).send('<h2>Error: Invalid or expired OAuth state</h2><p>Start the connection again from /api/bouncie/auth.</p>');
-    }
-
-    const clientId = config.bouncie.clientId;
-    const clientSecret = config.bouncie.clientSecret;
     const redirectUri = config.bouncie.redirectUri || 'https://portal.wavespestcontrol.com/api/bouncie/callback';
-
-    logger.info(`[bouncie] Token exchange started for redirect_uri=${redirectUri}`);
-
-    // Exchange code for tokens (JSON body per Bouncie docs)
-    let tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: redirectUri,
-      }),
-    });
-
-    // Fallback to form-encoded
-    if (!tokenRes.ok) {
-      const errBody = await tokenRes.text();
-      logger.warn(`[bouncie] JSON failed (${tokenRes.status}): ${errBody} — trying form-encoded...`);
-      tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: 'authorization_code', code, redirect_uri: redirectUri }).toString(),
-      });
-    }
-
-    if (!tokenRes.ok) {
-      const body = await tokenRes.text();
-      logger.error(`[bouncie] Token exchange failed: ${tokenRes.status} ${body}`);
-      return res.status(400).send(`<h2>Token exchange failed</h2><pre>${body}</pre>`);
-    }
-
-    const tokenData = await tokenRes.json();
-    currentToken = tokenData.access_token;
-    if (tokenData.refresh_token) currentRefresh = tokenData.refresh_token;
-    hydratedTokens = true;
-    await tokenStore.saveTokens({
-      accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token,
-      expiresIn: tokenData.expires_in,
-    });
-
-    // Update the bouncie.js service's in-memory tokens too
     try {
-      const bouncieService = require('../services/bouncie');
-      if (bouncieService.updateTokens) {
-        await bouncieService.updateTokens(tokenData.access_token, tokenData.refresh_token, {
-          persist: false,
-          expiresIn: tokenData.expires_in,
-        });
+      await withClaimedStaffOAuthState({
+        prefix: BOUNCIE_OAUTH_STATE_PREFIX,
+        rawState: String(state),
+        callback: () => exchangeBouncieAuthorizationCode(code, redirectUri),
+      });
+    } catch (error) {
+      if (error.code === 'STAFF_OAUTH_STATE_INVALID') {
+        return res.status(400).send('<h2>Error: Invalid or expired OAuth state</h2><p>Start the connection again from /api/bouncie/auth.</p>');
       }
-    } catch (e) { /* service may not expose this yet */ }
-
-    logger.info('[bouncie] OAuth token exchanged and persisted');
+      logger.error(`[bouncie] OAuth callback token exchange failed (status=${error.statusCode || 'n/a'})`);
+      return res.status(400).send('<h2>Token exchange failed</h2><p>Start the connection again from /api/bouncie/auth.</p>');
+    }
 
     // Show success page with instructions
-    const masked = (t) => t ? t.substring(0, 8) + '...' + t.substring(t.length - 4) : 'N/A';
     res.send(`<!DOCTYPE html><html><head><title>Bouncie Connected</title>
 <style>body{font-family:'DM Sans',sans-serif;background:#0f1923;color:#e2e8f0;display:flex;justify-content:center;padding:40px}
 .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:32px;max-width:600px;width:100%}
 h2{color:#10b981;margin:0 0 16px}.ok{color:#10b981;font-size:24px;margin-right:8px}
-.field{margin:12px 0;font-size:14px;padding:10px;background:#0f172a;border-radius:8px;font-family:'JetBrains Mono',monospace;word-break:break-all}
-.label{color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
 .warn{color:#f59e0b;font-size:13px;margin-top:16px;padding:12px;background:#f59e0b11;border:1px solid #f59e0b33;border-radius:8px}
 a{color:#0ea5e9;text-decoration:none}</style></head><body><div class="card">
 	<h2><span class="ok">&#10003;</span> Bouncie Connected</h2>
 	<p>Tokens exchanged, persisted, and loaded in-memory. Mileage tracking is active.</p>
-	<div><div class="label">Access Token</div><div class="field">${masked(tokenData.access_token)}</div></div>
-	<div><div class="label">Refresh Token</div><div class="field">${masked(tokenData.refresh_token)}</div></div>
 	<div class="warn"><strong>Stored in the application database.</strong><br>
-	The callback no longer logs full token values. Keep Railway env vars as a fallback only.</div>
+	Token values are never rendered or logged. Keep Railway env vars as a fallback only.</div>
 <p style="margin-top:20px"><a href="/admin/mileage">&#8592; Back to Mileage Dashboard</a></p>
 </div></body></html>`);
   } catch (err) {
