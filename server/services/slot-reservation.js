@@ -238,11 +238,14 @@ async function reserveSlot({
 
   // Redemption re-check for owner blackout days: a signed offer minted
   // moments before the admin blacked the date out must not stay bookable.
-  // Same SLOT_UNAVAILABLE the client already recovers from by refreshing
-  // (the refreshed list no longer offers the date). Helper fails open.
+  // Same SLOT_UNAVAILABLE the client already recovers from by refreshing —
+  // and the estimate's 5-min wrapper cache is invalidated FIRST, so that
+  // refresh recomputes instead of re-serving the stale pre-blackout list
+  // (and re-throwing forever). Helper fails open.
   {
     const { isBlackoutDate } = require('./scheduling/blackout-dates');
     if (await isBlackoutDate(date)) {
+      try { estimateSlotAvailability.invalidateEstimate(estimateId); } catch { /* best-effort */ }
       const err = new Error('that day is no longer available');
       err.code = 'SLOT_UNAVAILABLE';
       err.slotId = slotId;
@@ -636,6 +639,19 @@ async function commitReservation({
       const err = new Error('reservation expired');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
+    }
+
+    // Owner blackout re-check at COMMIT: the admin may have blacked the day
+    // out between the customer's reserve and their accept — the hold must
+    // not graduate onto a day off. Same expired-reservation recovery path
+    // the accept flow already handles (customer re-picks a time).
+    {
+      const { isBlackoutDate } = require('./scheduling/blackout-dates');
+      if (await isBlackoutDate(row.scheduled_date)) {
+        const err = new Error('that day is no longer available');
+        err.code = 'RESERVATION_EXPIRED';
+        throw err;
+      }
     }
 
     const serviceProfile = await resolveReservationServiceProfile(client, row, {

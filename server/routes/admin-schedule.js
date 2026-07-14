@@ -7058,7 +7058,9 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
       .onConflict('date')
       .merge({ reason: reason || null })
       .returning(['id', 'date', 'reason']);
-    logger.info(`[schedule] blackout date ${date} set${reason ? ` (${reason})` : ''}`);
+    // Reason is free-form admin text — never log it (PII rule): a staffer
+    // may type a name/phone/address into it. Date + presence only.
+    logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
     res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
   } catch (err) { next(err); }
 });
