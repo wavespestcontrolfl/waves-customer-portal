@@ -13,6 +13,34 @@ const { scoreLevelWord } = require('./activity-indicators');
 
 const HISTORY_LIMIT = 8;
 
+// Cumulative knockdown-progress summary (TYPED_PROGRESS_SUMMARY, dark).
+// Multi-visit knockdown protocols' story is baseline → today, not just
+// visit-over-visit: the ActivityCard trend sentence compares only to the
+// LAST visit, so a bed bug program that went 5 → 3 → 1 never states its
+// cumulative win. Scoped to the knockdown families (bed bug + the shared
+// roach indicator) and rendered ONLY when today improved on the recorded
+// baseline — flat/worse visits keep the existing trend wording, and the
+// summary states factual numbers only (no cleared/eliminated claims;
+// banned-copy rules stay owned by the typed report's own wording).
+const PROGRESS_SUMMARY_INDICATORS = new Set(['bed_bug_activity', 'roach_activity']);
+
+function buildActivityProgress({ indicatorKey, history = [], currentScore = null } = {}) {
+  if (process.env.TYPED_PROGRESS_SUMMARY !== 'true') return null;
+  if (!PROGRESS_SUMMARY_INDICATORS.has(indicatorKey)) return null;
+  if (!Array.isArray(history) || history.length < 2) return null;
+  const baseline = history[0];
+  if (!baseline || baseline.isCurrent || !Number.isFinite(Number(baseline.score))) return null;
+  if (!Number.isFinite(Number(currentScore))) return null;
+  if (Number(currentScore) >= Number(baseline.score)) return null;
+  return {
+    baselineScore: Number(baseline.score),
+    baselineLevelWord: baseline.levelWord || scoreLevelWord(Number(baseline.score)),
+    baselineDate: baseline.serviceDate || null,
+    currentScore: Number(currentScore),
+    visits: history.length,
+  };
+}
+
 // pg DATE columns hydrate as Date objects, which JSON-serialize as full ISO
 // timestamps — the client chart parses `${serviceDate}T12:00:00` and would
 // drop every point. Always hand the client a bare YYYY-MM-DD string.
@@ -83,6 +111,11 @@ async function loadActivityCustomerView(knex = db, { snapshot = null, service = 
     trendWord: activity.trendWord || null,
     isBaseline: history.filter((point) => !point.isCurrent).length === 0,
     history,
+    progress: buildActivityProgress({
+      indicatorKey: activity.indicatorKey,
+      history,
+      currentScore: activity.score,
+    }),
   };
 }
 
@@ -181,4 +214,9 @@ async function buildTypedVisitTimeline(knex = db, { activityView = null, snapsho
   };
 }
 
-module.exports = { loadActivityCustomerView, buildTypedVisitTimeline, HISTORY_LIMIT };
+module.exports = {
+  loadActivityCustomerView,
+  buildTypedVisitTimeline,
+  buildActivityProgress,
+  HISTORY_LIMIT,
+};
