@@ -8377,8 +8377,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
         {/* Pest/Mosquito V2 surface the pressure/activity reading in the dashboard
-            hero, so the standalone meter is suppressed for them (no double report). */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && (data.activity
+            hero, so the standalone meter is suppressed for them (no double report)
+            — EXCEPT typed reports with a gauge (owner ruling 2026-07-14): they
+            render the full ActivityCard (score history + knockdown progress chip)
+            alongside the dashboard, and the server withholds `activity` from the
+            hero on typed visits so the reading still shows exactly once. */}
+        {((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
 
@@ -8445,7 +8449,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hasVisitTimeline={normalizedVisitTimeline.enabled}
             hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
             hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity) && !data.pestReportV2 && !data.mosquitoReportV2}
+            hasActivity={Boolean(data.activity)
+              && (Boolean(data.typedReport) || (!data.pestReportV2 && !data.mosquitoReportV2))}
             hasCoverageMap={!hideCoverageCard}
           />
         )}
