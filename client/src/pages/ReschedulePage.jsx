@@ -362,6 +362,7 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
               }
             }}
             placeholder="Ask Waves"
+            maxLength={500}
             aria-label="Search for a service date or time"
           />
           <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
@@ -374,8 +375,12 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
             <span className="rsv2-ask-answer-actions">
               {aiFiltered ? (
                 <button type="button" className="rsv2-ask-reset" onClick={onShowAll}>Show all open times</button>
-              ) : null}
-              <button type="button" className="rsv2-ask-dismiss" onClick={() => setNotice(null)} aria-label="Dismiss">{'\u2715'}</button>
+              ) : (
+                // While a filter is active the dropdown IS the state
+                // indicator (with its reset), so it can't be dismissed away;
+                // a dismiss button that leaves it open would be a dead button.
+                <button type="button" className="rsv2-ask-dismiss" onClick={() => setNotice(null)} aria-label="Dismiss">{'\u2715'}</button>
+              )}
             </span>
           </div>
         ) : null}
