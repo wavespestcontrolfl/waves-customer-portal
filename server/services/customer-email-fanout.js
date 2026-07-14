@@ -40,9 +40,9 @@ const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 
 // Mirrors customer-address-fanout (which mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js and CLOSED_STATUSES in intelligence-bar/leads-tools.js).
-// 'sending' is deliberately absent: an in-flight send already rendered its
-// content; the row still matches the old email once it settles, so the next
-// fan-out heals it.
+// 'sending' is absent from THIS list (no estimate_data touch under an
+// in-flight send) but gets its own column-only customer_email sync below —
+// this service is diff-gated, so "heal on the next fan-out" never comes.
 const OPEN_ESTIMATE_STATUSES = ['draft', 'scheduled', 'sent', 'viewed', 'send_failed'];
 const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
 
@@ -102,6 +102,24 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         estimate_data: conn.raw("estimate_data - 'proposalDelivery'"),
         updated_at: now,
       });
+
+    // 'sending' rows sync too — but COLUMN-ONLY, no estimate_data touch.
+    // Unlike the presence-triggered address fan-out (where a skipped
+    // 'sending' row heals on the next resave), this service is diff-gated:
+    // skip the row now and it can never heal — the old email is gone from
+    // the customer row. Verified safe against the send path
+    // (routes/admin-estimates.js): the in-flight send reads its recipient
+    // into memory BEFORE the 'sending' claim, and the settle write touches
+    // status/sent_at and a jsonb merge of its OWN estimate_data keys — never
+    // customer_email. Residual: the settle stamps proposalDelivery for the
+    // send it just made (to the old spelling) — bounded to that one
+    // in-flight send; every future resend/follow-up uses the corrected
+    // address.
+    counts.estimates += await conn('estimates')
+      .where({ customer_id: customerId, status: 'sending' })
+      .whereRaw('LOWER(customer_email) = ?', [oldEmail])
+      .whereNull('archived_at')
+      .update({ customer_email: newEmail, updated_at: now });
 
     // Active automation enrollments send every remaining step to their
     // denormalized email — terminal enrollments (completed/cancelled/failed)

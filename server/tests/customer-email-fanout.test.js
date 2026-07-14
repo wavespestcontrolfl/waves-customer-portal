@@ -57,12 +57,19 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 1, newsletter: 1, automations: 1, reviewCards: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, reviewCards: 1 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
     // The stale "PDF emailed" marker (stamped for the OLD address) drops with the sync.
     expect(conn.__updates('estimates')[0].arg.estimate_data.__raw).toContain("- 'proposalDelivery'");
+    // In-flight ('sending') rows get a COLUMN-ONLY sync — never an
+    // estimate_data write under an active send claim.
+    const sendingSync = conn.__updates('estimates')[1].arg;
+    expect(sendingSync.customer_email).toBe('charleswrobb@gmail.com');
+    expect(sendingSync.estimate_data).toBeUndefined();
+    expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'where'
+      && c.arg && c.arg.status === 'sending')).toBe(true);
     expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('charleswrobb@gmail.com');
 
