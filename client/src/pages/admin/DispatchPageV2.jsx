@@ -1311,9 +1311,16 @@ export default function DispatchPageV2({
     return () => setOpenCreateHandler(null);
   }, [setOpenCreateHandler]);
 
-  const fetchSchedule = useCallback(async (d) => {
-    setLoading(true);
-    setError(null);
+  const fetchSchedule = useCallback(async (d, { silent = false } = {}) => {
+    // silent: refresh data without tripping the page-level loading/error
+    // gates — both render ABOVE the overlays, so a loud refresh (or a
+    // transient refresh failure) unmounts the in-place project editor and
+    // its unsaved edits in board/week modes (Codex r8 P2). Loud stays the
+    // default for initial loads, date changes, and explicit retries.
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const [scheduleData, catalogData] = await Promise.all([
         adminFetch(`/admin/schedule?date=${d}`),
@@ -1321,11 +1328,13 @@ export default function DispatchPageV2({
       ]);
       setData(scheduleData);
       setProducts(catalogData.products || []);
-      setLoading(false);
+      if (!silent) setLoading(false);
       return scheduleData;
     } catch (e) {
-      setError(e);
-      setLoading(false);
+      if (!silent) {
+        setError(e);
+        setLoading(false);
+      }
       return null;
     }
   }, []);
@@ -2548,7 +2557,9 @@ export default function DispatchPageV2({
                 fetchSchedule(date);
               }}
               onChanged={(info) => {
-                fetchSchedule(date);
+                // Silent: this fires while the editor is mounted — a loud
+                // refresh would unmount it through the loading gate.
+                fetchSchedule(date, { silent: true });
                 // Close-from-editor also completes the visit. The day
                 // refresh re-points day rows, but a Week-mode row never
                 // appears in the day payload — mark the snapshot terminal
@@ -2587,7 +2598,9 @@ export default function DispatchPageV2({
           onClose={() => setEditingService(null)}
           onSaved={() => {
             setEditingService(null);
-            fetchSchedule(date);
+            // Silent: Edit is reachable from the Details sheet while the
+            // project editor stays mounted underneath (Codex r8 P2).
+            fetchSchedule(date, { silent: true });
           }}
           onMarkPrepaid={(svc) => {
             setPrepaidEntryContext('edit');
@@ -2652,7 +2665,7 @@ export default function DispatchPageV2({
             setShowNewAppt(true);
           }}
           onCancelled={() => {
-            fetchSchedule(date);
+            fetchSchedule(date, { silent: true });
             // Week rows come from MobileDispatchList's cached /week payload —
             // without a bump the terminalized visit stays tappable as an
             // active project-backed row and can mint a project against a
@@ -2669,7 +2682,7 @@ export default function DispatchPageV2({
             );
           }}
           onNoShow={() => {
-            fetchSchedule(date);
+            fetchSchedule(date, { silent: true });
             // Same week-cache staleness as onCancelled (Codex r4 P2).
             setScheduleRefreshKey((k) => k + 1);
             // Same week-origin snapshot retirement as onCancelled (Codex r5).
@@ -2683,7 +2696,7 @@ export default function DispatchPageV2({
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.
             setScheduleRefreshKey((k) => k + 1);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
             // Re-seat (or retire) the continue snapshot off the refreshed
             // day payload (Codex r7 P2): a rain-out/reschedule moves the
             // visit, and a day-miss would otherwise keep serving the old
@@ -2728,7 +2741,7 @@ export default function DispatchPageV2({
                 checkoutInvoiceId: invoiceId,
                 checkoutInvoiceToken: invoiceToken,
               });
-              fetchSchedule(date);
+              fetchSchedule(date, { silent: true });
               return;
             }
             setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
@@ -2745,7 +2758,7 @@ export default function DispatchPageV2({
           onSaved={async () => {
             const svcId = editingLineService.id;
             setEditingLineService(null);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
             // Re-seat the checkout sheet on the updated service record so
             // the new totals render immediately without the tech having
             // to close + reopen the sheet.
@@ -2777,7 +2790,7 @@ export default function DispatchPageV2({
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
             handleComplete(svc);
-            fetchSchedule(date);
+            fetchSchedule(date, { silent: true });
           }}
           onChargeSuccess={async () => {
             // Card paths reopen completion like the invoice/cash/check
@@ -2792,7 +2805,7 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
@@ -2810,7 +2823,7 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
@@ -2830,7 +2843,7 @@ export default function DispatchPageV2({
             const entry = prepaidEntryContext;
             setPrepaidService(null);
             setPrepaidEntryContext(null);
-            const fresh = await fetchSchedule(date);
+            const fresh = await fetchSchedule(date, { silent: true });
             if (entry === 'edit') {
               // Re-seat the editing service with the post-save row so the
               // EditServiceModal banner reflects the new prepaid state
