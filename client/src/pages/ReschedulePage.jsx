@@ -853,11 +853,12 @@ function V2Styles() {
 export default function ReschedulePage() {
   const { token } = useParams();
   const [searchParams] = useSearchParams();
-  // Dark-ship gate for the approved 2026-07-13 redesign — exactly ?v2=1
-  // renders the new layout (a false-valued or empty v2 param must NOT flip
-  // the kill switch); the legacy layout stays the default until the owner
-  // flips.
-  const isV2 = searchParams.get('v2') === '1';
+  // FLIPPED (owner 2026-07-14): the 2026-07-13 redesign is now the default
+  // for everyone. Kill switch without a deploy: exactly ?classic=1 renders
+  // the legacy layout (which also keeps old preview links carrying ?v2=1
+  // harmless). Legacy code removal is a later cleanup once the flip has
+  // soaked.
+  const isV2 = searchParams.get('classic') !== '1';
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);

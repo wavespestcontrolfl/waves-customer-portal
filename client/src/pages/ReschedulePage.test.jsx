@@ -52,9 +52,9 @@ function reschedulablePayload(overrides = {}) {
   };
 }
 
-function renderPage({ v2 = false } = {}) {
+function renderPage({ classic = false } = {}) {
   return render(
-    <MemoryRouter initialEntries={[v2 ? '/reschedule/deadbeef?v2=1' : '/reschedule/deadbeef']}>
+    <MemoryRouter initialEntries={[classic ? '/reschedule/deadbeef?classic=1' : '/reschedule/deadbeef']}>
       <Routes>
         <Route path="/reschedule/:token" element={<ReschedulePage />} />
       </Routes>
@@ -92,7 +92,7 @@ describe('ReschedulePage arrival windows', () => {
   it('shows the current visit as a 2-hour arrival window, not the job block', async () => {
     stubFetch();
 
-    renderPage();
+    renderPage({ classic: true });
 
     // window_start 09:00 with job-block window_end 10:00 → the promise is
     // 9:00–11:00 AM, never 9:00–10:00 AM.
@@ -112,7 +112,7 @@ describe('ReschedulePage arrival windows', () => {
       }),
     });
 
-    renderPage();
+    renderPage({ classic: true });
 
     fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
     fireEvent.click(screen.getByRole('button', { name: /Move to Sunday, July 12/ }));
@@ -158,7 +158,7 @@ describe('ReschedulePage Waves AI search', () => {
       }),
     });
 
-    renderPage();
+    renderPage({ classic: true });
 
     const input = await screen.findByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
@@ -188,7 +188,7 @@ describe('ReschedulePage Waves AI search', () => {
       }),
     });
 
-    renderPage({ v2: true });
+    renderPage();
 
     // Day grid renders the day as a selectable option; its times panel shows
     // the slot chip. The legacy bottom CTA must not exist on v2.
@@ -235,7 +235,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse(payload));
     }));
 
-    renderPage({ v2: true });
+    renderPage();
 
     expect(await screen.findByText('Our best times for you')).toBeInTheDocument();
     // The panel-less 4:00 PM ranked entry is filtered out of the strip.
@@ -245,17 +245,29 @@ describe('ReschedulePage Waves AI search', () => {
     expect(await screen.findByRole('button', { name: /Confirm/ })).toBeInTheDocument();
   });
 
-  it('v2 gate requires exactly v2=1 — a false-valued param keeps the legacy layout', async () => {
+  it('flip gate: V2 is the default, ?classic=1 is the exact-match kill switch, stale ?v2 params are harmless', async () => {
     stubFetch();
-    render(
-      <MemoryRouter initialEntries={['/reschedule/deadbeef?v2=0']}>
+    // Exactly ?classic=1 → legacy (bottom CTA exists only on the old page).
+    const classic = render(
+      <MemoryRouter initialEntries={['/reschedule/deadbeef?classic=1']}>
         <Routes>
           <Route path="/reschedule/:token" element={<ReschedulePage />} />
         </Routes>
       </MemoryRouter>
     );
-    // Legacy layout marker: the bottom CTA exists only on the old page.
     expect(await screen.findByText('Pick a time above')).toBeInTheDocument();
+    classic.unmount();
+    // A stale preview link carrying ?v2=1 (or a false-valued classic) still
+    // renders the new default layout.
+    render(
+      <MemoryRouter initialEntries={['/reschedule/deadbeef?v2=1&classic=0']}>
+        <Routes>
+          <Route path="/reschedule/:token" element={<ReschedulePage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    expect(await screen.findByRole('option', { name: /Sunday, July 12/ })).toBeInTheDocument();
+    expect(screen.queryByText('Pick a time above')).not.toBeInTheDocument();
   });
 
   it('v2: floating bar search filters the grid and the reset restores it', async () => {
@@ -277,7 +289,7 @@ describe('ReschedulePage Waves AI search', () => {
       }),
     });
 
-    renderPage({ v2: true });
+    renderPage();
 
     const input = await screen.findByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
@@ -306,7 +318,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse(payload));
     }));
 
-    renderPage({ v2: true });
+    renderPage();
 
     expect(await screen.findByText(/we missed each other/)).toBeInTheDocument();
     expect(screen.queryByText(/is currently\s+scheduled for/)).not.toBeInTheDocument();
@@ -338,7 +350,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse(payload));
     }));
 
-    renderPage({ v2: true });
+    renderPage();
 
     // No warning before a slot is picked…
     expect(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
@@ -369,7 +381,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse(payload));
     }));
 
-    renderPage({ v2: true });
+    renderPage();
 
     fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
     expect(screen.getByRole('button', { name: /Confirm/ })).toBeInTheDocument();
@@ -404,7 +416,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
     }));
 
-    renderPage();
+    renderPage({ classic: true });
 
     const input = await screen.findByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
