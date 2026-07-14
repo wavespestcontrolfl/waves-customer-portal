@@ -1070,7 +1070,18 @@ export default function CreateProjectModal({
             {isSheet && onViewDetails && (
               <button
                 type="button"
-                onClick={() => !saving && onViewDetails()}
+                onClick={() => {
+                  if (saving) return;
+                  // Queued photos are File objects — they can't ride the
+                  // localStorage draft that survives this handoff, so make
+                  // the tech choose instead of silently dropping evidence
+                  // shots (Codex r3 P2).
+                  if (photoQueue.length
+                    && !confirm(`${photoQueue.length} queued photo${photoQueue.length === 1 ? '' : 's'} will be discarded if you open appointment details before saving. Continue?`)) {
+                    return;
+                  }
+                  onViewDetails();
+                }}
                 style={{
                   height: 36, minWidth: 72, borderRadius: 999,
                   background: P.card, border: `1px solid ${P.border}`,

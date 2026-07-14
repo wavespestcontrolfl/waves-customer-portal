@@ -129,6 +129,16 @@ function projectCompletionIsClosed(service) {
     && (service?.linkedProject?.status === "closed" || service?.status === "completed");
 }
 
+// Visit statuses the dispatch status route treats as terminal — the
+// appointment detail sheet hides Cancel/No-show for these, and the
+// continue-snapshot sync below refuses to downgrade past them.
+const TERMINAL_VISIT_STATUSES = new Set([
+  "completed",
+  "cancelled",
+  "no_show",
+  "skipped",
+]);
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const SKIP_REASONS = [
@@ -1191,6 +1201,18 @@ export default function DispatchPageV2({
     // staleness after an in-editor close is covered by the close signal
     // (onChanged {visitCompleted}) and the sheet's own terminal gating.
     if (fresh && fresh !== continueProjectService) {
+      // Never downgrade a terminal snapshot with an older row (Codex r3 P1):
+      // the close signal marks the snapshot completed while fetchSchedule is
+      // still in flight, so this effect re-runs against the PRE-close day
+      // payload first — accepting that stale active-looking row would
+      // resurrect the Details pill and hand a live-looking visit to the
+      // action sheet.
+      if (
+        TERMINAL_VISIT_STATUSES.has(String(continueProjectService.status))
+        && !TERMINAL_VISIT_STATUSES.has(String(fresh.status))
+      ) {
+        return;
+      }
       setContinueProjectService(fresh);
     }
   }, [data, continueProjectService]);
@@ -2440,6 +2462,12 @@ export default function DispatchPageV2({
             const svc = projectService;
             setProjectService(null);
             fetchSchedule(date);
+            // The mobile week list serves rows from its own cached /week
+            // payload — without a refetch that row still shows no
+            // linkedProject, and tapping it again would open a second
+            // create sheet (and a second POST) for the same visit
+            // (Codex r3 P2).
+            setScheduleRefreshKey((k) => k + 1);
             // Chain straight into the report editor so fill → review → send
             // all happens without leaving the schedule.
             if (p?.id) {
@@ -2474,10 +2502,13 @@ export default function DispatchPageV2({
                     // visit behind this report. Hidden once the visit/report
                     // is terminal (Codex P1) — the sheet also gates its own
                     // terminal actions as the last line of defense.
-                    const svc = continueProjectService;
-                    setContinueProjectId(null);
-                    setContinueProjectService(null);
-                    setDetailService(svc);
+                    // The editor stays MOUNTED underneath (Codex r3 P2):
+                    // clearing continueProjectId here unmounted ProjectDetail
+                    // and silently discarded unsaved findings edits. The
+                    // detail sheet portals to document.body at z-100, fully
+                    // covering this z-50 overlay; closing it drops the
+                    // operator back into the editor, edits intact.
+                    setDetailService(continueProjectService);
                   }}
                 >
                   Details
@@ -2503,6 +2534,11 @@ export default function DispatchPageV2({
                   setContinueProjectService(
                     (s) => (s ? { ...s, status: "completed" } : s),
                   );
+                  // The week list's cached /week payload still holds the
+                  // pre-close active row — tappable again once this overlay
+                  // closes, reseeding a stale active snapshot (Codex r3 P1).
+                  // Bump the shared key so it refetches, as rain-out does.
+                  setScheduleRefreshKey((k) => k + 1);
                 }
               }}
               canAdminActions={getAdminUser()?.role === "admin"}
