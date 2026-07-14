@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
+import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
 // (owner ruling 2026-07-09, LAWN_REPORT_V2 flag retired): the server builds
@@ -99,6 +100,33 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     // Shared sections still render exactly once in the V2 lead layout.
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
+  it('renders the dashboard and suppresses the legacy summary, meter, and coverage map', async () => {
+    const { container } = renderReport(mosquitoReportV2);
+    // Hero status from the mosquitoReportV2 payload.
+    await screen.findByText('One step recommended');
+
+    // The dashboard owns the summary slot — the legacy Visit Summary paragraph
+    // must not render alongside it, and the anchor exists exactly once.
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    // Habitat map + next step + outlook cards render. ("Standing water"
+    // legitimately appears twice: the SVG node label and its legend row.)
+    expect(await screen.findAllByText('Standing water')).toHaveLength(2);
+    await screen.findByText('Tip and toss standing water once a week');
+    await screen.findByText('Mosquito outlook for July');
+    // The hero carries the pressure reading; the standalone meter and the
+    // lettered coverage map are suppressed (the habitat diagram replaces it).
+    expect(container.querySelectorAll('#map')).toHaveLength(0);
+  });
+
+  it('mosquito visit without the payload keeps the legacy layout', async () => {
+    const { mosquitoReportV2: _omit, ...gatedOff } = mosquitoReportV2;
+    renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
   });
 });
 

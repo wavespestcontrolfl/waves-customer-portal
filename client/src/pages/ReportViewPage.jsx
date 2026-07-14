@@ -4,6 +4,7 @@ import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile'
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -5147,7 +5148,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // hides it too (the "Where we protected" diagram replaces the lettered map).
   const hideCoverageCard = data.serviceLine === 'lawn'
     || /tree|shrub/.test(String(data.serviceLine || ''))
-    || Boolean(data.pestReportV2);
+    || Boolean(data.pestReportV2)
+    // Mosquito V2's habitat diagram replaces the lettered map the same way.
+    || Boolean(data.mosquitoReportV2);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
   // show feedback. Canceling the native share sheet is not an error and
@@ -8230,6 +8233,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
+        {/* Mosquito Report V2 — yard-usability dashboard, same slot and same
+            suppression rules as Pest V2. Mutually exclusive with pestReportV2
+            (one service line per report), so the visit-summary anchor is never
+            duplicated. */}
+        {data.mosquitoReportV2 && (
+          <div id="visit-summary">
+            <MosquitoReportV2Section data={data.mosquitoReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+          </div>
+        )}
+
         {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
@@ -8256,10 +8269,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </>
         )}
 
-        {/* Pest V2 owns the summary slot (the protection-first dashboard above
-            carries the id="visit-summary" anchor), so the legacy Visit Summary
-            paragraph is suppressed for pest V2 to avoid showing the report twice. */}
-        {!data.pestReportV2 && (
+        {/* Pest/Mosquito V2 own the summary slot (the dashboard above carries
+            the id="visit-summary" anchor), so the legacy Visit Summary
+            paragraph is suppressed for them to avoid showing the report twice. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
@@ -8319,9 +8332,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Only pass token in live mode so the interactive rating picker
             doesn't render into generated/cached PDFs (mode === 'pdf' /
             'static') where the controls would be non-functional anyway. */}
-        {/* Pest V2 surfaces the pressure/activity reading in the dashboard hero,
-            so the standalone meter is suppressed for pest V2 (no double report). */}
-        {!data.pestReportV2 && (data.activity
+        {/* Pest/Mosquito V2 surface the pressure/activity reading in the dashboard
+            hero, so the standalone meter is suppressed for them (no double report). */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && (data.activity
           ? <ActivityCard data={data.activity} />
           : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
 
@@ -8386,9 +8399,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             data={data}
             hasProducts={hasApplications}
             hasVisitTimeline={normalizedVisitTimeline.enabled}
-            hasPestPressure={hasPestPressure && !data.pestReportV2}
+            hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
             hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity) && !data.pestReportV2}
+            hasActivity={Boolean(data.activity) && !data.pestReportV2 && !data.mosquitoReportV2}
             hasCoverageMap={!hideCoverageCard}
           />
         )}

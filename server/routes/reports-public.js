@@ -31,6 +31,22 @@ function suppressedTypedReport(record) {
   return Boolean(mode) && mode !== 'auto_send';
 }
 
+// Seasonal pest forecast for the V2 report dashboards (pest + mosquito).
+// Best-effort with a hard 4s cap — a forecast/network hiccup must never
+// block or slow a report render.
+async function fetchSeasonalForecastSafe(zip) {
+  try {
+    const { getForecast } = require('../services/pest-forecast/forecast');
+    const timer = new Promise((resolve) => {
+      const t = setTimeout(() => resolve(null), 4000);
+      if (t.unref) t.unref();
+    });
+    return await Promise.race([getForecast({ zip }), timer]);
+  } catch {
+    return null;
+  }
+}
+
 async function staffCanViewSuppressed(req) {
   try {
     const header = String(req.headers.authorization || '');
@@ -293,15 +309,7 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   ) {
     try {
       const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
-      let forecast = null;
-      try {
-        const { getForecast } = require('../services/pest-forecast/forecast');
-        const timer = new Promise((resolve) => {
-          const t = setTimeout(() => resolve(null), 4000);
-          if (t.unref) t.unref();
-        });
-        forecast = await Promise.race([getForecast({ zip: service.zip }), timer]);
-      } catch { forecast = null; }
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -315,6 +323,34 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
           : null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
+    } catch { /* best-effort — never block the report */ }
+  }
+
+  // Mosquito Report V2 — yard-usability dashboard for recurring mosquito visits
+  // (flag-gated), same family as Pest V2 but with habitat semantics instead of
+  // entry points (mosquito-report-v2.js explains the reframe). Mutually
+  // exclusive with pestReportV2 by service line. Best-effort, never blocks.
+  if (
+    process.env.MOSQUITO_REPORT_V2 === 'true'
+    && data.serviceLine === 'mosquito'
+    && dynamicContext.premiumExperience
+  ) {
+    try {
+      const { buildMosquitoReportV2 } = require('../services/service-report/mosquito-report-v2');
+      const forecast = await fetchSeasonalForecastSafe(service.zip);
+      const mosquitoReportV2 = buildMosquitoReportV2({
+        premiumExperience: dynamicContext.premiumExperience,
+        pestPressure: data.pestPressure,
+        activity: data.activity,
+        findings: data.findings || [],
+        applications: data.applications || [],
+        forecast,
+        // Same typed-report double-print guard as the pest hero.
+        technicianReport: !data.typedReport && data.summarySource === 'technician_report'
+          ? data.summary
+          : null,
+      });
+      if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
   }
 
