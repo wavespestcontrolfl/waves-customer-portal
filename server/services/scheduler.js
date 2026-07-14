@@ -2272,6 +2272,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Estimate engagement engine (behavior-triggered follow-ups)
+  //
+  // Sweeps the time-based rules into the job queue, then processes due jobs
+  // (view-event rules enqueue from the estimate view hook). 5-min cadence is
+  // what makes the 15-minute return-visit trigger real. Dark behind
+  // GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP: off = jobs are consumed as 'shadow'
+  // and would-sends logged, nothing customer-facing.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('estimate-engagement-engine', async () => {
+        const EngagementEngine = require('./estimate-engagement-engine');
+        await EngagementEngine.sweepTimeRules();
+        await EngagementEngine.processDueJobs();
+      });
+    } catch (err) {
+      logger.error(`[est-engage] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 30 MIN — Abandoned-booking recovery (1h SMS + 24h email)
   //
   // Chases /book drop-offs captured as booking_intents. 30-min cadence keeps the

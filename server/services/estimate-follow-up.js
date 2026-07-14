@@ -1154,4 +1154,6 @@ module.exports._private = {
   safetyGate,
   claimStage,
   mintStageLinks,
+  hasRepliedRecently,
+  wasRecentlyOpened,
 };
