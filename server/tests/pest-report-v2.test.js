@@ -129,8 +129,8 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
 
   it('marks pest-line records only when the gate is on', () => {
     process.env.PEST_REPORT_V2 = 'true';
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2');
-    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2b');
+    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2b');
     // Other lines keep their keys — the pest gate must not invalidate
     // cached lawn/mosquito/termite report PDFs.
     expect(pestReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');

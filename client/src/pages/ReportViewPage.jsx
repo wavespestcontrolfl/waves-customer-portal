@@ -8449,7 +8449,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hasVisitTimeline={normalizedVisitTimeline.enabled}
             hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
             hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity) && !data.pestReportV2 && !data.mosquitoReportV2}
+            hasActivity={Boolean(data.activity)
+              && (Boolean(data.typedReport) || (!data.pestReportV2 && !data.mosquitoReportV2))}
             hasCoverageMap={!hideCoverageCard}
           />
         )}

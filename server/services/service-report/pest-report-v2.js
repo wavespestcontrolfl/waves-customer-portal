@@ -244,7 +244,12 @@ function buildPestReportV2({
 function pestReportV2PdfSignature(service = {}) {
   if (process.env.PEST_REPORT_V2 !== 'true') return '';
   const line = service.service_line || detectServiceLine(service.service_type);
-  return line === 'pest' ? '-pestv2' : '';
+  // 'b' = the typed-activity composition (owner ruling 2026-07-14): typed
+  // pest PDFs now render the ActivityCard alongside the dashboard, so PDFs
+  // cached under '-pestv2' would keep hiding the gauge/chart/progress chip
+  // on permanent links (codex P2). Bump this suffix whenever the pest-line
+  // report COMPOSITION changes — each pest PDF re-renders once on next view.
+  return line === 'pest' ? '-pestv2b' : '';
 }
 
 module.exports = {
