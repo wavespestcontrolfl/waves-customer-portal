@@ -55,6 +55,10 @@ started with it off.
    - An authenticated Bouncie geozone webhook still returns 200 and is logged,
      but reports `staffMaintenanceSuppressed: true`; it must not start or stop a
      Staff timer while the gate is closed.
+   - The separate Bouncie live-tracking receiver may continue refreshing the
+     customer map, but its GPS arrival detector reports `staff_maintenance`
+     internally and must not auto-mark a service on property or change its
+     semantic Staff lifecycle state.
    - A public/customer smoke request still succeeds.
    - A previously connected Staff socket was disconnected by the old-instance
      drain, and an already-signed-in Staff browser cannot reconnect it.
