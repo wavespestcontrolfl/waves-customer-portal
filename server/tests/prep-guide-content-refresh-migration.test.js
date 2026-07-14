@@ -8,7 +8,13 @@
  *  2. Mechanics: new versions publish (prior archived, pointer flipped),
  *     and the sequence step-0 swap is exact-match admin-edit preserving.
  */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => false), sendOne: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/notification-service', () => ({}));
+
 const migration = require('../models/migrations/20260715000001_prep_guide_content_refresh');
+const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES, STEP_SWAPS } = migration;
 
@@ -84,6 +90,18 @@ describe('prep guide content compliance', () => {
       const faqBlocks = t.blocks.filter((b) => b.type === 'details' && b.variant === 'faq');
       expect(faqBlocks.length).toBe(1);
     }
+  });
+
+  test('the editor normalizer preserves the FAQ variant on details blocks', () => {
+    // Admin create-draft/save-draft rebuild blocks through normalizeBlocks —
+    // if it drops variant:'faq', the page FAQ layout silently regresses to
+    // the two-column table after the next editor save (codex #2741 r2).
+    const normalized = normalizeBlocks([
+      { type: 'details', variant: 'faq', rows: [{ label: 'Q?', value: 'A.' }] },
+      { type: 'details', rows: [{ label: 'Service', value: 'X' }] },
+    ]);
+    expect(normalized[0].variant).toBe('faq');
+    expect(normalized[1].variant).toBeUndefined();
   });
 
   test('sequence step-0 bodies carry the EPA-registered phrasing when they describe products', () => {
