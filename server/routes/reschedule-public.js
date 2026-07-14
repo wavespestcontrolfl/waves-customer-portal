@@ -567,10 +567,17 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (shiftedOccurrences) {
       for (const occ of shiftedOccurrences) {
         try {
+          // coverDueWindows deliberately FALSE: covering before the series
+          // SMS is attempted would suppress already-due 24h/72h reminders
+          // on every no-send path (no phone, template missing, blocked).
+          // Uncovered, the worst case is the cron sending a standard
+          // reminder alongside our series text; the customer always hears
+          // about the new time. markRescheduleNoticeSent below records the
+          // notice only after a confirmed send.
           await AppointmentReminders.handleReschedule(
             occ.id,
             `${String(occ.date).split('T')[0]}T${hhmm(occ.windowStart) || slot.start_time}`,
-            { sendNotification: false, coverDueWindows: true }
+            { sendNotification: false, coverDueWindows: false }
           );
         } catch (err) {
           logger.error(`[reschedule-public] series reminder sync failed for ${occ.id}: ${err.message}`);

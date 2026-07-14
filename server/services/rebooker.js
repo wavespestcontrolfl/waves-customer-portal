@@ -610,11 +610,23 @@ class SmartRebooker {
         let conflicted = false;
         if (!isAnchor && sib.technician_id && updateData.window_start) {
           const clashEnd = updateData.window_end || updateData.window_start;
+          // Same slot-reserve advisory lock the anchor and single-visit
+          // paths take — without it a concurrent assignment can pass its
+          // own overlap check before this trx commits and double-book
+          // anyway.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],
+          );
           const clash = await trx('scheduled_services')
             .where('scheduled_date', date)
             .where('technician_id', sib.technician_id)
             .whereNot('id', sib.id)
-            .whereRaw('(id != ? AND (recurring_parent_id IS NULL OR recurring_parent_id != ?))', [parentId, parentId])
+            // Exclude only the rows THIS sweep moves (cadence rows).
+            // Booster extras share recurring_parent_id but stay in place —
+            // a shifted sibling landing on a booster's window is a real
+            // conflict and must still unassign.
+            .whereRaw('NOT (id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
             .whereNotIn('status', TERMINAL)
             .where((q) => {
               q.whereNull('reservation_expires_at')
