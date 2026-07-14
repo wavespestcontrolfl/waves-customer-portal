@@ -140,6 +140,14 @@ class SmartRebooker {
     const options = [];
     const today = new Date();
 
+    // Rain-out SMS alternates enumerate their own dates (not via find-time)
+    // — skip owner blackout days here too (shared helper, fail-open).
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const blackout = await getBlackoutDates(
+      etDateString(addETDays(today, 1)),
+      etDateString(addETDays(today, 10)),
+    );
+
     for (let d = 1; d <= 10; d++) {
       // ET calendar math — toISOString() reads the UTC date while displayDate
       // below formats in ET, so between 8 PM and midnight ET the customer would
@@ -147,6 +155,7 @@ class SmartRebooker {
       const candidateDate = addETDays(today, d); // anchored at noon UTC on the ET calendar day
 
       const dateStr = etDateString(candidateDate);
+      if (blackout.has(dateStr)) continue;
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)

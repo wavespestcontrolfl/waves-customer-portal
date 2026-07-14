@@ -236,6 +236,20 @@ async function reserveSlot({
     throw err;
   }
 
+  // Redemption re-check for owner blackout days: a signed offer minted
+  // moments before the admin blacked the date out must not stay bookable.
+  // Same SLOT_UNAVAILABLE the client already recovers from by refreshing
+  // (the refreshed list no longer offers the date). Helper fails open.
+  {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    if (await isBlackoutDate(date)) {
+      const err = new Error('that day is no longer available');
+      err.code = 'SLOT_UNAVAILABLE';
+      err.slotId = slotId;
+      throw err;
+    }
+  }
+
   // Stale-slot guard: the slot list is generated minutes before the customer
   // taps it, and a page left open can hold windows the generator would no
   // longer offer. Enforce the same minimum booking lead the generator uses

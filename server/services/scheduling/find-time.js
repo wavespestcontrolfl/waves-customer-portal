@@ -163,23 +163,16 @@ async function findAvailableSlots(opts) {
   let dates = enumerateDates(dateFrom, dateTo, { includeWeekends });
 
   // Owner blackout days (admin Settings → Scheduling → Blackout days) are
-  // removed here — the single date-enumeration point behind every
-  // customer-facing offer surface (/book, the reschedule page, estimate
-  // slots, the Waves AI searches). Admin manual scheduling stays unblocked
-  // by design (the owner can knowingly book his own day off). Fail-open:
-  // an errored lookup must never take the whole offer pipeline down.
+  // removed from the offer enumeration here — /book, the reschedule page,
+  // route-aware estimate slots, and the Waves AI searches all generate
+  // through this function. (Surfaces that enumerate their own dates —
+  // estimate ASAP capacity, rain-out SMS options — and the offer-redemption
+  // commits consume the same shared helper.) Admin manual scheduling stays
+  // unblocked by design; the helper fails open.
   if (dates.length) {
-    try {
-      const blackoutRows = await db('schedule_blackout_dates')
-        .whereBetween('date', [dates[0], dates[dates.length - 1]])
-        .select('date');
-      if (blackoutRows.length) {
-        const blackout = new Set(blackoutRows.map((r) => toDateStr(r.date)));
-        dates = dates.filter((d) => !blackout.has(d));
-      }
-    } catch (err) {
-      logger.warn(`[find-time] blackout-date lookup failed (offering all dates): ${err.message}`);
-    }
+    const { getBlackoutDates } = require('./blackout-dates');
+    const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1]);
+    if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
 
   const candidates = [];

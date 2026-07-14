@@ -1152,6 +1152,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // Redemption re-check for owner blackout days: a signed slot offered
+    // minutes before the admin blacked the date out must not stay bookable.
+    // 409 + the standard refresh flow (the refreshed list drops the date).
+    {
+      const { isBlackoutDate } = require('../services/scheduling/blackout-dates');
+      if (await isBlackoutDate(slotDateStr)) {
+        return { ok: false, status: 409, error: 'That day is no longer available — please pick another day.' };
+      }
+    }
+
     // A new_customer payload whose street line carries a DIFFERENT inline
     // unit than the dedicated field points at two doors at once — fail closed
     // like the matching paths, instead of minting (or backfilling from) a

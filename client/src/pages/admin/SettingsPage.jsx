@@ -135,6 +135,7 @@ const VALID_TABS = [
   "gates",
   "team",
   "service-reports",
+  "blackout-days",
   "kpi-targets",
   "operating-costs",
   "system",

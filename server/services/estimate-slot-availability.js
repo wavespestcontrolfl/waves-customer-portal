@@ -937,7 +937,16 @@ async function buildAsapCapacitySlots(options = {}) {
   const techs = await db('technicians')
     .where({ active: true })
     .select('id', 'name');
-  return buildAsapCapacitySlotsForTechs({ ...options, techs });
+  const slots = buildAsapCapacitySlotsForTechs({ ...options, techs });
+  // ASAP capacity enumerates its own dates (it deliberately skips the
+  // route-aware find-time path), so owner blackout days must be filtered
+  // here too — same shared helper, same fail-open posture.
+  if (slots.length && options.dateFrom && options.dateTo) {
+    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const blackout = await getBlackoutDates(options.dateFrom, options.dateTo);
+    if (blackout.size) return slots.filter((s) => !blackout.has(s.date));
+  }
+  return slots;
 }
 
 // Reorder a date-sorted slot pool so customers see a spread of distinct
