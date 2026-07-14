@@ -628,6 +628,11 @@ function calculatePropertyProfile(input) {
 
   return {
     footprint, hardscape, lawnSqFt, turfSf: lawnSqFt,
+    // Persisted twin of the input flag (false once a real footprint exists):
+    // consumers of the returned property — the admin price-breakdown fallback
+    // included — must not re-derive homeSqFt/stories from a footprint of 0
+    // (codex P1 #2721).
+    footprintUnknown: input.footprintUnknown === true && !(footprint > 0),
     turfEstimated: turfArea.turfEstimated,
     turfConfidence: turfArea.turfConfidence,
     turfBasis: turfArea.turfBasis,

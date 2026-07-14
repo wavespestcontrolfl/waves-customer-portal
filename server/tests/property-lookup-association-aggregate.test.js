@@ -593,3 +593,129 @@ describe('codex round-4 hardening (#2721)', () => {
     expect(property.footprint).toBe(1200);
   });
 });
+
+describe('codex round-5 hardening (#2721)', () => {
+  const { aggregateSitusVerdict } = aiPrivate;
+
+  test('aggregation strips labeled unit designators from situs lines', async () => {
+    // "APT 101"-shaped situs: the bare-number strip alone would store
+    // "13510 LUXE AVE APT" and the situs guard would read a valid
+    // association lookup as a wrong street.
+    mockArcgis([
+      MASTER_FEATURE,
+      unitFeature(13510, 101, { fulladdress: '13510 LUXE AVE APT 101, VENICE FL, 34285' }),
+      unitFeature(13510, 102, { fulladdress: '13510 LUXE AVE APT 102, VENICE FL, 34285' }),
+      unitFeature(13510, 103, { fulladdress: '13510 LUXE AVE UNIT B-3, VENICE FL, 34285' }),
+      unitFeature(13510, 104, { fulladdress: '13510 LUXE AVE # 104, VENICE FL, 34285' }),
+      unitFeature(13510, 105, { fulladdress: '13510 LUXE AVE 105, VENICE FL, 34285' }),
+    ]);
+
+    const parcel = await lookupCountyParcelByPoint(PT.lat, PT.lng, { county: 'Sarasota' });
+
+    expect(parcel.aggregated).toBe(true);
+    expect(parcel.situsLines).toEqual(['13510 LUXE AVE']);
+    expect(parcel.situsAddress).toBe('13510 LUXE AVE');
+  });
+
+  test('the situs guard also strips designators on cached aggregate lines', () => {
+    // An aggregate cached before the aggregation-side strip still carries
+    // the designator word — the guard must not read it as a different street.
+    const parcel = {
+      aggregated: true,
+      situsHouseNumbers: ['13510'],
+      situsLines: ['13510 LUXE AVE APT'],
+    };
+
+    expect(aggregateSitusVerdict(parcel, '13510 Luxe Ave, Venice, FL 34285', 'rooftop',
+      '13510 Luxe Ave, Venice, FL 34285')).toBe('keep');
+    // A genuinely different street still drops.
+    expect(aggregateSitusVerdict(parcel, '13510 Luxe Ave, Venice, FL 34285', 'rooftop',
+      '13510 Harbor Dr, Venice, FL 34285')).toBe('drop');
+  });
+
+  test('tech-verified dimensions outrank the county aggregate on re-lookup', () => {
+    const record = {
+      propertyType: 'Multifamily',
+      _source: 'county',
+      squareFootage: 90000, // verified downward correction
+      lotSize: 150000,
+      stories: 2,
+      _fieldEvidence: {
+        squareFootage: { sourceType: 'verified' },
+        lotSize: { sourceType: 'verified' },
+      },
+      _parcel: {
+        aggregated: true,
+        residentialUnits: 150,
+        buildingCount: 3,
+        livingAreaSqft: 122696,
+        lotSqft: 240741,
+      },
+    };
+
+    const profile = buildEnrichedProfile(record, null, PT.lat, PT.lng);
+
+    expect(profile.homeSqFt).toBe(90000);
+    expect(profile.lotSqFt).toBe(150000);
+  });
+
+  test('translate zeroes an explicit footprint when footprintUnknown (client-derived slabs)', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+
+    // The admin client re-derives profile.footprint = homeSqFt / stories
+    // when building the request payload — the translation must not let that
+    // positive value bypass the pricing-side derivation guard.
+    const input = translateV2CallToV1Input({
+      homeSqFt: 122696,
+      lotSqFt: 200000,
+      stories: 1,
+      footprint: 122696,
+      footprintUnknown: true,
+      propertyType: 'commercial',
+      isCommercial: true,
+    }, [], {});
+
+    expect(input.footprintSqFt).toBe(0);
+    expect(input.footprintUnknown).toBe(true);
+
+    const property = calculatePropertyProfile({
+      homeSqFt: input.homeSqFt,
+      stories: input.stories,
+      lotSqFt: input.lotSqFt,
+      footprintSqFt: input.footprintSqFt,
+      footprintUnknown: input.footprintUnknown,
+      propertyType: 'commercial',
+    });
+    expect(property.footprint || 0).toBe(0);
+    // The returned property re-publishes the flag so downstream consumers
+    // (the admin price-breakdown fallback included) don't re-derive either.
+    expect(property.footprintUnknown).toBe(true);
+  });
+
+  test('translate forwards explicit footprints unchanged when stories are known', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+
+    const input = translateV2CallToV1Input({
+      homeSqFt: 2400,
+      lotSqFt: 10000,
+      stories: 2,
+      footprint: 1200,
+      propertyType: 'Single Family',
+    }, [], {});
+
+    expect(input.footprintSqFt).toBe(1200);
+    expect(input.footprintUnknown).toBeUndefined();
+
+    const property = calculatePropertyProfile({
+      homeSqFt: 2400,
+      stories: 2,
+      lotSqFt: 10000,
+      footprintSqFt: input.footprintSqFt,
+      propertyType: 'Single Family',
+    });
+    expect(property.footprint).toBe(1200);
+    expect(property.footprintUnknown).toBe(false);
+  });
+});

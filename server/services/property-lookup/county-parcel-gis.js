@@ -132,6 +132,27 @@ function modalValue(values) {
   return best;
 }
 
+// Building line of a situs: "NUMBER STREET" with any labeled secondary-unit
+// designator removed. County rows label units as "APT 101" / "UNIT B4" /
+// "# 12" (and some layers emit a bare trailing number instead). The bare-
+// number strip alone leaves the designator word behind ("13510 LUXE AVE APT"),
+// which the situs guard then reads as a different street and drops the whole
+// association back to the empty address-search path (codex P2 #2721). The
+// designator set mirrors stripUnitDesignators in ai-property-lookup.js.
+const SITUS_UNIT_DESIGNATOR_RE = /\s+(?:APT|APARTMENT|UNIT|STE|SUITE|BLDG|BUILDING|LOT|TRLR|RM|FL|#)\s*#?\s*[A-Z0-9-]*\s*$/i;
+
+function situsBuildingLine(situs) {
+  let s = String(situs || '').split(',')[0].replace(/\s+/g, ' ').trim();
+  // Peel repeatedly — "STE 200 BLDG C" carries two designators.
+  for (let i = 0; i < 3; i += 1) {
+    const next = s.replace(SITUS_UNIT_DESIGNATOR_RE, '').trim();
+    if (next === s) break;
+    s = next;
+  }
+  const m = s.match(/^(\d+\s+[^,]*?)(?:\s+\d+)?$/);
+  return m ? m[1].trim() : null;
+}
+
 function buildStackedAggregate(county, layer, features, lng, lat) {
   const rows = [];
   for (const feature of features) {
@@ -166,8 +187,8 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   for (const row of unitRows) {
     const m = String(row.parsed.situsAddress || '').match(/^(\d+)\s/);
     if (m) streetNumbers.add(m[1]);
-    const line = String(row.parsed.situsAddress || '').match(/^(\d+\s+[^,]*?)(?:\s+\d+)?(?:,|$)/);
-    if (line) situsLines.add(line[1].toUpperCase().replace(/\s+/g, ' ').trim());
+    const line = situsBuildingLine(row.parsed.situsAddress);
+    if (line) situsLines.add(line.toUpperCase());
   }
   const buildingCount = Math.max(1, streetNumbers.size);
 
@@ -191,10 +212,9 @@ function buildStackedAggregate(county, layer, features, lng, lat) {
   const yearBuilt = modalValue(unitRows.map((row) => row.parsed.yearBuilt));
   const stories = unitRows.reduce((max, row) => Math.max(max, row.parsed.stories || 0), 0) || null;
   // Situs without the trailing unit designator — the modal "NUMBER STREET".
-  const situsAddress = modalValue(unitRows.map((row) => {
-    const m = String(row.parsed.situsAddress || '').match(/^(\d+\s+[^,]*?)(?:\s+\d+)?(?:,|$)/);
-    return m ? m[1] : row.parsed.situsAddress;
-  })) || masterRow.parsed.situsAddress || null;
+  const situsAddress = modalValue(unitRows.map(
+    (row) => situsBuildingLine(row.parsed.situsAddress) || row.parsed.situsAddress,
+  )) || masterRow.parsed.situsAddress || null;
 
   return {
     parcelId: masterRow.parsed.parcelId || unitRows[0]?.parsed.parcelId || null,

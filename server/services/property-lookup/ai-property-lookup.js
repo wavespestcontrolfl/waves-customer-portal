@@ -1364,12 +1364,16 @@ function aggregateSitusVerdict(parcel, searchAddress, gisPrecision, typedAddress
   const situsLines = Array.isArray(parcel?.situsLines) ? parcel.situsLines : [];
   if (typedNumber && situsLines.length) {
     const typedLine = stripUnitDesignators(normalizeCountyStreetLine(anchored));
+    // County situs lines get the same designator strip as the typed side —
+    // a labeled unit ("13510 LUXE AVE APT 101") that rides a cached
+    // aggregate built before the aggregation-side strip must not read as a
+    // different street and drop the association (codex P2 #2721).
     const lineMatches = situsLines.some((line) => {
-      const norm = normalizeCountyStreetLine(line);
+      const norm = stripUnitDesignators(normalizeCountyStreetLine(line));
       return norm === typedLine;
     });
     const extendsAsUnit = situsLines.some((line) => {
-      const norm = normalizeCountyStreetLine(line);
+      const norm = stripUnitDesignators(normalizeCountyStreetLine(line));
       return typedLine.startsWith(`${norm} `) && /^\d[\w-]*$/.test(typedLine.slice(norm.length + 1));
     });
     if (extendsAsUnit) return 'drop'; // unit-level lookup, not the HOA

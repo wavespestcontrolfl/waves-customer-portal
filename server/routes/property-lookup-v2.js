@@ -1301,10 +1301,19 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   if (rc?._parcel?.aggregated) {
     const aggLiving = Math.min(Number(rc._parcel.livingAreaSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
     const aggLot = Math.min(Number(rc._parcel.lotSqft) || 0, AGGREGATE_DIM_CAP_SQFT);
+    // A tech-verified dimension outranks the county aggregate — this runs
+    // AFTER applyVerifiedOverrides, and taking the max here would silently
+    // undo a verified downward correction on every subsequent lookup
+    // (codex P2 #2721).
+    const isVerified = (field) => rc._fieldEvidence?.[field]?.sourceType === 'verified';
     rc = {
       ...rc,
-      squareFootage: Math.max(Number(rc.squareFootage) || 0, aggLiving) || rc.squareFootage,
-      lotSize: Math.max(Number(rc.lotSize) || 0, aggLot) || rc.lotSize,
+      squareFootage: isVerified('squareFootage')
+        ? rc.squareFootage
+        : Math.max(Number(rc.squareFootage) || 0, aggLiving) || rc.squareFootage,
+      lotSize: isVerified('lotSize')
+        ? rc.lotSize
+        : Math.max(Number(rc.lotSize) || 0, aggLot) || rc.lotSize,
     };
   }
   // Record-bearing lookups carry the audit on the cached record (_addressAudit,
@@ -3205,7 +3214,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     stories,
     storiesSource: p.storiesSource || null,
     lotSqFt,
-    footprintSqFt: p.footprintSqFt ?? p.footprint,
+    // footprintUnknown wins over any explicit footprint in the payload — the
+    // admin client re-derives profile.footprint = homeSqFt / stories when
+    // building the request, and a positive value here would bypass the
+    // pricing-side derivation guard entirely (codex P1 #2721).
+    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprintSqFt ?? p.footprint),
     footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,

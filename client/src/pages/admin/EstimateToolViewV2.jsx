@@ -2710,6 +2710,12 @@ export default function EstimateToolViewV2({
     if (sqft > 0) {
       const fp = Math.round(sqft / st);
       setForm((f) => {
+        // footprintUnknown lookup (association aggregate, story count
+        // unknown): homeSqFt is the summed living area and stories a
+        // default — deriving a "footprint" here re-arms the fake-slab
+        // autofill the lookup suppressed (codex P1 #2721). Manual entry
+        // stays possible; the box just never self-fills.
+        if (f._footprintUnknownLookup) return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -3045,9 +3051,19 @@ export default function EstimateToolViewV2({
           ...f,
           ...upd,
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
+          // Rides the form so the homeSqFt/stories effect can't re-derive a
+          // footprint the lookup refused to claim (codex P1 #2721).
+          _footprintUnknownLookup: ep.footprintUnknown === true,
           _poolCageSizeEdited: false,
           _storiesEdited: false,
         };
+        // With derivation suppressed nothing would refresh a previous
+        // address's auto-derived footprint — clear it (manual entries keep
+        // the same never-overwritten contract as the boxes below).
+        if (ep.footprintUnknown === true && f._termiteFootprintAuto) {
+          next.termiteFootprintSqFt = "";
+          next._termiteFootprintAuto = false;
+        }
         // Termite measurement pre-fills honor the section contract: a
         // manually entered value is never overwritten by a lookup estimate,
         // and a lookup miss clears a value only if a previous lookup put it
@@ -3614,7 +3630,11 @@ export default function EstimateToolViewV2({
       } else {
         delete profile.measuredTurfSf;
       }
-      if (profile.homeSqFt)
+      // footprintUnknown (association aggregate, story count unknown): the
+      // summed living area over a defaulted story count is NOT a ground-floor
+      // footprint — deriving one here would hand pricing the exact fake slab
+      // the lookup suppressed (codex P1 #2721).
+      if (profile.homeSqFt && profile.footprintUnknown !== true)
         profile.footprint = Math.round(
           profile.homeSqFt / (profile.stories || 1),
         );
@@ -3732,29 +3752,36 @@ export default function EstimateToolViewV2({
         const homeSf = p.homeSqFt || p.squareFootage || 0;
         const stories = p.stories || 1;
         const fp = p.footprint || Math.round(homeSf / stories);
-        const fpAdj = interp(fp, [
-          { at: 800, adj: -15 },
-          { at: 1200, adj: -10 },
-          { at: 1500, adj: -5 },
-          { at: 1750, adj: -5 },
-          { at: 2000, adj: 0 },
-          { at: 2500, adj: 3 },
-          { at: 3000, adj: 6 },
-          { at: 4000, adj: 10 },
-          { at: 5500, adj: 16 },
-        ]);
         add(
           "property",
           `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`,
           0,
           "info",
         );
-        add(
-          "pest",
-          `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
-          fpAdj,
-          fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
-        );
+        // footprintUnknown: 0 is a refusal to claim a footprint, not a tiny
+        // slab — re-deriving homeSqFt/stories for the breakdown would show
+        // an adjustment the engine never charged (codex P1 #2721).
+        if (p.footprintUnknown === true) {
+          add("pest", "Footprint: field measurement required", 0, "info");
+        } else {
+          const fpAdj = interp(fp, [
+            { at: 800, adj: -15 },
+            { at: 1200, adj: -10 },
+            { at: 1500, adj: -5 },
+            { at: 1750, adj: -5 },
+            { at: 2000, adj: 0 },
+            { at: 2500, adj: 3 },
+            { at: 3000, adj: 6 },
+            { at: 4000, adj: 10 },
+            { at: 5500, adj: 16 },
+          ]);
+          add(
+            "pest",
+            `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
+            fpAdj,
+            fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
+          );
+        }
         if (p.poolCage === "YES") {
           const cageSize = String(p.poolCageSize || "MEDIUM").toUpperCase();
           const cageAdj =
@@ -4131,6 +4158,7 @@ export default function EstimateToolViewV2({
       customerEmail: "",
       leadServiceInterest: "",
       _termiteFootprintAuto: false,
+      _footprintUnknownLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
@@ -4763,6 +4791,7 @@ export default function EstimateToolViewV2({
                       // missing-measurement warning suppressed.
                       trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
+                      _footprintUnknownLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
                       _preslabSqftAuto: false,
