@@ -570,6 +570,39 @@ class SmartRebooker {
         .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
         .map((s) => s.id);
 
+      // Same-series same-DATE collisions are hard-blocked regardless of
+      // tech/time (auto-dispatch candidate-slots does the same): a plan must
+      // never get two of its own visits on one day. Project every date this
+      // shift will write and probe the series rows that are NOT moving
+      // (boosters, pre-anchor occurrences, skipped rows) — a hit aborts the
+      // whole trx so the caller offers a different anchor slot instead.
+      {
+        const projectedDates = [];
+        for (let i = startIdx; i < siblings.length; i++) {
+          const sib = siblings[i];
+          if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
+          const oi = i - startIdx;
+          projectedDates.push(oi === 0
+            ? String(newDate).split('T')[0]
+            : nextRecurringDate(newDate, parent.recurring_pattern, oi, opts));
+        }
+        if (projectedDates.length) {
+          const seriesClash = await trx('scheduled_services')
+            .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
+            .whereNotIn('id', sweptIds)
+            .whereNotIn('status', TERMINAL)
+            .whereIn('scheduled_date', projectedDates)
+            .first('id');
+          if (seriesClash) {
+            throw Object.assign(new Error('That date lands on another visit in this plan — pick a different time'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+        }
+      }
+
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];

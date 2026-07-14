@@ -50,6 +50,17 @@ describe('reschedule-public eligibility', () => {
       .toEqual({ ok: false, reason: 'not_available' });
     expect(eligibility({ status: 'completed', scheduled_date: '2026-07-01' }, NOW))
       .toEqual({ ok: false, reason: 'completed' });
+    // A past 'rescheduled' row is a pending-rebook PLACEHOLDER, not a missed
+    // visit — reviving it would resurrect a phantom (codex r6). Future
+    // 'rescheduled' rows stay plainly reschedulable (tested above).
+    expect(eligibility({ status: 'rescheduled', scheduled_date: '2026-07-01' }, NOW))
+      .toEqual({ ok: false, reason: 'past' });
+    expect(eligibility({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-02',
+      window_start: '08:00:00',
+      window_end: '09:00:00',
+    }, NOW)).toEqual({ ok: false, reason: 'past' });
   });
 
   test('same-day appointment is missed only after the QUOTED arrival window (start + 2h), not the job block', () => {

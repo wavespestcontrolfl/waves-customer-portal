@@ -273,11 +273,14 @@ describe('live-status reschedule override (allowLive)', () => {
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    // Same-series date-collision probe (codex r6 on #2725) runs once before
+    // any row updates — no clash by default.
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const updates = siblings.map(() => chain({ update: jest.fn().mockResolvedValue(1) }));
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, ...updates];
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, ...updates];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -507,14 +510,16 @@ describe('live-status reschedule override (allowLive)', () => {
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    // No same-series date collision…
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
-    // tech-9 already has an overlapping job on the recomputed sibling date.
+    // …but tech-9 already has an overlapping job on the recomputed sibling date.
     const conflictCheck = chain({ first: jest.fn().mockResolvedValue({ id: 'other-job' }) });
     const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, anchorUpdate, conflictCheck, sibUpdate];
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, conflictCheck, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;

@@ -161,9 +161,15 @@ function eligibility(svc, now = new Date()) {
   // 2026-07-13: "we missed each other — pick a new time"). Terminal and
   // live states were already rejected above; the rebooker only validates
   // the TARGET date, so a future target on a past visit commits cleanly.
+  // Only pending/confirmed rows qualify: a past 'rescheduled' row is a
+  // pending-rebook PLACEHOLDER other code treats as non-live — reviving it
+  // to confirmed would resurrect a phantom visit.
+  const missable = status === 'pending' || status === 'confirmed';
   const dateStr = apptDateStr(svc.scheduled_date);
   const todayEt = etDateString(now);
-  if (dateStr && dateStr < todayEt) return { ok: true, missed: true };
+  if (dateStr && dateStr < todayEt) {
+    return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
+  }
   if (dateStr === todayEt) {
     // Same-day: the visit is only MISSED once BOTH the internal job block
     // (window_end) AND the customer-quoted arrival promise (window_start +
@@ -183,7 +189,7 @@ function eligibility(svc, now = new Date()) {
     if (candidates.length) {
       const nowEt = etParts(now);
       if (Math.max(...candidates) <= nowEt.hour * 60 + nowEt.minute) {
-        return { ok: true, missed: true };
+        return missable ? { ok: true, missed: true } : { ok: false, reason: 'past' };
       }
     }
   }
@@ -662,14 +668,18 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
 
     // Live dispatch-board refresh, same broadcast the admin reschedule emits
     // (every shifted occurrence on a series re-anchor).
-    try {
+    {
       const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
       const jobIds = shiftedOccurrences ? shiftedOccurrences.map((occ) => occ.id) : [svc.id];
+      // Per-occurrence isolation (same as the admin series path): one socket
+      // failure must not leave the remaining shifted visits stale.
       for (const jobId of jobIds) {
-        await emitDispatchJobUpdate({ jobId, actorId: null });
+        try {
+          await emitDispatchJobUpdate({ jobId, actorId: null });
+        } catch (err) {
+          logger.error(`[reschedule-public] board broadcast failed for ${jobId}: ${err.message}`);
+        }
       }
-    } catch (err) {
-      logger.error(`[reschedule-public] board broadcast failed for ${svc.id}: ${err.message}`);
     }
 
     // Series-shift conflicts: the rebooker validated each shifted sibling
