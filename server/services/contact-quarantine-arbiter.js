@@ -101,8 +101,10 @@ function dotSpokenInDictation(rawSpoken) {
   // Domain-suffix mentions are never local-part evidence, whether the "at"
   // anchor existed or not (trailing chatter can keep "gmail dot com" inside
   // the sliced prefix: "... at gmail dot com, reach me at that address").
-  s = s.replace(/\b(?:dot|period)\s+(?:com|net|org|edu|gov|co|io|us|biz|info)\b/gi, '');
-  return /\b(?:dot|period)\b/i.test(s);
+  // Dot tokens mirror the decoder's own rule set ("dot"/"period"/"point" all
+  // convert to "." in an email context — contact-dictation EMAIL RULES #4).
+  s = s.replace(/\b(?:dot|period|point)\s+(?:com|net|org|edu|gov|co|io|us|biz|info)\b/gi, '');
+  return /\b(?:dot|period|point)\b/i.test(s);
 }
 
 // ── Evidence gathering (deterministic, no model) ─────────────────────────────

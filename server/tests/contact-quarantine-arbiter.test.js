@@ -630,4 +630,10 @@ describe('gmailCanonicalMailbox', () => {
     // sliced prefix — the suffix strip still discounts it.
     expect(dotSpokenInDictation('jane doe at gmail dot com, reach me at that address')).toBe(false);
   });
+
+  test('"point" counts as a spoken dot — mirrors the decoder\'s dot tokens', () => {
+    expect(dotSpokenInDictation('jane point doe at gmail dot com')).toBe(true);
+    // ...including as a domain separator that must be discounted.
+    expect(dotSpokenInDictation('jane doe at gmail point com')).toBe(false);
+  });
 });
