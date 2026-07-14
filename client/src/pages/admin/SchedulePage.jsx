@@ -7082,6 +7082,12 @@ const STATION_PROGRAM_UI = {
     activityLabel: "Consumption",
     activityCounter: "with consumption",
   },
+  trapping: {
+    title: "Rodent trap map",
+    hint: "Every trap starts as OK — tap a pin to record a capture, service, or no access.",
+    activityLabel: "Capture",
+    activityCounter: "with captures",
+  },
 };
 function stationStatusLabel(status, program) {
   if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
@@ -7753,11 +7759,16 @@ export function CompletionPanel({
   // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
   // load/submit one program's station ids while the sync targets the other,
   // silently skipping the visit's checks.
-  const stationTypeProgram = { termite_bait_station: "termite", rodent_bait_station: "rodent" };
+  const stationTypeProgram = {
+    termite_bait_station: "termite",
+    rodent_bait_station: "rodent",
+    rodent_trapping: "trapping",
+  };
   const companionStationTypes = stationTypeSet.slice(1);
   const stationProgram = stationTypeProgram[stationTypeSet[0]]
     || (companionStationTypes.includes("termite_bait_station") ? "termite"
-      : companionStationTypes.includes("rodent_bait_station") ? "rodent" : null);
+      : companionStationTypes.includes("rodent_bait_station") ? "rodent"
+        : companionStationTypes.includes("rodent_trapping") ? "trapping" : null);
   const stationFeatureOn = stationMapFlag && Boolean(stationProgram);
   const [stationPreloads, setStationPreloads] = useState([]); // property's existing stations
   const [stationNew, setStationNew] = useState([]); // pins dropped this session [{ key, number, shape }]
@@ -7935,18 +7946,23 @@ export function CompletionPanel({
     ];
     const statusOf = (key) => stationStatuses[key] || "ok";
     const inaccessible = activeKeys.filter((key) => statusOf(key) === "inaccessible").length;
-    const counts = {
-      total_stations: String(activeKeys.length),
-      stations_checked: String(activeKeys.length - inaccessible),
-      stations_inaccessible: String(inaccessible),
-      // Only the termite schema carries a per-station activity COUNT; the
-      // rodent flow records consumption as a select (tech judgment) — never
-      // auto-write a key the schema doesn't own, or submit validation
-      // rejects the unknown field.
-      ...(stationProgram === "termite"
-        ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
-        : {}),
-    };
+    // Each program maps to ITS schema's count keys — never auto-write a key
+    // the schema doesn't own, or submit validation rejects the unknown
+    // field. Trapping owns traps_checked only: captures is a tech-judgment
+    // count (one trap can hold multiple captures), and the schema has no
+    // total/inaccessible keys.
+    const counts = stationProgram === "trapping"
+      ? { traps_checked: String(activeKeys.length - inaccessible) }
+      : {
+        total_stations: String(activeKeys.length),
+        stations_checked: String(activeKeys.length - inaccessible),
+        stations_inaccessible: String(inaccessible),
+        // Only the termite schema carries a per-station activity COUNT; the
+        // rodent flow records consumption as a select (tech judgment).
+        ...(stationProgram === "termite"
+          ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
+          : {}),
+      };
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
     // reading the ref inside them would see the values we're about to
@@ -7965,7 +7981,8 @@ export function CompletionPanel({
       }
       return changed ? next : values;
     };
-    const stationTypedFlow = stationProgram === "rodent" ? "rodent_bait_station" : "termite_bait_station";
+    const stationTypedFlow = stationProgram === "trapping" ? "rodent_trapping"
+      : stationProgram === "rodent" ? "rodent_bait_station" : "termite_bait_station";
     if (service.completionProfile?.findingsType === stationTypedFlow) {
       setFindingsValues((prev) => applyCounts(prev));
     } else {

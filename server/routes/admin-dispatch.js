@@ -1174,7 +1174,7 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1 } }));
+  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
 
   return {
     available: true,
@@ -2521,6 +2521,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       if (conflict) {
         return res.status(400).json({ error: conflict, code: 'rodent_consumption_conflict' });
+      }
+    }
+    // Trapping analog: a capture-marked trap pin beside an explicit
+    // Captures count of 0 contradicts itself on the customer report.
+    if (Array.isArray(termiteStations) && termiteStations.length
+      && stationProgram === 'trapping' && !isIncompleteVisit) {
+      const trappingValues = completionProfile?.findingsType === 'rodent_trapping'
+        ? (structuredFindings?.values || null)
+        : ((Array.isArray(companionFindings)
+          ? companionFindings.find((entry) => entry?.type === 'rodent_trapping')
+          : null)?.values || null);
+      const conflict = TermiteStations.trapCaptureConflict({
+        program: stationProgram,
+        entries: termiteStations,
+        findings: trappingValues,
+      });
+      if (conflict) {
+        return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
       }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {

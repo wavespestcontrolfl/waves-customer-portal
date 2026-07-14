@@ -2280,6 +2280,17 @@ const STATION_CARD_PROGRAM_META = {
     activityLegend: 'Bait consumption observed',
     activitySummary: 'with bait consumption',
   },
+  // Trapping copy states factual capture/removal counts only — never
+  // absence or elimination claims (BANNED_CUSTOMER_COPY), and no
+  // exterior-pressure phrasing (that rule is scoped to bait stations;
+  // traps legitimately sit interior too).
+  trapping: {
+    title: 'Rodent trap map',
+    intro: 'Numbered pins show where the traps in your rodent program are placed. Colors reflect this visit.',
+    ariaLabel: 'Rodent trap locations marked on a satellite view of the property',
+    activityLegend: 'Capture recorded',
+    activitySummary: 'with captures recorded',
+  },
 };
 const STATION_STATUS_META = {
   ok: { color: '#10B981', label: 'Checked — no activity' },
@@ -2294,6 +2305,9 @@ function stationStatusMeta(status, programMeta) {
   if (status === 'activity') return { ...base, label: programMeta.activityLegend };
   if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.rodent) {
     return { ...base, label: 'Checked — no consumption' };
+  }
+  if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.trapping) {
+    return { ...base, label: 'Checked — no capture' };
   }
   return base;
 }

@@ -2690,7 +2690,7 @@ function TermiteStationsPanel({ customerId }) {
   const [newPins, setNewPins] = useState([]); // [{ key, number, shape }]
   const [moves, setMoves] = useState({}); // id → shape
   const [retired, setRetired] = useState([]); // ids retired this session
-  const [numberBases, setNumberBases] = useState({ termite: 1, rodent: 1 });
+  const [numberBases, setNumberBases] = useState({ termite: 1, rodent: 1, trapping: 1 });
   const newSeqRef = useRef(0);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -2709,7 +2709,7 @@ function TermiteStationsPanel({ customerId }) {
     setNewPins([]);
     setMoves({});
     setRetired([]);
-    setNumberBases({ termite: 1, rodent: 1 });
+    setNumberBases({ termite: 1, rodent: 1, trapping: 1 });
     setErr("");
     setMsg("");
     setSaving(false);
@@ -2737,6 +2737,7 @@ function TermiteStationsPanel({ customerId }) {
         setNumberBases({
           termite: Number(res?.nextStationNumberByProgram?.termite) || Number(res?.nextStationNumber) || 1,
           rodent: Number(res?.nextStationNumberByProgram?.rodent) || 1,
+          trapping: Number(res?.nextStationNumberByProgram?.trapping) || 1,
         });
       })
       .catch((e) => {
@@ -2922,7 +2923,7 @@ function TermiteStationsPanel({ customerId }) {
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-12 text-ink-secondary">Program</span>
-                {["termite", "rodent"].map((opt) => (
+                {["termite", "rodent", "trapping"].map((opt) => (
                   <button
                     key={opt}
                     type="button"
@@ -2937,7 +2938,7 @@ function TermiteStationsPanel({ customerId }) {
                       dirtyCount > 0 && opt !== program ? "opacity-50" : "",
                     )}
                   >
-                    {opt === "termite" ? "Termite" : "Rodent"}
+                    {opt === "termite" ? "Termite" : opt === "rodent" ? "Rodent" : "Traps"}
                   </button>
                 ))}
               </div>

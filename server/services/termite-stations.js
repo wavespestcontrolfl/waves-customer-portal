@@ -47,10 +47,17 @@ function isStationMapReportEnabled() {
 // Station programs: termite in-ground bait stations and exterior rodent
 // bait stations share the registry/check tables and every write path —
 // numbering, dedupe, occupancy, and report scoping are all per-program.
-const STATION_PROGRAMS = ['termite', 'rodent'];
+// Program order is ALSO the companion tie-break order (see
+// stationProgramForProfile) — append new programs at the end so existing
+// tie-break behavior never shifts.
+const STATION_PROGRAMS = ['termite', 'rodent', 'trapping'];
 const PROGRAM_TYPED_FLOW = {
   termite: 'termite_bait_station',
   rodent: 'rodent_bait_station',
+  // Trap placements are registry assets too: persistent, numbered,
+  // per-visit status — the typed flow that authorizes them is the trapping
+  // completion itself (there is no separate "trap station" findings type).
+  trapping: 'rodent_trapping',
 };
 
 function normalizeProgram(value) {
@@ -100,6 +107,23 @@ function rodentConsumptionConflict({ program, entries = [], findings = {} } = {}
   const consumption = String(findings?.bait_consumption ?? '').trim().toLowerCase();
   if (consumption !== 'none') return null;
   return 'a station is marked with bait consumption this visit, but the Bait consumption level reads "None" — reconcile them before completing';
+}
+
+// Trapping analog of rodentConsumptionConflict: a trap pin marked
+// 'activity' (capture recorded) must not ship beside an EXPLICIT captures
+// count of 0 in the rodent_trapping findings — the report would state
+// "found no new captures" and "K with captures recorded" on one page. An
+// empty/unset count passes (count fields mean "not recorded", never 0),
+// and captures above zero are never checked against the pin count — one
+// trap can hold multiple captures.
+function trapCaptureConflict({ program, entries = [], findings = {} } = {}) {
+  if (normalizeProgram(program) !== 'trapping') return null;
+  const hasCapturePin = (Array.isArray(entries) ? entries : [])
+    .some((entry) => entry && entry.status === 'activity');
+  if (!hasCapturePin) return null;
+  const captures = String(findings?.captures ?? '').trim();
+  if (captures !== '0') return null;
+  return 'a trap is marked with a capture this visit, but the Captures count reads 0 — reconcile them before completing';
 }
 
 // Station marks are point pins: the circle capture shape only, never rects.
@@ -666,6 +690,7 @@ module.exports = {
   profileAllowsStationSync,
   stationProgramForProfile,
   rodentConsumptionConflict,
+  trapCaptureConflict,
   stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,
