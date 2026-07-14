@@ -273,11 +273,14 @@ describe('live-status reschedule override (allowLive)', () => {
     const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
     const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    // Same-series date-collision probe (codex r6 on #2725) runs once before
+    // any row updates — no clash by default.
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
     const updates = siblings.map(() => chain({ update: jest.fn().mockResolvedValue(1) }));
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, ...updates];
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, ...updates];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -289,12 +292,16 @@ describe('live-status reschedule override (allowLive)', () => {
     db.transaction = jest.fn(async (callback) => callback(trx));
 
     const dbQueries = [anchorLookup, parentLookup];
+    // Post-commit escalation check (mirrors the single path since codex r4
+    // on #2725) reads reschedule_log via db — serve an under-threshold count.
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
       throw new Error(`Unexpected db table ${table}`);
     });
 
-    return { updates, historyInsert, logInsert };
+    return { updates, historyInsert, logInsert, siblingsQuery, escalationCount };
   }
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
@@ -387,11 +394,21 @@ describe('live-status reschedule override (allowLive)', () => {
       { allowLive: true },
     )).rejects.toMatchObject({
       statusCode: 409,
-      message: expect.stringContaining('transitioned to a non-reschedulable state concurrently'),
+      // All-or-none: ANY raced row (anchor included) aborts the series trx.
+      message: expect.stringContaining('changed concurrently'),
     });
 
     // Anchor write carried the status guard; nothing after it ran.
-    expect(updates[0].where).toHaveBeenCalledWith({ status: 'on_site' });
+    // Optimistic guard carries the previously READ scheduling fields, not
+    // just status (codex r2/r3 on #2725) — anchors abort, siblings skip.
+    expect(updates[0].where).toHaveBeenCalledWith({
+      id: 'svc-1',
+      status: 'on_site',
+      scheduled_date: BASE,
+      window_start: '09:00:00',
+      window_end: '11:00:00',
+      technician_id: null,
+    });
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();
     expect(clearTechCurrentJob).not.toHaveBeenCalled();
@@ -457,5 +474,80 @@ describe('live-status reschedule override (allowLive)', () => {
       statusCode: 409,
       message: 'Cannot reschedule a completed job',
     });
+  });
+
+  test('rescheduleSeries sweeps cadence rows only — the sibling query excludes boosters (is_recurring=false)', async () => {
+    const { siblingsQuery } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+    ]);
+
+    await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    );
+
+    // Booster extras share recurring_parent_id but are is_recurring=false —
+    // they must never be swept into cadence math (codex P1 2026-07-14).
+    expect(siblingsQuery.whereRaw).toHaveBeenCalledWith(
+      '(id = ? OR (recurring_parent_id = ? AND is_recurring = true))',
+      ['svc-1', 'svc-1'],
+    );
+  });
+
+  test('rescheduleSeries unassigns a shifted sibling whose kept tech is double-booked on the recomputed date', async () => {
+    const anchorFull = {
+      ...liveService('confirmed'),
+      recurring_parent_id: null,
+      is_recurring: true,
+      recurring_pattern: 'weekly',
+      recurring_nth: null,
+      recurring_weekday: null,
+      recurring_interval_days: null,
+    };
+    const siblings = [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00', technician_id: 'tech-9' },
+    ];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchorFull) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    // No same-series date collision…
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    // …but tech-9 already has an overlapping job on the recomputed sibling date.
+    const conflictCheck = chain({ first: jest.fn().mockResolvedValue({ id: 'other-job' }) });
+    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const historyInsert = chain();
+    const logInsert = chain();
+
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, conflictCheck, sibUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return historyInsert;
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return escalationCount;
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    );
+
+    // The sibling still shifts (cadence preserved) but its tech is cleared
+    // inside the trx so nothing double-booked ever commits; the flag lets
+    // the route park it for dispatch reassignment.
+    const sibPayload = sibUpdate.update.mock.calls[0][0];
+    expect(sibPayload.scheduled_date).toBe(SIB1_SHIFTED);
+    expect(sibPayload.technician_id).toBeNull();
+    expect(result.rescheduledOccurrences[0].conflicted).toBe(false);
+    expect(result.rescheduledOccurrences[1].conflicted).toBe(true);
   });
 });

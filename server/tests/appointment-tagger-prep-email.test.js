@@ -66,6 +66,9 @@ let customerRow;
 let priorBookingRow;
 let automationActiveRow;
 let priorPrepInteraction;
+let servicePrepRow;
+let servicePrepUpdateResult;
+let serviceUpdates;
 let trxRaw;
 
 // isPrepAutomationActive lookup (email_template_automations) — a row = active.
@@ -96,15 +99,23 @@ function customersQuery() {
   return q;
 }
 
-// First-time gate lookup (hasPriorSameTypeBooking) — resolves the prior
-// same-family scheduled_services row, null = first-time treatment.
+// scheduled_services serves two chains: the first-time gate lookup
+// (hasPriorSameTypeBooking — .where()…first(), null = first-time) and the
+// ensureServicePrepToken mint (.select('prep_token',…)…first() +
+// .update().returning()). The .select() call marks token mode.
 function priorBookingQuery() {
+  let tokenMode = false;
   const q = {
+    select: jest.fn(() => { tokenMode = true; return q; }),
     where: jest.fn(() => q),
     whereIn: jest.fn(() => q),
     whereNot: jest.fn(() => q),
     whereNotIn: jest.fn(() => q),
-    first: jest.fn(async () => priorBookingRow),
+    whereNull: jest.fn(() => q),
+    update: jest.fn((patch) => { serviceUpdates.push(patch); return q; }),
+    returning: jest.fn(async () => servicePrepUpdateResult),
+    catch: jest.fn(async () => undefined),
+    first: jest.fn(async () => (tokenMode ? servicePrepRow : priorBookingRow)),
   };
   return q;
 }
@@ -124,6 +135,9 @@ describe('appointment tagger prep email automation', () => {
     priorBookingRow = null;
     automationActiveRow = { id: 'auto-1' };
     priorPrepInteraction = null;
+    servicePrepRow = { prep_token: null, prep_template_key: null };
+    servicePrepUpdateResult = [{}];
+    serviceUpdates = [];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return priorBookingQuery();
       if (table === 'customer_interactions') return interactionsQuery();
@@ -136,6 +150,7 @@ describe('appointment tagger prep email automation', () => {
     trxRaw = jest.fn(async () => ({}));
     trx.raw = trxRaw;
     db.transaction = jest.fn(async (fn) => fn(trx));
+    db.fn = { now: jest.fn(() => 'NOW()') };
   });
 
   test('cockroach booking emits appointment.booked scoped to prep.cockroach', async () => {
@@ -159,8 +174,60 @@ describe('appointment tagger prep email automation', () => {
       service_date: formatDisplayDate(FUTURE_DATE),
       property_address: '123 Palm Ave, Bradenton, 34211',
     });
-    expect(call.payload.prep_url).toContain('?tab=visits');
+    // prep_url is the tokened public prep page; only the portal link keeps
+    // pointing at the login-gated visits tab.
+    expect(call.payload.prep_url).toMatch(/\/prep\/[0-9a-f]{32}$/);
     expect(call.payload.customer_portal_url).toContain('?tab=visits');
+  });
+
+  test('prep_url reuses an existing service prep token', async () => {
+    const existing = 'ab'.repeat(16);
+    servicePrepRow = { prep_token: existing, prep_template_key: 'prep.cockroach' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.payload.prep_url).toContain(`/prep/${existing}`);
+    // Same key → no realignment write.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
+  });
+
+  test('a reused token with a different stored key is NOT retargeted at queue time', async () => {
+    servicePrepRow = { prep_token: 'cd'.repeat(16), prep_template_key: 'prep.flea' };
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    // The stored key is what the last DELIVERED guide rendered; it moves
+    // (with prep_sent_at) only when the new send confirms — in the
+    // executor's markServicePrepSent, never here.
+    expect(serviceUpdates.some((p) => p && p.prep_template_key)).toBe(false);
+  });
+
+  test('queueing the guide email never stamps prep_sent_at (delivery does)', async () => {
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    // The executor stamps prep_sent_at when the run actually reaches
+    // 'sent' — a queued run can still skip, suppress, or fail.
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
+  });
+
+  test('prep_url degrades to the portal visits tab when the token mint fails', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') {
+        const q = priorBookingQuery();
+        q.select = jest.fn(() => { throw new Error('boom'); });
+        return q;
+      }
+      if (table === 'customer_interactions') return interactionsQuery();
+      if (table === 'email_template_automations') return automationsQuery();
+      return customersQuery();
+    });
+
+    await AppointmentTagger.triggerPestPrep(service(), 'cockroach');
+
+    expect(executor.processTrigger).toHaveBeenCalledTimes(1);
+    const call = executor.processTrigger.mock.calls[0][0];
+    expect(call.payload.prep_url).toContain('?tab=visits');
   });
 
   test('flea booking maps to prep.flea and renders the auto_flea SMS companion', async () => {
@@ -483,6 +550,9 @@ describe('treatment automation sequence (one guide email, Automations-tab source
     priorBookingRow = null;
     priorPrepInteraction = null;
     priorEnrollmentRow = null;
+    servicePrepRow = { prep_token: null, prep_template_key: null };
+    servicePrepUpdateResult = [{}];
+    serviceUpdates = [];
     templateRow = { key: 'bed_bug', enabled: true };
     firstStepRow = { step_order: 0, enabled: true, html_body: '<p>guide</p>', text_body: '' };
     customerRow = {
@@ -528,6 +598,11 @@ describe('treatment automation sequence (one guide email, Automations-tab source
       'auto_bed_bug', { first_name: 'Taylor' }, expect.any(Object),
     );
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    // Sequence-lane parity: the visit's public prep token is minted at
+    // enroll time (the runner stamps prep_sent_at when step-0 delivers).
+    expect(serviceUpdates.some((p) => p && p.prep_token && p.prep_template_key === 'prep.bed_bug')).toBe(true);
+    // But never the delivery stamp — that belongs to the runner.
+    expect(serviceUpdates.some((p) => p && p.prep_sent_at !== undefined)).toBe(false);
   });
 
   test('gate off: the transactional prep lane runs unchanged and nothing enrolls', async () => {

@@ -468,4 +468,150 @@ describe('email template automation executor', () => {
     expect(keyV1).toBe(keyV2);
     expect(keyV1).not.toMatch(/version-/);
   });
+
+  test('a prep guide run that actually sends stamps prep_sent_at + delivered key on the visit', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({ stop_if: ['appointment.cancelled', 'appointment.closed', 'appointment.past'] }),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const sentRun = { ...queuedRun, status: 'sent', email_message_id: 'message-1' };
+    const stampQuery = chain({});
+
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [sentRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      // 1st: live-payload refresh of the visit row; 2nd: the
+      // markServicePrepSent confirmed-delivery stamp.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+        stampQuery,
+      ],
+    });
+    db.fn = { now: jest.fn(() => 'NOW()') };
+    EmailTemplates.sendTemplate.mockResolvedValue({
+      sent: true,
+      message: { id: 'message-1', provider_message_id: 'sg-message-1' },
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: {
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].run.status).toBe('sent');
+    expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      prep_template_key: 'prep.flea',
+      prep_sent_at: 'NOW()',
+    }));
+  });
+
+  test('a blocked prep guide run never stamps the visit', async () => {
+    const prepAutomation = automation({
+      id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      idempotency_key_template: 'prep.flea:{scheduled_service_id}',
+      conditions: JSON.stringify({ service_type_contains: ['flea'] }),
+      exit_conditions: JSON.stringify({}),
+    });
+    const queuedRun = run({
+      id: 'run-prep',
+      automation_id: 'automation-prep',
+      automation_key: 'prep.flea',
+      template_key: 'prep.flea',
+      trigger_event_key: 'appointment.booked',
+      trigger_event_id: 'appointment_booked:svc-1',
+      entity_type: 'scheduled_service',
+      entity_id: 'svc-1',
+      idempotency_key: 'prep.flea:svc-1',
+      recipient_type: 'customer',
+      payload: JSON.stringify({
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      }),
+    });
+    const blockedRun = { ...queuedRun, status: 'blocked' };
+
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [prepAutomation] })],
+      email_template_automation_runs: [
+        chain({ first: null }),
+        chain({ returning: [queuedRun] }),
+        chain({ returning: [{ ...queuedRun, status: 'running', attempts: 1 }] }),
+        chain({ returning: [blockedRun] }),
+      ],
+      email_template_automation_run_events: [
+        chain({ returning: [{ id: 'e1' }] }),
+        chain({ returning: [{ id: 'e2' }] }),
+        chain({ returning: [{ id: 'e3' }] }),
+      ],
+      // Only the live-payload read — NO stamp query is queued; a stamp
+      // attempt would throw "Unexpected db table" and fail this test.
+      scheduled_services: [
+        chain({ first: { id: 'svc-1', status: 'scheduled', service_type: 'Flea Control Service', scheduled_date: '2199-01-01', customer_id: null } }),
+      ],
+    });
+    EmailTemplates.sendTemplate.mockResolvedValue({ blocked: true, reason: 'suppressed' });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'appointment.booked',
+      triggerEventId: 'appointment_booked:svc-1',
+      payload: {
+        scheduled_service_id: 'svc-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        service_type: 'Flea Control Service',
+        service_date_ymd: '2199-01-01',
+      },
+      now: new Date('2026-07-14T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].run.status).toBe('blocked');
+  });
 });

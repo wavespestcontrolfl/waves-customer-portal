@@ -390,7 +390,7 @@ class AppointmentTagger {
       // each would send a companion SMS. Everything inside runs on the trx
       // (enrollCustomer takes dbh), so the lock holder needs no second pooled
       // connection.
-      return await db.transaction(async (trx) => {
+      const outcome = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`treatment_enroll:${service.customer_id}:${templateKey}`]);
 
         // Once per customer — but only rows that delivered (or still can):
@@ -428,6 +428,21 @@ class AppointmentTagger {
         // coming from this run, so the SMS stays silent too.
         return { queued: false, reason: 'not_queued' };
       });
+      if (outcome?.queued) {
+        // Sequence-lane parity with the transactional lane: mint the
+        // visit's public prep token now (outside the lock transaction — the
+        // lock holder must not pin a second pooled connection). The
+        // automation-runner stamps prep_sent_at on this row when the
+        // step-0 guide actually sends, which is what lights up the
+        // tracker's prep link. Fail-soft.
+        try {
+          const { ensureServicePrepToken } = require('./project-email');
+          await ensureServicePrepToken(service.id, PREP_AUTOMATION_BY_PEST_TYPE[pestType]);
+        } catch (tokenErr) {
+          logger.warn(`[appointment-tagger] prep token mint failed for service ${service.id}: ${tokenErr.message}`);
+        }
+      }
+      return outcome;
     } catch (err) {
       logger.error(`[appointment-tagger] ${templateKey} sequence enroll failed for service ${service.id}: ${err.message}`);
       return { queued: false, reason: 'error' };
@@ -512,7 +527,19 @@ class AppointmentTagger {
         || 'there';
 
       const executor = require('./email-template-automation-executor');
+      // Tokened public prep page (2026-07-14 audit): the guide email's CTA
+      // must land on the durable, printable /prep/:token page — not the
+      // login-gated portal visits tab. Mint fails soft: a token hiccup
+      // degrades the CTA back to the portal link rather than blocking the
+      // send.
       const portalVisitsUrl = portalUrl('/?tab=visits');
+      let prepUrl = portalVisitsUrl;
+      try {
+        const { ensureServicePrepToken } = require('./project-email');
+        prepUrl = portalUrl(`/prep/${await ensureServicePrepToken(service.id, automationKey)}`);
+      } catch (tokenErr) {
+        logger.warn(`[appointment-tagger] prep token mint failed for service ${service.id}: ${tokenErr.message}`);
+      }
       const trigger = await executor.processTrigger({
         triggerEventKey: 'appointment.booked',
         triggerEventId: `appointment_booked:${service.id}`,
@@ -530,7 +557,7 @@ class AppointmentTagger {
           service_date: formatDisplayDate(service.scheduled_date, { fallback: '' }),
           service_date_ymd: serviceDateStr,
           property_address: [service.address_line1, service.city, service.zip].filter(Boolean).join(', '),
-          prep_url: portalVisitsUrl,
+          prep_url: prepUrl,
           customer_portal_url: portalVisitsUrl,
         },
         executeImmediately: false,
@@ -541,6 +568,10 @@ class AppointmentTagger {
       // email is coming, so the companion SMS that references it must not send.
       // These are NOT the "no email on file" case, so no standalone fallback
       // either — a disabled automation or a re-run should stay silent.
+      // No prep_sent_at stamp here: "queued" is not "delivered" — the
+      // executor stamps it (markServicePrepSent) when the run actually
+      // reaches 'sent', so the tracker never links a guide that a later
+      // skip/suppress/failure kept from the customer.
       const queued = (trigger?.results || []).some(
         (r) => !r.deduped && String(r.run?.status || '') !== 'skipped',
       );

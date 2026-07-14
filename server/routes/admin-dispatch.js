@@ -1174,7 +1174,7 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1 }));
+  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
 
   return {
     available: true,
@@ -1188,6 +1188,7 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     },
     stations: stationSlice.stations,
     nextStationNumber: stationSlice.nextStationNumber,
+    nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
     zones: resolvedZones.map((zone, i) => ({
       id: zone.id,
@@ -1351,6 +1352,15 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
     if (!Array.isArray(entries) || !entries.length) {
       return res.status(400).json({ error: 'stations must be a non-empty array', code: 'termite_stations_invalid' });
     }
+    // Program routes the save to the termite or rodent registry slice —
+    // explicit and validated, never inferred from pins.
+    const program = req.body?.program == null ? 'termite' : req.body.program;
+    if (!TermiteStations.STATION_PROGRAMS.includes(program)) {
+      return res.status(400).json({
+        error: `program must be one of: ${TermiteStations.STATION_PROGRAMS.join(', ')}`,
+        code: 'termite_stations_invalid',
+      });
+    }
     const entriesError = TermiteStations.validateStationEntriesBody(entries, { allowStatus: false });
     if (entriesError) {
       return res.status(400).json({ error: entriesError, code: 'termite_stations_invalid' });
@@ -1359,7 +1369,7 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
     // skipped pin would leave the office view claiming a station the
     // registry never got. Shared helper keeps the netting arithmetic
     // aligned with the sync (validated retires only, replay-aware creates).
-    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries)) {
+    if (await TermiteStations.stationCapWouldOverflow(db, customer.id, entries, program)) {
       return res.status(400).json({
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — retire stations before adding more`,
         code: 'termite_stations_cap',
@@ -1370,6 +1380,7 @@ router.put('/customers/:customerId/termite-stations', requireAdmin, async (req, 
       const result = await TermiteStations.upsertStationsForCustomer(trx, {
         customerId: customer.id,
         entries,
+        program,
       });
       // Unlike the completion's post-commit sync, this write IS the primary
       // action and runs inside its own transaction — a cap skip under the
@@ -1713,6 +1724,26 @@ router.put('/:serviceId/status', async (req, res, next) => {
         error: 'This visit was already marked as a no-show. Refresh and try again.',
         code: 'already_no_show',
       });
+    }
+
+    // ALL terminal statuses are one-way, not just no_show (#2717 server
+    // hardening): fromStatus is read fresh from the row, so a stale board
+    // on another device could flip a completed compliance visit to
+    // cancelled (firing a contradictory customer notice) hours after the
+    // work was done — the client cannot guard the two-device case. Only a
+    // DIFFERENT target 409s; a same-status re-send flows through so a
+    // retry after a partial failure reruns the idempotent post-commit
+    // effects below (invoice void, reminder handling, track state).
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, toStatus);
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit is already ${terminal.status}. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
     }
 
     // No-show is only valid FROM an active visit state, and only once the
@@ -2418,21 +2449,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Station cap must reject BEFORE the completion commits: the typed
-    // counts were auto-filled from every pin the tech can see, so a pin
-    // silently dropped later by the fail-soft sync's cap guard would freeze
-    // findings the registry and customer map contradict. The helper nets
-    // the payload exactly the way the sync will (validated retires only,
-    // replay-aware creates), so idempotent resumes of an already-committed
-    // completion pass straight through to the stored-response path.
-    if (Array.isArray(termiteStations) && svc.customer_id
-      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations)) {
-      return res.status(400).json({
-        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
-        code: 'termite_stations_cap',
-      });
-    }
-
     // Stale-recap guard: a live job force-rescheduled to a future day
     // (rebooker allowLive) is rewound to a fresh confirmed appointment —
     // a recap submit from a CompletionPanel opened before the reschedule
@@ -2462,6 +2478,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // cancelled/skipped are one-way too, and this submit path bypasses the
+    // PUT /status terminal guard — a CompletionPanel opened before another
+    // dispatcher cancelled or skipped the visit could otherwise flip it
+    // back to completed and run the full completion machinery (invoice,
+    // customer recap text) for a visit the status machine says never
+    // happened. Same non-completable set as pest-recap and
+    // project-completion. completed→completed deliberately passes through
+    // (evaluateTerminalTransition returns null on same-status) so durable
+    // completion resumes and retries keep reaching the stored-response
+    // path below.
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, 'completed');
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit was already ${terminal.status} and can no longer be completed. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
+    }
+
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
     }
@@ -2485,6 +2523,65 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: 'Could not verify the completion type for this service. Try again in a moment.',
         code: 'completion_profile_lookup_failed',
       });
+    }
+    // Station cap must reject BEFORE the completion commits: the typed
+    // counts were auto-filled from every pin the tech can see, so a pin
+    // silently dropped later by the fail-soft sync's cap guard would freeze
+    // findings the registry and customer map contradict. Sits after profile
+    // resolution because the profile picks the PROGRAM (termite vs rodent)
+    // whose registry slice the cap applies to; still ahead of every commit.
+    // The helper nets the payload exactly the way the sync will (validated
+    // retires only, replay-aware creates), so idempotent resumes of an
+    // already-committed completion pass straight through to the
+    // stored-response path.
+    const stationProgram = TermiteStations.stationProgramForProfile(completionProfile);
+    if (Array.isArray(termiteStations) && termiteStations.length && stationProgram && svc.customer_id
+      && await TermiteStations.stationCapWouldOverflow(db, svc.customer_id, termiteStations, stationProgram)) {
+      return res.status(400).json({
+        error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
+        code: 'termite_stations_cap',
+      });
+    }
+    // Rodent consumption consistency (codex r2): station checks recording
+    // bait consumption must not ship beside an explicit "None" consumption
+    // select — the customer report would contradict itself. Pre-commit like
+    // the cap check (the sync is fail-soft and can't reject); incomplete
+    // visits skip the station sync entirely, so they skip this too. The
+    // rodent findings live on the primary when rodent_bait_station IS the
+    // findings type, else on its companion section.
+    if (Array.isArray(termiteStations) && termiteStations.length
+      && stationProgram === 'rodent' && !isIncompleteVisit) {
+      const rodentValues = completionProfile?.findingsType === 'rodent_bait_station'
+        ? (structuredFindings?.values || null)
+        : ((Array.isArray(companionFindings)
+          ? companionFindings.find((entry) => entry?.type === 'rodent_bait_station')
+          : null)?.values || null);
+      const conflict = TermiteStations.rodentConsumptionConflict({
+        program: stationProgram,
+        entries: termiteStations,
+        findings: rodentValues,
+      });
+      if (conflict) {
+        return res.status(400).json({ error: conflict, code: 'rodent_consumption_conflict' });
+      }
+    }
+    // Trapping analog: a capture-marked trap pin beside an explicit
+    // Captures count of 0 contradicts itself on the customer report.
+    if (Array.isArray(termiteStations) && termiteStations.length
+      && stationProgram === 'trapping' && !isIncompleteVisit) {
+      const trappingValues = completionProfile?.findingsType === 'rodent_trapping'
+        ? (structuredFindings?.values || null)
+        : ((Array.isArray(companionFindings)
+          ? companionFindings.find((entry) => entry?.type === 'rodent_trapping')
+          : null)?.values || null);
+      const conflict = TermiteStations.trapCaptureConflict({
+        program: stationProgram,
+        entries: termiteStations,
+        findings: trappingValues,
+      });
+      if (conflict) {
+        return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
+      }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
       return res.status(409).json({
@@ -4387,8 +4484,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // zero-tap default "ok" checks for a visit that didn't happen would
     // corrupt the station history future reports and trends read.
     if (Array.isArray(termiteStations) && termiteStations.length) {
-      if (isIncompleteVisit || !TermiteStations.profileAllowsStationSync(completionProfile)) {
-        logger.warn('[completion] termite stations payload skipped', {
+      if (isIncompleteVisit || !stationProgram) {
+        logger.warn('[completion] station payload skipped', {
           serviceId: svc.id,
           incomplete: isIncompleteVisit,
           findingsType: completionProfile?.findingsType || null,
@@ -4399,6 +4496,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             customerId: svc.customer_id,
             serviceRecordId: record.id,
             entries: termiteStations,
+            program: stationProgram,
           });
           if (stationSync.skipped.length) {
             // post-commit skips (cap race / foreign id) can't 400 a
@@ -7000,6 +7098,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     if (scope === 'series') {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', { allowLive: true });
       const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+      // The rebooker unassigns any shifted sibling whose kept tech would
+      // double-book its recomputed date (occ.conflicted). Those rows often
+      // land outside the reloaded week view — surface them in the response
+      // AND ring the bell so a dispatcher's series drag can't silently
+      // strand unassigned visits.
+      const unassignedConflicts = occurrences
+        .filter((occ) => occ.conflicted)
+        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+      if (unassignedConflicts.length) {
+        try {
+          const NotificationService = require('../services/notification-service');
+          const notif = await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Series move left visits unassigned',
+            `A series reschedule shifted ${unassignedConflicts.length} future visit(s) onto already-booked windows; they were left UNASSIGNED (${unassignedConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+            { metadata: { scheduledServiceId: req.params.serviceId, conflicts: unassignedConflicts } }
+          );
+          if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${req.params.serviceId}: ${JSON.stringify(unassignedConflicts)}`);
+        } catch (err) {
+          logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
+        }
+      }
       for (const occurrence of occurrences) {
         await syncRescheduleReminder(
           occurrence.id,
@@ -7066,7 +7186,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
 
       const { rescheduledOccurrences, ...response } = result;
-      return res.json({ ...response, notificationSent, notificationError });
+      return res.json({ ...response, notificationSent, notificationError, unassignedConflicts });
     }
 
     // Staff-initiated reschedules may override live lifecycle states

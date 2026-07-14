@@ -167,6 +167,40 @@ describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
   });
 });
 
+describe('ReportViewPage — trapping station map card (program labels)', () => {
+  it('renders the trap map with capture labels for program "trapping"', async () => {
+    const payload = {
+      ...legacyLawnReport,
+      serviceLine: 'rodent',
+      serviceLineDisplay: 'Rodent control',
+      serviceDisplayName: 'Rodent Trapping Visit',
+      stationMap: {
+        available: true,
+        program: 'trapping',
+        image: { url: 'https://example.test/satellite.png', width: 640, height: 340 },
+        summary: { total: 2, checked: 2, activity: 1, serviced: 0, inaccessible: 0 },
+        stations: [
+          { id: 'st-tr1', number: 1, cx: 0.3, cy: 0.4, status: 'activity' },
+          { id: 'st-tr2', number: 2, cx: 0.6, cy: 0.5, status: 'ok' },
+        ],
+      },
+    };
+    delete payload.lawnAssessment;
+    delete payload.lawnProgramOverview;
+    delete payload.reportV2;
+    renderReport(payload);
+    await screen.findByText('Rodent trap map');
+    // trapping legend labels (presentation-only relabels of the shared
+    // enum) — each appears in the pin's SVG title AND its legend row
+    expect((await screen.findAllByText(/Capture recorded/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Checked — no capture/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/termite activity/i)).toBeNull();
+    expect(screen.queryByText(/consumption/i)).toBeNull();
+    // numbers-only summary discipline with the trapping counter
+    await screen.findByText(/1 with captures recorded/);
+  });
+});
+
 describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 null)', () => {
   it('renders Products Applied and Visit Timeline exactly once', async () => {
     const { container } = renderReport(legacyLawnReport);

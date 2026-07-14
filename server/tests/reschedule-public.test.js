@@ -13,7 +13,10 @@ const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
 const emailMigration = require('../models/migrations/20260702000012_reschedule_link_email_templates');
 
-const { eligibility, bookingRange, searchParseOpts, apptDateStr, label12 } = reschedulePublicRouter._test;
+const {
+  eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
+  pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
+} = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
 const NOW = new Date('2026-07-02T16:00:00.000Z');
@@ -36,18 +39,49 @@ describe('reschedule-public eligibility', () => {
       .toEqual({ ok: false, reason: 'not_available' });
   });
 
-  test('past appointments are not reschedulable', () => {
+  test('past pending/confirmed appointments are MISSED and rebookable (owner ruling 2026-07-13)', () => {
     expect(eligibility({ status: 'confirmed', scheduled_date: '2026-07-01' }, NOW))
+      .toEqual({ ok: true, missed: true });
+    expect(eligibility({ status: 'pending', scheduled_date: '2026-06-20' }, NOW))
+      .toEqual({ ok: true, missed: true });
+    // Terminal/live/no-show states stay blocked even when past — only visits
+    // that were never served (still pending-family) get the rebook path.
+    expect(eligibility({ status: 'no_show', scheduled_date: '2026-07-01' }, NOW))
+      .toEqual({ ok: false, reason: 'not_available' });
+    expect(eligibility({ status: 'completed', scheduled_date: '2026-07-01' }, NOW))
+      .toEqual({ ok: false, reason: 'completed' });
+    // A past 'rescheduled' row is a pending-rebook PLACEHOLDER, not a missed
+    // visit — reviving it would resurrect a phantom (codex r6). Future
+    // 'rescheduled' rows stay plainly reschedulable (tested above).
+    expect(eligibility({ status: 'rescheduled', scheduled_date: '2026-07-01' }, NOW))
       .toEqual({ ok: false, reason: 'past' });
+    expect(eligibility({
+      status: 'rescheduled',
+      scheduled_date: '2026-07-02',
+      window_start: '08:00:00',
+      window_end: '09:00:00',
+    }, NOW)).toEqual({ ok: false, reason: 'past' });
   });
 
-  test('same-day appointment whose window elapsed in ET is past', () => {
+  test('same-day appointment is missed only after the QUOTED arrival window (start + 2h), not the job block', () => {
+    // 8:00 start, job block ends 10:00, arrival promise ran to 10:00 —
+    // by 12:00 ET it is genuinely missed.
     expect(eligibility({
       status: 'confirmed',
       scheduled_date: '2026-07-02',
       window_start: '08:00:00',
       window_end: '10:00:00',
-    }, NOW)).toEqual({ ok: false, reason: 'past' });
+    }, NOW)).toEqual({ ok: true, missed: true });
+    // 10:30 start with job block ending 11:00: at 12:00 ET the job block has
+    // elapsed but the quoted 10:30–12:30 arrival window has NOT — the tech
+    // may still legitimately arrive, so it's a plain reschedulable visit,
+    // never "we missed each other" (codex P2 2026-07-13).
+    expect(eligibility({
+      status: 'confirmed',
+      scheduled_date: '2026-07-02',
+      window_start: '10:30:00',
+      window_end: '11:00:00',
+    }, NOW)).toEqual({ ok: true });
   });
 
   test('same-day appointment with a window still ahead stays reschedulable', () => {
@@ -77,6 +111,37 @@ describe('reschedule-public eligibility', () => {
     expect(label12('00:30')).toBe('12:30 AM');
     expect(label12('12:00')).toBe('12:00 PM');
     expect(label12(null)).toBe(null);
+  });
+});
+
+describe('reschedule-public series re-anchor rule', () => {
+  test('pullForwardDays: positive for earlier targets, negative for push-backs', () => {
+    expect(pullForwardDays('2026-08-13', '2026-07-16')).toBe(28);
+    expect(pullForwardDays('2026-07-16', '2026-08-13')).toBe(-28);
+    expect(pullForwardDays('2026-07-16', '2026-07-16')).toBe(0);
+    expect(pullForwardDays(null, '2026-07-16')).toBe(0);
+  });
+
+  test('re-anchors ONLY recurring visits pulled forward by at least the threshold', () => {
+    const recurring = { is_recurring: true, scheduled_date: '2026-08-13' };
+    // 28-day pull-forward (Bill Waterman's case) → re-anchor.
+    expect(shouldReanchor(recurring, '2026-07-16')).toBe(true);
+    // Exactly at threshold → re-anchor; one day short → single move.
+    const at = new Date(Date.UTC(2026, 7, 13, 12) - REANCHOR_PULLFORWARD_DAYS * 86400000)
+      .toISOString().slice(0, 10);
+    const under = new Date(Date.UTC(2026, 7, 13, 12) - (REANCHOR_PULLFORWARD_DAYS - 1) * 86400000)
+      .toISOString().slice(0, 10);
+    expect(shouldReanchor(recurring, at)).toBe(true);
+    expect(shouldReanchor(recurring, under)).toBe(false);
+    // Push-backs never re-anchor.
+    expect(shouldReanchor(recurring, '2026-08-20')).toBe(false);
+    // Non-recurring visits never re-anchor regardless of distance.
+    expect(shouldReanchor({ is_recurring: false, scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(false);
+    // A genuine child occurrence carries is_recurring itself and re-anchors.
+    expect(shouldReanchor({ is_recurring: true, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(true);
+    // BOOSTER extras share recurring_parent_id but are is_recurring=false —
+    // moving one must NEVER shift the base plan (codex P1 2026-07-13).
+    expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-07-16')).toBe(false);
   });
 });
 

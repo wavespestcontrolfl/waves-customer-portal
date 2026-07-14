@@ -456,6 +456,16 @@ class SmartRebooker {
     if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) {
       throw new Error('Service is not part of a recurring series');
     }
+    // The schema doesn't enforce parent/customer equality, and this method
+    // is reachable from the public bearer-token route — a stale or miswired
+    // recurring_parent_id must never let one customer's token mutate
+    // another customer's parent row or future visits. Sibling sweep below
+    // carries the same customer_id scope.
+    if (String(parent.customer_id) !== String(service.customer_id)) {
+      throw Object.assign(new Error('Series parent belongs to a different customer — refusing to shift'), {
+        statusCode: 409,
+      });
+    }
 
     const win = parseWindow(newWindow);
 
@@ -529,38 +539,105 @@ class SmartRebooker {
         });
       }
 
+      // Cadence rows ONLY: booster-month extras share recurring_parent_id
+      // but carry is_recurring=false and hold no recurrence index — sweeping
+      // them would both move the boosters and push genuine children an
+      // extra interval, destroying the configured booster schedule.
       const siblings = await trx('scheduled_services')
-        .where(function () {
-          this.where('id', parentId).orWhere('recurring_parent_id', parentId);
-        })
+        .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+        .where('customer_id', service.customer_id)
         .where('scheduled_date', '>=', service.scheduled_date)
         .whereNotIn('status', TERMINAL)
         .orderBy('scheduled_date', 'asc')
-        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end');
+        .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
 
       // Anchor cadence at the dropped service's position so siblings
       // before it (same-date ties) don't pull index 0 away from it.
       const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
-      // Live-anchor race guard: between the outer service read and this
-      // SELECT the anchor may have completed/cancelled (absent — the
-      // terminal filter dropped it) or been marked skipped (present,
-      // since 'skipped' is non-terminal for cadence math, but a no-show
-      // drop that must NOT be revived to confirmed). Either way the
-      // series must not shift, the tech must not be freed, and the
-      // customer must not be notified — throw, rolling back the trx and
-      // skipping the wasLive post-commit cleanup. A raced live→live
-      // advance (en_route→on_site) or live→confirmed flip stays movable.
-      if (wasLive) {
+      // Anchor race guard — ALL callers: between the outer service read and
+      // this SELECT the anchor may have completed/cancelled (absent — the
+      // terminal filter dropped it) or been marked skipped (present, since
+      // 'skipped' is non-terminal for cadence math, but a no-show drop that
+      // must NOT be revived to confirmed). Either way the series must not
+      // shift: a terminal anchor changing the customer's future cadence is
+      // wrong regardless of who initiated the move. Throw, rolling back the
+      // trx (and skipping the wasLive post-commit cleanup). A raced
+      // live→live advance (en_route→on_site) or live→confirmed flip stays
+      // movable under allowLive.
+      {
         const anchorRow = droppedIdx === -1 ? null : siblings[droppedIdx];
         const anchorStillMovable = !!anchorRow
-          && (RESCHEDULABLE.has(anchorRow.status) || LIVE_OVERRIDE_STATUSES.has(anchorRow.status));
+          && (RESCHEDULABLE.has(anchorRow.status) || (wasLive && LIVE_OVERRIDE_STATUSES.has(anchorRow.status)));
         if (!anchorStillMovable) {
           throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
             statusCode: 409,
           });
         }
+        // Caller-supplied expected anchor state: the public route DECIDES
+        // scope (single vs whole-series) from its own read of the anchor.
+        // If the anchor's date/window moved between that read and this trx,
+        // the pull-forward math behind the decision is stale — abort so the
+        // caller re-reads and re-decides instead of shifting a series the
+        // customer no longer qualified to shift.
+        if (options.expectAnchor) {
+          const norm = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
+          const hm = (t) => (t ? String(t).slice(0, 5) : null);
+          const expDate = norm(options.expectAnchor.scheduled_date);
+          const expStart = hm(options.expectAnchor.window_start);
+          if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
+            || (expStart && hm(anchorRow.window_start) !== expStart)) {
+            throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+        }
       }
-      const startIdx = droppedIdx === -1 ? 0 : droppedIdx;
+      const startIdx = droppedIdx;
+
+      // The rows THIS sweep will move — conflict checks below exclude
+      // exactly these (their dates are changing) and nothing else. Cadence
+      // rows BEFORE the anchor stay put and must still register as
+      // conflicts: pulling an Aug 4 weekly to Jul 21 shifts Aug 11 → Jul 28
+      // right onto the untouched Jul 28 occurrence.
+      const sweptIds = siblings
+        .slice(startIdx)
+        .filter((s) => RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId)))
+        .map((s) => s.id);
+
+      // Same-series same-DATE collisions are hard-blocked regardless of
+      // tech/time (auto-dispatch candidate-slots does the same): a plan must
+      // never get two of its own visits on one day. Project every date this
+      // shift will write and probe the series rows that are NOT moving
+      // (boosters, pre-anchor occurrences, skipped rows) — a hit aborts the
+      // whole trx so the caller offers a different anchor slot instead.
+      {
+        const projectedDates = [];
+        for (let i = startIdx; i < siblings.length; i++) {
+          const sib = siblings[i];
+          if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
+          const oi = i - startIdx;
+          projectedDates.push(oi === 0
+            ? String(newDate).split('T')[0]
+            : nextRecurringDate(newDate, parent.recurring_pattern, oi, opts));
+        }
+        if (projectedDates.length) {
+          const seriesClash = await trx('scheduled_services')
+            .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
+            .whereNotIn('id', sweptIds)
+            .whereNotIn('status', TERMINAL)
+            .whereIn('scheduled_date', projectedDates)
+            .first('id');
+          if (seriesClash) {
+            throw Object.assign(new Error('That date lands on another visit in this plan — pick a different time'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SLOT_TAKEN',
+            });
+          }
+        }
+      }
 
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
@@ -572,7 +649,8 @@ class SmartRebooker {
         if (!RESCHEDULABLE.has(sib.status) && !isLiveAnchor) continue;
 
         const occurrenceIndex = i - startIdx;
-        const date = occurrenceIndex === 0
+        const isAnchor = occurrenceIndex === 0;
+        const date = isAnchor
           ? newDate
           : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
 
@@ -584,6 +662,44 @@ class SmartRebooker {
           updated_at: trx.fn.now(),
           ...(isLiveAnchor ? LIVE_LIFECYCLE_RESET : {}),
         };
+        // The ANCHOR may carry a caller-chosen technician (the customer
+        // self-serve path validated its slot against a specific tech's
+        // route — dropping that assignment would bypass the slot's
+        // conflict guarantee and strand the chosen opening). Same
+        // advisory-lock + overlap guard as the single-visit path, scoped
+        // to the anchor; siblings keep their existing techs. Callers that
+        // omit the option (admin series shifts) are unaffected.
+        if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          updateData.technician_id = options.technicianId || null;
+          const anchorEnd = updateData.window_end;
+          if (options.technicianId && updateData.window_start && anchorEnd) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
+            );
+            const overlap = await trx('scheduled_services')
+              .where('scheduled_date', date)
+              .where('technician_id', options.technicianId)
+              .whereNot('id', sib.id)
+              .whereNotIn('status', ['cancelled', 'completed'])
+              .where((q) => {
+                q.whereNull('reservation_expires_at')
+                  .orWhereRaw('reservation_expires_at > NOW()');
+              })
+              .whereRaw(
+                "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+                [anchorEnd, updateData.window_start],
+              )
+              .first('id');
+            if (overlap) {
+              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'SLOT_TAKEN',
+              });
+            }
+          }
+        }
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
           trx,
           date,
@@ -594,20 +710,83 @@ class SmartRebooker {
           updateData.recurring_weekday = opts.weekday;
         }
 
-        const rowUpdate = trx('scheduled_services').where({ id: sib.id });
-        if (isLiveAnchor) {
-          // Atomic guard for the live anchor — same contract as the
-          // single-job override: the tech can complete/cancel this job
-          // between the sibling SELECT above and this UPDATE, and a
-          // terminal row must not be steamrolled back to confirmed +
-          // a rewound tracker. 0 rows updated → the whole series trx
-          // rolls back (all-or-none).
-          rowUpdate.where({ status: sib.status });
+        // Non-anchor siblings land on recomputed dates the route never
+        // validated. Never COMMIT a double-booking: if the sibling's kept
+        // tech already has an overlapping job on the new date (outside this
+        // series — earlier-loop siblings have already moved), clear the
+        // assignment inside the same trx and flag the occurrence so the
+        // caller can park it for dispatch. The visit itself still shifts —
+        // cadence is preserved; only the route assignment is deferred.
+        let conflicted = false;
+        if (!isAnchor && sib.technician_id && updateData.window_start) {
+          // Null window_end (schema-legal) must not collapse the probe to a
+          // zero-length window — mirror the SQL predicate's fallback and
+          // assume a 60-minute block from the start.
+          const clashEnd = updateData.window_end || (() => {
+            const [h, m] = String(updateData.window_start).split(':').map(Number);
+            const total = h * 60 + (m || 0) + 60;
+            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+          })();
+          // Same slot-reserve advisory lock the anchor and single-visit
+          // paths take — without it a concurrent assignment can pass its
+          // own overlap check before this trx commits and double-book
+          // anyway.
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['slot-reserve', `${sib.technician_id}:${String(date).split('T')[0]}`],
+          );
+          const clash = await trx('scheduled_services')
+            .where('scheduled_date', date)
+            .where('technician_id', sib.technician_id)
+            // Exclude only the rows this sweep is moving (sweptIds — their
+            // dates are changing, so their pre-shift positions are noise).
+            // Everything else counts: boosters, pre-anchor cadence rows
+            // that stayed put, other plans — a shifted sibling landing on
+            // any of their windows is a real conflict and must unassign.
+            .whereNotIn('id', sweptIds)
+            .whereNotIn('status', TERMINAL)
+            .where((q) => {
+              q.whereNull('reservation_expires_at')
+                .orWhereRaw('reservation_expires_at > NOW()');
+            })
+            .whereRaw(
+              "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), 60)::text || ' minutes')::interval)) > ?::time",
+              [clashEnd, updateData.window_start],
+            )
+            .first('id');
+          if (clash) {
+            conflicted = true;
+            updateData.technician_id = null;
+          }
         }
-        const updated = await rowUpdate.update(updateData);
-        if (isLiveAnchor && updated === 0) {
-          throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
+
+        // Atomic optimistic guard for EVERY row — same contract as the
+        // single-job path, and it carries the previously READ scheduling
+        // fields, not just status: a concurrent reschedule usually leaves
+        // status 'confirmed', so status alone would let this sweep
+        // overwrite a newer date/window/tech edit. ANY raced row aborts
+        // the whole trx — the series shift is all-or-none, so the customer
+        // is never told "your visits moved" while one stayed on the old
+        // cadence.
+        const updated = await trx('scheduled_services')
+          .where({
+            id: sib.id,
+            status: sib.status,
+            scheduled_date: sib.scheduled_date,
+            window_start: sib.window_start,
+            // window_end and technician_id are overwritten by this sweep
+            // (duration + the conflict-unassign decision were computed from
+            // the values read above) — a concurrent resize/reassignment
+            // must invalidate the match, not be steamrolled.
+            window_end: sib.window_end ?? null,
+            technician_id: sib.technician_id ?? null,
+          })
+          .update(updateData);
+        if (updated === 0) {
+          throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
             statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
           });
         }
 
@@ -630,6 +809,9 @@ class SmartRebooker {
           date,
           windowStart: win.start || sib.window_start,
           windowEnd: win.end || sib.window_end,
+          // True when the shift cleared this row's tech to avoid committing
+          // a double-booked route — the caller parks it for reassignment.
+          conflicted,
         });
       }
 
@@ -664,6 +846,22 @@ class SmartRebooker {
         }
       }
       emitCustomerJobRefresh({ ...service, id: serviceId }, 'confirmed');
+    }
+
+    // Same escalation check the single-visit path runs — a series re-anchor
+    // is still a reschedule of this visit, and the manual-review threshold
+    // must not be bypassable by qualifying for the series path.
+    try {
+      const count = await db('reschedule_log')
+        .where({ scheduled_service_id: serviceId })
+        .count('* as count').first();
+      if (parseInt(count.count) >= RULES.escalation.max_auto_reschedules_per_service) {
+        logger.warn(`Service ${serviceId} has been rescheduled ${count.count} times (latest as a series re-anchor) — needs manual review`);
+        await db('reschedule_log').where({ scheduled_service_id: serviceId }).orderBy('created_at', 'desc').first()
+          .then((log) => log && db('reschedule_log').where({ id: log.id }).update({ escalated: true }));
+      }
+    } catch (err) {
+      logger.warn(`[rebooker] series escalation check failed for ${serviceId}: ${err.message}`);
     }
 
     return {

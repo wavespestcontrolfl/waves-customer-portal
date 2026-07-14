@@ -1488,3 +1488,143 @@ describe('admin projects routes', () => {
     });
   });
 });
+
+// #2717 server hardening: one visit, one report. POST /admin/projects
+// refuses a create for an already-reported visit with a 409
+// visit_already_reported naming the existing project — a silent
+// return-the-existing-row success would let the client discard freshly
+// typed findings (Codex P2 on #2732). A lost create race (unique index
+// 23505) resolves to the same contract.
+describe('POST /admin/projects one-report-per-visit conflict', () => {
+  afterEach(() => {
+    delete db.schema;
+  });
+
+  const wdoBody = JSON.stringify({
+    customer_id: 'customer-1',
+    project_type: 'wdo_inspection',
+    scheduled_service_id: 'svc-legacy',
+  });
+
+  function mockTables(projectsFactory) {
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain({ first: jest.fn().mockResolvedValue({ id: 'customer-1' }) });
+      if (table === 'scheduled_services') return chain({
+        first: jest.fn().mockResolvedValue({
+          id: 'svc-legacy', service_id: null, service_type: 'WDO Inspection',
+          customer_id: 'customer-1', scheduled_date: '2026-07-13',
+        }),
+      });
+      if (table === 'services') return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (table === 'service_completion_profiles') return modeAwareProfilesChain({ flipped: [], backed: [], first: undefined });
+      if (table === 'projects') return projectsFactory();
+      if (table === 'activity_log') return chain();
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+  }
+
+  test('409s with the existing linked project instead of inserting a duplicate', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const existing = {
+      id: 'project-existing', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'draft', scheduled_service_id: 'svc-legacy',
+    };
+    const projectsInsert = jest.fn();
+    mockTables(() => chain({
+      first: jest.fn().mockResolvedValue(existing),
+      insert: projectsInsert,
+    }));
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
+      expect(body.project.id).toBe('project-existing');
+      expect(projectsInsert).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a legacy record-only report (NULL scheduled link) still blocks the visit', async () => {
+    // Pre-hardening rows can carry scheduled_service_id = NULL while their
+    // service record points at the visit — the direct-column lookup (and the
+    // partial unique index) never see them (Codex round-2 P2). The lookup
+    // must join the project's service record and OR its scheduled link into
+    // the match, or the visit mints a second report.
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const legacy = {
+      id: 'project-record-only', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'sent',
+      scheduled_service_id: null, service_record_id: 'rec-legacy',
+    };
+    const projectsInsert = jest.fn();
+    const lookup = chain({
+      first: jest.fn().mockResolvedValue(legacy),
+      insert: projectsInsert,
+    });
+    mockTables(() => lookup);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
+      expect(body.project.id).toBe('project-record-only');
+      expect(projectsInsert).not.toHaveBeenCalled();
+      expect(lookup.leftJoin).toHaveBeenCalledWith('service_records', 'projects.service_record_id', 'service_records.id');
+      const groupedWhere = lookup.where.mock.calls
+        .map(([arg]) => arg)
+        .find((arg) => typeof arg === 'function');
+      expect(groupedWhere).toBeDefined();
+      const grouped = { where: jest.fn(), orWhere: jest.fn() };
+      grouped.where.mockReturnValue(grouped);
+      grouped.orWhere.mockReturnValue(grouped);
+      groupedWhere.call(grouped, grouped);
+      expect(grouped.where).toHaveBeenCalledWith('projects.scheduled_service_id', 'svc-legacy');
+      expect(grouped.orWhere).toHaveBeenCalledWith('service_records.scheduled_service_id', 'svc-legacy');
+    });
+  });
+
+  test('a lost same-visit create race (unique-violation 23505) resolves to the winner', async () => {
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const winner = {
+      id: 'project-winner', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'draft', scheduled_service_id: 'svc-legacy',
+    };
+    let projectsCalls = 0;
+    mockTables(() => {
+      projectsCalls += 1;
+      // 1st: pre-insert lookup misses (the race window); 2nd: insert hits
+      // the partial unique index; 3rd: post-conflict lookup finds the winner.
+      if (projectsCalls === 1) return chain({ first: jest.fn().mockResolvedValue(undefined) });
+      if (projectsCalls === 2) {
+        const dupErr = Object.assign(
+          new Error('duplicate key value violates unique constraint "projects_scheduled_service_id_unique"'),
+          { code: '23505' },
+        );
+        return chain({ returning: jest.fn().mockRejectedValue(dupErr) });
+      }
+      return chain({ first: jest.fn().mockResolvedValue(winner) });
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
+      expect(body.project.id).toBe('project-winner');
+    });
+  });
+});

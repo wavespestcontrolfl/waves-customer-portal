@@ -391,6 +391,27 @@ function ClientMeta({ data }) {
   );
 }
 
+// Prep-guide link for the pre-visit cards (Scheduled / EnRoute / OnProperty).
+// Renders only when prep was actually sent for this visit — prepToken stays
+// null otherwise, so most visits show nothing here.
+function PrepLink({ data }) {
+  if (!data.prepToken) return null;
+  return (
+    <a
+      href={`/prep/${data.prepToken}`}
+      data-glass="soft"
+      style={{
+        display: 'block', marginTop: 16, padding: '12px 16px',
+        border: `1px solid ${TRACK_SURFACE.border}`, borderRadius: 8,
+        textAlign: 'center', fontSize: 15, fontWeight: 600,
+        color: COLORS.glassNavy, textDecoration: 'none',
+      }}
+    >
+      View prep instructions
+    </a>
+  );
+}
+
 // ── State cards ──────────────────────────────────────────────────
 function ScheduledCard({ data }) {
   const techFirst = data.tech?.firstName || 'your tech';
@@ -408,6 +429,7 @@ function ScheduledCard({ data }) {
         You'll get a text as soon as {techFirst} is on the way.
       </div>
       <ClientMeta data={data} />
+      <PrepLink data={data} />
     </Card>
   );
 }
@@ -459,6 +481,7 @@ function EnRouteCard({ data }) {
         </div>
 
         <ClientMeta data={data} />
+        <PrepLink data={data} />
 
         <a
           href={WAVES_SUPPORT_SMS_TEL}
@@ -490,6 +513,7 @@ function OnPropertyCard({ data }) {
         </div>
       ) : null}
       <ClientMeta data={data} />
+      <PrepLink data={data} />
     </Card>
   );
 }
