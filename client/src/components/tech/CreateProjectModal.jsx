@@ -362,10 +362,18 @@ export default function CreateProjectModal({
   // Debounced auto-save of the typed fields. Held off while the restore
   // prompt is showing so we don't clobber the saved draft before the tech
   // chooses, and skipped entirely when the form is still empty.
+  // draftFlushRef mirrors the CURRENT eligible payload so the unmount flush
+  // below can write it synchronously — the Details handoff (and any other
+  // unmount) inside the 700ms window was silently dropping the last edits
+  // (Codex P2 on #2717).
+  const draftFlushRef = useRef(null);
   useEffect(() => {
     // Stop once the project exists on the server — the server draft is then
     // the source of truth and a local draft would risk a duplicate on restore.
-    if (!draftReadyRef.current || showDraftPrompt || createdProject) return;
+    if (!draftReadyRef.current || showDraftPrompt || createdProject) {
+      draftFlushRef.current = null;
+      return;
+    }
     const hasContent = Boolean(
       projectType
       || customerId
@@ -373,17 +381,36 @@ export default function CreateProjectModal({
       || (recommendations && recommendations.trim())
       || Object.values(findings).some((v) => String(v || '').trim()),
     );
-    if (!hasContent) return;
+    if (!hasContent) {
+      draftFlushRef.current = null;
+      return;
+    }
+    const payload = {
+      savedAt: new Date().toISOString(),
+      projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
+    };
+    draftFlushRef.current = { key: draftKey, payload };
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(draftKey, JSON.stringify({
-          savedAt: new Date().toISOString(),
-          projectType, customerId, customerLabel, projectDate, title, findings, recommendations,
-        }));
+        localStorage.setItem(draftKey, JSON.stringify(payload));
       } catch { /* quota / serialization — non-blocking */ }
     }, 700);
     return () => clearTimeout(timer);
   }, [draftKey, showDraftPrompt, createdProject, projectType, customerId, customerLabel, projectDate, title, findings, recommendations]);
+
+  // Unmount-only flush of a pending draft write. The debounce cleanup above
+  // cancels the timer on EVERY dep change, which is correct while mounted —
+  // but on unmount the cancelled write must still land or the newest
+  // keystrokes vanish. The ref is nulled whenever a write would be
+  // ineligible (empty form, restore prompt showing, project created), so
+  // this can never resurrect a cleared draft.
+  useEffect(() => () => {
+    const pending = draftFlushRef.current;
+    if (!pending) return;
+    try {
+      localStorage.setItem(pending.key, JSON.stringify(pending.payload));
+    } catch { /* quota / serialization — non-blocking */ }
+  }, []);
 
   function restoreDraft() {
     const d = savedDraft;
@@ -896,6 +923,11 @@ export default function CreateProjectModal({
         // The project now lives server-side as a draft — it's the source of
         // truth. Drop the local draft so a later restore can't re-POST a
         // duplicate (e.g. if photo uploads below fail and the tech reopens).
+        // Null the flush ref imperatively too: if the parent unmounts this
+        // modal in the same render batch as onCreated, the effect that
+        // normally nulls it never re-runs, and the unmount flush would
+        // resurrect the draft we just deleted.
+        draftFlushRef.current = null;
         try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
       } else {
         const r = await adminFetch(`/admin/projects/${data.project.id}`, {

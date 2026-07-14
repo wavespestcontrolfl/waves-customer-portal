@@ -1185,9 +1185,12 @@ export default function DispatchPageV2({
     const fresh = (data?.services || []).find(
       (s) => String(s.id) === String(continueProjectService.id),
     );
-    if (!fresh) {
-      setContinueProjectService(null);
-    } else if (fresh !== continueProjectService) {
+    // A miss is NOT a clear (Codex r2): mobile Week mode rows come from the
+    // /week payload and legitimately aren't in the selected day's response —
+    // clearing on miss killed the Details pill for every week row. Week-row
+    // staleness after an in-editor close is covered by the close signal
+    // (onChanged {visitCompleted}) and the sheet's own terminal gating.
+    if (fresh && fresh !== continueProjectService) {
       setContinueProjectService(fresh);
     }
   }, [data, continueProjectService]);
@@ -2459,7 +2462,8 @@ export default function DispatchPageV2({
             className="max-w-4xl mx-auto my-6 px-4"
             onClick={(e) => e.stopPropagation()}
           >
-            {isMobile && continueProjectService && (
+            {isMobile && continueProjectService
+              && !projectCompletionIsClosed(continueProjectService) && (
               <div className="flex justify-end mb-2">
                 <button
                   type="button"
@@ -2467,7 +2471,9 @@ export default function DispatchPageV2({
                   onClick={() => {
                     // Pest-completion parity: appointment actions (cancel /
                     // no-show / reschedule / rain-out / price edit) for the
-                    // visit behind this report.
+                    // visit behind this report. Hidden once the visit/report
+                    // is terminal (Codex P1) — the sheet also gates its own
+                    // terminal actions as the last line of defense.
                     const svc = continueProjectService;
                     setContinueProjectId(null);
                     setContinueProjectService(null);
@@ -2486,7 +2492,19 @@ export default function DispatchPageV2({
                 setContinueProjectService(null);
                 fetchSchedule(date);
               }}
-              onChanged={() => fetchSchedule(date)}
+              onChanged={(info) => {
+                fetchSchedule(date);
+                // Close-from-editor also completes the visit. The day
+                // refresh re-points day rows, but a Week-mode row never
+                // appears in the day payload — mark the snapshot terminal
+                // directly off the close signal so the Details pill hides
+                // for those too (Codex P1/r2).
+                if (info?.visitCompleted) {
+                  setContinueProjectService(
+                    (s) => (s ? { ...s, status: "completed" } : s),
+                  );
+                }
+              }}
               canAdminActions={getAdminUser()?.role === "admin"}
             />
           </div>

@@ -1984,7 +1984,11 @@ export function ProjectDetail({
       });
       const d = await readJsonResponse(r, "Could not close project");
       await load();
-      onChanged?.();
+      // Close also completes the linked visit — tell the host so schedule
+      // embeds can retire their visit snapshot (DispatchPageV2 Details
+      // handoff, Codex P1 on #2717). Other call sites stay bare; consumers
+      // that take no args (loadProjects) are unaffected.
+      onChanged?.({ visitCompleted: !!d.serviceCompleted });
       const serviceText = d.serviceCompleted ? " Service marked completed." : "";
       const portalText = d.portalAttached
         ? " Report attached to the customer portal."
