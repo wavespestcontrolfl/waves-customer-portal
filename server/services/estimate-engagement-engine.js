@@ -109,6 +109,24 @@ function categoryEligible(est, rule) {
   return lines.every((line) => allowed.has(line.key));
 }
 
+// Rules that share a send budget: the two expiring variants are ONE expiry
+// reminder per estimate (codex 2736 r3 — a never-viewed send followed by an
+// open must not let the engaged variant re-nudge the same deadline).
+function dedupeGroup(ruleKey) {
+  if (ruleKey === 'expiring_engaged' || ruleKey === 'expiring_never_viewed') {
+    return ['expiring_engaged', 'expiring_never_viewed'];
+  }
+  return [ruleKey];
+}
+
+// Legacy 2h-cron claim columns that must also block the engine's claim —
+// checked atomically inside claimFollowupSend (codex 2736 r3).
+function legacyFlagsFor(ruleKey) {
+  if (ruleKey === 'delivery_unopened_24h') return ['followup_unviewed_sent'];
+  if (ruleKey === 'expiring_engaged' || ruleKey === 'expiring_never_viewed') return ['followup_expiring_sent'];
+  return [];
+}
+
 // Idempotent enqueue: the partial unique index (one pending job per
 // estimate+rule) absorbs duplicate triggers; a rule already SENT for this
 // estimate never re-enqueues; neither does one whose job already reached a
@@ -123,6 +141,12 @@ async function enqueueJob(estimateId, rule, dueAt, trigger) {
   // pending → shadow/done between a separate lookup and the insert can't
   // resurrect a consumed lifecycle. The pending partial-unique conflict
   // clause still backstops two concurrent view hooks racing each other.
+  // Jobs guard is PER-RULE (a sibling's stale-skipped lifecycle must not
+  // block this rule from queuing — e.g. never-viewed goes stale on open,
+  // the engaged variant still owes the deadline reminder); the SENDS guard
+  // is per dedupe GROUP — one actual send covers the whole concept.
+  const group = dedupeGroup(rule.rule_key);
+  const groupIn = group.map(() => '?').join(', ');
   const result = await db.raw(
     `INSERT INTO estimate_followup_jobs (estimate_id, rule_key, due_at, trigger)
      SELECT ?, ?, ?, ?::jsonb
@@ -132,14 +156,14 @@ async function enqueueJob(estimateId, rule, dueAt, trigger) {
      )
      AND NOT EXISTS (
        SELECT 1 FROM estimate_followup_sends
-       WHERE estimate_id = ? AND rule_key = ?
+       WHERE estimate_id = ? AND rule_key IN (${groupIn})
      )
      ON CONFLICT (estimate_id, rule_key) WHERE status = 'pending' DO NOTHING
      RETURNING id`,
     [
       estimateId, rule.rule_key, dueAt, JSON.stringify(trigger || {}),
       estimateId, rule.rule_key,
-      estimateId, rule.rule_key,
+      estimateId, ...group,
     ],
   );
   return (result?.rows?.length || 0) === 1;
@@ -224,11 +248,14 @@ async function sweepTimeRules(now = new Date()) {
         // Quiet from the latest TOUCH: a resend (sent_at bump) resets the
         // window, so require sent_at outside it too (null sent_at passes —
         // the view timestamps carry the window alone).
+        // Window on the LATEST touch — view or (re)send (codex 2736 r3):
+        // keying on last_viewed_at alone both fired minutes after a resend
+        // AND silently missed the resend-aged case (old view past the max
+        // bound, fresh send inside the window).
         q = q.where({ status: 'viewed' })
           .whereNotNull('last_viewed_at')
-          .where('last_viewed_at', '<', new Date(nowMs - p.minQuietHours * 3600000))
-          .where('last_viewed_at', '>', new Date(nowMs - p.maxQuietHours * 3600000))
-          .where((sub) => sub.whereNull('sent_at').orWhere('sent_at', '<', new Date(nowMs - p.minQuietHours * 3600000)));
+          .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) < ?', [new Date(nowMs - p.minQuietHours * 3600000)])
+          .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) > ?', [new Date(nowMs - p.maxQuietHours * 3600000)]);
       } else if (rule.rule_key === 'expiring_engaged') {
         q = q.whereIn('status', ACTIVE_STATUSES)
           .whereNotNull('viewed_at')
@@ -363,6 +390,17 @@ async function processDueJobs(now = new Date()) {
         await markJob(job.id, 'skipped', 'category-ineligible');
         continue;
       }
+      // A resend restarts the unopened timer (codex 2736 r3): the one-
+      // lifecycle enqueue guard means a terminal skip here would permanently
+      // lose the fresh delivery's nudge — defer to sent_at + minAge instead.
+      if (rule.rule_key === 'delivery_unopened_24h'
+        && est.status === 'sent' && !est.viewed_at && !est.followup_unviewed_sent) {
+        const sentAtMs = est.sent_at ? new Date(est.sent_at).getTime() : 0;
+        if (sentAtMs && nowMs - sentAtMs < rule.params.minAgeHours * 3600000) {
+          await deferJob(job.id, new Date(sentAtMs + rule.params.minAgeHours * 3600000));
+          continue;
+        }
+      }
       if (!rulePredicateStillHolds(est, rule, nowMs)) {
         await markJob(job.id, 'skipped', 'stale-condition');
         continue;
@@ -382,17 +420,28 @@ async function processDueJobs(now = new Date()) {
         await markJob(job.id, 'skipped', 'customer-replied');
         continue;
       }
-      // Inbox guardrails: hard cap across the whole ledger; spacing between
-      // engagement emails (hot rules exempt by param).
-      const ledger = await db('estimate_followup_sends')
-        .where({ estimate_id: est.id })
-        .orderBy('sent_at', 'desc')
-        .select('rule_key', 'sent_at');
-      if (ledger.length >= ENGINE_LIMITS.maxSendsPerEstimate) {
+      // Sibling budget: an engine send from the same dedupe group already
+      // covered this concept (the atomic claim re-checks this too).
+      const siblings = dedupeGroup(rule.rule_key).filter((k) => k !== rule.rule_key);
+      if (siblings.length) {
+        const siblingSend = await db('estimate_followup_sends')
+          .where({ estimate_id: est.id })
+          .whereIn('rule_key', siblings)
+          .first('id');
+        if (siblingSend) {
+          await markJob(job.id, 'skipped', 'sibling-sent');
+          continue;
+        }
+      }
+      // Inbox guardrails from the estimate's OWN counters (codex 2736 r3):
+      // follow_up_count / last_follow_up_at are bumped by BOTH lanes, so
+      // legacy sends count toward the cap and the spacing window — the
+      // ledger alone misses legacy stages, which never write it.
+      if (Number(est.follow_up_count || 0) >= ENGINE_LIMITS.maxSendsPerEstimate) {
         await markJob(job.id, 'skipped', 'max-sends-cap');
         continue;
       }
-      const lastSendMs = ledger.length ? new Date(ledger[0].sent_at).getTime() : 0;
+      const lastSendMs = est.last_follow_up_at ? new Date(est.last_follow_up_at).getTime() : 0;
       const spacingMs = ENGINE_LIMITS.minSpacingHours * 3600000;
       if (lastSendMs && !rule.params.spacingExempt && nowMs - lastSendMs < spacingMs) {
         await deferJob(job.id, new Date(lastSendMs + spacingMs));
@@ -423,6 +472,9 @@ async function processDueJobs(now = new Date()) {
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
+      }, {
+        blockLegacyFlags: legacyFlagsFor(rule.rule_key),
+        blockRuleKeys: siblings,
       }))) {
         await markJob(job.id, 'skipped', 'lost-claim');
         continue;
@@ -497,6 +549,8 @@ module.exports._private = {
   enqueueJob,
   parseParams,
   rulePredicateStillHolds,
+  dedupeGroup,
+  legacyFlagsFor,
   ENGINE_LIMITS,
   DEFAULT_RULE_PARAMS,
 };

@@ -125,6 +125,8 @@ function baseEstimate(overrides = {}) {
     customer_email: 'taylor@example.com',
     token: 'tok-xyz',
     sent_at: new Date(NOW.getTime() - 100 * H),
+    follow_up_count: 0,
+    last_follow_up_at: null,
     expires_at: new Date(NOW.getTime() + 5 * 86400000),
     viewed_at: new Date(NOW.getTime() - 80 * H),
     last_viewed_at: new Date(NOW.getTime() - 80 * H),
@@ -246,11 +248,10 @@ describe('onEstimateViewed (view-event rules)', () => {
 
 describe('processDueJobs', () => {
   // Happy-path queue for one due job on the gone-quiet rule.
-  function enqueueProcessorHappyPath({ job = pendingJob(), est = baseEstimate(), ledgerRows = [] } = {}) {
+  function enqueueProcessorHappyPath({ job = pendingJob(), est = baseEstimate() } = {}) {
     enqueue('estimate_followup_jobs', { rows: [job] });     // due scan
     enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
     enqueue('estimates', { first: est });                   // fresh re-read
-    enqueue('estimate_followup_sends', { rows: ledgerRows }); // caps/spacing ledger
     enqueue('notification_prefs', { first: { email_enabled: true } });
     // job status update + estimate bump resolve via builder defaults
   }
@@ -263,6 +264,7 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(1);
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
       'est-1', 'viewed_gone_quiet_72h', 'estimate.engage_gone_quiet', expect.any(Object),
+      { blockLegacyFlags: [], blockRuleKeys: [] },
     );
     expect(followupShared.sendDualChannel).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'est-1' }),
@@ -309,15 +311,9 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(1);
   });
 
-  test('the 4-send cap skips the job', async () => {
-    enqueueProcessorHappyPath({
-      ledgerRows: [
-        { rule_key: 'a', sent_at: new Date(NOW.getTime() - 40 * H) },
-        { rule_key: 'b', sent_at: new Date(NOW.getTime() - 60 * H) },
-        { rule_key: 'c', sent_at: new Date(NOW.getTime() - 80 * H) },
-        { rule_key: 'payment_step_abandoned', sent_at: new Date(NOW.getTime() - 90 * H) },
-      ],
-    });
+  test('the 4-send cap counts BOTH lanes via follow_up_count', async () => {
+    // Four legacy sends, zero ledger rows — the cap must still trip.
+    enqueueProcessorHappyPath({ est: baseEstimate({ follow_up_count: 4 }) });
 
     const result = await Engine.processDueJobs(NOW);
 
@@ -326,9 +322,9 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'max-sends-cap' }));
   });
 
-  test('a send 1h ago defers a non-exempt rule to the spacing boundary', async () => {
+  test('a send 1h ago (either lane) defers a non-exempt rule to the spacing boundary', async () => {
     const lastSent = new Date(NOW.getTime() - 1 * H);
-    enqueueProcessorHappyPath({ ledgerRows: [{ rule_key: 'a', sent_at: lastSent }] });
+    enqueueProcessorHappyPath({ est: baseEstimate({ follow_up_count: 1, last_follow_up_at: lastSent }) });
 
     const result = await Engine.processDueJobs(NOW);
 
@@ -342,7 +338,7 @@ describe('processDueJobs', () => {
   test('return_visit_hot is spacing-EXEMPT and still sends', async () => {
     enqueueProcessorHappyPath({
       job: pendingJob({ rule_key: 'return_visit_hot' }),
-      ledgerRows: [{ rule_key: 'a', sent_at: new Date(NOW.getTime() - 1 * H) }],
+      est: baseEstimate({ follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 1 * H) }),
     });
 
     const result = await Engine.processDueJobs(NOW);
@@ -350,6 +346,7 @@ describe('processDueJobs', () => {
     expect(result.sent).toBe(1);
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
       'est-1', 'return_visit_hot', 'estimate.engage_return_visit', expect.any(Object),
+      { blockLegacyFlags: [], blockRuleKeys: [] },
     );
   });
 
@@ -417,17 +414,34 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
   });
 
-  test('an unopened job goes stale after a RESEND (sent_at age re-checked)', async () => {
+  test('a RESEND restarts the unopened timer — job defers to sent_at + minAge', async () => {
     const UNOPENED_RULE = { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_unopened', params: {} };
+    const freshSend = new Date(NOW.getTime() - 2 * H);
     enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'delivery_unopened_24h' })] });
     enqueue('estimate_followup_rules', { rows: [UNOPENED_RULE] });
-    enqueue('estimates', { first: baseEstimate({ status: 'sent', viewed_at: null, last_viewed_at: null, sent_at: new Date(NOW.getTime() - 2 * H) }) });
+    enqueue('estimates', { first: baseEstimate({ status: 'sent', viewed_at: null, last_viewed_at: null, sent_at: freshSend }) });
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(0);
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined(); // still pending — NOT a terminal skip
+    expect(defer.payload.due_at.getTime()).toBe(freshSend.getTime() + 24 * H);
+  });
+
+  test('a sibling expiring send suppresses the other variant', async () => {
+    const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });
+    enqueue('estimate_followup_rules', { rows: [EXPIRING_RULE] });
+    enqueue('estimates', { first: baseEstimate({ expires_at: new Date(NOW.getTime() + 1 * 86400000) }) });
+    enqueue('estimate_followup_sends', { first: { id: 'never-viewed-send' } }); // sibling already sent
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
-    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'sibling-sent' }));
   });
 
   test('a legacy-lane unviewed claim suppresses the engine unopened email', async () => {

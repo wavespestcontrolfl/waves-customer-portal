@@ -121,12 +121,26 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // SMS/email to the customer. Re-checks archived_at at claim time: the
 // candidate queries filter on it, but a manual/sweep archive landing between
 // the read and this UPDATE must still block the send.
-async function claimStage(estId, flag) {
-  const affected = await db("estimates")
+async function claimStage(estId, flag, { excludeEngineRuleKeys = [] } = {}) {
+  const q = db("estimates")
     .where({ id: estId })
     .whereNull("archived_at")
-    .where((q) => q.where(flag, false).orWhereNull(flag))
-    .update({ [flag]: true });
+    .where((qq) => qq.where(flag, false).orWhereNull(flag));
+  // Cross-lane dedupe INSIDE the atomic claim (codex 2736 r3): the legacy
+  // cron and the engagement engine run under different advisory locks, so
+  // the candidate-query whereNotExists alone leaves a read-then-claim race
+  // at the 2h boundary. Re-checking the engine ledger in the same UPDATE
+  // closes it — if the engine's send landed after our candidate read, this
+  // claim affects 0 rows and the stage skips.
+  if (excludeEngineRuleKeys.length) {
+    q.whereNotExists(function excludeEngineSends() {
+      this.select(db.raw("1"))
+        .from("estimate_followup_sends")
+        .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+        .whereIn("estimate_followup_sends.rule_key", excludeEngineRuleKeys);
+    });
+  }
+  const affected = await q.update({ [flag]: true });
   return affected === 1;
 }
 
@@ -513,14 +527,39 @@ const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
 // claimStage path does (codex 2729 r2). A send failure deletes the row so
 // the next tick retries — the ledger row is the claim AND the attribution
 // record.
-async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger) {
+// Optional atomic guards (codex 2736 r3): blockLegacyFlags re-checks the
+// legacy cron's boolean claim columns inside the same statement (closes the
+// cross-lane race at the 2h boundary — column names are allowlisted, never
+// caller-interpolated), and blockRuleKeys blocks sibling rules that share a
+// send budget (e.g. the two expiring variants = one expiry reminder).
+const CLAIM_LEGACY_FLAG_COLUMNS = new Set([
+  "followup_unviewed_sent",
+  "followup_expiring_sent",
+]);
+
+async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, options = {}) {
+  const legacyFlags = (options.blockLegacyFlags || []).filter((col) => CLAIM_LEGACY_FLAG_COLUMNS.has(col));
+  const siblingKeys = options.blockRuleKeys || [];
+  const bindings = [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId];
+  const flagClause = legacyFlags.map((col) => `AND estimates.${col} IS NOT TRUE`).join("\n     ");
+  let siblingClause = "";
+  if (siblingKeys.length) {
+    siblingClause = `AND NOT EXISTS (
+       SELECT 1 FROM estimate_followup_sends s2
+       WHERE s2.estimate_id = estimates.id
+         AND s2.rule_key IN (${siblingKeys.map(() => "?").join(", ")})
+     )`;
+    bindings.push(...siblingKeys);
+  }
   const result = await db.raw(
     `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
      SELECT id, ?, ?, ?::jsonb FROM estimates
      WHERE id = ? AND archived_at IS NULL
+     ${flagClause}
+     ${siblingClause}
      ON CONFLICT (estimate_id, rule_key) DO NOTHING
      RETURNING id`,
-    [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId],
+    bindings,
   );
   return (result?.rows?.length || 0) === 1;
 }
@@ -817,7 +856,9 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_unviewed_sent"))) {
+          if (!(await claimStage(est.id, "followup_unviewed_sent", {
+            excludeEngineRuleKeys: ["delivery_unopened_24h"],
+          }))) {
             logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
             continue;
           }
@@ -1077,7 +1118,9 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_expiring_sent"))) {
+          if (!(await claimStage(est.id, "followup_expiring_sent", {
+            excludeEngineRuleKeys: ["expiring_engaged", "expiring_never_viewed"],
+          }))) {
             logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
             continue;
           }
