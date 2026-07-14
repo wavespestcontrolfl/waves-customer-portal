@@ -657,6 +657,12 @@ class SmartRebooker {
             status: sib.status,
             scheduled_date: sib.scheduled_date,
             window_start: sib.window_start,
+            // window_end and technician_id are overwritten by this sweep
+            // (duration + the conflict-unassign decision were computed from
+            // the values read above) — a concurrent resize/reassignment
+            // must invalidate the match, not be steamrolled.
+            window_end: sib.window_end ?? null,
+            technician_id: sib.technician_id ?? null,
           })
           .update(updateData);
         if (updated === 0) {

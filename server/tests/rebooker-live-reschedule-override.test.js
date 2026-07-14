@@ -398,6 +398,8 @@ describe('live-status reschedule override (allowLive)', () => {
       status: 'on_site',
       scheduled_date: BASE,
       window_start: '09:00:00',
+      window_end: '11:00:00',
+      technician_id: null,
     });
     expect(updates[1].update).not.toHaveBeenCalled();
     expect(historyInsert.insert).not.toHaveBeenCalled();

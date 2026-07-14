@@ -567,22 +567,23 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     if (shiftedOccurrences) {
       for (const occ of shiftedOccurrences) {
         try {
-          // coverDueWindows deliberately FALSE: covering before the series
-          // SMS is attempted would suppress already-due 24h/72h reminders
-          // on every no-send path (no phone, template missing, blocked).
-          // Uncovered, the worst case is the cron sending a standard
-          // reminder alongside our series text; the customer always hears
-          // about the new time. markRescheduleNoticeSent below records the
-          // notice only after a confirmed send.
+          // coverDueWindows:true — same duplicate-reminder race guard the
+          // admin series path uses: an already-due 24h window must not let
+          // the 15-min cron text a standard reminder in the gap before our
+          // series SMS lands. The no-send hole this opens (no phone,
+          // template missing, send blocked) is closed below: every no-send
+          // path explicitly RE-ARMS the covered windows so the cron still
+          // reminds — the customer never ends up with silence.
           await AppointmentReminders.handleReschedule(
             occ.id,
             `${String(occ.date).split('T')[0]}T${hhmm(occ.windowStart) || slot.start_time}`,
-            { sendNotification: false, coverDueWindows: false }
+            { sendNotification: false, coverDueWindows: true }
           );
         } catch (err) {
           logger.error(`[reschedule-public] series reminder sync failed for ${occ.id}: ${err.message}`);
         }
       }
+      let seriesNoticeSent = false;
       try {
         const smsTemplatesRouter = require('./admin-sms-templates');
         const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -614,12 +615,33 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
               metadata: { original_message_type: 'reschedule_series_confirmation', source: 'reschedule_public' },
             });
             if (!(msg?.blocked || msg?.sent === false)) {
+              seriesNoticeSent = true;
               await AppointmentReminders.markRescheduleNoticeSent(shiftedOccurrences.map((occ) => occ.id));
             }
           }
         }
       } catch (err) {
         logger.warn(`[reschedule-public] series confirmation SMS failed for ${svc.id}: ${err.message}`);
+      }
+      if (!seriesNoticeSent) {
+        // No-send path (no phone / template missing / blocked / send threw):
+        // the covered 24h/72h flags above would otherwise suppress due
+        // reminders entirely. Re-arm them so the 15-min cron still reminds
+        // the customer of the new times — a possible duplicate was the risk
+        // covering guards against; silence is worse.
+        try {
+          await db('appointment_reminders')
+            .whereIn('scheduled_service_id', shiftedOccurrences.map((occ) => occ.id))
+            .update({
+              reminder_72h_sent: false,
+              reminder_72h_sent_at: null,
+              reminder_24h_sent: false,
+              reminder_24h_sent_at: null,
+              updated_at: db.fn.now(),
+            });
+        } catch (err) {
+          logger.error(`[reschedule-public] series reminder re-arm failed for ${svc.id}: ${err.message}`);
+        }
       }
     } else {
       try {
