@@ -567,7 +567,27 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
         billByInvoice,
         paymentMethodPreference: null,
       });
-      return !!hold.required;
+      if (!hold.required) return false;
+      // Mirror the intent endpoint's saved-card auto-satisfy (codex 2729
+      // r1): resolveCardHoldPolicy is config-level only — the endpoints
+      // additionally 409 ('saved_method') when a consented chargeable card
+      // already covers the booking. A customer who gained a saved card
+      // after abandoning the hold step owes no capture, so never nudge
+      // them to save one. Customer resolution mirrors the endpoint
+      // (customer_id, else accept's phone match). Errors fall to the outer
+      // catch → fail closed.
+      const { matchAcceptCustomerByPhone } = require("../routes/estimate-public");
+      const { findConsentedChargeableCard } = require("./payment-method-consents");
+      let holdCustomerId = est.customer_id || null;
+      if (!holdCustomerId && est.customer_phone) {
+        const { match } = await matchAcceptCustomerByPhone(est);
+        holdCustomerId = match?.id || null;
+      }
+      if (holdCustomerId) {
+        const savedCard = await findConsentedChargeableCard(holdCustomerId);
+        if (savedCard?.stripe_payment_method_id) return false;
+      }
+      return true;
     }
     const membership = await buildEstimateMembershipContext(est);
     const policy = await resolveRecurringCardPolicyForEstimate({

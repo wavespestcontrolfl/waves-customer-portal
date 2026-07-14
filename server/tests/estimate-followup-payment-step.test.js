@@ -55,6 +55,10 @@ jest.mock('../routes/estimate-public', () => ({
   isEstimateAcceptActive: jest.fn(() => true),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   resolveEstimateInvoiceMode: jest.fn(() => false),
+  matchAcceptCustomerByPhone: jest.fn(async () => ({ match: null })),
+}));
+jest.mock('../services/payment-method-consents', () => ({
+  findConsentedChargeableCard: jest.fn(async () => null),
 }));
 jest.mock('../services/recurring-card-on-file', () => ({
   resolveRecurringCardPolicyForEstimate: jest.fn(async () => ({ required: true })),
@@ -74,6 +78,7 @@ const logger = require('../services/logger');
 const estimatePublic = require('../routes/estimate-public');
 const { resolveRecurringCardPolicyForEstimate } = require('../services/recurring-card-on-file');
 const { resolveCardHoldPolicy } = require('../services/estimate-card-holds');
+const { findConsentedChargeableCard } = require('../services/payment-method-consents');
 const { _private } = require('../services/estimate-follow-up');
 
 // Chainable knex-builder stub. Chain methods return the builder; awaiting it
@@ -247,6 +252,34 @@ describe('checkPaymentStepAbandoned', () => {
       expect.objectContaining({ treatAsOneTime: true }),
     );
     expect(resolveRecurringCardPolicyForEstimate).not.toHaveBeenCalled();
+  });
+
+  test('card_hold with a consented saved card skips — the hold is auto-satisfied', async () => {
+    findConsentedChargeableCard.mockResolvedValue({ stripe_payment_method_id: 'pm_123' });
+    enqueueHappyPath(baseEstimate({ checkout_kind: 'card_hold' }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(findConsentedChargeableCard).toHaveBeenCalledWith('cust-1');
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(writes.some((w) => w.table === 'estimate_followup_sends')).toBe(false);
+  });
+
+  test('card_hold on a customerless estimate resolves the customer by phone before the saved-card check', async () => {
+    estimatePublic.matchAcceptCustomerByPhone.mockResolvedValue({ match: { id: 'cust-9' } });
+    findConsentedChargeableCard.mockResolvedValue({ stripe_payment_method_id: 'pm_456' });
+    enqueueHappyPath(baseEstimate({
+      checkout_kind: 'card_hold',
+      customer_id: null,
+      customer_phone: '+19415550100',
+    }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(findConsentedChargeableCard).toHaveBeenCalledWith('cust-9');
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
   test('inactive (expired) estimates skip without claiming', async () => {
