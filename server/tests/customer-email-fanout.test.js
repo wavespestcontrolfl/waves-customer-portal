@@ -57,7 +57,7 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, reviewCards: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, reviewCards: 1 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
@@ -71,6 +71,9 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'where'
       && c.arg && c.arg.status === 'sending')).toBe(true);
     expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('email_template_automation_runs')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('referral_promoters')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('notification_prefs')[0].arg.billing_email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('charleswrobb@gmail.com');
 
     const cardUpdate = conn.__updates('triage_items')[0].arg;
@@ -97,7 +100,7 @@ describe('propagateCustomerEmailChange', () => {
       before: { id: 'cust-1', email: 'Charleswrobb@Gmail.com' },
       after: AFTER,
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -107,7 +110,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: null },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -145,6 +148,23 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
   });
 
+  test('queued template-automation runs sync only in pre-send/running states', async () => {
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const statusFilter = conn.__calls.find((c) => c.table === 'email_template_automation_runs' && c.op === 'whereIn' && c.arg.col === 'status');
+    expect(statusFilter.arg.vals).toEqual(['queued', 'scheduled', 'retry_scheduled', 'running']);
+  });
+
+  test('enrollment sync includes customer_id-NULL rows via the old-email guard', async () => {
+    // Estimate follow-ups enroll with customer_id null; the where-callback
+    // (customer match OR null) plus the old-email whereRaw scopes them.
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const enrollmentEmailGuard = conn.__calls.find(
+      (c) => c.table === 'automation_enrollments' && c.op === 'whereRaw');
+    expect(enrollmentEmailGuard.arg.bindings).toEqual(['charlesw.robb@gmail.com']);
+  });
+
   test('an INVALID replacement email never fans out or resolves cards', async () => {
     const conn = makeConn({
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
@@ -153,7 +173,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: 'foo@bar' },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 

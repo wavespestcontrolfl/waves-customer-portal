@@ -13,6 +13,19 @@
  *   - automation_enrollments.email — denormalized at enrollment; the
  *     automation runner sends every remaining step to it, so an ACTIVE
  *     enrollment keeps mailing the misspelling after the record is fixed.
+ *     Includes customer_id-NULL rows matching the old email: estimate
+ *     follow-ups enroll with `customer_id: estimate.customer_id || null`
+ *     and nothing backfills the link later.
+ *   - email_template_automation_runs.recipient_email — queued/delayed runs
+ *     (estimate, appointment, payment follow-ups) send to the stored value
+ *     at claim time; a run queued before the correction would deliver to
+ *     the misspelling.
+ *   - referral_promoters.customer_email — snapshotted at promoter
+ *     enrollment; reward emails send directly to it.
+ *   - notification_prefs.billing_email — a sendable customer address
+ *     (invoice/balance recipients); only rewritten when it still equals the
+ *     OLD email, so a deliberately different billing contact is never
+ *     touched.
  *   - triage_items (email_unverified / email_invalid) — the read-back card
  *     asks "which spelling is right?"; an operator saving a DIFFERENT email
  *     on the customer record is the authoritative answer, so the card
@@ -62,11 +75,12 @@ function emailKey(value) {
  *   source — short human label for resolution notes/logs (e.g. "Customer 360
  *            edit", "Intelligence Bar update_customer")
  * @param {object} conn — knex connection or transaction
- * @returns counts { leads, estimates, newsletter, reviewCards } — all zero
- *   when the email did not actually change or was removed.
+ * @returns counts { leads, estimates, newsletter, automations, templateRuns,
+ *   promoters, billingPrefs, reviewCards } — all zero when the email did not
+ *   actually change or was removed.
  */
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, reviewCards: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, reviewCards: 0 };
   const customerId = (after && after.id) || (before && before.id);
   // OLD is a loose match key (the stored copy may itself be malformed — that
   // is exactly what gets corrected); NEW must be a syntactically VALID
@@ -123,11 +137,43 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
     // Active automation enrollments send every remaining step to their
     // denormalized email — terminal enrollments (completed/cancelled/failed)
-    // are history and stay untouched.
+    // are history and stay untouched. customer_id-NULL rows matching the old
+    // email are included: estimate follow-ups enroll with
+    // `customer_id: estimate.customer_id || null` and nothing links them
+    // later — the old-email guard is what scopes them to this correction.
     counts.automations += await conn('automation_enrollments')
-      .where({ customer_id: customerId, status: 'active' })
+      .where({ status: 'active' })
+      .where((q) => q.where({ customer_id: customerId }).orWhereNull('customer_id'))
       .whereRaw('LOWER(email) = ?', [oldEmail])
       .update({ email: newEmail, updated_at: now });
+
+    // Queued/delayed email-template automation runs deliver to the stored
+    // recipient_email at claim time (email-template-automation-executor).
+    // Pre-send states sync (queued/scheduled/retry_scheduled) plus 'running':
+    // the in-flight attempt already claimed its recipient in memory, but a
+    // failed attempt re-reads the row for the retry — same never-heals
+    // argument as the 'sending' estimates above. Completed/skipped runs are
+    // an audit trail and stay untouched.
+    counts.templateRuns += await conn('email_template_automation_runs')
+      .whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running'])
+      .where((q) => q.where({ recipient_id: String(customerId) }).orWhereNull('recipient_id'))
+      .whereRaw('LOWER(recipient_email) = ?', [oldEmail])
+      .update({ recipient_email: newEmail, updated_at: now });
+
+    // Referral promoter rows snapshot the email at enrollment; reward
+    // notifications send directly to it (referral-engine).
+    counts.promoters += await conn('referral_promoters')
+      .where({ customer_id: customerId })
+      .whereRaw('LOWER(customer_email) = ?', [oldEmail])
+      .update({ customer_email: newEmail, updated_at: now });
+
+    // billing_email is a sendable customer address (invoice/balance
+    // recipients read it) — the old-email guard means a deliberately
+    // different billing contact is never rewritten.
+    counts.billingPrefs += await conn('notification_prefs')
+      .where({ customer_id: customerId })
+      .whereRaw('LOWER(billing_email) = ?', [oldEmail])
+      .update({ billing_email: newEmail, updated_at: now });
 
     // newsletter_subscribers.email is UNIQUE. Check-first instead of
     // update-and-catch: a caught unique violation would poison the caller's
@@ -197,9 +243,9 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     }
   }
 
-  if (counts.leads || counts.estimates || counts.newsletter || counts.automations || counts.reviewCards) {
+  if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).
-    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter row(s), ${counts.automations} automation enrollment(s); resolved ${counts.reviewCards} email review card(s)`);
+    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter, ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s); resolved ${counts.reviewCards} email review card(s)`);
   }
   return counts;
 }

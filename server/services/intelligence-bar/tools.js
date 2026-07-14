@@ -1061,8 +1061,7 @@ async function updateCustomer(customerId, updates) {
     // Operator-visible ripple of an email change (zeros/absent = no ripple):
     // how many open lead/estimate/newsletter copies were synced and how many
     // email review cards the correction resolved.
-    ...(emailSync && (emailSync.leads || emailSync.estimates || emailSync.newsletter || emailSync.automations || emailSync.reviewCards)
-      ? { email_sync: emailSync } : {}),
+    ...(emailSync && Object.values(emailSync).some(Boolean) ? { email_sync: emailSync } : {}),
   };
 }
 
