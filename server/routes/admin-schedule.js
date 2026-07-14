@@ -1192,6 +1192,35 @@ const ZONE_LABELS = {
   sarasota: 'Sarasota', venice_north_port: 'Venice/N.Port', ellenton: 'Ellenton',
 };
 
+// Compact, client-safe summary of an attached invoice's line items for the
+// schedule payloads. An invoice attached to a scheduled service is what the
+// visit actually collects — completion billing and Charge-now both reuse it
+// as-is — so the sheets need its breakdown to explain a first visit whose
+// accept-minted invoice carries the WaveGuard setup fee on top of the
+// per-application price. Amounts fall back to quantity * unit_price when a
+// line has no amount (InvoiceService.create computes subtotals that way too).
+function compactCheckoutInvoiceLines(rawLines) {
+  let lines = rawLines;
+  if (typeof lines === 'string') {
+    try { lines = JSON.parse(lines); } catch { return []; }
+  }
+  if (!Array.isArray(lines)) return [];
+  return lines
+    .map((li) => {
+      const quantity = Number(li?.quantity) || 1;
+      const unitPrice = Number(li?.unit_price) || 0;
+      const amount = li?.amount != null && Number.isFinite(Number(li.amount))
+        ? Number(li.amount)
+        : Math.round(quantity * unitPrice * 100) / 100;
+      return {
+        description: String(li?.description || '').slice(0, 160),
+        amount,
+      };
+    })
+    .filter((li) => li.description && Number.isFinite(li.amount))
+    .slice(0, 8);
+}
+
 // GET /api/admin/schedule — day view (board + dispatch)
 router.get('/', async (req, res, next) => {
   try {
@@ -1272,8 +1301,25 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token');
+          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
       } catch { /* scheduled_service_id may be absent before migration */ }
+      // Whether the visit's recorded prepayment has ALREADY been consumed by
+      // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
+      // and books a scheduled_service_prepaid payment). The sheets need this
+      // to avoid netting the same prepayment twice in the charge preview.
+      // Same detection the reuse path uses; gated to the rare prepaid+invoice
+      // overlap so the hot day-view stays cheap.
+      let checkoutInvoicePrepaidApplied = false;
+      if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+        try {
+          checkoutInvoicePrepaidApplied = !!(await db('payments')
+            .where({ customer_id: s.customer_id, status: 'paid' })
+            .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+            .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+            .first('id'));
+        } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+      }
 
       const alerts = [];
       if (prefs?.neighborhood_gate_code) alerts.push({ type: 'gate', text: `Gate: ${prefs.neighborhood_gate_code}` });
@@ -1336,6 +1382,15 @@ router.get('/', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+        checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+        checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+        checkoutInvoicePrepaidApplied,
+        // The INVOICE's own Bill-To: a payer-billed invoice survives the
+        // visit's payer being cleared/deactivated, and the Charge-now reuse
+        // path refuses it — the sheets must not present it as collectible
+        // even when the visit itself resolves self-pay.
+        checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
         completionProfile: projectCompletionContext.completionProfile || null,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -1457,6 +1512,14 @@ router.get('/week', async (req, res, next) => {
     // Column-guarded (cached) — an unguarded explicit select would 500 this
     // whole endpoint on a pre-migration database.
     const hasSelfPayCol = await require('../services/payer').scheduledServicesHasSelfPay(db);
+    // Server-resolved Bill-To, same resolution as the day view (per-job payer,
+    // else the customer default unless pinned self-pay, ACTIVE payers only).
+    // The week payload needs it for the same reason: the checkout sheet must
+    // never present a payer-billed visit's attached invoice as collectible,
+    // and a default-payer visit carries no scheduled_services.payer_id.
+    const effectiveBillToSql = hasSelfPayCol
+      ? 'COALESCE(scheduled_services.payer_id, CASE WHEN COALESCE(scheduled_services.self_pay_override, false) THEN NULL ELSE customers.payer_id END)'
+      : 'COALESCE(scheduled_services.payer_id, customers.payer_id)';
 
     for (let i = 0; i < 7; i++) {
       const d = new Date(start);
@@ -1469,7 +1532,11 @@ router.get('/week', async (req, res, next) => {
         .whereNotIn('status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'bill_to_payer.id as billed_to_payer_id',
+          'bill_to_payer.display_name as billed_to_payer_name',
+          'bill_to_payer.company_name as billed_to_payer_company',
           'scheduled_services.service_id',
           'scheduled_services.is_callback',
           'scheduled_services.service_type', 'scheduled_services.status',
@@ -1516,8 +1583,21 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'token');
+            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
+        // Mirrors the day-view enrichment: has the visit's prepayment already
+        // been consumed by this invoice? Gated to the prepaid+invoice overlap.
+        let checkoutInvoicePrepaidApplied = false;
+        if (checkoutInvoice && s.prepaid_amount != null && Number(s.prepaid_amount) > 0) {
+          try {
+            checkoutInvoicePrepaidApplied = !!(await db('payments')
+              .where({ customer_id: s.customer_id, status: 'paid' })
+              .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+              .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [checkoutInvoice.id])
+              .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [s.id])
+              .first('id'));
+          } catch { /* fail toward not-applied — preview still nets the prepaid */ }
+        }
         const autopayActive = await customerOnAutopay({
           id: s.customer_id,
           autopay_enabled: s.autopay_enabled,
@@ -1554,9 +1634,23 @@ router.get('/week', async (req, res, next) => {
         payerId: s.payer_id || null,
         poNumber: s.po_number || null,
         selfPayOverride: s.self_pay_override === true,
+          // Resolved ACTIVE Bill-To (or null = self-pay) — same shape as the
+          // day payload so the sheets' payer guards work from either view.
+          billedToPayer: s.billed_to_payer_id
+            ? {
+              id: s.billed_to_payer_id,
+              name: s.billed_to_payer_name || s.billed_to_payer_company || 'Third-party payer',
+            }
+            : null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+          checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
+          checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
+          checkoutInvoiceCreditApplied: checkoutInvoice?.credit_applied != null ? Number(checkoutInvoice.credit_applied) : 0,
+          checkoutInvoicePrepaidApplied,
+          // Same invoice-level Bill-To flag as the day payload (see there).
+          checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
           completionProfile: projectCompletionContext.completionProfile || null,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
@@ -4174,9 +4268,15 @@ async function mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams }
           'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
           ['schedule.invoice.mint', String(svc.id)],
         );
+        // Replay = the double-tap window returning the FIRST request's fresh
+        // invoice. Terminal invoices (refunded/cancelled — every payment
+        // route rejects them) are not replay candidates: returning one here
+        // would resurrect a dead invoice the caller's reuse filter just
+        // skipped, instead of minting the replacement.
         const replayed = await trx('invoices')
           .where({ scheduled_service_id: svc.id })
           .whereNot('status', 'void')
+          .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
           .orderBy('created_at', 'desc')
           .first();
         if (replayed) return { invoice: replayed, reused: true };
@@ -4646,7 +4746,15 @@ router.post('/:id/invoice', async (req, res, next) => {
         if (['paid', 'prepaid'].includes(lockedInvoice.status)) return { invoice: lockedInvoice, prepaidCredit: 0 };
 
         const invoiceTotalCents = toCents(lockedInvoice.total);
-        if (!(invoiceTotalCents > 0)) {
+        // The prepayment settles the amount DUE (total − credit_applied), not
+        // the gross: capping against the gross would consume more of the
+        // prepayment than is owed, and closing only when the GROSS hits zero
+        // left a credit-applied invoice open with $0 due (e.g. $214 total,
+        // $50 account credit, $164 prepayment — fully settled, never marked
+        // paid).
+        const creditAppliedCents = toCents(lockedInvoice.credit_applied);
+        const dueCents = Math.max(0, invoiceTotalCents - creditAppliedCents);
+        if (!(dueCents > 0)) {
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
         const existingCredit = await trx('payments')
@@ -4659,14 +4767,14 @@ router.post('/:id/invoice', async (req, res, next) => {
           return { invoice: lockedInvoice, prepaidCredit: 0 };
         }
 
-        const creditCents = Math.min(prepaidCents, invoiceTotalCents);
+        const creditCents = Math.min(prepaidCents, dueCents);
         const remainingCents = Math.max(0, invoiceTotalCents - creditCents);
         const prepaidCredit = centsToDollars(creditCents);
         const remainingTotal = centsToDollars(remainingCents);
         const stamp = etDateString();
         const noteLine = `[${stamp}] Prepaid amount applied after tax: $${prepaidCredit}`;
         const nextNotes = lockedInvoice.notes ? `${lockedInvoice.notes}\n${noteLine}` : noteLine;
-        const paidByPrepayment = remainingCents <= 0;
+        const paidByPrepayment = dueCents - creditCents <= 0;
         const [updatedInvoice] = await trx('invoices')
           .where({ id: lockedInvoice.id })
           .update({
@@ -4705,10 +4813,15 @@ router.post('/:id/invoice', async (req, res, next) => {
     };
 
     // Reuse the existing invoice for this visit if one already exists and isn't
-    // void — avoids dupes if the tech taps "Charge now" twice.
+    // void — avoids dupes if the tech taps "Charge now" twice. Refunded/
+    // cancelled invoices are terminal too: every payment route rejects them,
+    // so reusing one would hand the tech an uncollectible token and block the
+    // sheet from minting the replacement it promises. Skip them so a fresh
+    // invoice mints below instead.
     let existing = await db('invoices')
       .where({ scheduled_service_id: svc.id })
       .whereNot('status', 'void')
+      .whereNotIn('status', ['refunded', 'canceled', 'cancelled'])
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
@@ -4725,15 +4838,22 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
       const applied = await applyPrepaidCredit(existing);
       existing = applied.invoice;
-      const alreadyPaid = ['paid', 'prepaid'].includes(existing.status);
+      // Settled = nothing left to collect. A zero amount due counts too
+      // (account credit fully covers an invoice that was never marked paid)
+      // — returning total 0 with alreadyPaid false would send the parent
+      // into tender selection for a $0 charge.
+      const alreadyPaid = ['paid', 'prepaid'].includes(existing.status)
+        || invoiceAmountDue(existing) <= 0;
       return res.json({
         success: true,
         reused: true,
         invoiceId: existing.id,
         // Settled invoices have nothing left to collect — report 0 due and an
         // alreadyPaid flag so the tech checkout sheet doesn't open tender
-        // options for a covered/prepaid visit.
-        total: alreadyPaid ? 0 : Number(existing.total),
+        // options for a covered/prepaid visit. Otherwise report the amount
+        // DUE (net of credit_applied) — the gross would over-collect on
+        // cash/check tenders for a credit-applied invoice.
+        total: alreadyPaid ? 0 : invoiceAmountDue(existing),
         prepaidCredit: applied.prepaidCredit,
         token: existing.token,
         status: existing.status,
@@ -4866,14 +4986,22 @@ router.post('/:id/invoice', async (req, res, next) => {
     } else {
       logger.info(`[schedule] Pre-completion invoice ${invoice.invoice_number} minted for service ${svc.id}: $${invoice.total}`);
     }
+    // Mirrors the reuse branch: settled or zero-due (credit-covered) means
+    // nothing to collect — never hand the parent a $0 tender flow.
+    const mintAlreadyPaid = ['paid', 'prepaid'].includes(invoice.status)
+      || invoiceAmountDue(invoice) <= 0;
     res.json({
       success: true,
       reused: minted.reused,
       invoiceId: invoice.id,
-      total: Number(invoice.total),
+      // Amount DUE (net of any auto-applied account credit) — the tender
+      // sheets collect this figure, so it must match what record-payment
+      // will actually book.
+      total: mintAlreadyPaid ? 0 : invoiceAmountDue(invoice),
       prepaidCredit: applied.prepaidCredit,
       token: invoice.token,
       status: invoice.status,
+      alreadyPaid: mintAlreadyPaid,
     });
   } catch (err) { next(err); }
 });
@@ -6896,6 +7024,7 @@ router.get('/next-visit', async (req, res, next) => {
 router._test = {
   buildAssignedScheduleEtaQuery,
   buildTechStatusQuery,
+  compactCheckoutInvoiceLines,
   formatAssignedVehicleLocation,
   calculateAssignedScheduleEta,
   normalizeAssignmentScope,

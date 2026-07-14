@@ -55,6 +55,7 @@ function makeTrx({ replayedInvoice = undefined } = {}) {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
+    q.whereNotIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.first = jest.fn(async () => (table === 'invoices' ? replayedInvoice : undefined));
     return q;
