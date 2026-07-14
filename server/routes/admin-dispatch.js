@@ -2500,6 +2500,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'termite_stations_cap',
       });
     }
+    // Rodent consumption consistency (codex r2): station checks recording
+    // bait consumption must not ship beside an explicit "None" consumption
+    // select — the customer report would contradict itself. Pre-commit like
+    // the cap check (the sync is fail-soft and can't reject); incomplete
+    // visits skip the station sync entirely, so they skip this too. The
+    // rodent findings live on the primary when rodent_bait_station IS the
+    // findings type, else on its companion section.
+    if (Array.isArray(termiteStations) && termiteStations.length
+      && stationProgram === 'rodent' && !isIncompleteVisit) {
+      const rodentValues = completionProfile?.findingsType === 'rodent_bait_station'
+        ? (structuredFindings?.values || null)
+        : ((Array.isArray(companionFindings)
+          ? companionFindings.find((entry) => entry?.type === 'rodent_bait_station')
+          : null)?.values || null);
+      const conflict = TermiteStations.rodentConsumptionConflict({
+        program: stationProgram,
+        entries: termiteStations,
+        findings: rodentValues,
+      });
+      if (conflict) {
+        return res.status(400).json({ error: conflict, code: 'rodent_consumption_conflict' });
+      }
+    }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
       return res.status(409).json({
         error: 'This service must be completed through a project.',

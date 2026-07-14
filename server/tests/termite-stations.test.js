@@ -24,6 +24,7 @@ const {
   syncStationsForCompletion,
   loadStationsForPropertyMap,
   buildStationMapReportContext,
+  rodentConsumptionConflict,
 } = require('../services/termite-stations');
 
 // Minimal knex-shaped fake for the exact chains the service uses
@@ -514,6 +515,53 @@ test('the PRIMARY typed flow wins the program when both station flows appear on 
     typedTypes: ['rodent_trapping', 'rodent_bait_station'],
     serviceDate: '2026-07-13',
   }).program).toBe('rodent');
+  // non-station primary with BOTH station companions: the companion
+  // tie-break mirrors stationProgramForProfile (termite first), regardless
+  // of companion submission order — /complete synced this visit's checks
+  // under termite, so the report must render termite too.
+  expect(buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping', 'rodent_bait_station', 'termite_bait_station'],
+    serviceDate: '2026-07-13',
+  }).program).toBe('termite');
+});
+
+test('rodentConsumptionConflict flags "None" beside a consumption-marked station', () => {
+  const activityEntries = [{ id: 'st-r1', status: 'activity' }];
+  // explicit None + activity station → conflict
+  expect(rodentConsumptionConflict({
+    program: 'rodent',
+    entries: activityEntries,
+    findings: { bait_consumption: 'None' },
+  })).toMatch(/reconcile/i);
+  // a real consumption level is consistent
+  expect(rodentConsumptionConflict({
+    program: 'rodent',
+    entries: activityEntries,
+    findings: { bait_consumption: 'Moderate' },
+  })).toBeNull();
+  // unset select renders nothing contradictory → no conflict
+  expect(rodentConsumptionConflict({
+    program: 'rodent',
+    entries: activityEntries,
+    findings: {},
+  })).toBeNull();
+  // no activity-status stations → None is fine
+  expect(rodentConsumptionConflict({
+    program: 'rodent',
+    entries: [{ id: 'st-r1', status: 'ok' }],
+    findings: { bait_consumption: 'None' },
+  })).toBeNull();
+  // termite is out of scope by design ('activity' also covers live
+  // termites/tubing, not a strict contradiction of its bait select)
+  expect(rodentConsumptionConflict({
+    program: 'termite',
+    entries: activityEntries,
+    findings: { bait_consumption: 'None — bait intact' },
+  })).toBeNull();
 });
 
 test('check rows upsert on replay (same station + record) instead of duplicating', async () => {

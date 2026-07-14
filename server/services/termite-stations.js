@@ -83,6 +83,25 @@ function profileAllowsStationSync(profile) {
   return stationProgramForProfile(profile) != null;
 }
 
+// Pre-commit report-consistency guard (codex r2): a rodent visit whose
+// station entries record bait consumption (status 'activity') must not ship
+// beside an EXPLICIT bait_consumption of 'None' in the rodent typed
+// findings — the customer report would state "None" and "K with bait
+// consumption" on one page. Rodent-only by design: termite's station
+// 'activity' status also covers live termites/mud tubing, which is not a
+// strict contradiction of its bait-consumption select. An absent/unset
+// select is left alone (nothing contradictory renders). Returns an error
+// string for the route's 400, or null.
+function rodentConsumptionConflict({ program, entries = [], findings = {} } = {}) {
+  if (normalizeProgram(program) !== 'rodent') return null;
+  const hasConsumption = (Array.isArray(entries) ? entries : [])
+    .some((entry) => entry && entry.status === 'activity');
+  if (!hasConsumption) return null;
+  const consumption = String(findings?.bait_consumption ?? '').trim().toLowerCase();
+  if (consumption !== 'none') return null;
+  return 'a station is marked with bait consumption this visit, but the Bait consumption level reads "None" — reconcile them before completing';
+}
+
 // Station marks are point pins: the circle capture shape only, never rects.
 // Returns the sanitized shape to persist, or null when malformed.
 function sanitizeStationShape(shape) {
@@ -558,15 +577,15 @@ function buildStationMapReportContext({
   // rodent pins only, a termite report termite pins only — a property with
   // both programs never co-renders them on one visit's map. typedTypes
   // arrives PRIMARY-FIRST from report-data ([snapshot.type, ...companions]),
-  // and the primary's program must win when both station flows appear on
-  // one visit (codex P2: probing STATION_PROGRAMS order selected termite
-  // for a rodent-primary report with a termite companion) — mirroring
-  // stationProgramForProfile's primary-wins doctrine.
+  // and this selection must be IDENTICAL to what /complete's
+  // stationProgramForProfile resolved when the checks were written (codex
+  // r1+r2): a station PRIMARY wins outright; among COMPANIONS the tie
+  // breaks in STATION_PROGRAMS order (termite first) — otherwise the report
+  // renders one program's pins over the other program's recorded checks.
   const types = Array.isArray(typedTypes) ? typedTypes : [];
-  const stationType = types.find((t) => STATION_PROGRAMS.some((p) => PROGRAM_TYPED_FLOW[p] === t)) || null;
-  const program = stationType
-    ? STATION_PROGRAMS.find((p) => PROGRAM_TYPED_FLOW[p] === stationType)
-    : null;
+  const primaryProgram = STATION_PROGRAMS.find((p) => PROGRAM_TYPED_FLOW[p] === types[0]) || null;
+  const companionProgram = STATION_PROGRAMS.find((p) => types.slice(1).includes(PROGRAM_TYPED_FLOW[p])) || null;
+  const program = primaryProgram || companionProgram;
   if (!program) return { available: false, reason: 'not_station_visit' };
   const programRows = (Array.isArray(stationRows) ? stationRows : [])
     .filter((row) => normalizeProgram(row.program) === program);
@@ -646,6 +665,7 @@ module.exports = {
   validateStationEntriesBody,
   profileAllowsStationSync,
   stationProgramForProfile,
+  rodentConsumptionConflict,
   stationCapWouldOverflow,
   upsertStationsForCustomer,
   syncStationsForCompletion,

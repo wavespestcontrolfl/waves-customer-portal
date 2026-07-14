@@ -7747,14 +7747,17 @@ export function CompletionPanel({
       ? service.companionSchemas.map((s) => s?.type)
       : []),
   ];
-  // stationTypeSet is PRIMARY-FIRST (findingsType, then companions) and the
-  // primary's program must win when both station flows appear on one visit —
-  // the server resolver (stationProgramForProfile) is primary-authoritative,
-  // so probing termite first here made the panel load/submit termite ids
-  // that /complete's rodent-program sync then skipped (codex P2).
+  // This selection must be IDENTICAL to the server's
+  // stationProgramForProfile, which /complete syncs against (codex r1+r2):
+  // a station PRIMARY (findingsType, first entry) wins outright; among
+  // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
+  // load/submit one program's station ids while the sync targets the other,
+  // silently skipping the visit's checks.
   const stationTypeProgram = { termite_bait_station: "termite", rodent_bait_station: "rodent" };
-  const primaryStationType = stationTypeSet.find((t) => stationTypeProgram[t]);
-  const stationProgram = primaryStationType ? stationTypeProgram[primaryStationType] : null;
+  const companionStationTypes = stationTypeSet.slice(1);
+  const stationProgram = stationTypeProgram[stationTypeSet[0]]
+    || (companionStationTypes.includes("termite_bait_station") ? "termite"
+      : companionStationTypes.includes("rodent_bait_station") ? "rodent" : null);
   const stationFeatureOn = stationMapFlag && Boolean(stationProgram);
   const [stationPreloads, setStationPreloads] = useState([]); // property's existing stations
   const [stationNew, setStationNew] = useState([]); // pins dropped this session [{ key, number, shape }]
