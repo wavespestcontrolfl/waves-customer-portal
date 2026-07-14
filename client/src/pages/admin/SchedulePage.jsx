@@ -7050,13 +7050,17 @@ export function ZoneMarkingStep({
 }
 
 // ── Bait station marking (station-map-v1) ────────────────────────────────────
-// Termite bait stations as individually-numbered pins on the same satellite
-// image the zone step draws on. Unlike zones (areas, all-or-nothing gate),
-// stations are independent point pins that each carry a per-visit status —
-// the tech's zero-tap path is "everything OK": every station defaults to
-// 'ok' and only exceptions (activity / serviced / no access) get a tap.
-// Pins persist as normalized circles so the shared zone-drift re-anchoring
-// applies to them unchanged.
+// Bait stations (termite in-ground or rodent exterior, per `program`) as
+// individually-numbered pins on the same satellite image the zone step
+// draws on. Unlike zones (areas, all-or-nothing gate), stations are
+// independent point pins that each carry a per-visit status — the tech's
+// zero-tap path is "everything OK": every station defaults to 'ok' and only
+// exceptions get a tap. Pins persist as normalized circles so the shared
+// zone-drift re-anchoring applies to them unchanged. Status VALUES are
+// shared across programs (one DB CHECK); only the labels differ —
+// 'activity' reads "Activity" for termite, "Consumption" for rodent
+// (owner rodent-wording rules: exterior bait consumption, never
+// interior-infestation language).
 const STATION_PIN_R = 0.035; // normalized against the SHORT side (~12px @340)
 const STATION_TAP_RADIUS_PX = 22;
 const STATION_STATUS_UI = {
@@ -7065,6 +7069,24 @@ const STATION_STATUS_UI = {
   serviced: { color: "#f59e0b", label: "Serviced" },
   inaccessible: { color: "#94a3b8", label: "No access" },
 };
+const STATION_PROGRAM_UI = {
+  termite: {
+    title: "Bait station map",
+    hint: "Every station starts as OK — tap a pin to flag activity, service, or no access.",
+    activityLabel: "Activity",
+    activityCounter: "with activity",
+  },
+  rodent: {
+    title: "Rodent bait station map",
+    hint: "Every station starts as OK — tap a pin to flag consumption, service, or no access.",
+    activityLabel: "Consumption",
+    activityCounter: "with consumption",
+  },
+};
+function stationStatusLabel(status, program) {
+  if (status === "activity") return STATION_PROGRAM_UI[program]?.activityLabel || "Activity";
+  return STATION_STATUS_UI[status]?.label || status;
+}
 
 export function StationMarkingStep({
   map,
@@ -7080,6 +7102,7 @@ export function StationMarkingStep({
   // server cap (property-map stationCap) — add-mode stops here so the
   // counts can never claim a pin the registry will refuse
   maxStations = 80,
+  program = "termite", // 'termite' | 'rodent' — labels only, mechanics shared
   disabled = false,
   dark = false,
 }) {
@@ -7198,12 +7221,14 @@ export function StationMarkingStep({
     );
   };
 
+  const programUi = STATION_PROGRAM_UI[program] || STATION_PROGRAM_UI.termite;
+
   return (
     <div style={{ marginTop: 12, border: `1px solid ${hairline}`, borderRadius: 12, background: cardBg, padding: 12 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>Bait station map</div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: ink }}>{programUi.title}</div>
         <div style={{ fontSize: 11, color: showStatuses && activityCount ? "#ef4444" : mutedInk, fontWeight: 500 }}>
-          {pinned.length} pinned{showStatuses && activityCount ? ` · ${activityCount} with activity` : ""}
+          {pinned.length} pinned{showStatuses && activityCount ? ` · ${activityCount} ${programUi.activityCounter}` : ""}
         </div>
       </div>
       <div style={{ fontSize: 11, color: mutedInk, margin: "2px 0 8px" }}>
@@ -7212,7 +7237,7 @@ export function StationMarkingStep({
           : armedMoveKey
             ? `Tap the photo to place station ${stations.find((s) => s.key === armedMoveKey)?.number ?? ""}.`
             : showStatuses
-              ? "Every station starts as OK — tap a pin to flag activity, service, or no access."
+              ? programUi.hint
               : "Tap a pin to move or retire it, or add the property's stations from the satellite view."}
       </div>
       {stale.length > 0 && !addMode && !armedMoveKey && (
@@ -7277,7 +7302,7 @@ export function StationMarkingStep({
                 onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
                 style={chipStyle(statusOf(selected.key) === status, meta.color)}
               >
-                {meta.label}
+                {stationStatusLabel(status, program)}
               </button>
             ))}
             {selected.shape && (
@@ -7306,7 +7331,7 @@ export function StationMarkingStep({
           {Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
             <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
               <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
-              {meta.label}
+              {stationStatusLabel(status, program)}
             </span>
           ))}
         </div>
@@ -7709,15 +7734,31 @@ export function CompletionPanel({
   const [customerInteraction, setCustomerInteraction] = useState("");
   const [customerConcern, setCustomerConcern] = useState("");
 
-  // Bait station map (station-map-v1). Only termite-bait-typed completions
-  // (primary or companion) surface the station step — the flag alone must
-  // not put termite pins on lawn/pest completions. Eligibility reads the
-  // service prop directly so the property-map effect below can depend on it.
+  // Bait station map (station-map-v1). Only station-typed completions
+  // (termite or rodent, primary or companion) surface the station step — the
+  // flag alone must not put pins on lawn/pest completions, and the visit's
+  // typed flow picks the PROGRAM whose registry slice loads. Eligibility
+  // reads the service prop directly so the property-map effect below can
+  // depend on it.
   const { enabled: stationMapFlag } = useFeatureFlagReady("station-map-v1");
-  const stationEligible = service.completionProfile?.findingsType === "termite_bait_station"
-    || (Array.isArray(service.companionSchemas)
-      && service.companionSchemas.some((s) => s?.type === "termite_bait_station"));
-  const stationFeatureOn = stationMapFlag && stationEligible;
+  const stationTypeSet = [
+    service.completionProfile?.findingsType,
+    ...(Array.isArray(service.companionSchemas)
+      ? service.companionSchemas.map((s) => s?.type)
+      : []),
+  ];
+  // This selection must be IDENTICAL to the server's
+  // stationProgramForProfile, which /complete syncs against (codex r1+r2):
+  // a station PRIMARY (findingsType, first entry) wins outright; among
+  // COMPANIONS the tie breaks termite-first. Any divergence makes the panel
+  // load/submit one program's station ids while the sync targets the other,
+  // silently skipping the visit's checks.
+  const stationTypeProgram = { termite_bait_station: "termite", rodent_bait_station: "rodent" };
+  const companionStationTypes = stationTypeSet.slice(1);
+  const stationProgram = stationTypeProgram[stationTypeSet[0]]
+    || (companionStationTypes.includes("termite_bait_station") ? "termite"
+      : companionStationTypes.includes("rodent_bait_station") ? "rodent" : null);
+  const stationFeatureOn = stationMapFlag && Boolean(stationProgram);
   const [stationPreloads, setStationPreloads] = useState([]); // property's existing stations
   const [stationNew, setStationNew] = useState([]); // pins dropped this session [{ key, number, shape }]
   const [stationMoves, setStationMoves] = useState({}); // id → shape re-positioned this session
@@ -7739,16 +7780,22 @@ export function CompletionPanel({
         if (cancelled) return;
         setPropertyMap(res || null);
         if (!res?.available) return;
-        setStationPreloads((Array.isArray(res.stations) ? res.stations : []).map((station) => ({
-          id: String(station.id),
-          number: station.number,
-          label: station.label || null,
-          shape: station.geometryImage && station.geometryImage.type === "circle"
-            ? station.geometryImage
-            : null,
-          stale: Boolean(station.staleMark),
-        })));
-        setStationNumberBase(Number(res.nextStationNumber) || 1);
+        setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
+          .filter((station) => (station.program || "termite") === stationProgram)
+          .map((station) => ({
+            id: String(station.id),
+            number: station.number,
+            label: station.label || null,
+            shape: station.geometryImage && station.geometryImage.type === "circle"
+              ? station.geometryImage
+              : null,
+            stale: Boolean(station.staleMark),
+          })));
+        setStationNumberBase(
+          Number(res.nextStationNumberByProgram?.[stationProgram])
+          || Number(res.nextStationNumber)
+          || 1,
+        );
         const preload = {};
         const norm01 = (v) => Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= 1;
         (res.zones || []).forEach((zone) => {
@@ -7892,7 +7939,13 @@ export function CompletionPanel({
       total_stations: String(activeKeys.length),
       stations_checked: String(activeKeys.length - inaccessible),
       stations_inaccessible: String(inaccessible),
-      stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length),
+      // Only the termite schema carries a per-station activity COUNT; the
+      // rodent flow records consumption as a select (tech judgment) — never
+      // auto-write a key the schema doesn't own, or submit validation
+      // rejects the unknown field.
+      ...(stationProgram === "termite"
+        ? { stations_with_activity: String(activeKeys.filter((key) => statusOf(key) === "activity").length) }
+        : {}),
     };
     // Snapshot the last auto-written values BEFORE scheduling the state
     // updates: the updater callbacks run after this effect finishes, so
@@ -7912,18 +7965,19 @@ export function CompletionPanel({
       }
       return changed ? next : values;
     };
-    if (service.completionProfile?.findingsType === "termite_bait_station") {
+    const stationTypedFlow = stationProgram === "rodent" ? "rodent_bait_station" : "termite_bait_station";
+    if (service.completionProfile?.findingsType === stationTypedFlow) {
       setFindingsValues((prev) => applyCounts(prev));
     } else {
       setCompanionState((prev) => {
-        const entry = prev.termite_bait_station || EMPTY_COMPANION_ENTRY;
+        const entry = prev[stationTypedFlow] || EMPTY_COMPANION_ENTRY;
         const nextValues = applyCounts(entry.values);
         if (nextValues === entry.values) return prev;
-        return { ...prev, termite_bait_station: { ...entry, values: nextValues } };
+        return { ...prev, [stationTypedFlow]: { ...entry, values: nextValues } };
       });
     }
     stationAutoCountsRef.current = counts;
-  }, [stationFeatureOn, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
+  }, [stationFeatureOn, stationProgram, stationPreloads, stationNew, stationMoves, stationStatuses, stationRetired]);
   // Tech-side Pest Pressure rating (0-5). Companion to the customer-side
   // capture on the public service report — both flows write to
   // service_records.client_pest_rating with their respective source.
@@ -11915,6 +11969,7 @@ export function CompletionPanel({
                 onMoveStation={moveStationPin}
                 onSetStatus={setStationStatus}
                 onRemoveStation={removeStationPin}
+                program={stationProgram || "termite"}
                 maxStations={Number(propertyMap?.stationCap) || 80}
                 disabled={generating || success}
               />
@@ -13928,6 +13983,7 @@ export function CompletionPanel({
               onMoveStation={moveStationPin}
               onSetStatus={setStationStatus}
               onRemoveStation={removeStationPin}
+              program={stationProgram || "termite"}
               maxStations={Number(propertyMap?.stationCap) || 80}
               dark
               disabled={generating || success}

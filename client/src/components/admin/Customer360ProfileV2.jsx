@@ -2683,11 +2683,14 @@ function TermiteStationsPanel({ customerId }) {
   const [open, setOpen] = useState(false);
   const [map, setMap] = useState(null); // property-map payload
   const [loading, setLoading] = useState(false);
-  const [preloads, setPreloads] = useState([]); // property's existing stations
+  // program picks which registry slice (termite in-ground vs rodent
+  // exterior) the panel edits — pins, numbering, and saves are all scoped
+  const [program, setProgram] = useState("termite");
+  const [allStations, setAllStations] = useState([]); // both programs, tagged
   const [newPins, setNewPins] = useState([]); // [{ key, number, shape }]
   const [moves, setMoves] = useState({}); // id → shape
   const [retired, setRetired] = useState([]); // ids retired this session
-  const [numberBase, setNumberBase] = useState(1);
+  const [numberBases, setNumberBases] = useState({ termite: 1, rodent: 1 });
   const newSeqRef = useRef(0);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -2701,11 +2704,12 @@ function TermiteStationsPanel({ customerId }) {
     customerRef.current = customerId;
     setOpen(false);
     setMap(null);
-    setPreloads([]);
+    setProgram("termite");
+    setAllStations([]);
     setNewPins([]);
     setMoves({});
     setRetired([]);
-    setNumberBase(1);
+    setNumberBases({ termite: 1, rodent: 1 });
     setErr("");
     setMsg("");
     setSaving(false);
@@ -2720,16 +2724,20 @@ function TermiteStationsPanel({ customerId }) {
       .then((res) => {
         if (cancelled) return;
         setMap(res || { available: false, reason: "empty_response" });
-        setPreloads((Array.isArray(res?.stations) ? res.stations : []).map((station) => ({
+        setAllStations((Array.isArray(res?.stations) ? res.stations : []).map((station) => ({
           id: String(station.id),
           number: station.number,
+          program: station.program || "termite",
           label: station.label || null,
           shape: station.geometryImage && station.geometryImage.type === "circle"
             ? station.geometryImage
             : null,
           stale: Boolean(station.staleMark),
         })));
-        setNumberBase(Number(res?.nextStationNumber) || 1);
+        setNumberBases({
+          termite: Number(res?.nextStationNumberByProgram?.termite) || Number(res?.nextStationNumber) || 1,
+          rodent: Number(res?.nextStationNumberByProgram?.rodent) || 1,
+        });
       })
       .catch((e) => {
         if (cancelled) return;
@@ -2744,6 +2752,7 @@ function TermiteStationsPanel({ customerId }) {
     };
   }, [open, customerId, loadNonce]);
 
+  const preloads = allStations.filter((station) => station.program === program);
   const display = [
     ...preloads
       .filter((station) => !retired.includes(station.id))
@@ -2765,13 +2774,22 @@ function TermiteStationsPanel({ customerId }) {
     })),
   ];
   const dirtyCount = newPins.length + Object.keys(moves).length + retired.length;
+  // Unsaved edits belong to the CURRENT program's registry slice — switching
+  // mid-edit would save termite pins into the rodent slice (or vice versa),
+  // so the toggle locks until the operator saves or the panel reloads.
+  const switchProgram = (next) => {
+    if (saving || next === program || dirtyCount > 0) return;
+    setProgram(next);
+    setMsg("");
+    setErr("");
+  };
 
   const addPin = (pt) => {
     if (saving) return;
     newSeqRef.current += 1;
     setNewPins((prev) => {
       const base = Math.max(
-        Number(numberBase) || 1,
+        Number(numberBases[program]) || 1,
         ...prev.map((station) => (Number(station.number) || 0) + 1),
       );
       return [
@@ -2838,7 +2856,7 @@ function TermiteStationsPanel({ customerId }) {
         `/admin/dispatch/customers/${customerId}/termite-stations`,
         {
           method: "PUT",
-          body: JSON.stringify({ stations: entries }),
+          body: JSON.stringify({ stations: entries, program }),
         },
       );
       if (customerRef.current !== customerId) return;
@@ -2864,7 +2882,7 @@ function TermiteStationsPanel({ customerId }) {
   return (
     <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
       <div className="flex items-center justify-between gap-2">
-        <SectionTitle className="mb-0">Termite Bait Stations</SectionTitle>
+        <SectionTitle className="mb-0">Bait Stations</SectionTitle>
         <Button
           size="sm"
           variant="secondary"
@@ -2902,6 +2920,27 @@ function TermiteStationsPanel({ customerId }) {
           )}
           {!loading && map?.available && (
             <div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-12 text-ink-secondary">Program</span>
+                {["termite", "rodent"].map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    disabled={saving || (dirtyCount > 0 && opt !== program)}
+                    title={dirtyCount > 0 && opt !== program ? "Save or discard this program's edits first" : undefined}
+                    onClick={() => switchProgram(opt)}
+                    className={cn(
+                      "text-12 px-2 py-0.5 rounded-sm border-hairline u-focus-ring",
+                      opt === program
+                        ? "border-zinc-900 bg-zinc-900 text-white"
+                        : "border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100",
+                      dirtyCount > 0 && opt !== program ? "opacity-50" : "",
+                    )}
+                  >
+                    {opt === "termite" ? "Termite" : "Rodent"}
+                  </button>
+                ))}
+              </div>
               <StationMarkingStep
                 map={map}
                 stations={display}
@@ -2912,6 +2951,7 @@ function TermiteStationsPanel({ customerId }) {
                 onRemoveStation={removePin}
                 showStatuses={false}
                 maxStations={Number(map?.stationCap) || 80}
+                program={program}
                 disabled={saving}
               />
               <div className="flex items-center gap-3 mt-2">
