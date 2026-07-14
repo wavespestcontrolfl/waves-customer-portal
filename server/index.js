@@ -232,7 +232,7 @@ const limiter = rateLimit({
 // GATE_PAYER_STATEMENTS is off). Runs before the limiter; the route's own
 // gate + per-route limiter still apply when the feature is enabled.
 app.use('/api/pay/statement', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('payerStatements')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -242,7 +242,7 @@ app.use('/api/pay/statement', (req, res, next) => {
 // contract: while the gate is off the surface must read 404 even for an IP
 // that already exhausted the global /api/ limiter (a 429 would reveal it).
 app.use('/api/public/lawn-assessment', (req, res, next) => {
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('lawnAssessmentMagnet')) {
     return res.status(404).json({ error: 'Not found' });
   }
@@ -254,7 +254,7 @@ app.use('/api/public/pest-identifier', (req, res, next) => {
   // invalid token 404s exactly like the dark surface (see the matching
   // carve-out in routes/public-pest-identifier.js).
   if (req.method === 'GET' && /^\/[a-f0-9]{32}\/?$/.test(req.path)) return next();
-  // eslint-disable-next-line global-require
+   
   if (!require('./config/feature-gates').isEnabled('pestIdentifier')) {
     return res.status(404).json({ error: 'Not found' });
   }
