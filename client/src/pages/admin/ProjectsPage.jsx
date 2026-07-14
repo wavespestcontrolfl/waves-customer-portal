@@ -1938,20 +1938,36 @@ export function ProjectDetail({
       setError("Admin access required to close projects.");
       return;
     }
-    if (billingBlocksClose) {
+    // Re-check the closeout preview at decision time (Codex r6 P3 on
+    // #2717): the mounted preview goes stale when the linked visit is
+    // cancelled/no-showed out-of-band (e.g. the schedule's overlaid
+    // appointment sheet while this editor stays mounted), so the gates
+    // below would promise "complete linked service" and then 409. Only
+    // the preview is refreshed — data/edit state stay untouched so
+    // unsaved edits survive; falls back to the mounted preview if the
+    // fetch fails.
+    let preview = closeoutPreview;
+    try {
+      const pr = await adminFetch(`/admin/projects/${projectId}`);
+      const pd = await readJsonResponse(pr, "Could not refresh closeout preview");
+      if (pd?.closeoutPreview) preview = pd.closeoutPreview;
+    } catch {
+      /* keep the mounted preview */
+    }
+    if (preview?.billing?.required && !preview?.billing?.resolved) {
       setError(
-        `${closeoutBillingLabel(closeoutPreview.billing)}. Create or collect the invoice before closing this project.`,
+        `${closeoutBillingLabel(preview.billing)}. Create or collect the invoice before closing this project.`,
       );
       return;
     }
-    if (followupBlocksClose) {
+    if (preview?.followup?.unsupported) {
       setError(
         "Auto-schedule follow-up is not available yet. Change the follow-up policy to alert or schedule the follow-up manually before closing.",
       );
       return;
     }
-    if (previewBlocksClose) {
-      const status = closeoutPreview?.serviceCompletion?.status;
+    if (preview?.canClose === false) {
+      const status = preview?.serviceCompletion?.status;
       setError(
         status
           ? `This project cannot close while the linked service is ${status}.`
@@ -1960,13 +1976,13 @@ export function ProjectDetail({
       return;
     }
     const closeoutLines = [
-      closeoutPreview?.serviceCompletion?.willCompleteService
-        ? `Service: complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
+      preview?.serviceCompletion?.willCompleteService
+        ? `Service: complete ${preview.serviceCompletion.serviceType || "linked service"}`
         : null,
-      closeoutPreview?.billing ? `Billing: ${closeoutBillingLabel(closeoutPreview.billing)}` : null,
-      closeoutPreview?.followup ? `Follow-up: ${closeoutFollowupLabel(closeoutPreview.followup)}` : null,
-      closeoutPreview?.portal
-        ? `Portal: ${closeoutPreview.portal.attached ? "attached" : "token-only"}`
+      preview?.billing ? `Billing: ${closeoutBillingLabel(preview.billing)}` : null,
+      preview?.followup ? `Follow-up: ${closeoutFollowupLabel(preview.followup)}` : null,
+      preview?.portal
+        ? `Portal: ${preview.portal.attached ? "attached" : "token-only"}`
         : null,
     ].filter(Boolean);
     const confirmText = [

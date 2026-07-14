@@ -1213,6 +1213,17 @@ export default function DispatchPageV2({
       ) {
         return;
       }
+      // Keep the created-project seed through the same window (Codex r6
+      // P2): onCreated stamps linkedProject onto the snapshot before
+      // fetchSchedule resolves — a stale day row without it would strip
+      // the link and reopen the duplicate-create path from Details →
+      // Complete project.
+      if (
+        continueProjectService.linkedProject?.id
+        && !fresh.linkedProject?.id
+      ) {
+        return;
+      }
       setContinueProjectService(fresh);
     }
   }, [data, continueProjectService]);
