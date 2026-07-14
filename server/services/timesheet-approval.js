@@ -264,13 +264,36 @@ async function signWeek({ technicianId, weekStart, signature, reviewToken, now =
     if (weekly.status === 'approved') {
       throw approvalHttpError(409, 'Week already approved by admin — cannot sign after lock');
     }
-    if (reviewSnapshotToken({ weekly, dailies, entries }) !== reviewToken) {
+    const currentReviewToken = reviewSnapshotToken({ weekly, dailies, entries });
+    if (weekly.tech_signed_at) {
+      // A successful sign changes the signed fields included in the review
+      // token. Accept the exact pre-sign snapshot so a lost response can be
+      // retried, while still rejecting changed totals, entries, or day state.
+      const preSignReviewToken = reviewSnapshotToken({
+        weekly: { ...weekly, tech_signed_at: null, tech_signature: null },
+        dailies,
+        entries,
+      });
+      if (![currentReviewToken, preSignReviewToken].includes(reviewToken)) {
+        throw approvalHttpError(
+          409,
+          'Timecard changed after review; reload the latest totals before signing.',
+        );
+      }
+      if (String(weekly.tech_signature || '') !== normalizedSignature) {
+        throw approvalHttpError(
+          409,
+          'Week was already signed with a different signature; reload the timecard.',
+        );
+      }
+      return { weekly, alreadySigned: true };
+    }
+    if (currentReviewToken !== reviewToken) {
       throw approvalHttpError(
         409,
         'Timecard changed after review; reload the latest totals before signing.',
       );
     }
-    if (weekly.tech_signed_at) return { weekly, alreadySigned: true };
 
     const signedAt = new Date();
     const [signed] = await trx('time_weekly_summary')
@@ -286,7 +309,15 @@ async function signWeek({ technicianId, weekStart, signature, reviewToken, now =
     if (signed) return { weekly: signed, alreadySigned: false };
 
     const fresh = await trx('time_weekly_summary').where({ id: weekly.id }).first();
-    if (fresh?.tech_signed_at) return { weekly: fresh, alreadySigned: true };
+    if (fresh?.tech_signed_at && String(fresh.tech_signature || '') === normalizedSignature) {
+      return { weekly: fresh, alreadySigned: true };
+    }
+    if (fresh?.tech_signed_at) {
+      throw approvalHttpError(
+        409,
+        'Week was already signed with a different signature; reload the timecard.',
+      );
+    }
     throw approvalHttpError(
       409,
       'Week was approved before sign-off completed — refresh and try again',
@@ -545,14 +576,6 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
       .where('work_date', '<=', end)
       .orderBy('work_date')
       .forUpdate();
-    const currentReviewToken = reviewSnapshotToken({ weekly, dailies, entries });
-    if (currentReviewToken !== reviewToken) {
-      throw approvalHttpError(
-        409,
-        'Timesheet changed after review; reload and review the latest totals before approval.',
-      );
-    }
-
     if (weekly.status === 'approved') {
       const entriesConsistent = entries.every(
         entry => normalizedEntryApprovalStatus(entry) === 'approved',
@@ -564,7 +587,17 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
           'Approved week is inconsistent; unlock it before reconciling approval state.',
         );
       }
+      // The review token is a precondition for mutating a pending snapshot.
+      // Once every locked component is already approved, this is a safe no-op
+      // even when the caller still has the pre-commit token after a lost reply.
       return;
+    }
+    const currentReviewToken = reviewSnapshotToken({ weekly, dailies, entries });
+    if (currentReviewToken !== reviewToken) {
+      throw approvalHttpError(
+        409,
+        'Timesheet changed after review; reload and review the latest totals before approval.',
+      );
     }
     if (weekly.status !== 'pending') {
       throw approvalHttpError(409, `Week is ${weekly.status || 'not pending'} and cannot be approved.`);

@@ -123,9 +123,10 @@ router.post('/:id/undo-stop', async (req, res, next) => {
     try {
       reopened = await db.transaction(async (trx) => {
         // Claim the notification row first and keep that claim in the same
-        // transaction as the timer reopen. A concurrent read/dismiss either
-        // wins before this lock (and makes undo ineligible) or waits until the
-        // handled state commits; it cannot race between eligibility and reopen.
+        // transaction as the timer reopen. Read receipts are advisory and may
+        // race with an Undo tap; only an explicit dismissal (or a prior undo)
+        // is terminal. A concurrent dismissal either wins before this lock or
+        // waits until the handled state commits.
         const row = await trx('tech_notifications')
           .where({ id: req.params.id, technician_id: req.technicianId })
           .forUpdate()
@@ -133,7 +134,7 @@ router.post('/:id/undo-stop', async (req, res, next) => {
         if (!row || row.type !== 'geofence_timer_stopped') {
           throw notificationHttpError(404, 'Stop notification not found');
         }
-        if (row.read || row.dismissed_at) {
+        if (row.dismissed_at) {
           throw notificationHttpError(409, 'Stop notification was already handled');
         }
         const createdAt = new Date(row.created_at).getTime();
@@ -153,7 +154,7 @@ router.post('/:id/undo-stop', async (req, res, next) => {
           stoppedEntryId,
         );
         const claimed = await trx('tech_notifications')
-          .where({ id: row.id, technician_id: req.technicianId, read: false })
+          .where({ id: row.id, technician_id: req.technicianId })
           .whereNull('dismissed_at')
           .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
         if (claimed !== 1) {

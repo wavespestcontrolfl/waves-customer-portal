@@ -297,6 +297,123 @@ describe('weekly timesheet approval safety', () => {
     expect(specs[3].updatePayload.tech_signature).toBe('Tech One');
   });
 
+  test('treats the pre-sign review token as an idempotent retry after signing commits', async () => {
+    const events = [];
+    const entries = [{
+      id: 'shift-1',
+      entry_type: 'shift',
+      status: 'completed',
+      approval_status: 'pending',
+      clock_in: WEEK_CLOCK_IN,
+      clock_out: new Date('2020-01-06T22:00:00.000Z'),
+      duration_minutes: 480,
+    }];
+    const dailies = [{
+      id: 'daily-1',
+      work_date: '2020-01-06',
+      total_shift_minutes: 480,
+      job_count: 0,
+      status: 'pending',
+    }];
+    const unsignedWeekly = {
+      id: 'weekly-1',
+      status: 'pending',
+      week_start: '2020-01-06',
+      total_shift_minutes: 480,
+      tech_signed_at: null,
+      tech_signature: null,
+    };
+    const signedWeekly = {
+      ...unsignedWeekly,
+      tech_signed_at: new Date('2026-07-13T14:00:00.000Z'),
+      tech_signature: 'Tech One',
+    };
+    const { transactionQueue } = installDatabase([
+      { table: 'time_entries', label: 'entries', thenValue: entries },
+      { table: 'time_entry_daily_summary', label: 'dailiesBefore', thenValue: dailies },
+      { table: 'time_entry_daily_summary', label: 'dailiesAfter', thenValue: dailies },
+    ], [], events);
+    timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
+    timeTracking.computeDailySummaryInTransaction.mockResolvedValue();
+    timeTracking.computeWeeklySummaryInTransaction.mockResolvedValue(signedWeekly);
+    const preSignReviewToken = approval._test.reviewSnapshotToken({
+      weekly: unsignedWeekly,
+      dailies,
+      entries,
+    });
+
+    await expect(approval.signWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      signature: 'Tech One',
+      reviewToken: preSignReviewToken,
+    })).resolves.toEqual({ weekly: signedWeekly, alreadySigned: true });
+
+    expect(transactionQueue).toHaveLength(0);
+    expect(events).not.toContain('signUpdate.update');
+    expect(events).toContain('transaction.commit');
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a different signature', 'Tech Two', 'pre-sign'],
+    ['an unrelated stale token', 'Tech One', 'stale'],
+  ])('rejects an already-signed retry with %s', async (_label, signature, tokenKind) => {
+    const events = [];
+    const entries = [{
+      id: 'shift-1',
+      entry_type: 'shift',
+      status: 'completed',
+      approval_status: 'pending',
+      clock_in: WEEK_CLOCK_IN,
+      clock_out: new Date('2020-01-06T22:00:00.000Z'),
+      duration_minutes: 480,
+    }];
+    const dailies = [{
+      id: 'daily-1',
+      work_date: '2020-01-06',
+      total_shift_minutes: 480,
+      status: 'pending',
+    }];
+    const unsignedWeekly = {
+      id: 'weekly-1',
+      status: 'pending',
+      week_start: '2020-01-06',
+      total_shift_minutes: 480,
+      tech_signed_at: null,
+      tech_signature: null,
+    };
+    const signedWeekly = {
+      ...unsignedWeekly,
+      tech_signed_at: new Date('2026-07-13T14:00:00.000Z'),
+      tech_signature: 'Tech One',
+    };
+    installDatabase([
+      { table: 'time_entries', label: 'entries', thenValue: entries },
+      { table: 'time_entry_daily_summary', label: 'dailiesBefore', thenValue: dailies },
+      { table: 'time_entry_daily_summary', label: 'dailiesAfter', thenValue: dailies },
+    ], [], events);
+    timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
+    timeTracking.computeDailySummaryInTransaction.mockResolvedValue();
+    timeTracking.computeWeeklySummaryInTransaction.mockResolvedValue(signedWeekly);
+    const reviewToken = tokenKind === 'stale'
+      ? 'stale-token'
+      : approval._test.reviewSnapshotToken({ weekly: unsignedWeekly, dailies, entries });
+
+    await expect(approval.signWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      signature,
+      reviewToken,
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringMatching(tokenKind === 'stale' ? /changed/ : /different signature/),
+    });
+
+    expect(events).not.toContain('signUpdate.update');
+    expect(events).toContain('transaction.rollback');
+  });
+
   test('refuses sign-off while a day is disputed', async () => {
     const events = [];
     const entries = [{
@@ -661,6 +778,81 @@ describe('weekly timesheet approval safety', () => {
     expect(transactionQueue).toHaveLength(0);
     expect(events).not.toContain('entryApproval.update');
     expect(events).toContain('transaction.commit');
+  });
+
+  test('preserves an approval retry carrying the pre-commit review token', async () => {
+    const events = [];
+    const pendingEntries = [{
+      id: 'shift-1',
+      entry_type: 'shift',
+      status: 'completed',
+      approval_status: 'pending',
+      clock_in: WEEK_CLOCK_IN,
+    }];
+    const approvedEntries = pendingEntries.map(entry => ({
+      ...entry,
+      approval_status: 'approved',
+    }));
+    const pendingDailies = [{
+      id: 'daily-1',
+      status: 'pending',
+      work_date: '2020-01-06',
+    }];
+    const approvedDailies = pendingDailies.map(daily => ({ ...daily, status: 'approved' }));
+    const pendingWeekly = {
+      id: 'weekly-1',
+      status: 'pending',
+      week_start: '2020-01-06',
+      approved_by: null,
+      approved_at: null,
+      // Unlock intentionally preserves the prior approval note. A retry must
+      // still be idempotent after this pending snapshot is approved again.
+      approval_notes: 'prior approval',
+    };
+    const approvedWeekly = {
+      ...pendingWeekly,
+      status: 'approved',
+      approved_by: 'admin-1',
+      approved_at: new Date('2026-07-13T14:00:00.000Z'),
+      approval_notes: 'reviewed',
+    };
+    const { transactionQueue } = installDatabase([
+      { table: 'time_entries', label: 'entries', thenValue: approvedEntries },
+      {
+        table: 'time_entry_daily_summary',
+        label: 'dailiesBefore',
+        thenValue: approvedDailies,
+      },
+      { table: 'time_entry_daily_summary', label: 'dailies', thenValue: approvedDailies },
+      {
+        table: 'time_entry_daily_summary',
+        label: 'dailiesAfterWeekly',
+        thenValue: approvedDailies,
+      },
+    ], detailSpecs(approvedWeekly, approvedDailies, approvedEntries), events);
+    timeTracking.lockStaffWeek.mockResolvedValue('2020-01-06');
+    timeTracking.computeDailySummaryInTransaction.mockResolvedValue();
+    timeTracking.computeWeeklySummaryInTransaction.mockResolvedValue(approvedWeekly);
+    const preApprovalReviewToken = approval._test.reviewSnapshotToken({
+      weekly: pendingWeekly,
+      dailies: pendingDailies,
+      entries: pendingEntries,
+    });
+
+    const detail = await approval.approveWeek({
+      technicianId: 'tech-1',
+      weekStart: '2020-01-06',
+      adminId: 'admin-1',
+      notes: 'reviewed',
+      reviewToken: preApprovalReviewToken,
+    });
+
+    expect(transactionQueue).toHaveLength(0);
+    expect(events).not.toContain('entryApproval.update');
+    expect(events).not.toContain('dailyApproval.update');
+    expect(events).not.toContain('weeklyApproval.update');
+    expect(events).toContain('transaction.commit');
+    expect(detail.weekly).toMatchObject(approvedWeekly);
   });
 
   test('requires a fresh review token after totals change', async () => {
