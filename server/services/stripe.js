@@ -1938,12 +1938,27 @@ const StripeService = {
         // delayed drain makes the deferred job self-serve even on a quiet
         // instance (any later payment event also drains due jobs).
         const RECEIPT_DEFER_MS = 3 * 60_000;
-        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+        const deferredUntil = new Date(Date.now() + RECEIPT_DEFER_MS);
+        const enqueueResult = await ReceiptDeliveryQueue.enqueueReceiptDelivery({
           invoiceId,
           stripePaymentIntentId: paymentIntent.id,
           source: 'card_on_file',
-          ...(deferReceiptDelivery ? { nextAttemptAt: new Date(Date.now() + RECEIPT_DEFER_MS) } : {}),
+          ...(deferReceiptDelivery ? { nextAttemptAt: deferredUntil } : {}),
         });
+        if (deferReceiptDelivery && !enqueueResult.enqueued) {
+          // The payment_intent.succeeded webhook enqueues the same invoice
+          // immediately and the queue dedupes on invoice_id — if the webhook
+          // won the insert, its NOW-due job would text the classic receipt
+          // before the combined completion SMS delivers. Push the existing
+          // job out to the deferral (only while still queued and earlier; a
+          // job already running is past helping — the acknowledged race
+          // sliver, worst case a duplicate receipt mention).
+          await db('receipt_delivery_jobs')
+            .where({ invoice_id: invoiceId, status: 'queued' })
+            .where('next_attempt_at', '<', deferredUntil)
+            .update({ next_attempt_at: deferredUntil, updated_at: db.fn.now() })
+            .catch((deferErr) => logger.warn(`[stripe] receipt-job deferral update failed for invoice ${invoiceId}: ${deferErr.message}`));
+        }
         ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain(
           deferReceiptDelivery
             ? { delayMs: RECEIPT_DEFER_MS + 5_000, limit: 5 }
