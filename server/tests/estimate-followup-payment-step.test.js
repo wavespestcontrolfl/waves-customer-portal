@@ -59,6 +59,13 @@ jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(async () => ({})),
   resolveEstimateQuoteRequirement: jest.fn(() => ({ quoteRequired: false })),
   estimateTrenchingReviewRequired: jest.fn(() => false),
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => {}),
+  resolveAcceptOneTimeTotal: jest.fn(() => 149),
+  commercialAcceptDepositExempt: jest.fn(() => false),
+  isCommercialAutoAcceptEstimate: jest.fn(() => false),
+}));
+jest.mock('../services/estimate-delivery-options', () => ({
+  commercialLowConfidenceRange: jest.fn(() => ({ hasLowConfidence: false, forceSiteQuote: false })),
 }));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: jest.fn(async () => null),
@@ -153,6 +160,7 @@ function baseEstimate(overrides = {}) {
     customer_phone: null,
     customer_email: 'taylor@example.com',
     token: 'tok-xyz',
+    show_one_time_option: true,
     viewed_at: new Date('2026-06-09T10:00:00Z'),
     last_viewed_at: new Date('2026-06-09T10:00:00Z'),
     created_at: new Date('2026-06-08T15:00:00Z'),
@@ -197,6 +205,10 @@ beforeEach(() => {
   estimatePublic.buildPricingBundle.mockResolvedValue({});
   estimatePublic.resolveEstimateQuoteRequirement.mockReturnValue({ quoteRequired: false });
   estimatePublic.estimateTrenchingReviewRequired.mockReturnValue(false);
+  estimatePublic.reconcileFrozenMembershipSnapshot.mockResolvedValue(undefined);
+  estimatePublic.resolveAcceptOneTimeTotal.mockReturnValue(149);
+  estimatePublic.commercialAcceptDepositExempt.mockReturnValue(false);
+  estimatePublic.isCommercialAutoAcceptEstimate.mockReturnValue(false);
   findConsentedChargeableCard.mockResolvedValue(null);
   resolveRecurringCardPolicyForEstimate.mockResolvedValue({ required: true });
   resolveCardHoldPolicy.mockReturnValue({ required: true });
@@ -336,6 +348,62 @@ describe('checkPaymentStepAbandoned', () => {
     expect(sent).toBe(0);
     expect(resolveRecurringCardPolicyForEstimate).not.toHaveBeenCalled();
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('reconciles the frozen membership snapshot before the policy read, like the endpoints', async () => {
+    enqueueHappyPath(baseEstimate());
+
+    await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(estimatePublic.reconcileFrozenMembershipSnapshot).toHaveBeenCalledTimes(1);
+    const reconcileOrder = estimatePublic.reconcileFrozenMembershipSnapshot.mock.invocationCallOrder[0];
+    const policyOrder = resolveRecurringCardPolicyForEstimate.mock.invocationCallOrder[0];
+    expect(reconcileOrder).toBeLessThan(policyOrder);
+  });
+
+  test('card_hold on a mixed estimate whose one-time option is gone skips — the endpoint 400s it', async () => {
+    enqueueHappyPath(baseEstimate({ checkout_kind: 'card_hold', show_one_time_option: false }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(resolveCardHoldPolicy).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('card_hold with an unpriced one-time choice skips too', async () => {
+    estimatePublic.resolveAcceptOneTimeTotal.mockReturnValue(0);
+    enqueueHappyPath(baseEstimate({ checkout_kind: 'card_hold' }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('card_hold with no linked customer and no phone skips — accept cannot bind the booking', async () => {
+    enqueueHappyPath(baseEstimate({
+      checkout_kind: 'card_hold',
+      customer_id: null,
+      customer_phone: null,
+    }));
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(resolveCardHoldPolicy).not.toHaveBeenCalled();
+    expect(rawClaims).toHaveLength(0);
+  });
+
+  test('commercial manual-billing exemption skips the recurring nudge', async () => {
+    estimatePublic.commercialAcceptDepositExempt.mockReturnValue(true);
+    enqueueHappyPath(baseEstimate());
+
+    const sent = await _private.checkPaymentStepAbandoned(NOW);
+
+    expect(sent).toBe(0);
+    expect(resolveRecurringCardPolicyForEstimate).not.toHaveBeenCalled();
     expect(rawClaims).toHaveLength(0);
   });
 

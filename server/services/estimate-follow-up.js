@@ -547,12 +547,25 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       buildPricingBundle,
       resolveEstimateQuoteRequirement,
       estimateTrenchingReviewRequired,
+      reconcileFrozenMembershipSnapshot,
+      resolveAcceptOneTimeTotal,
+      commercialAcceptDepositExempt,
+      isCommercialAutoAcceptEstimate,
+      matchAcceptCustomerByPhone,
     } = require("../routes/estimate-public");
+    const { commercialLowConfidenceRange } = require("./estimate-delivery-options");
     const { resolveRecurringCardPolicyForEstimate } = require("./recurring-card-on-file");
     const { resolveCardHoldPolicy } = require("./estimate-card-holds");
     const { buildEstimateMembershipContext } = require("./estimate-membership-context");
 
     if (!isEstimateAcceptActive(est)) return false;
+    // Both intent endpoints reconcile the frozen membership snapshot before
+    // any pricing/policy read (codex 2729 r3): a stale "existing customer"
+    // snapshot would make this re-check disagree with the live endpoint in
+    // either direction (skip a customer the endpoint would still card, or
+    // vice versa). Mutates est.estimate_data in place, so estData parses
+    // AFTER it — same order as the endpoints.
+    await reconcileFrozenMembershipSnapshot(est);
     let estData = {};
     try {
       estData = typeof est.estimate_data === "string"
@@ -569,12 +582,27 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
     if (estimateTrenchingReviewRequired(estData)) return false;
     const pricingBundle = await buildPricingBundle(est);
     if (resolveEstimateQuoteRequirement(pricingBundle, estData).quoteRequired) return false;
+    // Contact gate, BOTH lanes (codex 2729 r2 + r3): recurring accept is
+    // phone-keyed (CUSTOMER_CONTACT_REQUIRED), and a required hold binds a
+    // slot/appointment, which accept also refuses without a customer/phone.
+    // Don't nudge an email-only estimate into a card step that can't
+    // complete online.
+    if (!est.customer_id && !est.customer_phone) return false;
     const billByInvoice = resolveEstimateInvoiceMode(est, estData);
     // The event kind records which accept lane the customer was in; a
     // structurally one-time-only estimate can only ever be the hold lane.
-    const oneTimeLane = checkoutKind === "card_hold"
-      || isStructuralOneTimeOnlyEstimate(estData, est);
+    const structurallyOneTime = isStructuralOneTimeOnlyEstimate(estData, est);
+    const oneTimeLane = checkoutKind === "card_hold" || structurallyOneTime;
     if (oneTimeLane) {
+      // One-time availability (codex 2729 r3): the abandoned intent was a
+      // one_time request (the event kind proves it), and /card-hold-intent
+      // still 400s that request on a mixed estimate whose one-time choice
+      // is now hidden or unpriced — same predicate as the endpoint.
+      if (!structurallyOneTime) {
+        const oneTimeChoicePrice = resolveAcceptOneTimeTotal(est, pricingBundle);
+        const canChooseOneTime = !!est.show_one_time_option && oneTimeChoicePrice > 0;
+        if (!canChooseOneTime) return false;
+      }
       const hold = resolveCardHoldPolicy({
         treatAsOneTime: true,
         billByInvoice,
@@ -589,7 +617,6 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       // them to save one. Customer resolution mirrors the endpoint
       // (customer_id, else accept's phone match). Errors fall to the outer
       // catch → fail closed.
-      const { matchAcceptCustomerByPhone } = require("../routes/estimate-public");
       const { findConsentedChargeableCard } = require("./payment-method-consents");
       let holdCustomerId = est.customer_id || null;
       if (!holdCustomerId && est.customer_phone) {
@@ -602,12 +629,18 @@ async function paymentStepStillRequiresCard(est, checkoutKind) {
       }
       return true;
     }
-    // Mirror /recurring-card-intent's contact gate (codex 2729 r2):
-    // accept-time customer resolution is phone-keyed, so an estimate with
-    // no linked customer and no phone can't complete a recurring accept —
-    // the endpoint 400s (CUSTOMER_CONTACT_REQUIRED). Don't nudge an
-    // email-only estimate into a card step that immediately rejects.
-    if (!est.customer_id && !est.customer_phone) return false;
+    // Commercial manual-billing exemption (codex 2729 r3): the SAME
+    // commercialAcceptDepositExempt predicate /recurring-card-intent 409s
+    // with 'commercial_manual_billing' — an estimate edited into an
+    // auto-priced commercial/manual-billing or site-confirmation-held state
+    // collects nothing at accept, so it owes no card nudge.
+    const lc = commercialLowConfidenceRange(estData);
+    if (commercialAcceptDepositExempt({
+      isCommercialAccept: isCommercialAutoAcceptEstimate(est),
+      siteConfirmationHold: lc.hasLowConfidence && !lc.forceSiteQuote,
+      treatAsOneTime: false,
+      billByInvoice,
+    })) return false;
     const membership = await buildEstimateMembershipContext(est);
     const policy = await resolveRecurringCardPolicyForEstimate({
       estimate: est,
