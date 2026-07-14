@@ -17,6 +17,7 @@
  *   3. socket.handshake.headers.authorization  — Bearer JWT fallback
  *
  * Outcomes:
+ *   - maintenance + Staff JWT → reject with code STAFF_MAINTENANCE
  *   - missing token        → reject with code AUTH_FAILED
  *   - JWT invalid          → reject with code AUTH_FAILED
  *   - JWT expired          → reject with code TOKEN_EXPIRED
@@ -61,6 +62,10 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const {
+  isSignedStaffJwt,
+  isStaffMaintenanceEnabled,
+} = require('../middleware/staff-maintenance');
 
 // Track tokens are 64-char lowercase hex — generated as
 // encode(gen_random_bytes(32), 'hex') in
@@ -99,6 +104,16 @@ function rejectionError(message, code) {
 
 async function socketAuth(socket, next) {
   const { jwtToken, trackToken } = extractAuth(socket);
+
+  // Leave customer JWT and public tracking sockets online during Phase-B
+  // maintenance, but reject any handshake carrying a valid Staff JWT before a
+  // technicians lookup or room join can occur.
+  if (isStaffMaintenanceEnabled() && isSignedStaffJwt(jwtToken)) {
+    return next(rejectionError(
+      'Staff access is temporarily unavailable',
+      'STAFF_MAINTENANCE',
+    ));
+  }
 
   // Track-token path: public TrackPage. Doesn't go through jwt.verify;
   // the token is opaque + non-JWT (random hex) and is matched against

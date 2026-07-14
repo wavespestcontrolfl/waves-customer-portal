@@ -200,6 +200,15 @@ app.use(cors({
   credentials: true,
 }));
 
+// Phase-B Staff maintenance interlock. This must run before every API route,
+// rate limiter, and body parser so login, timer writes, and Staff bearer tokens
+// on otherwise-public routes all fail closed with the same response.
+const {
+  isStaffMaintenanceEnabled,
+  staffMaintenance,
+} = require('./middleware/staff-maintenance');
+app.use(staffMaintenance);
+
 // Rate limiting — key generator shared with route-level limiters (JWT subject
 // when authenticated, /64-collapsed IP otherwise; full rationale in the module).
 const { rateLimitKey } = require('./middleware/rate-limit-key');
@@ -600,11 +609,13 @@ app.use('/api/admin', require('./routes/admin-billing-health'));
 // Health check
 app.get('/api/health', (req, res) => {
   const { gates } = require('./config/feature-gates');
+  res.set('Cache-Control', 'no-store');
   res.json({
     status: 'ok',
     service: 'waves-customer-portal',
     timestamp: new Date().toISOString(),
     environment: config.nodeEnv,
+    staffMaintenance: { enabled: isStaffMaintenanceEnabled() },
     gates,
   });
 });
