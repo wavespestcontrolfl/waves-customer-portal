@@ -650,7 +650,14 @@ class SmartRebooker {
         // cadence is preserved; only the route assignment is deferred.
         let conflicted = false;
         if (!isAnchor && sib.technician_id && updateData.window_start) {
-          const clashEnd = updateData.window_end || updateData.window_start;
+          // Null window_end (schema-legal) must not collapse the probe to a
+          // zero-length window — mirror the SQL predicate's fallback and
+          // assume a 60-minute block from the start.
+          const clashEnd = updateData.window_end || (() => {
+            const [h, m] = String(updateData.window_start).split(':').map(Number);
+            const total = h * 60 + (m || 0) + 60;
+            return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+          })();
           // Same slot-reserve advisory lock the anchor and single-visit
           // paths take — without it a concurrent assignment can pass its
           // own overlap check before this trx commits and double-book

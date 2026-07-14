@@ -441,9 +441,11 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             .where({ scheduled_service_id: svc.id })
             .orderBy('created_at', 'desc')
             .first('reason_code', 'new_date');
+          // apptDateStr handles pg DATE columns arriving as JS Dates —
+          // String() on a Date is a locale string that never matches.
           replaySeriesShifted = !!lastLog
             && String(lastLog.reason_code || '').endsWith('_series')
-            && String(lastLog.new_date).split('T')[0] === date;
+            && apptDateStr(lastLog.new_date) === date;
         } catch (err) {
           logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
         }
