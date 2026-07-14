@@ -287,6 +287,32 @@ async function sweepTimeRules(now = new Date()) {
 
 // ── Job processor ────────────────────────────────────────────────────────
 
+// Lost-claim repair (codex 2736 r5): a lost claim means either a
+// concurrent winner sent, or OUR earlier attempt sent and the
+// follow_up_count/last_follow_up_at bump failed before the job was marked
+// done. Idempotently re-apply the bump from the ledger row — guarded on
+// last_follow_up_at < sends.sent_at, so a healthy estimate (bump already
+// ran, stamped at/after the claim) is untouched and the repair runs at
+// most once per send. Without it, a transiently-failed bump leaves the
+// sent email invisible to the cap/spacing guards.
+async function repairSendBookkeeping(estimateId, ruleKey) {
+  try {
+    await db.raw(
+      `UPDATE estimates SET
+         follow_up_count = COALESCE(estimates.follow_up_count, 0) + 1,
+         last_follow_up_at = s.sent_at
+       FROM estimate_followup_sends s
+       WHERE estimates.id = ?
+         AND s.estimate_id = estimates.id
+         AND s.rule_key = ?
+         AND (estimates.last_follow_up_at IS NULL OR estimates.last_follow_up_at < s.sent_at)`,
+      [estimateId, ruleKey],
+    );
+  } catch (err) {
+    logger.warn(`[est-engage] bookkeeping repair failed for estimate ${estimateId}/${ruleKey}: ${err.message}`);
+  }
+}
+
 // Time-sweep predicates re-checked at PROCESS time (codex 2736 r1): a job
 // queued in-window can go stale before it fires — the customer opens the
 // "unopened" estimate, returns to the "gone quiet" one, or the expiry date
@@ -347,20 +373,24 @@ async function deferJob(jobId, dueAt, { countAttempt = false } = {}) {
 
 async function processDueJobs(now = new Date()) {
   const nowMs = now.getTime();
-  const jobs = await db('estimate_followup_jobs')
-    .where({ status: 'pending' })
-    .where('due_at', '<=', now)
-    .orderBy('due_at', 'asc')
+  // Priority joins the SQL ordering (codex 2736 r5): the LIMIT applies in
+  // the database, so a same-due_at overflow (a sweep queues everything at
+  // now) must rank urgent rules INTO the batch — an in-memory sort after
+  // the limit can't rescue a job Postgres never returned.
+  const jobs = await db('estimate_followup_jobs as j')
+    .leftJoin('estimate_followup_rules as r', 'r.rule_key', 'j.rule_key')
+    .where('j.status', 'pending')
+    .where('j.due_at', '<=', now)
+    .orderByRaw('j.due_at asc, COALESCE(r.priority, 100) asc')
     .limit(ENGINE_LIMITS.jobBatchSize)
-    .select('*');
+    .select('j.*');
   if (!jobs.length) return { sent: 0, shadow: 0 };
 
   const rules = await loadRules();
   const rulesByKey = new Map(rules.map((r) => [r.rule_key, r]));
-  // Same-sweep jobs share a due_at; rule priority breaks the tie so an
-  // urgent rule (expiring, priority 30) wins the spacing/cap budget over a
-  // generic one (gone-quiet, 50) instead of Postgres's arbitrary order
-  // deciding which email the customer gets (codex 2736 r4).
+  // Belt over the SQL order: re-assert (due_at, priority) in memory so the
+  // processing order never depends on the driver preserving it (codex 2736
+  // r4/r5 — urgent rules win the spacing/cap budget).
   jobs.sort((a, b) => {
     const t = new Date(a.due_at).getTime() - new Date(b.due_at).getTime();
     if (t) return t;
@@ -485,6 +515,7 @@ async function processDueJobs(now = new Date()) {
         blockLegacyFlags: legacyFlagsFor(rule.rule_key),
         blockRuleKeys: siblings,
       }))) {
+        await repairSendBookkeeping(est.id, rule.rule_key);
         await markJob(job.id, 'skipped', 'lost-claim');
         continue;
       }
@@ -564,6 +595,7 @@ module.exports._private = {
   rulePredicateStillHolds,
   dedupeGroup,
   legacyFlagsFor,
+  repairSendBookkeeping,
   ENGINE_LIMITS,
   DEFAULT_RULE_PARAMS,
 };

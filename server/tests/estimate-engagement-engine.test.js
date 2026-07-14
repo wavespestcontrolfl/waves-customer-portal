@@ -64,7 +64,7 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'whereIn', 'whereNotNull', 'whereNull', 'where', 'whereNot', 'select',
-    'orderBy', 'limit', 'whereNotExists', 'whereRaw', 'onConflict', 'ignore',
+    'orderBy', 'orderByRaw', 'leftJoin', 'limit', 'whereNotExists', 'whereRaw', 'onConflict', 'ignore',
     'returning', 'as', 'distinctOn',
   ]) {
     b[m] = jest.fn(() => b);
@@ -103,6 +103,8 @@ function enqueue(table, cfg) {
 // Calls land here; results come from jobInsertResults (default = queued).
 const rawJobs = [];
 let jobInsertResults;
+// Lost-claim bookkeeping repairs (raw UPDATE ... FROM estimate_followup_sends).
+const rawRepairs = [];
 
 const NOW = new Date('2026-06-10T15:00:00Z');
 const H = 3600000;
@@ -157,13 +159,21 @@ beforeEach(() => {
   jest.clearAllMocks();
   writes.length = 0;
   rawJobs.length = 0;
+  rawRepairs.length = 0;
   jobInsertResults = [];
   queues = {};
-  db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  db.mockImplementation((rawTable) => {
+    const table = String(rawTable).split(' as ')[0]; // normalize aliased scans
+    return makeBuilder(table, (queues[table] || []).shift() || {});
+  });
   db.raw.mockImplementation((sql, bindings) => {
     if (typeof sql === 'string' && sql.includes('INSERT INTO estimate_followup_jobs')) {
       rawJobs.push({ sql, bindings });
       return Promise.resolve({ rows: jobInsertResults.shift() ?? [{ id: 'job-1' }] });
+    }
+    if (typeof sql === 'string' && sql.includes('UPDATE estimates SET')) {
+      rawRepairs.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
     }
     return sql;
   });
@@ -510,6 +520,20 @@ describe('processDueJobs', () => {
     expect(followupShared.sendDualChannel).toHaveBeenCalledTimes(1);
     // The email went out — the ledger row must survive, or a retry re-emails.
     expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
+  });
+
+  test('a lost claim repairs the counters for the send that already happened', async () => {
+    followupShared.claimFollowupSend.mockResolvedValue(false); // our earlier attempt (or a twin) already holds the row
+    enqueueProcessorHappyPath();
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(rawRepairs).toHaveLength(1);
+    expect(rawRepairs[0].sql).toContain('last_follow_up_at < s.sent_at');
+    expect(rawRepairs[0].bindings).toEqual(['est-1', 'viewed_gone_quiet_72h']);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'lost-claim' }));
   });
 
   test('rule priority breaks due_at ties — the expiring email wins the budget', async () => {
