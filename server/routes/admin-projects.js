@@ -1407,10 +1407,23 @@ router.post('/', async (req, res, next) => {
     // never clears it) and names the existing report to continue in.
     // Keeper preference matches migration 20260714000010: strongest report
     // first (closed > sent > draft), then oldest.
+    //
+    // Legacy record-only links count too (Codex round-2 P2): a project
+    // created before the derived link was persisted carries
+    // scheduled_service_id = NULL while its service record points at the
+    // visit — the direct-column lookup (and the partial unique index)
+    // would miss it and let the visit mint a second report. Migration
+    // 20260714000010 backfills those rows; the join here covers any that
+    // appear between deploys or in environments where the backfill was
+    // guarded out.
     const existingByVisit = () => db('projects')
-      .where({ scheduled_service_id: linkedScheduledServiceId })
-      .orderByRaw("CASE status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END")
-      .orderBy('created_at', 'asc')
+      .leftJoin('service_records', 'projects.service_record_id', 'service_records.id')
+      .where((q) => q
+        .where('projects.scheduled_service_id', linkedScheduledServiceId)
+        .orWhere('service_records.scheduled_service_id', linkedScheduledServiceId))
+      .orderByRaw("CASE projects.status WHEN 'closed' THEN 0 WHEN 'sent' THEN 1 ELSE 2 END")
+      .orderBy('projects.created_at', 'asc')
+      .select('projects.*')
       .first();
     if (linkedScheduledServiceId) {
       const existing = await existingByVisit();

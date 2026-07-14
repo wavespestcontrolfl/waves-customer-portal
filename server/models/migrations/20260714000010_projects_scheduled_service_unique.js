@@ -33,6 +33,36 @@ exports.up = async function up(knex) {
   );
   if (indexCheck.rows?.[0]?.present) return;
 
+  // Legacy record-only links first (Codex round-2 P2): a project created
+  // from a service record before POST /admin/projects persisted the derived
+  // link carries scheduled_service_id = NULL while its service record points
+  // at the visit. Those rows dodge both the route's direct-column lookup and
+  // the partial index below, so adopt the record's link BEFORE deduping —
+  // that way the dedup ranking and the index see every report that documents
+  // a visit, and a stale create for that visit hits the constraint instead
+  // of minting a second report.
+  const hasRecordLink = await knex.schema.hasColumn('projects', 'service_record_id')
+    && await knex.schema.hasTable('service_records')
+    && await knex.schema.hasColumn('service_records', 'scheduled_service_id');
+  if (hasRecordLink) {
+    const adopted = await knex.raw(`
+      UPDATE projects p
+      SET scheduled_service_id = sr.scheduled_service_id, updated_at = NOW()
+      FROM service_records sr
+      WHERE p.service_record_id = sr.id
+        AND p.scheduled_service_id IS NULL
+        AND sr.scheduled_service_id IS NOT NULL
+      RETURNING p.id, sr.scheduled_service_id AS adopted_visit
+    `);
+    const adoptedRows = adopted.rows || [];
+    if (adoptedRows.length) {
+      console.warn(
+        `[migration ${INDEX_NAME}] adopted the service record's visit link on ${adoptedRows.length} record-only project(s): `
+        + adoptedRows.map((r) => `${r.id} (→ ${r.adopted_visit})`).join(', '),
+      );
+    }
+  }
+
   // Deterministic dedup: rank every linked row per visit, clear the link on
   // everything after the keeper. RETURNING gives the loud audit trail.
   const unlinked = await knex.raw(`

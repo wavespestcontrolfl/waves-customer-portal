@@ -28,6 +28,17 @@ describe('evaluateTerminalTransition', () => {
     });
   });
 
+  test('cancelled → completed conflicts (stale CompletionPanel submit after another dispatcher cancelled)', () => {
+    // The /complete submit path consults this guard too (Codex round-2 P1)
+    // — the PUT /status guard alone left completion submits able to flip a
+    // cancelled/skipped visit back to completed and run the full completion
+    // machinery.
+    expect(evaluateTerminalTransition('cancelled', 'completed')).toEqual({
+      conflict: true,
+      status: 'cancelled',
+    });
+  });
+
   test('re-sending the same terminal status passes through — retries must rerun the route\'s idempotent post-commit effects', () => {
     expect(evaluateTerminalTransition('completed', 'completed')).toBeNull();
     expect(evaluateTerminalTransition('cancelled', 'cancelled')).toBeNull();

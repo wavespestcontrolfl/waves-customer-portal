@@ -2482,6 +2482,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // cancelled/skipped are one-way too, and this submit path bypasses the
+    // PUT /status terminal guard — a CompletionPanel opened before another
+    // dispatcher cancelled or skipped the visit could otherwise flip it
+    // back to completed and run the full completion machinery (invoice,
+    // customer recap text) for a visit the status machine says never
+    // happened. Same non-completable set as pest-recap and
+    // project-completion. completed→completed deliberately passes through
+    // (evaluateTerminalTransition returns null on same-status) so durable
+    // completion resumes and retries keep reaching the stored-response
+    // path below.
+    {
+      const { evaluateTerminalTransition } = require('../services/job-status');
+      const terminal = evaluateTerminalTransition(svc.status, 'completed');
+      if (terminal?.conflict) {
+        return res.status(409).json({
+          error: `This visit was already ${terminal.status} and can no longer be completed. Refresh and try again.`,
+          code: 'already_terminal',
+          status: terminal.status,
+        });
+      }
+    }
+
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
     }

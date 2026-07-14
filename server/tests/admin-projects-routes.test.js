@@ -1549,6 +1549,50 @@ describe('POST /admin/projects one-report-per-visit conflict', () => {
     });
   });
 
+  test('a legacy record-only report (NULL scheduled link) still blocks the visit', async () => {
+    // Pre-hardening rows can carry scheduled_service_id = NULL while their
+    // service record points at the visit — the direct-column lookup (and the
+    // partial unique index) never see them (Codex round-2 P2). The lookup
+    // must join the project's service record and OR its scheduled link into
+    // the match, or the visit mints a second report.
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    const legacy = {
+      id: 'project-record-only', customer_id: 'customer-1',
+      project_type: 'wdo_inspection', status: 'sent',
+      scheduled_service_id: null, service_record_id: 'rec-legacy',
+    };
+    const projectsInsert = jest.fn();
+    const lookup = chain({
+      first: jest.fn().mockResolvedValue(legacy),
+      insert: projectsInsert,
+    });
+    mockTables(() => lookup);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: wdoBody,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('visit_already_reported');
+      expect(body.project.id).toBe('project-record-only');
+      expect(projectsInsert).not.toHaveBeenCalled();
+      expect(lookup.leftJoin).toHaveBeenCalledWith('service_records', 'projects.service_record_id', 'service_records.id');
+      const groupedWhere = lookup.where.mock.calls
+        .map(([arg]) => arg)
+        .find((arg) => typeof arg === 'function');
+      expect(groupedWhere).toBeDefined();
+      const grouped = { where: jest.fn(), orWhere: jest.fn() };
+      grouped.where.mockReturnValue(grouped);
+      grouped.orWhere.mockReturnValue(grouped);
+      groupedWhere.call(grouped, grouped);
+      expect(grouped.where).toHaveBeenCalledWith('projects.scheduled_service_id', 'svc-legacy');
+      expect(grouped.orWhere).toHaveBeenCalledWith('service_records.scheduled_service_id', 'svc-legacy');
+    });
+  });
+
   test('a lost same-visit create race (unique-violation 23505) resolves to the winner', async () => {
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
     const winner = {
