@@ -2627,8 +2627,19 @@ export default function DispatchPageV2({
             });
             setShowNewAppt(true);
           }}
-          onCancelled={() => fetchSchedule(date)}
-          onNoShow={() => fetchSchedule(date)}
+          onCancelled={() => {
+            fetchSchedule(date);
+            // Week rows come from MobileDispatchList's cached /week payload —
+            // without a bump the terminalized visit stays tappable as an
+            // active project-backed row and can mint a project against a
+            // cancelled visit (Codex r4 P2). Same pattern as onRescheduled.
+            setScheduleRefreshKey((k) => k + 1);
+          }}
+          onNoShow={() => {
+            fetchSchedule(date);
+            // Same week-cache staleness as onCancelled (Codex r4 P2).
+            setScheduleRefreshKey((k) => k + 1);
+          }}
           onRescheduled={() => {
             fetchSchedule(date);
             // The mobile week list owns its own cached weekData; bump the
