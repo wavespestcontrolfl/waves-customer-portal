@@ -14,7 +14,13 @@
 jest.mock('stripe', () => jest.fn(() => ({})));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
-jest.mock('../routes/stripe-webhook-helpers', () => ({ classifyExistingWebhookEvent: jest.fn(), STALE_CLAIM_WINDOW_MS: 60000 }));
+jest.mock('../routes/stripe-webhook-helpers', () => ({
+  classifyExistingWebhookEvent: jest.fn(),
+  invoicePaymentIntentBlocksFallback: jest.fn(() => false),
+  savedCardAttemptMatchesPaymentIntent: jest.fn(() => false),
+  savedCardCreditAdjustment: jest.fn(() => null),
+  STALE_CLAIM_WINDOW_MS: 60000,
+}));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));

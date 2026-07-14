@@ -997,6 +997,35 @@ router.post('/:id/charge-card', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[admin-invoices] charge-card failed: ${err.message}`);
+    // Stripe already collected the money, but the local invoice/payment write
+    // rolled back. Returning the generic 400 below makes the mobile sheet
+    // re-enable Charge and invites a second collection once the one-minute
+    // Stripe idempotency bucket rolls over.
+    if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+      return res.status(409).json({
+        error: `Charge succeeded at Stripe (PI ${err.stripePaymentIntentId}) but could not be recorded. DO NOT charge again — an admin must reconcile it.`,
+        code: err.code,
+        orphan: true,
+        stripe_payment_intent_id: err.stripePaymentIntentId,
+      });
+    }
+    // A connection/API failure without a returned PaymentIntent has an unknown
+    // outcome: Stripe may have accepted it. Keep this non-retryable for the same
+    // reason as a confirmed orphan charge.
+    if (err.code === 'STRIPE_AMBIGUOUS_OUTCOME') {
+      return res.status(409).json({
+        error: 'Charge outcome is uncertain — Stripe may have processed it. DO NOT charge again until an admin checks Stripe.',
+        code: err.code,
+        ambiguous: true,
+      });
+    }
+    if (err.code === 'STRIPE_CHARGE_IN_PROGRESS') {
+      return res.status(409).json({
+        error: 'A saved-card charge is already in progress or awaiting reconciliation. DO NOT charge again until an admin verifies it.',
+        code: err.code,
+        in_progress: true,
+      });
+    }
     res.status(400).json({ error: err.message });
   }
 });

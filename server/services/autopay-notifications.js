@@ -5,6 +5,7 @@ const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
+const { isPaused } = require('./autopay-eligibility');
 
 /**
  * Autopay Notifications
@@ -56,7 +57,7 @@ async function sendPreChargeReminders() {
       if (!c.phone) { skipped++; continue; }
 
       // Skip if paused through the charge date
-      if (c.autopay_paused_until && new Date(c.autopay_paused_until) >= target) {
+      if (isPaused(c, target)) {
         skipped++; continue;
       }
 

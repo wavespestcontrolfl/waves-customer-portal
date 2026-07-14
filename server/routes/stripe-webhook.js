@@ -5,7 +5,14 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { isBankMethodType } = require('../services/autopay-eligibility');
 const stripeConfig = require('../config/stripe-config');
-const { classifyExistingWebhookEvent, STALE_CLAIM_WINDOW_MS } = require('./stripe-webhook-helpers');
+const {
+  classifyExistingWebhookEvent,
+  invoicePaymentIntentBlocksFallback,
+  lateSavedCardPaymentNeedsOrphan,
+  savedCardAttemptMatchesPaymentIntent,
+  savedCardCreditAdjustment,
+  STALE_CLAIM_WINDOW_MS,
+} = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
@@ -178,6 +185,48 @@ async function paymentDetailsFromIntent(paymentIntent) {
   return details;
 }
 
+async function findMatchingSavedCardAttempt(
+  database,
+  invoice,
+  paymentIntent,
+  { lock = false, allowResolvedSucceeded = false } = {},
+) {
+  if (!invoice || paymentIntent.metadata?.source !== 'admin_card_on_file') return null;
+  let query = database('stripe_invoice_charge_attempts')
+    .where({ invoice_id: invoice.id });
+  if (paymentIntent.metadata?.saved_card_attempt_id) {
+    query = query.where({ id: paymentIntent.metadata.saved_card_attempt_id });
+  } else if (paymentIntent.id) {
+    query = query.where({ stripe_payment_intent_id: paymentIntent.id });
+  } else {
+    return null;
+  }
+  query = query.whereIn(
+    'status',
+    allowResolvedSucceeded ? ['claimed', 'ambiguous', 'succeeded'] : ['claimed', 'ambiguous'],
+  );
+  if (!allowResolvedSucceeded) query = query.whereNull('resolved_at');
+  if (lock) query = query.forUpdate();
+  const candidate = await query.first(
+    'id',
+    'invoice_id',
+    'status',
+    'resolved_at',
+    'created_at',
+    'stripe_payment_method_id',
+    'stripe_payment_intent_id',
+    'idempotency_key',
+    'credit_applied_delta',
+    'credit_applied_total',
+  );
+  return savedCardAttemptMatchesPaymentIntent({
+    attempt: candidate,
+    invoice,
+    paymentIntent,
+    allowResolvedSucceeded,
+  }) ? candidate : null;
+}
+
 async function findInvoiceForPaymentIntent(paymentIntent) {
   const byPaymentIntent = await db('invoices')
     .where({ stripe_payment_intent_id: paymentIntent.id })
@@ -196,6 +245,8 @@ async function findInvoiceForPaymentIntent(paymentIntent) {
     const byMetadata = await db('invoices').where({ id: invoiceId }).first();
     if (byMetadata?.stripe_payment_intent_id
       && String(byMetadata.stripe_payment_intent_id) !== String(paymentIntent.id)) {
+      const savedCardAttempt = await findMatchingSavedCardAttempt(db, byMetadata, paymentIntent);
+      if (savedCardAttempt) return byMetadata;
       logger.warn(
         `[stripe-webhook] PI ${paymentIntent.id} metadata invoice ${invoiceId} is already bound to ${byMetadata.stripe_payment_intent_id}; ignoring metadata fallback`,
       );
@@ -263,6 +314,26 @@ async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason)
     logger.error(`[stripe-webhook] Failed to record orphan succeeded PI ${paymentIntent.id}: ${err.message}`);
     throw err;
   }
+}
+
+async function resolveOrphanSucceededPaymentIntentIfSettled(paymentIntentId) {
+  if (!paymentIntentId) return false;
+  const invoice = await db('invoices')
+    .where({ stripe_payment_intent_id: paymentIntentId, status: 'paid' })
+    .first('id');
+  if (!invoice) return false;
+  const payment = await db('payments')
+    .where({ stripe_payment_intent_id: paymentIntentId, status: 'paid' })
+    .first('id');
+  if (!payment) return false;
+  const resolved = await db('stripe_orphan_charges')
+    .where({ stripe_payment_intent_id: paymentIntentId, resolved: false })
+    .update({
+      resolved: true,
+      resolved_at: new Date(),
+      resolution_notes: 'Automatically reconciled after the retried succeeded webhook settled this exact PaymentIntent',
+    });
+  return resolved > 0;
 }
 
 // Durable record for a statement PI that collected money but was NOT settled
@@ -828,7 +899,112 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);
   const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
+  const savedCardAttemptForTenderGuard = invoiceForTenderGuard
+    ? await findMatchingSavedCardAttempt(db, invoiceForTenderGuard, paymentIntent, {
+      allowResolvedSucceeded: true,
+    })
+    : null;
   const invoiceForTenderGuardStatus = String(invoiceForTenderGuard?.status || '').toLowerCase();
+  if (lateSavedCardPaymentNeedsOrphan({
+    invoiceStatus: invoiceForTenderGuardStatus,
+    activePaymentIntentId: invoiceForTenderGuard?.stripe_payment_intent_id,
+    incomingPaymentIntentId: piId,
+    terminalStatuses: INVOICE_TERMINAL_PAYMENT_STATUSES,
+    hasMatchingSavedCardAttempt: !!savedCardAttemptForTenderGuard,
+  })) {
+    const reason = `Late saved-card PI ${piId} succeeded after invoice ${invoiceForTenderGuard.id} was already ${invoiceForTenderGuardStatus}`;
+    logger.error(`[stripe-webhook] Quarantining ${reason}`);
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      reason,
+    );
+    return;
+  }
+  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard) {
+    const {
+      assertNoInvoiceChargeReconciliationPending,
+      parkInvoiceForSavedCardReconciliation,
+    } = require('../services/stripe');
+    let savedCardFence = null;
+    try {
+      await assertNoInvoiceChargeReconciliationPending(invoiceForTenderGuard.id);
+    } catch (fenceErr) {
+      savedCardFence = fenceErr;
+    }
+    const retryingQuarantinedIntent = savedCardFence?.code === 'STRIPE_CHARGED_DB_FAILED'
+      && String(savedCardFence.stripePaymentIntentId || '') === String(piId);
+    if (retryingQuarantinedIntent) {
+      // This is the durable quarantine written when this exact public PI first
+      // raced the saved-card owner. Once the owner has resolved, let the retry
+      // settle the same PI; the quarantine is cleared only after both its paid
+      // invoice and payment rows exist below.
+      logger.info(`[stripe-webhook] Retrying quarantined public PI ${piId} after saved-card claim resolved`);
+    } else if (savedCardFence) {
+      if (savedCardFence.code === 'STRIPE_CHARGE_IN_PROGRESS') {
+        // The owning request may still prove a deterministic failure and
+        // release its claim. Persist this already-succeeded competing PI before
+        // asking Stripe to retry: if the saved-card owner wins meanwhile, the
+        // retry sees a paid invoice and must not make this second charge vanish.
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal ?? centsToDollars(paymentIntent.amount),
+          `Succeeded public PI ${piId} raced active saved-card attempt ${savedCardFence.chargeAttemptId || 'unknown'}`,
+        );
+        throw new Error(`Saved-card charge attempt ${savedCardFence.chargeAttemptId || 'unknown'} is still active; retry succeeded webhook`);
+      }
+      const reason = `Succeeded PI ${piId} conflicts with unresolved saved-card attempt ${savedCardFence.chargeAttemptId || 'unknown'}`;
+      logger.error(`[stripe-webhook] Quarantining ${reason}`);
+      await recordOrphanSucceededPaymentIntent(
+        paymentIntent,
+        chargedTotal ?? centsToDollars(paymentIntent.amount),
+        reason,
+      );
+      const quarantineError = new Error(reason);
+      quarantineError.code = 'STRIPE_CHARGED_DB_FAILED';
+      quarantineError.stripePaymentIntentId = piId;
+      quarantineError.reconciliationRequired = true;
+      await parkInvoiceForSavedCardReconciliation({
+        invoiceId: invoiceForTenderGuard.id,
+        error: quarantineError,
+      });
+      return;
+    }
+  }
+  if (savedCardAttemptForTenderGuard?.status === 'claimed') {
+    const {
+      savedCardClaimIsStale,
+      promoteStaleSavedCardClaim,
+      resolveSettledInvoiceSavedCardChargeAttempt,
+    } = require('../services/stripe');
+    // The owner commits invoice + payment before closing its durable claim.
+    // If it crashed in that narrow gap, repair the claim immediately instead
+    // of treating a fully-settled charge as active until the stale window.
+    const alreadySettled = await resolveSettledInvoiceSavedCardChargeAttempt({
+      attemptId: savedCardAttemptForTenderGuard.id,
+      invoiceId: invoiceForTenderGuard.id,
+      customerId: invoiceForTenderGuard.customer_id,
+      stripePaymentIntentId: piId,
+      amount: chargedTotal,
+    });
+    if (alreadySettled) {
+      savedCardAttemptForTenderGuard.status = 'succeeded';
+      logger.info(`[stripe-webhook] Repaired committed saved-card attempt ${savedCardAttemptForTenderGuard.id} for PI ${piId}`);
+    } else if (!savedCardClaimIsStale(savedCardAttemptForTenderGuard)) {
+      // The saved-card owner has not committed success/failure/ambiguity yet.
+      // Ask Stripe to retry instead of settling against transaction state that
+      // may still roll back (especially account-credit application).
+      throw new Error(`Saved-card charge attempt ${savedCardAttemptForTenderGuard.id} is still active; retry succeeded webhook`);
+    } else {
+      const promoted = await promoteStaleSavedCardClaim(savedCardAttemptForTenderGuard, db);
+      if (!promoted) {
+        // Another request changed the fence after our read. Retry from a fresh
+        // snapshot instead of guessing whether it resolved or changed owners.
+        throw new Error(`Saved-card charge attempt ${savedCardAttemptForTenderGuard.id} changed during webhook recovery; retry`);
+      }
+      savedCardAttemptForTenderGuard.status = 'ambiguous';
+    }
+  }
   const surchargeQuarantine = await shouldQuarantineUnfinalizedCardPayment(
     paymentIntent,
     details,
@@ -883,7 +1059,11 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     && !INVOICE_TERMINAL_PAYMENT_STATUSES.includes(invoiceForTenderGuardStatus)
     && !isTerminalInvoicePaymentIntent(paymentIntent, details.paymentMethod)) {
     // Tender match prices from amount due (total − applied account credit).
-    const invoiceBaseAmount = invoiceAmountDue(invoiceForTenderGuard);
+    const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount);
+    const invoiceBaseAmount = savedCardAttemptForTenderGuard?.status === 'ambiguous'
+      && Number.isFinite(metadataBaseAmount)
+      ? metadataBaseAmount
+      : invoiceAmountDue(invoiceForTenderGuard);
     try {
       assertInvoicePaymentIntentTenderMatches(paymentIntent, details.paymentMethod, invoiceBaseAmount);
     } catch (err) {
@@ -952,14 +1132,51 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       const activePi = lockedInvoice.stripe_payment_intent_id
         ? String(lockedInvoice.stripe_payment_intent_id)
         : '';
-      if (INVOICE_TERMINAL_PAYMENT_STATUSES.includes(String(lockedInvoice.status || '').toLowerCase())
-        || (lockedInvoice.status === 'processing' && activePi !== String(piId))
-        || (activePi && activePi !== String(piId))) {
+      const matchingAmbiguousAttempt = await findMatchingSavedCardAttempt(
+        trx,
+        lockedInvoice,
+        paymentIntent,
+        { lock: true },
+      );
+      if (invoicePaymentIntentBlocksFallback({
+        invoiceStatus: lockedInvoice.status,
+        activePaymentIntentId: activePi,
+        incomingPaymentIntentId: piId,
+        terminalStatuses: INVOICE_TERMINAL_PAYMENT_STATUSES,
+        hasMatchingSavedCardAttempt: !!matchingAmbiguousAttempt,
+      })) {
         logger.warn(
           `[stripe-webhook] Skipping paid fallback row for PI ${piId}; ` +
           `invoice ${invoice.id} status=${lockedInvoice.status || 'unknown'} active_pi=${activePi || 'none'}`,
         );
         return;
+      }
+
+      if (matchingAmbiguousAttempt) {
+        const creditAdjustment = savedCardCreditAdjustment({
+          attempt: matchingAmbiguousAttempt,
+          invoice: lockedInvoice,
+        });
+        if (creditAdjustment) {
+          // An ambiguity can be promoted from a stale `claimed` fence even if
+          // the request process crashed before re-persisting its rolled-back
+          // credit draw-down. Reapply the exact pre-Stripe target inside this
+          // settlement transaction so cash + credit still equal the invoice.
+          const { postCreditMovement } = require('../services/customer-credit');
+          await postCreditMovement({
+            customerId: lockedInvoice.customer_id,
+            delta: -creditAdjustment.delta,
+            source: 'adjustment',
+            invoiceId: lockedInvoice.id,
+            note: `Account credit consumed by reconciled saved-card attempt ${matchingAmbiguousAttempt.id}`,
+            createdBy: 'system:saved_card_reconciliation',
+          }, trx);
+          await trx('invoices').where({ id: lockedInvoice.id }).update({
+            credit_applied: creditAdjustment.target,
+            updated_at: trx.fn.now(),
+          });
+          lockedInvoice.credit_applied = creditAdjustment.target;
+        }
       }
 
       const fallbackInvoiceUpdates = {
@@ -980,14 +1197,16 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       if (details.cardLastFour) fallbackInvoiceUpdates.card_last_four = details.cardLastFour;
       if (details.receiptUrl) fallbackInvoiceUpdates.receipt_url = details.receiptUrl;
 
-      const invoiceLinked = await trx('invoices')
+      const invoiceLinkQuery = trx('invoices')
         .where({ id: lockedInvoice.id })
-        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
-        .where(function activePaidIntentGuard() {
+        .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES);
+      if (!matchingAmbiguousAttempt) {
+        invoiceLinkQuery.where(function activePaidIntentGuard() {
           this.whereNull('stripe_payment_intent_id')
             .orWhere({ stripe_payment_intent_id: piId });
-        })
-        .update(fallbackInvoiceUpdates);
+        });
+      }
+      const invoiceLinked = await invoiceLinkQuery.update(fallbackInvoiceUpdates);
       if (!invoiceLinked) {
         throw new Error(`Invoice ${invoice.id} no longer matches PI ${piId}`);
       }
@@ -1024,6 +1243,24 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
           payment_state: 'paid',
         }),
       });
+      if (matchingAmbiguousAttempt) {
+        const attemptResolved = await trx('stripe_invoice_charge_attempts')
+          .where({ id: matchingAmbiguousAttempt.id })
+          .whereIn('status', ['claimed', 'ambiguous'])
+          .whereNull('resolved_at')
+          .update({
+            status: 'succeeded',
+            stripe_payment_intent_id: piId,
+            amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
+            error_message: null,
+            resolved_at: new Date(),
+            updated_at: new Date(),
+          });
+        if (!attemptResolved) {
+          throw new Error(`Ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} no longer owns invoice ${invoice.id}`);
+        }
+        logger.info(`[stripe-webhook] Bound ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} to succeeded PI ${piId}`);
+      }
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
     });
   }
@@ -1061,6 +1298,25 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
     .update(invoiceUpdates);
   if (fallbackLinkedInvoiceId && invoiceUpdated === 0) {
     invoiceUpdated = 1;
+  }
+
+  if (['claimed', 'ambiguous', 'succeeded'].includes(savedCardAttemptForTenderGuard?.status)
+    && invoiceForTenderGuard) {
+    const { resolveSettledInvoiceSavedCardChargeAttempt } = require('../services/stripe');
+    const attemptResolved = await resolveSettledInvoiceSavedCardChargeAttempt({
+      attemptId: savedCardAttemptForTenderGuard.id,
+      invoiceId: invoiceForTenderGuard.id,
+      customerId: invoiceForTenderGuard.customer_id,
+      stripePaymentIntentId: piId,
+      amount: chargedTotal,
+    });
+    if (attemptResolved) {
+      logger.info(`[stripe-webhook] Repaired settled saved-card attempt ${savedCardAttemptForTenderGuard.id} for PI ${piId}`);
+    }
+  }
+
+  if (await resolveOrphanSucceededPaymentIntentIfSettled(piId)) {
+    logger.info(`[stripe-webhook] Cleared reconciled orphan fence for settled PI ${piId}`);
   }
 
   if (invoiceUpdated > 0) {
@@ -1497,6 +1753,28 @@ async function handlePaymentIntentFailed(paymentIntent, eventId) {
         paid_at: null,
         ach_processing_notified_at: null,
       });
+  }
+
+  // A create timeout may have left no PI on the parked invoice. Stripe's
+  // definitive failure event still carries our signed metadata + immutable
+  // saved PM, so use the same exact matcher as succeeded reconciliation to
+  // release the attempt, reopen the invoice, and return reserved credit.
+  const failedAttemptInvoice = failedInvoice || await findInvoiceForPaymentIntent(paymentIntent);
+  const failedSavedCardAttempt = failedAttemptInvoice
+    ? await findMatchingSavedCardAttempt(db, failedAttemptInvoice, paymentIntent)
+    : null;
+  if (failedSavedCardAttempt) {
+    const { resolveFailedInvoiceSavedCardChargeAttempt } = require('../services/stripe');
+    const attemptResolved = await resolveFailedInvoiceSavedCardChargeAttempt({
+      attemptId: failedSavedCardAttempt.id,
+      invoiceId: failedAttemptInvoice.id,
+      customerId: failedAttemptInvoice.customer_id,
+      stripePaymentIntentId: piId,
+      failureMessage: `${failureMessage}${failureCode ? ` (${failureCode})` : ''}`,
+    });
+    if (attemptResolved) {
+      logger.info(`[stripe-webhook] Released failed saved-card attempt ${failedSavedCardAttempt.id} for PI ${piId}`);
+    }
   }
 
   // Fire-and-forget health rescore after payment failure
@@ -2890,7 +3168,13 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
     const activePi = lockedInvoice.stripe_payment_intent_id
       ? String(lockedInvoice.stripe_payment_intent_id)
       : '';
-    if (activePi && activePi !== String(piId)) {
+    const matchingSavedCardAttempt = await findMatchingSavedCardAttempt(
+      trx,
+      lockedInvoice,
+      paymentIntent,
+      { lock: true },
+    );
+    if (activePi && activePi !== String(piId) && !matchingSavedCardAttempt) {
       logger.warn(
         `[stripe-webhook] Ignoring stale ACH processing PI ${piId} for invoice ${invoice.id}; ` +
         `active PI is ${activePi}`,
@@ -2898,8 +3182,37 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       return;
     }
 
+    if (matchingSavedCardAttempt?.status === 'claimed') {
+      const {
+        savedCardClaimIsStale,
+        promoteStaleSavedCardClaim,
+      } = require('../services/stripe');
+      if (!savedCardClaimIsStale(matchingSavedCardAttempt)) {
+        // The owner may still commit its invoice/payment transaction or its
+        // rolled-back credit reservation. Retry instead of amount-checking an
+        // intentionally incomplete local snapshot and canceling valid ACH.
+        throw new Error(`Saved-card charge attempt ${matchingSavedCardAttempt.id} is still active; retry processing webhook`);
+      }
+      const promoted = await promoteStaleSavedCardClaim(matchingSavedCardAttempt, trx);
+      if (!promoted) {
+        throw new Error(`Saved-card charge attempt ${matchingSavedCardAttempt.id} changed during processing recovery; retry`);
+      }
+      matchingSavedCardAttempt.status = 'ambiguous';
+    }
+
+    let creditAdjustment = null;
+    if (matchingSavedCardAttempt) {
+      creditAdjustment = savedCardCreditAdjustment({
+        attempt: matchingSavedCardAttempt,
+        invoice: lockedInvoice,
+      });
+    }
+
     // Expected ACH amount prices from amount due (total − applied account credit).
-    const expected = computeChargeAmount(invoiceAmountDue(lockedInvoice), 'us_bank_account');
+    const expectedInvoice = creditAdjustment
+      ? { ...lockedInvoice, credit_applied: creditAdjustment.target }
+      : lockedInvoice;
+    const expected = computeChargeAmount(invoiceAmountDue(expectedInvoice), 'us_bank_account');
     const expectedCents = Math.round(expected.total * 100);
     const actualCents = Number(paymentIntent.amount || 0);
     if (actualCents !== expectedCents) {
@@ -2914,7 +3227,27 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           logger.warn(`[stripe-webhook] Could not cancel mismatched processing PI ${piId}: ${cancelErr.message}`);
         }
       }
-      return;
+      // Throw so the transaction rolls back any state already touched by this
+      // event. A canceled PI is ignored on retry; a cancel failure remains
+      // retryable instead of committing a mismatched credit reservation.
+      throw new Error(`ACH processing PI ${piId} amount mismatch; retry after cancellation`);
+    }
+
+    if (creditAdjustment) {
+      const { postCreditMovement } = require('../services/customer-credit');
+      await postCreditMovement({
+        customerId: lockedInvoice.customer_id,
+        delta: -creditAdjustment.delta,
+        source: 'adjustment',
+        invoiceId: lockedInvoice.id,
+        note: `Account credit consumed by processing saved-card attempt ${matchingSavedCardAttempt.id}`,
+        createdBy: 'system:saved_card_reconciliation',
+      }, trx);
+      await trx('invoices').where({ id: lockedInvoice.id }).update({
+        credit_applied: creditAdjustment.target,
+        updated_at: trx.fn.now(),
+      });
+      lockedInvoice.credit_applied = creditAdjustment.target;
     }
 
     const existingPayment = await trx('payments')
@@ -2959,14 +3292,16 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
       });
     }
 
-    await trx('invoices')
+    const processingInvoiceUpdate = trx('invoices')
       .where({ id: lockedInvoice.id })
-      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES)
-      .where(function activeProcessingIntentGuard() {
+      .whereNotIn('status', INVOICE_TERMINAL_PAYMENT_STATUSES);
+    if (!matchingSavedCardAttempt) {
+      processingInvoiceUpdate.where(function activeProcessingIntentGuard() {
         this.whereNull('stripe_payment_intent_id')
           .orWhere({ stripe_payment_intent_id: piId });
-      })
-      .update({
+      });
+    }
+    const invoiceRowsUpdated = await processingInvoiceUpdate.update({
         status: 'processing',
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -2976,6 +3311,9 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         // succeeded handler recomputes amount due off the collapsed total.
         total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
       });
+    if (!invoiceRowsUpdated) {
+      throw new Error(`ACH processing PI ${piId} could not bind invoice ${lockedInvoice.id}; retry webhook`);
+    }
   });
 
   // ── Customer-facing ACH "we got it, processing" acknowledgment ──
@@ -3774,3 +4112,4 @@ module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
+module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;

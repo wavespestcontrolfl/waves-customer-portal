@@ -38,3 +38,40 @@ describe('Stripe Terminal handoff staff-session binding', () => {
     expect(_test.handoffStaffSessionMatches(claims, tech)).toBe(false);
   });
 });
+
+describe('Stripe Terminal saved-card fence response', () => {
+  test('distinguishes a retryable active claim from reconciliation', () => {
+    expect(_test.terminalChargeFenceResponse({
+      code: 'STRIPE_CHARGE_IN_PROGRESS',
+      reconciliationRequired: false,
+    })).toEqual(expect.objectContaining({
+      code: 'payment_charge_in_progress',
+      reconciliationRequired: false,
+    }));
+    expect(_test.terminalChargeFenceResponse({
+      code: 'STRIPE_AMBIGUOUS_OUTCOME',
+      reconciliationRequired: true,
+    })).toEqual(expect.objectContaining({
+      code: 'payment_reconciliation_pending',
+      reconciliationRequired: true,
+    }));
+  });
+});
+
+describe('Stripe Terminal canceled-handoff recovery', () => {
+  test('only the explicit expires-at-used-at marker forces a fresh handoff', () => {
+    const usedAt = '2026-07-15T23:00:00.000Z';
+    expect(_test.terminalHandoffNeedsReissue({
+      used_at: usedAt,
+      expires_at: usedAt,
+    })).toBe(true);
+    expect(_test.terminalHandoffNeedsReissue({
+      used_at: usedAt,
+      expires_at: '2026-07-15T23:01:00.000Z',
+    })).toBe(false);
+    expect(_test.terminalHandoffNeedsReissue({
+      used_at: null,
+      expires_at: usedAt,
+    })).toBe(false);
+  });
+});

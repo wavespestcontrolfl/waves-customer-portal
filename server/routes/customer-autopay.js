@@ -7,7 +7,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
-const { isChargeableAutopayMethod, isBankMethodType } = require('../services/autopay-eligibility');
+const { isChargeableAutopayMethod, isBankMethodType, isPaused } = require('../services/autopay-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -92,8 +92,7 @@ router.get('/', async (req, res, next) => {
       .orderBy('is_default', 'desc')
       .orderBy('created_at', 'desc');
 
-    const pausedUntil = customer.autopay_paused_until ? new Date(customer.autopay_paused_until) : null;
-    const isPaused = !!(pausedUntil && pausedUntil >= new Date(new Date().toDateString()));
+    const autopayPaused = isPaused(customer);
 
     const chargeableAutopayMethod = await db('payment_methods')
       .where({
@@ -146,8 +145,8 @@ router.get('/', async (req, res, next) => {
       : null;
 
     let state = 'disabled';
-    if (customerAutopayEnabled && !isPaused) state = 'active';
-    else if (customerAutopayEnabled && isPaused) state = 'paused';
+    if (customerAutopayEnabled && !autopayPaused) state = 'active';
+    else if (customerAutopayEnabled && autopayPaused) state = 'paused';
 
     const recentEvents = await getRecent(req.customerId, 10);
 

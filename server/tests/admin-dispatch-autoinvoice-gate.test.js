@@ -1,4 +1,21 @@
 const { shouldAutoInvoiceCompletion } = require('../routes/admin-dispatch')._test;
+const { completionSavedCardFallbackPolicy } = require('../routes/admin-dispatch')._test;
+
+describe('completion saved-card fallback policy', () => {
+  test('suppresses fallback rails for a fresh in-progress claim', () => {
+    expect(completionSavedCardFallbackPolicy({
+      suppressAlternateCollection: true,
+      reconciliationRequired: false,
+    })).toEqual({ suppressFallback: true, retainRetryableFallback: false });
+  });
+
+  test('suppresses fallback rails when money may have moved', () => {
+    expect(completionSavedCardFallbackPolicy({
+      suppressAlternateCollection: true,
+      reconciliationRequired: true,
+    })).toEqual({ suppressFallback: true, retainRetryableFallback: false });
+  });
+});
 
 const base = {
   recapReviewOnly: false,

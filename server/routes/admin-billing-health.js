@@ -8,6 +8,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { logAutopay } = require('../services/autopay-log');
 const { etDateString, etParts } = require('../utils/datetime-et');
+const { isPaused } = require('../services/autopay-eligibility');
 
 router.use(adminAuthenticate);
 router.use(requireAdmin);
@@ -28,11 +29,10 @@ router.get('/customers/:id/autopay-state', async (req, res, next) => {
       .first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
-    const pausedUntil = customer.autopay_paused_until ? new Date(customer.autopay_paused_until) : null;
-    const isPaused = !!(pausedUntil && pausedUntil >= new Date(new Date().toDateString()));
+    const autopayPaused = isPaused(customer);
     let state = 'disabled';
-    if (customer.autopay_enabled && !isPaused) state = 'active';
-    else if (customer.autopay_enabled && isPaused) state = 'paused';
+    if (customer.autopay_enabled && !autopayPaused) state = 'active';
+    else if (customer.autopay_enabled && autopayPaused) state = 'paused';
 
     const recent_events = await db('autopay_log')
       .where({ customer_id: customerId })

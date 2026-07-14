@@ -9,11 +9,13 @@ describe('StripeService.createInvoicePaymentIntent', () => {
   // path runs. Default to no credit so existing cases keep the original lifecycle.
   let customerAccountCredits;
   let applyCreditSideEffect;
+  let savedCardAttempt;
 
   beforeEach(() => {
     jest.resetModules();
     customerAccountCredits = '0.00';
     applyCreditSideEffect = null;
+    savedCardAttempt = null;
 
     invoiceRow = {
       id: 'inv_123',
@@ -66,6 +68,21 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     };
     const paymentsQuery = {
       where: jest.fn(() => paymentsQuery),
+      whereNull: jest.fn(() => paymentsQuery),
+      whereRaw: jest.fn(() => paymentsQuery),
+      orWhereColumn: jest.fn(() => paymentsQuery),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const chargeAttemptsQuery = {
+      where: jest.fn(() => chargeAttemptsQuery),
+      whereIn: jest.fn(() => chargeAttemptsQuery),
+      whereNull: jest.fn(() => chargeAttemptsQuery),
+      forUpdate: jest.fn(() => chargeAttemptsQuery),
+      first: jest.fn(async () => savedCardAttempt),
+      update: jest.fn().mockResolvedValue(1),
+    };
+    const orphanChargesQuery = {
+      where: jest.fn(() => orphanChargesQuery),
       first: jest.fn().mockResolvedValue(null),
     };
     // Auto-apply resolves the customer's account-credit balance up front; these
@@ -79,8 +96,11 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       if (table === 'invoices') return lockedInvoiceQuery;
       if (table === 'payments') return paymentsQuery;
       if (table === 'customers') return customersQuery;
+      if (table === 'stripe_invoice_charge_attempts') return chargeAttemptsQuery;
+      if (table === 'stripe_orphan_charges') return orphanChargesQuery;
       throw new Error(`Unexpected trx table: ${table}`);
     });
+    trxMock.fn = { now: jest.fn(() => 'NOW') };
     dbMock = jest.fn(table => {
       if (table === 'invoices') return rootInvoiceQuery;
       throw new Error(`Unexpected db table: ${table}`);
@@ -104,6 +124,48 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         if (applyCreditSideEffect) applyCreditSideEffect();
       }),
     }));
+  });
+
+  test('rechecks the saved-card fence while holding the invoice lock', async () => {
+    savedCardAttempt = {
+      id: 'attempt-active',
+      status: 'claimed',
+      idempotency_key: 'attempt-key',
+      created_at: new Date().toISOString(),
+    };
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        statusCode: 409,
+        inProgress: false,
+        savedCardPending: true,
+      });
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('parks an ambiguity discovered by the locked saved-card recheck', async () => {
+    savedCardAttempt = {
+      id: 'attempt-ambiguous',
+      status: 'ambiguous',
+      idempotency_key: 'attempt-key',
+      created_at: new Date().toISOString(),
+    };
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id))
+      .rejects.toMatchObject({
+        code: 'STRIPE_AMBIGUOUS_OUTCOME',
+        statusCode: 409,
+        inProgress: false,
+        savedCardPending: true,
+      });
+    expect(updateInvoice).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'processing',
+      stripe_payment_intent_id: null,
+    }));
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
   test('does not return a canceled idempotency replay when replacing an invoice PaymentIntent', async () => {
@@ -435,6 +497,101 @@ describe('StripeService.createInvoicePaymentIntent', () => {
       });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('StripeService.finalizeInvoicePayment saved-card serialization', () => {
+  const crypto = require('crypto');
+  let originalJwtSecret;
+
+  beforeEach(() => {
+    jest.resetModules();
+    originalJwtSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = 'finalize-test-secret';
+  });
+
+  afterEach(() => {
+    if (originalJwtSecret == null) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
+  });
+
+  test('locks the invoice and rejects a saved-card claim before Stripe confirm', async () => {
+    const invoice = {
+      id: 'inv-finalize',
+      invoice_number: 'WPC-FINALIZE',
+      status: 'sent',
+      total: '75.00',
+      credit_applied: 0,
+      customer_id: 'cust-1',
+      stripe_payment_intent_id: 'pi-public',
+    };
+    const stripeClient = {
+      paymentMethods: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'debit' } }),
+      },
+      paymentIntents: {
+        update: jest.fn(),
+        confirm: jest.fn(),
+      },
+    };
+    const invoiceQuery = {
+      where: jest.fn(() => invoiceQuery),
+      forUpdate: jest.fn(() => invoiceQuery),
+      first: jest.fn().mockResolvedValue(invoice),
+    };
+    const attemptQuery = {
+      where: jest.fn(() => attemptQuery),
+      whereIn: jest.fn(() => attemptQuery),
+      whereNull: jest.fn(() => attemptQuery),
+      first: jest.fn().mockResolvedValue({
+        id: 'attempt-race',
+        status: 'claimed',
+        idempotency_key: 'attempt-key',
+        created_at: new Date().toISOString(),
+      }),
+    };
+    const rootInvoiceQuery = {
+      where: jest.fn(() => rootInvoiceQuery),
+      first: jest.fn().mockResolvedValue(invoice),
+    };
+    const dbMock = jest.fn((table) => {
+      if (table === 'invoices') return rootInvoiceQuery;
+      throw new Error(`Unexpected root table ${table}`);
+    });
+    dbMock.transaction = jest.fn(async (callback) => callback((table) => {
+      if (table === 'invoices') return invoiceQuery;
+      if (table === 'stripe_invoice_charge_attempts') return attemptQuery;
+      throw new Error(`Unexpected finalize table ${table}`);
+    }));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({
+      secretKey: 'sk_test_mock',
+      publishableKey: 'pk_test_mock',
+    }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+
+    const payload = JSON.stringify({
+      invoiceId: invoice.id,
+      paymentMethodId: 'pm-card',
+      invoiceTotal: 75,
+      quotedAt: Date.now(),
+    });
+    const signature = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('base64url');
+    const quoteToken = `${Buffer.from(payload).toString('base64url')}.${signature}`;
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.finalizeInvoicePayment(invoice.id, quoteToken))
+      .rejects.toMatchObject({
+        code: 'STRIPE_CHARGE_IN_PROGRESS',
+        statusCode: 409,
+        savedCardPending: true,
+      });
+    expect(invoiceQuery.forUpdate).toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.update).not.toHaveBeenCalled();
+    expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
   });
 });
 

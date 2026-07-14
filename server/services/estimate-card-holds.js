@@ -409,12 +409,20 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
     logger.info('[estimate-card-holds] completion charge succeeded', { scheduledServiceId, invoiceId });
     return { charged: true };
   } catch (err) {
-    // STRIPE_CHARGED_DB_FAILED: Stripe COLLECTED the money but our DB write
-    // failed (already recorded as a stripe_orphan_charge). Reopening to 'held'
-    // would let a retry charge the SAME invoice again — and chargeInvoiceWith-
-    // SavedCard's idempotency key is minute-bucketed, so a later retry mints a
-    // SECOND PaymentIntent. Park it terminal for manual reconciliation instead.
-    if (err.code === 'STRIPE_CHARGED_DB_FAILED') {
+    // Confirmed-or-possible collection outcomes are terminal. Reopening the
+    // hold would expose another collection rail while Stripe may already have
+    // the money. chargeInvoiceWithSavedCard parks the invoice centrally; this
+    // defensive update protects older/mocked implementations too.
+    const reconciliationRequired = StripeService.savedCardChargeNeedsReconciliation(err);
+    const suppressAlternateCollection = StripeService.savedCardChargeSuppressesAlternateCollection(err);
+    if (reconciliationRequired) {
+      await db('invoices').where({ id: invoiceId })
+        .whereNotIn('status', ['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled'])
+        .update({
+          status: 'processing',
+          ...(err.stripePaymentIntentId ? { stripe_payment_intent_id: err.stripePaymentIntentId } : {}),
+          updated_at: db.fn.now(),
+        }).catch(() => {});
       await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
         .update({
           status: 'charge_review',
@@ -423,8 +431,23 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId }) {
           charged_at: db.fn.now(),
           updated_at: db.fn.now(),
         }).catch(() => {});
-      logger.error('[estimate-card-holds] completion charge hit STRIPE_CHARGED_DB_FAILED — parked charge_review, NOT retryable', { scheduledServiceId, paymentIntentId: err.stripePaymentIntentId });
+      logger.error('[estimate-card-holds] completion charge requires reconciliation — invoice processing + hold charge_review, NOT retryable', { scheduledServiceId, code: err.code, paymentIntentId: err.stripePaymentIntentId });
       return { charged: false, reason: 'charge_review', error: err.message };
+    }
+    if (suppressAlternateCollection) {
+      // This request still suppresses its alternate pay-link response, but a
+      // fresh collision is not proof that money moved. Return the hold to its
+      // retryable state so a deterministic decline by the owning request does
+      // not strand the completed visit in manual review.
+      await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
+        .update({
+          status: 'held',
+          completion_payment_intent_id: null,
+          charged_amount: null,
+          updated_at: db.fn.now(),
+        }).catch(() => {});
+      logger.warn('[estimate-card-holds] completion charge already in progress — hold restored for retry and this request suppresses alternate collection', { scheduledServiceId });
+      return { charged: false, reason: 'charge_in_progress', error: err.message };
     }
     // Genuine pre-charge failure (no money moved) — safe to retry later.
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
@@ -534,7 +557,7 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
   const result = await chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId });
   // Surface a declined / ambiguous card charge — the recap flow has no pay-link
   // state to fall back on, so without this a stranded draft goes unnoticed.
-  if (result?.reason === 'charge_failed' || result?.reason === 'charge_review') {
+  if (['charge_failed', 'charge_review', 'charge_in_progress'].includes(result?.reason)) {
     await alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId: hold.customer_id, reason: result.reason });
   }
   return result;

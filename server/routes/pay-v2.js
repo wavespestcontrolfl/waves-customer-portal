@@ -101,6 +101,32 @@ function respondWithPaymentError(req, res, {
   return res.status(statusCode).json({ error: clientMessage || message || error?.message || 'Payment error' });
 }
 
+async function rejectIfSavedCardCollectionPending(invoice, res) {
+  try {
+    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    return false;
+  } catch (err) {
+    if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+    const reconciliationRequired = StripeService.savedCardChargeNeedsReconciliation(err);
+    if (reconciliationRequired) {
+      // A stale claim is promoted to ambiguity by the fence lookup. Persist
+      // that state on the invoice too, so status-only collection paths that do
+      // not know about the attempt table cannot open another payment rail.
+      await StripeService.parkInvoiceForSavedCardReconciliation({
+        invoiceId: invoice.id,
+        error: err,
+      });
+    }
+    res.status(409).json({
+      error: 'A saved payment method attempt is in progress or awaiting verification. Please do not pay again yet.',
+      inProgress: false,
+      savedCardPending: true,
+      reconciliationRequired,
+    });
+    return true;
+  }
+}
+
 // =========================================================================
 // GET /api/pay/:token — Invoice data + processor info + Stripe key
 // =========================================================================
@@ -377,6 +403,10 @@ router.post('/:token/setup', async (req, res, next) => {
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
+    // A committed saved-card claim is a cross-rail fence, not only a guard
+    // for repeated saved-card clicks. Do not mint a public PaymentIntent
+    // while an off-session charge is active or awaiting reconciliation.
+    if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -467,6 +497,8 @@ router.post('/:token/setup', async (req, res, next) => {
         error: err.message,
         inProgress: !!err.inProgress,
         microdepositPending: !!err.microdepositPending,
+        savedCardPending: !!err.savedCardPending,
+        reconciliationRequired: !!err.reconciliationRequired,
       });
     }
     logger.error(`[pay-v2] Setup error: ${err.message}`);
@@ -499,6 +531,10 @@ router.post('/:token/update-amount', async (req, res, next) => {
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
+    // An older pay-page PI can outlive the page that minted it. Fence every
+    // route that can mutate that PI while a saved-card collection owns the
+    // invoice, not only the route that creates new PIs.
+    if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -555,6 +591,7 @@ router.post('/:token/quote', async (req, res, next) => {
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
+    if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -592,6 +629,7 @@ router.post('/:token/finalize', async (req, res, next) => {
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
+    if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
       assertInvoiceCollectible(invoice.status);
     } catch (err) {
@@ -603,6 +641,14 @@ router.post('/:token/finalize', async (req, res, next) => {
     res.json(result);
   } catch (err) {
     logger.error(`[pay-v2] Finalize error: ${err.message}`);
+    if (err.statusCode === 409 && err.savedCardPending) {
+      return res.status(409).json({
+        error: err.message,
+        inProgress: false,
+        savedCardPending: true,
+        reconciliationRequired: !!err.reconciliationRequired,
+      });
+    }
     reportBillPaymentError(req, {
       invoice,
       phase: 'finalize',
@@ -632,6 +678,7 @@ router.post('/:token/confirm', async (req, res, next) => {
     if (invoice.payer_statement_id) {
       return res.status(400).json({ error: 'This charge is billed on the monthly statement; pay the statement, not the individual invoice.' });
     }
+    if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
         assertInvoiceCollectible(invoice.status);

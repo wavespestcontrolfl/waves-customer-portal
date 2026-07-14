@@ -24,7 +24,14 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
 jest.mock('./stripe-webhook-helpers', () => ({ classifyExistingWebhookEvent: jest.fn(), STALE_CLAIM_WINDOW_MS: 60000 }), { virtual: true });
-jest.mock('../routes/stripe-webhook-helpers', () => ({ classifyExistingWebhookEvent: jest.fn(), STALE_CLAIM_WINDOW_MS: 60000 }));
+jest.mock('../routes/stripe-webhook-helpers', () => ({
+  classifyExistingWebhookEvent: jest.fn(),
+  invoicePaymentIntentBlocksFallback: jest.fn(() => false),
+  lateSavedCardPaymentNeedsOrphan: jest.fn(() => false),
+  savedCardAttemptMatchesPaymentIntent: jest.fn(() => false),
+  savedCardCreditAdjustment: jest.fn(() => null),
+  STALE_CLAIM_WINDOW_MS: 60000,
+}));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn() }));
@@ -45,7 +52,60 @@ jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed:
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
-const { _handleRefundFailed: handleRefundFailed, _handleChargeRefunded: handleChargeRefunded } = require('../routes/stripe-webhook');
+const {
+  _handleRefundFailed: handleRefundFailed,
+  _handleChargeRefunded: handleChargeRefunded,
+  _resolveOrphanSucceededPaymentIntentIfSettled: resolveOrphanSucceededPaymentIntentIfSettled,
+} = require('../routes/stripe-webhook');
+
+describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('resolves a quarantined public PaymentIntent only after that exact intent settled the invoice', async () => {
+    const orphanUpdate = jest.fn().mockResolvedValue(1);
+    const makeLookup = (row) => {
+      const query = {
+        where: jest.fn(() => query),
+        first: jest.fn(async () => row),
+      };
+      return query;
+    };
+    const invoiceQuery = makeLookup({ id: 'inv-1' });
+    const paymentQuery = makeLookup({ id: 'pay-1' });
+    const orphanQuery = {
+      where: jest.fn(() => orphanQuery),
+      update: orphanUpdate,
+    };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoiceQuery;
+      if (table === 'payments') return paymentQuery;
+      if (table === 'stripe_orphan_charges') return orphanQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+
+    await expect(resolveOrphanSucceededPaymentIntentIfSettled('pi_public')).resolves.toBe(true);
+    expect(invoiceQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_public', status: 'paid' });
+    expect(paymentQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_public', status: 'paid' });
+    expect(orphanQuery.where).toHaveBeenCalledWith({ stripe_payment_intent_id: 'pi_public', resolved: false });
+    expect(orphanUpdate).toHaveBeenCalledWith(expect.objectContaining({ resolved: true }));
+  });
+
+  test('leaves quarantine open when a competing saved-card intent settled instead', async () => {
+    const invoiceQuery = {
+      where: jest.fn(() => invoiceQuery),
+      first: jest.fn(async () => null),
+    };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoiceQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+
+    await expect(resolveOrphanSucceededPaymentIntentIfSettled('pi_public')).resolves.toBe(false);
+    expect(db).not.toHaveBeenCalledWith('stripe_orphan_charges');
+  });
+});
 
 describe('handleRefundFailed', () => {
   let paymentRow;
