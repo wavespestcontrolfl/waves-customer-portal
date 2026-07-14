@@ -12,6 +12,7 @@ const {
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
+const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
@@ -107,6 +108,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // flip must re-render cached mosquito-report PDFs. Env + service line only —
   // immutable per render, no race re-check.
   const mosquitoV2Signature = mosquitoReportV2PdfSignature(service);
+  // Same for PEST_REPORT_V2 — the pest gate predates this key component, so
+  // pest PDFs cached pre-dashboard re-render once on next view.
+  const pestV2Signature = pestReportV2PdfSignature(service);
   let pdf;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
@@ -138,7 +142,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
   try {
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature,
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -168,7 +172,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service),
     })
     : null;
   const stored = service?.pdf_storage_key === expectedPdfStorageKey

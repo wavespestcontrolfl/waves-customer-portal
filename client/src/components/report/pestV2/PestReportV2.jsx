@@ -90,21 +90,50 @@ const eyebrow = {
   marginBottom: 8,
 };
 
-// Pressure trend reads inverted: DOWN is good (fewer pests). Forecast trend reads
-// straight: UP is the thing to watch. `goodWhenDown` flips the color.
-function TrendArrow({ trend, goodWhenDown = false }) {
-  if (!trend || trend === 'flat' || trend === 'stable' || trend === 'insufficient_data') return null;
-  const up = trend === 'up' || trend === 'worsening';
-  const arrow = up ? '▲' : '▼';
-  const isGood = goodWhenDown ? !up : up === false;
-  const color = isGood ? COLORS.green : (up ? COLORS.red : COLORS.green);
-  return <span style={{ color, fontSize: 11, marginLeft: 4 }}>{arrow}</span>;
+// Trend arrow across the two vocabularies this dashboard receives: the
+// seasonal forecast emits up/down/flat, while Pest Pressure trends
+// (pest-pressure/trend.js) emit improving / increasing /
+// significant_increase / stable / first_marker / insufficient_data — the
+// old up/down-only check rendered a worsening "increasing" pressure trend
+// as a green down arrow (same codex finding as Mosquito V2). Directional
+// reads: UP = more pests (red), DOWN = fewer (green); non-directional
+// states render nothing.
+const TREND_UP = new Set(['up', 'worsening', 'increasing', 'significant_increase']);
+const TREND_DOWN = new Set(['down', 'improving', 'decreasing', 'significant_decrease']);
+function TrendArrow({ trend }) {
+  const up = TREND_UP.has(trend);
+  if (!up && !TREND_DOWN.has(trend)) return null;
+  return (
+    <span style={{ color: up ? COLORS.red : COLORS.green, fontSize: 11, marginLeft: 4 }}>
+      {up ? '▲' : '▼'}
+    </span>
+  );
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
 export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
+  // The rating POST returns a recalculated pestPressure (possibly turning an
+  // insufficient reading into a real score) — hold the displayed metric in
+  // state so a successful submit can refresh it without a full reload (the
+  // standalone PestPressureCard that used to own this is suppressed when the
+  // dashboard renders). Parity with the same codex finding on Mosquito V2.
+  const [metric, setMetric] = useState(supportingMetric);
+  useEffect(() => { setMetric(supportingMetric); }, [supportingMetric]);
   if (!status) return null;
   const t = tone(status.tone);
+  const refreshFromPestPressure = (pestPressure) => {
+    if (!pestPressure) return;
+    const score = pestPressure.displayScore ?? pestPressure.score;
+    if (score == null) return;
+    setMetric((prev) => ({
+      ...(prev || { kind: 'pressure', caption: 'Pest pressure', rating: null, submittedRating: null }),
+      kind: 'pressure',
+      score: String(score),
+      max: pestPressure.maxScore || 5,
+      label: pestPressure.label || null,
+      trend: pestPressure.trend || null,
+    }));
+  };
   return (
     <section data-glass="card" style={{ ...card, background: t.wash, border: `1px solid ${t.border}` }}>
       <div data-gt="eyebrow" style={eyebrow}>Today’s protection status</div>
@@ -115,8 +144,17 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       {statusSummary ? (
         <p style={{ fontSize: 15, color: BODY, lineHeight: 1.5, margin: '10px 0 0' }}>{statusSummary}</p>
       ) : null}
-      {supportingMetric ? <SupportingMetric metric={supportingMetric} /> : null}
-      <PestPressureRating metric={supportingMetric} token={token} live={mode === 'live'} />
+      {/* The score pill hides when the reading is still insufficient (score
+          null) — the metric may then exist solely to carry the rating picker. */}
+      {metric && (metric.score != null || metric.label)
+        ? <SupportingMetric metric={metric} />
+        : null}
+      <PestPressureRating
+        metric={supportingMetric}
+        token={token}
+        live={mode === 'live'}
+        onRefreshed={refreshFromPestPressure}
+      />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
       ) : null}
@@ -137,17 +175,27 @@ function SupportingMetric({ metric }) {
       <span style={{ fontFamily: FONTS.body, fontWeight: 700, fontSize: 18, color: TEXT }}>{value}</span>
       {showOutOf ? <span style={{ fontSize: 12, color: MUTED }}>/ {metric.max}</span> : null}
       {metric.label && metric.score != null ? <span style={{ fontSize: 12, color: MUTED }}>· {metric.label}</span> : null}
-      <TrendArrow trend={metric.trend} goodWhenDown />
+      <TrendArrow trend={metric.trend} />
     </div>
   );
 }
 
 // One-shot customer calibration (replaces the suppressed legacy PestPressureCard
 // picker). Posts to the same token route; live mode only; hides once submitted.
-function PestPressureRating({ metric, token, live }) {
+function PestPressureRating({ metric, token, live, onRefreshed }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // Client-side navigation to another /report/:token reuses this mounted
+  // component — re-derive the one-shot state from the new report's payload so
+  // a rating submitted on the previous report doesn't hide this one's picker
+  // (matches the legacy PestPressureCard's token reset; same codex finding
+  // as Mosquito V2).
+  useEffect(() => {
+    setSubmitted(Boolean(metric && metric.submittedRating != null));
+    setBusy(false);
+    setFailed(false);
+  }, [token, metric && metric.submittedRating]);
   if (!metric || metric.kind !== 'pressure') return null;
   if (submitted) {
     return <div style={{ marginTop: 12, fontSize: 13, color: COLORS.green, fontWeight: 600 }}>Thanks — your input helps us calibrate your protection plan.</div>;
@@ -163,8 +211,15 @@ function PestPressureRating({ metric, token, live }) {
       });
       // 409 = already recorded (another tab/device) — show the thank-you,
       // not a dead picker.
-      if (res.ok || res.status === 409) setSubmitted(true);
-      else setFailed(true);
+      if (res.ok || res.status === 409) {
+        setSubmitted(true);
+        // The route recalculates the score with the new signal and returns
+        // the updated pestPressure — surface it (legacy card parity).
+        if (res.ok && onRefreshed) {
+          const body = await res.json().catch(() => null);
+          if (body?.pestPressure) onRefreshed(body.pestPressure);
+        }
+      } else setFailed(true);
     } catch { setFailed(true); } finally { setBusy(false); }
   };
   return (
