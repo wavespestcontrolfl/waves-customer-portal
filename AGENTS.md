@@ -292,6 +292,13 @@ finding and warns on P1. Reviewers must return JSON matching
   `/api/public/prep/:token` (read-only, 32-hex token format gate,
   60 req/min rate limit, privacy headers `no-store`/`noindex`/`no-referrer`,
   filters email-only blocks, server-side interpolation, generic 404),
+  `/api/public/prep/:token/pdf` (downloadable PDF twin of the prep page —
+  action-bar Download parity with service reports; same 32-hex token format
+  gate, same 60 req/min limiter, same privacy headers, generic 404; payload
+  is the SAME interpolated guide blocks plus customer name + service
+  address + technician first name/name — never email or phone (owner PII
+  ruling 2026-07-13); filename sanitized server-side before
+  Content-Disposition; no view-analytics writes on this route),
   `/api/public/price-change/:token` (price-change notice page data;
   32-hex token format gate, 60 req/min rate limit, privacy headers
   `no-store`/`noindex`/`no-referrer`, generic 404; payload is first name +

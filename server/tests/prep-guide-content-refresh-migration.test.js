@@ -97,12 +97,19 @@ describe('publish mechanics', () => {
       if (table === 'email_template_versions') {
         let filters = {};
         const q = {
-          where: jest.fn((f) => { Object.assign(filters, f); return q; }),
+          where: jest.fn((a, b, c) => {
+            if (typeof a === 'object') Object.assign(filters, a);
+            else if (a === 'version_number' && b === '<') filters.versionBelow = c;
+            return q;
+          }),
           whereNot: jest.fn(() => q),
           orderBy: jest.fn(() => q),
           first: jest.fn(async () => {
             if (filters.id) return state.versions.find((v) => v.id === filters.id) || null;
-            return [...state.versions].sort((a, b) => b.version_number - a.version_number)[0] || null;
+            let rows = [...state.versions];
+            if (filters.status) rows = rows.filter((v) => v.status === filters.status);
+            if (filters.versionBelow !== undefined) rows = rows.filter((v) => v.version_number < filters.versionBelow);
+            return rows.sort((a, b) => b.version_number - a.version_number)[0] || null;
           }),
           insert: jest.fn((row) => ({
             returning: jest.fn(async () => {
@@ -148,6 +155,35 @@ describe('publish mechanics', () => {
     expect(state.versionUpdates.some((u) => u.patch.status === 'archived')).toBe(true);
     // pointer flipped
     expect(state.templateUpdates.some((u) => u.active_version_id === 'v-new-0')).toBe(true);
+    // migration marker present so down() can identify its own versions
+    expect(JSON.parse(state.inserted[0].validation_snapshot).source).toBe('migration:20260715000001');
+  });
+
+  test('down leaves an admin publication (no marker) alone', async () => {
+    const { knex, state } = makeKnex();
+    state.step = { id: 's-1', html_body: 'unrelated', text_body: '' };
+    // Active version was published by an admin — no snapshot marker.
+    state.versions = [{ id: 'v-1', template_id: 't-1', version_number: 9, status: 'active', validation_snapshot: '{"ok":true}', blocks: '[]' }];
+    state.template.active_version_id = 'v-1';
+
+    await migration.down(knex);
+
+    expect(state.templateUpdates).toHaveLength(0);
+    expect(state.versionUpdates).toHaveLength(0);
+  });
+
+  test('down reactivates the prior version when the marker matches', async () => {
+    const { knex, state } = makeKnex();
+    state.step = { id: 's-1', html_body: 'unrelated', text_body: '' };
+    state.versions = [
+      { id: 'v-old', template_id: 't-1', version_number: 3, status: 'archived', validation_snapshot: '{}', blocks: '[]' },
+      { id: 'v-mig', template_id: 't-1', version_number: 4, status: 'active', validation_snapshot: JSON.stringify({ ok: true, source: 'migration:20260715000001' }), blocks: '[]' },
+    ];
+    state.template.active_version_id = 'v-mig';
+
+    await migration.down(knex);
+
+    expect(state.templateUpdates.some((u) => u.active_version_id === 'v-old')).toBe(true);
   });
 
   test('step swap is exact-match only (admin-edited body untouched)', async () => {

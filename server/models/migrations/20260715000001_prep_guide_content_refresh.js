@@ -31,6 +31,22 @@
 
 const json = (v) => JSON.stringify(v);
 
+// Stamped into validation_snapshot.source on versions this migration
+// publishes so down() can identify its OWN versions exactly — never a
+// later admin publication that happens to carry identical blocks
+// (created_by is a technician-uuid FK, so the marker lives here; the
+// snapshot column is write-only storage and seeds already populate it).
+const MIGRATION_MARKER = 'migration:20260715000001';
+
+function snapshotSource(version) {
+  try {
+    const snap = typeof version.validation_snapshot === 'string'
+      ? JSON.parse(version.validation_snapshot)
+      : version.validation_snapshot;
+    return snap?.source || null;
+  } catch { return null; }
+}
+
 const p = (content) => ({ type: 'paragraph', content });
 const h = (content) => ({ type: 'heading', content });
 const callout = (content) => ({ type: 'callout', content });
@@ -297,6 +313,13 @@ async function publishVersion(knex, key, blocks) {
     preview_text: prior?.preview_text || null,
     blocks: json(blocks),
     text_body: null,
+    validation_snapshot: json({
+      ok: true,
+      source: MIGRATION_MARKER,
+      referenced_variables: [],
+      disallowed_variables: [],
+      missing_required_in_template: [],
+    }),
     published_at: now,
   }).returning('*');
   await knex('email_template_versions')
@@ -350,9 +373,10 @@ exports.down = async function down(knex) {
       const template = await knex('email_templates').where({ template_key: t.key }).first();
       if (!template?.active_version_id) continue;
       const current = await knex('email_template_versions').where({ id: template.active_version_id }).first();
-      if (!current || JSON.stringify(JSON.parse(JSON.stringify(t.blocks))) !== JSON.stringify(
-        typeof current.blocks === 'string' ? JSON.parse(current.blocks) : current.blocks,
-      )) continue; // admin republished since: leave alone
+      // Only roll back a version THIS migration created (snapshot marker)
+      // — an admin publication after the migration, even with identical
+      // blocks, is left alone.
+      if (!current || snapshotSource(current) !== MIGRATION_MARKER) continue;
       const prior = await knex('email_template_versions')
         .where({ template_id: template.id, status: 'archived' })
         .where('version_number', '<', current.version_number)
