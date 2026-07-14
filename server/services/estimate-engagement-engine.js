@@ -111,12 +111,22 @@ function categoryEligible(est, rule) {
 
 // Idempotent enqueue: the partial unique index (one pending job per
 // estimate+rule) absorbs duplicate triggers; a rule already SENT for this
-// estimate never re-enqueues.
+// estimate never re-enqueues; neither does one whose job already reached a
+// TERMINAL state (done/shadow/skipped/failed) — one job lifecycle per
+// (estimate, rule), so shadow mode consumes candidates exactly once
+// (codex 2736 r1: without this, every sweep tick re-shadowed the same
+// candidate, inflating volume counts and letting a shadow-consumed
+// candidate send after a mid-window gate flip).
 async function enqueueJob(estimateId, rule, dueAt, trigger) {
   const alreadySent = await db('estimate_followup_sends')
     .where({ estimate_id: estimateId, rule_key: rule.rule_key })
     .first('id');
   if (alreadySent) return false;
+  const priorJob = await db('estimate_followup_jobs')
+    .where({ estimate_id: estimateId, rule_key: rule.rule_key })
+    .whereNot({ status: 'pending' })
+    .first('id');
+  if (priorJob) return false;
   const rows = await db('estimate_followup_jobs')
     .insert({
       estimate_id: estimateId,
@@ -236,6 +246,33 @@ async function sweepTimeRules(now = new Date()) {
 
 // ── Job processor ────────────────────────────────────────────────────────
 
+// Time-sweep predicates re-checked at PROCESS time (codex 2736 r1): a job
+// queued in-window can go stale before it fires — the customer opens the
+// "unopened" estimate, returns to the "gone quiet" one, or the expiry date
+// moves. Judge the CURRENT row; a stale job skips instead of sending copy
+// that's no longer true. View-event rules need no re-check here — their
+// trigger is a historical fact (the return visit happened) and the generic
+// gates cover everything current. Only the wrong-copy bound is enforced
+// (e.g. gone-quiet's min bound, not its sweep-window max — a late-processed
+// job's copy is still true).
+function rulePredicateStillHolds(est, rule, nowMs) {
+  const p = rule.params;
+  if (rule.trigger_type !== 'time_sweep') return true;
+  if (rule.rule_key === 'delivery_unopened_24h') {
+    return est.status === 'sent' && !est.viewed_at;
+  }
+  if (rule.rule_key === 'viewed_gone_quiet_72h') {
+    const lastView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
+    return !!lastView && nowMs - lastView >= p.minQuietHours * 3600000;
+  }
+  if (rule.rule_key === 'expiring_engaged' || rule.rule_key === 'expiring_never_viewed') {
+    const expires = est.expires_at ? new Date(est.expires_at).getTime() : 0;
+    if (!expires || expires <= nowMs || expires >= nowMs + p.expiresWithinDays * 86400000) return false;
+    return rule.rule_key === 'expiring_engaged' ? !!est.viewed_at : !est.viewed_at;
+  }
+  return true;
+}
+
 async function markJob(jobId, status, reason, extra = {}) {
   await db('estimate_followup_jobs')
     .where({ id: jobId })
@@ -288,6 +325,10 @@ async function processDueJobs(now = new Date()) {
       }
       if (!categoryEligible(est, rule)) {
         await markJob(job.id, 'skipped', 'category-ineligible');
+        continue;
+      }
+      if (!rulePredicateStillHolds(est, rule, nowMs)) {
+        await markJob(job.id, 'skipped', 'stale-condition');
         continue;
       }
       // Mid-read hold: they're literally on the page — try again shortly.
@@ -388,6 +429,19 @@ async function processDueJobs(now = new Date()) {
           logger.error(`[est-engage] claim release failed for job ${job.id}: ${releaseErr.message}`);
         }
       }
+      // Poison-job guard (codex 2736 r1): an unexpected error must not leave
+      // the row pending with an elapsed due_at — it would head the
+      // due_at-ordered batch every tick and eventually starve valid jobs.
+      // Count the attempt and defer; give up after the bounded retries.
+      try {
+        if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
+          await markJob(job.id, 'failed', `error:${err.message}`.slice(0, 128), { attempts: db.raw('attempts + 1') });
+        } else {
+          await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), { countAttempt: true });
+        }
+      } catch (markErr) {
+        logger.error(`[est-engage] poison-guard update failed for job ${job.id}: ${markErr.message}`);
+      }
     }
   }
   if (sent > 0 || shadow > 0) {
@@ -406,6 +460,7 @@ module.exports._private = {
   categoryEligible,
   enqueueJob,
   parseParams,
+  rulePredicateStillHolds,
   ENGINE_LIMITS,
   DEFAULT_RULE_PARAMS,
 };

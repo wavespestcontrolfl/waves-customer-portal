@@ -63,7 +63,7 @@ const writes = [];
 function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
-    'join', 'whereIn', 'whereNotNull', 'whereNull', 'where', 'select',
+    'join', 'whereIn', 'whereNotNull', 'whereNull', 'where', 'whereNot', 'select',
     'orderBy', 'limit', 'whereNotExists', 'whereRaw', 'onConflict', 'ignore',
     'returning', 'as', 'distinctOn',
   ]) {
@@ -119,8 +119,8 @@ function baseEstimate(overrides = {}) {
     customer_name: 'Taylor Doe',
     customer_email: 'taylor@example.com',
     token: 'tok-xyz',
-    viewed_at: new Date(NOW.getTime() - 26 * H),
-    last_viewed_at: new Date(NOW.getTime() - 26 * H),
+    viewed_at: new Date(NOW.getTime() - 80 * H),
+    last_viewed_at: new Date(NOW.getTime() - 80 * H),
     ...overrides,
   };
 }
@@ -166,6 +166,7 @@ describe('onEstimateViewed (view-event rules)', () => {
       session('2026-06-10T14:55:00Z'),
     ]);
     enqueue('estimate_followup_sends', { first: undefined }); // not already sent
+    enqueue('estimate_followup_jobs', { first: undefined });     // no prior terminal job
     enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
@@ -183,6 +184,7 @@ describe('onEstimateViewed (view-event rules)', () => {
       session('2026-06-10T14:55:00Z'),
     ]);
     enqueue('estimate_followup_sends', { first: undefined });
+    enqueue('estimate_followup_jobs', { first: undefined });
     enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
@@ -200,6 +202,7 @@ describe('onEstimateViewed (view-event rules)', () => {
     ]);
     // high intent is the only match (3 sessions ≠ exactly 2; last gap < 3d)
     enqueue('estimate_followup_sends', { first: undefined });
+    enqueue('estimate_followup_jobs', { first: undefined });
     enqueue('estimate_followup_jobs', { insert: [{ id: 'job-1' }] });
 
     await Engine.onEstimateViewed(baseEstimate(), NOW);
@@ -219,6 +222,20 @@ describe('onEstimateViewed (view-event rules)', () => {
     await Engine.onEstimateViewed(baseEstimate(), NOW);
 
     expect(writes.filter((w) => w.table === 'estimate_followup_jobs')).toHaveLength(0);
+  });
+
+  test('a shadow-consumed (terminal) job blocks re-enqueue — one lifecycle per estimate+rule', async () => {
+    enqueueViewRules();
+    sessionsForEstimate.mockResolvedValue([
+      session('2026-06-10T12:00:00Z', '2026-06-10T12:10:00Z'),
+      session('2026-06-10T14:55:00Z'),
+    ]);
+    enqueue('estimate_followup_sends', { first: undefined });
+    enqueue('estimate_followup_jobs', { first: { id: 'prior-shadow-job' } }); // consumed last tick
+
+    await Engine.onEstimateViewed(baseEstimate(), NOW);
+
+    expect(writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'insert')).toHaveLength(0);
   });
 
   test('terminal/archived/email-less estimates never evaluate', async () => {
@@ -340,6 +357,7 @@ describe('processDueJobs', () => {
 
   test('actively-viewing customers defer instead of getting emailed mid-read', async () => {
     enqueueProcessorHappyPath({
+      job: pendingJob({ rule_key: 'return_visit_hot' }),
       est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
     });
 
@@ -373,6 +391,46 @@ describe('processDueJobs', () => {
     expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
     const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(defer.payload.status).toBeUndefined(); // deferred, not failed (attempt 1 of 5)
+  });
+
+  test('a gone-quiet job goes stale when the customer returns before it fires', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 2 * H) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('an unopened job goes stale once the estimate is viewed', async () => {
+    const UNOPENED_RULE = { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', priority: 40, template_key: 'estimate.engage_unopened', params: {} };
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'delivery_unopened_24h' })] });
+    enqueue('estimate_followup_rules', { rows: [UNOPENED_RULE] });
+    enqueue('estimates', { first: baseEstimate({ status: 'viewed' }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+  });
+
+  test('an unexpected per-job error defers the job out of the due batch (poison guard)', async () => {
+    customerConvertedSince.mockRejectedValue(new Error('db hiccup'));
+    enqueueProcessorHappyPath();
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined(); // still pending, but...
+    expect(defer.payload.due_at).toBeInstanceOf(Date);
+    expect(defer.payload.due_at.getTime()).toBeGreaterThan(NOW.getTime()); // ...bumped out of the batch
+    expect(defer.payload.attempts).toBeDefined(); // attempt counted toward the 5-try cap
   });
 
   test('inactive estimate (accepted since enqueue) skips', async () => {
