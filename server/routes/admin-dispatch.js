@@ -5314,9 +5314,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             alreadyPaid = true;
             invoiceCreated = false;
             payUrl = null;
-            // A pre-existing receipt_sent_at means another path already sent
-            // this invoice's receipt — the combined text must not restate it.
-            autoChargedReceiptPending = combinedReceiptArmed && !invoice.receipt_sent_at;
+            // Combined receipt only for an ACTUAL card charge ('paid'): a
+            // 'prepaid' outcome means account credit covered the invoice
+            // with no Stripe charge and no receipt job enqueued — a
+            // combined "payment" text would cite $0/no card and stamp a
+            // receipt nothing is queued to back. A pre-existing
+            // receipt_sent_at means another path already sent this
+            // invoice's receipt — never restate it.
+            autoChargedReceiptPending = combinedReceiptArmed
+              && freshStatus === 'paid'
+              && !invoice.receipt_sent_at;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
                 details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
@@ -5620,7 +5627,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // through the GATE_AUTOPAY_CUSTOMER_SMS rollout gate like every other
     // automated-charge customer text.
     let paymentFailedNoticeSent = false;
-    if (paymentFailedSmsContext && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
+    // Resume dedupe: the side-effects resume path reruns the auto-charge, so
+    // a crash after this notice delivered but before the completion attempt
+    // was marked succeeded would text the same decline twice. 'sending' also
+    // counts as handled for DEDUPE (a crash mid-send has an unknown outcome
+    // and a duplicate payment text is worse than a drop — the admin
+    // payment-failed bell covers the drop), but only a confirmed 'sent'
+    // suppresses the completion SMS's pay link.
+    const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
+    if (priorPaymentFailedNoticeStatus === 'sent') {
+      paymentFailedNoticeSent = true;
+    } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
+      && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id) {
       try {
@@ -5645,6 +5663,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           entity_id: record.id,
         });
         if (paymentFailedBody) {
+          // Durable 'sending' marker BEFORE the send — the resume-dedupe
+          // above keys off it. Mutate the in-memory notes too so the later
+          // completion-SMS writes (which spread recordStructuredNotes)
+          // carry the marker forward instead of clobbering it.
+          recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
+          recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: serializeJsonb(recordStructuredNotes),
+          });
           const failResult = await sendCustomerMessage({
             to: svc.cust_phone,
             body: paymentFailedBody,
@@ -5658,8 +5685,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
           });
           paymentFailedNoticeSent = !!failResult.sent;
+          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
+          if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+          else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: serializeJsonb(recordStructuredNotes),
+          }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
+          record.structured_notes = recordStructuredNotes;
           if (!failResult.sent) {
             logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
+          } else {
+            // The notice DELIVERED the pay link — the invoice must finalize
+            // exactly as if the completion SMS had carried it (draft →
+            // sent, sent_at/sms_sent_at, lead-conversion updates), because
+            // the completion SMS below now goes report-only.
+            try {
+              const InvoiceService = require('../services/invoice');
+              invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                sms: true,
+                source: 'payment_failed_notice',
+                payUrl,
+              });
+            } catch (statusErr) {
+              logger.warn(`[dispatch] invoice delivery status sync after payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
+            }
           }
         }
       } catch (failErr) {
@@ -5797,11 +5846,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               entity_id: record.id,
             };
             let body = null;
-            if (autoChargedReceiptPending) {
+            // Re-check the receipt-text prefs at selection time: the
+            // pre-charge probe can go stale in the window before this send,
+            // and the combined text carries receipt facts under the
+            // completion purpose — an opt-out flipped in between must win.
+            // Skipping here is safe either way: no claim gets stamped, so
+            // the DEFERRED receipt job enforces the receipt policy itself.
+            if (autoChargedReceiptPending && await customerWantsReceiptTexts(svc.customer_id)) {
               // This completion's auto-charge settled inline and the combined
               // template is active: ONE text carries the report and the
-              // receipt facts (amount, card, receipt link); the queued
-              // separate receipt text was stood down at charge time.
+              // receipt facts (amount, card, receipt link); the receipt job
+              // was enqueued deferred and skips its SMS leg only after the
+              // confirmed-delivery claim below.
               try {
                 const InvoiceService = require('../services/invoice');
                 const receiptFacts = await InvoiceService.receiptSmsFacts(invoice);
