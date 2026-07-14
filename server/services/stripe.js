@@ -1532,7 +1532,16 @@ const StripeService = {
    * @param {string} paymentMethodId — payment_methods.id (our internal UUID)
    * @returns {object} payments row
    */
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId) {
+  // opts.deferReceiptDelivery — the dispatch completion flow sets this when
+  // its combined report+receipt SMS is armed: the receipt job is enqueued a
+  // few minutes out instead of immediately, giving the completion text the
+  // window to deliver the receipt facts and claim receipt_sent_at AFTER
+  // confirmed delivery. Crash-safe by construction: nothing is stamped up
+  // front, so if the combined text never delivers (crash, block, template
+  // deactivated), the deferred job sends the classic receipt when it comes
+  // due. The email leg rides the same job — a few minutes late, unchanged
+  // otherwise.
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -1924,12 +1933,22 @@ const StripeService = {
 
       try {
         const ReceiptDeliveryQueue = require('./receipt-delivery-queue');
+        // See the deferReceiptDelivery doc on this method. 3 minutes covers
+        // the completion request's report/SMS work with slack; the extra
+        // delayed drain makes the deferred job self-serve even on a quiet
+        // instance (any later payment event also drains due jobs).
+        const RECEIPT_DEFER_MS = 3 * 60_000;
         await ReceiptDeliveryQueue.enqueueReceiptDelivery({
           invoiceId,
           stripePaymentIntentId: paymentIntent.id,
           source: 'card_on_file',
+          ...(deferReceiptDelivery ? { nextAttemptAt: new Date(Date.now() + RECEIPT_DEFER_MS) } : {}),
         });
-        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+        ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain(
+          deferReceiptDelivery
+            ? { delayMs: RECEIPT_DEFER_MS + 5_000, limit: 5 }
+            : { delayMs: 1000, limit: 5 },
+        );
       } catch (err) {
         logger.error(`[stripe] Card-on-file receipt queue failed for invoice ${invoice.invoice_number}: ${err.message}`);
       }
