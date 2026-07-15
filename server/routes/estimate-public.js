@@ -866,6 +866,44 @@ function oneTimeInvoiceLabelForCategory(category, fallback = 'One-time service')
   }
 }
 
+// Customer-facing copy for the SSR recurring/one-time mode toggle — MUST
+// mirror oneTimeToggleLabels + the lawn oneTimePriceCopy branch in
+// client/src/pages/EstimateViewPage.jsx (the SPA path renders the same
+// estimate after hydration): a lawn-only estimate must not offer
+// "One-Time Pest Control" or promise a pest callback on a turf treatment.
+// Bundles/unknown categories keep the legacy pest wording byte-identical.
+// `callbackNote: null` means the category renders NO one-time callback line
+// (the pest 30-day callback is a pest-service term, unratified elsewhere).
+function oneTimeToggleCopyForCategory(category) {
+  switch (category) {
+    case 'lawn_care': return {
+      groupLabel: 'Lawn service type',
+      recurringLabel: 'Recurring Lawn Program',
+      oneTimeLabel: 'One-Time Lawn Treatment',
+      oneTimeNote: 'One lawn treatment for the measured turf, pay on service day. No recurring schedule, no tier discount.',
+      callbackNote: null,
+      finalHeading: 'Go Waves! Wave Goodbye to Lawn Pests!',
+    };
+    case 'mosquito': return {
+      groupLabel: 'Mosquito service type',
+      recurringLabel: 'Recurring Mosquito Program',
+      oneTimeLabel: 'One-Time Mosquito Treatment',
+      oneTimeNote: 'One visit, pay on service day. No recurring schedule, no tier discount.',
+      callbackNote: 'Includes a 30-day callback period if pests return after this visit.',
+      finalHeading: 'Go Waves! Wave Goodbye to Mosquitoes!',
+    };
+    case 'tree_shrub': return {
+      groupLabel: 'Tree & shrub service type',
+      recurringLabel: 'Recurring Tree & Shrub Care',
+      oneTimeLabel: 'One-Time Tree & Shrub Visit',
+      oneTimeNote: 'One visit, pay on service day. No recurring schedule, no tier discount.',
+      callbackNote: 'Includes a 30-day callback period if pests return after this visit.',
+      finalHeading: 'Ready to book?',
+    };
+    default: return null; // pest/bundle/unknown → legacy pest strings inline in the template
+  }
+}
+
 function oneTimeInvoiceRowLabel(row = {}) {
   return String(row.displayName || row.label || row.name || row.service || '').trim();
 }
@@ -3744,6 +3782,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const showOneTimeOption = !!est.showOneTimeOption;
   const oneTimeChoicePrice = Number(est.oneTimeChoicePrice || 0);
   const canChooseOneTime = showOneTimeOption && oneTimeChoicePrice > 0;
+  // Category-aware toggle wording (codex P2 on #2754): the SSR page is what a
+  // customer opens from the sent link — it must match the SPA's category
+  // labels, or a lawn estimate offers "One-Time Pest Control".
+  const oneTimeChoiceCategory = canChooseOneTime ? serviceCategoryForOneTimeChoice(estData) : null;
+  const oneTimeToggleCopy = oneTimeToggleCopyForCategory(oneTimeChoiceCategory);
   const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, est);
   const displayPestOnly = canChooseOneTime && Number(pestRecurring?.monthlyBase || 0) > 0;
   const billingRecurring = displayPestOnly
@@ -4357,6 +4400,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {
     if (isWaveGuardSetupOneTimeItem(it)) return false;
     if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
+    // Non-pest choice shapes (lawn, mosquito, …): the ALTERNATE one-time
+    // choice row must not re-list under "billed separately" in recurring
+    // mode — the customer would read it as owed on top of the plan (codex
+    // r2; the React path hides the whole breakdown when showOneTimeOption).
+    // Pest keeps its dedicated matcher above.
+    if (canChooseOneTime && oneTimeChoiceCategory && oneTimeChoiceCategory !== 'pest_control'
+      && isOneTimeChoiceItemForCategory(it, oneTimeChoiceCategory)) return false;
     return true;
   });
   const displayableOneTimeItems = quoteRequired
@@ -4954,27 +5004,27 @@ ${shellTopBar()}
     ${customerEmail ? `<div class="hero-contact">${customerEmail}</div>` : ''}
     ${customerPhoneDisplay ? `<div class="hero-contact">${customerPhoneDisplay}</div>` : ''}
     ${canChooseOneTime ? `
-    <div class="mode-toggle" role="group" aria-label="Pest control service type">
-      <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">${escapeHtml(pestTierCadence || 'Recurring')} Pest Control</button>
-      <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">One-Time Pest Control</button>
+    <div class="mode-toggle" role="group" aria-label="${escapeHtml(oneTimeToggleCopy?.groupLabel || 'Pest control service type')}">
+      <button type="button" class="mode-btn is-active" data-mode-set="recurring" aria-pressed="true">${escapeHtml(oneTimeToggleCopy?.recurringLabel || `${pestTierCadence || 'Recurring'} Pest Control`)}</button>
+      <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</button>
     </div>` : ''}
     ${recurringHeroPriceHtml}
     ${canChooseOneTime ? `
     <div class="choice-treatment" data-mode-only="one_time" hidden>
-      <div class="choice-treatment-name">One-Time Pest Control</div>
+      <div class="choice-treatment-name">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</div>
       <div class="choice-treatment-detail">Single treatment</div>
       <div class="big-price choice-treatment-price">
         <span class="num" id="onetime-display">${fmtMoney(oneTimeChoicePrice)}</span>
         <span class="per">one-time</span>
       </div>
       <div class="onetime-note">
-        One visit, pay on service day. No recurring schedule, no tier discount.
+        ${escapeHtml(oneTimeToggleCopy?.oneTimeNote || 'One visit, pay on service day. No recurring schedule, no tier discount.')}
       </div>
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
     ${isOneTimeOnly && !hasOnlyBoraCareServices ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
-    ${canChooseOneTime ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>Includes a 30-day callback period if pests return after this visit.</div>` : ''}
+    ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
 
@@ -5186,7 +5236,7 @@ ${shellTopBar()}
   <div class="final">
     <h2${isOneTimeOnly ? '' : ' data-mode-only="recurring"'}>${escapeHtml(isOneTimeOnly ? 'Ready to book?' : pageCopy.finalHeading)}</h2>
     ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.finalHeading || 'Go Waves! Wave Goodbye to Pests!')}</h2>` : ''}
     ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">${commercialManualAccept ? 'Approve estimate' : 'Pick a time and book'}</button>`}
     <div style="margin-top:20px;font-size:14px">
@@ -16197,6 +16247,8 @@ module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
+module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
+module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

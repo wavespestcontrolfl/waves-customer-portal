@@ -286,13 +286,22 @@ function lawnScenario() {
   const lawnService = bundle.pricing.services.find((s) => s.key === 'lawn_care');
   return {
     ...bundle,
-    estimate: { ...bundle.estimate, serviceCategory: 'lawn_care' },
+    // Mirrors the real lawn-program + one-time-curative shape (e.g. a chinch
+    // knockdown quoted alongside the program): show_one_time_option on with a
+    // priced one_time_lawn row, so the harness exercises the recurring/one-time
+    // mode toggle on a lawn-only estimate.
+    estimate: { ...bundle.estimate, serviceCategory: 'lawn_care', showOneTimeOption: true },
     pricing: {
       ...bundle.pricing,
       services: [lawnService],
       renderFlags: { showRecurringSummary: false, showWaveGuardSetupFee: false, showPestRecurringAddOns: false },
       waveGuardTier: null,
       combinedRecurring: null,
+      anchorOneTimePrice: 174,
+      oneTimeBreakdown: {
+        total: 174,
+        items: [{ service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174, detail: 'Single treatment', kind: 'charge' }],
+      },
       askChips: ['What is included in the lawn program?', 'How fast will my lawn improve?', 'Are pets and kids safe?'],
     },
   };
