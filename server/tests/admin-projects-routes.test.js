@@ -993,6 +993,131 @@ describe('admin projects routes', () => {
     delete process.env.ANTHROPIC_API_KEY;
   });
 
+  // A minimal buffer that passes the magic-byte image sniff as a PNG.
+  function pngBlob(size = 1024) {
+    const bytes = new Uint8Array(size);
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    return new Blob([bytes], { type: 'image/png' });
+  }
+
+  test('wdo treatment photo extraction transcribes a treatment sticker into the previous-treatment fields', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    mockAnthropicCreate.mockResolvedValue({
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          suggestedFindings: {
+            previous_treatment_evidence: 'Yes',
+            previous_treatment_notes: 'Notice of Termite Protection sticker from Massey Services observed on the electrical panel: WDO inspection dated 8/18/15, materials used Bora-Care, treated for subterranean termites, lot #80.',
+          },
+          confidence: 'high',
+          reviewNotes: ['Handwritten date partially smudged — confirm year on site.'],
+        }),
+      }],
+    });
+    db.mockImplementation((table) => {
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const fd = new FormData();
+      fd.append('property_address', '8920 49th Ave E Bradenton, FL 34211');
+      fd.append('previous_treatment_photo', pngBlob(), 'sticker.png');
+
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-treatment-photo`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+        body: fd,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.suggestedFindings.previous_treatment_evidence).toBe('Yes');
+      expect(body.suggestedFindings.previous_treatment_notes).toContain('Massey Services');
+      expect(body.suggestedFindings.previous_treatment_notes).toContain('Bora-Care');
+      expect(body.confidence).toBe('high');
+      expect(body.reviewNotes).toHaveLength(1);
+      // Photo-only fast path: no property lookup, and the vision call carries the image.
+      expect(lookupPropertyFromAITrio).not.toHaveBeenCalled();
+      const request = mockAnthropicCreate.mock.calls[0][0];
+      expect(request.messages[0].content.some((block) => block.type === 'image')).toBe(true);
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo treatment photo extraction requires a photo', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    db.mockImplementation((table) => {
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const fd = new FormData();
+      fd.append('property_address', '8920 49th Ave E Bradenton, FL 34211');
+
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-treatment-photo`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+        body: fd,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/photo required/i);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo treatment photo extraction enforces technician visit scope', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    const customerRead = chain({
+      first: jest.fn().mockResolvedValue({ id: 'customer-1' }),
+    });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return customerRead;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const fd = new FormData();
+      fd.append('customer_id', 'customer-1');
+      fd.append('previous_treatment_photo', pngBlob(), 'sticker.png');
+
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-treatment-photo`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tech-1' },
+        body: fd,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(403);
+      expect(body.error).toBe('Technician projects must be linked to an assigned visit');
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
+  test('wdo treatment photo extraction rejects oversized photos before AI review', async () => {
+    process.env.ANTHROPIC_API_KEY = 'test-key';
+    db.mockImplementation((table) => {
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const fd = new FormData();
+      fd.append('previous_treatment_photo', pngBlob(5 * 1024 * 1024), 'large.png');
+
+      const res = await fetch(`${baseUrl}/admin/projects/wdo-treatment-photo`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin' },
+        body: fd,
+      });
+      const body = await res.json();
+      expect(res.status).toBe(400);
+      expect(body.error).toMatch(/too large/i);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+
   test('technician cannot create an ad hoc project without an assigned visit link', async () => {
     const customerRead = chain({
       first: jest.fn().mockResolvedValue({ id: 'customer-1' }),

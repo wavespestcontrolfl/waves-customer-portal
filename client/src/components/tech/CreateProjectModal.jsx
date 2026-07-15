@@ -315,6 +315,51 @@ export default function CreateProjectModal({
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
 
+  // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
+  // company's treatment sticker/notice (or visible evidence) into the
+  // previous-treatment fields. Seq + customer refs guard a slow extraction
+  // against a mid-flight customer switch — like the intelligence bar, another
+  // property's treatment details must never land on this FDACS filing.
+  const [treatmentExtract, setTreatmentExtract] = useState({ status: 'idle', message: '' });
+  const treatmentExtractSeqRef = useRef(0);
+  const customerIdRef = useRef(customerId);
+  customerIdRef.current = customerId;
+  // Mirrors projectType for the same in-flight guard: switching the modal to
+  // another project type clears the findings, and a late WDO extraction must
+  // not write previous_treatment_* keys into the new type's report.
+  const projectTypeRef = useRef(projectType);
+  projectTypeRef.current = projectType;
+  // Mirrors the WDO address context (typed property address, else the
+  // customer's) the same way WdoIntelligenceBar keys its lookups on the
+  // address: an extraction result must not land after the tech re-points
+  // the report at a different property mid-request.
+  const wdoAddressContext = String(findings.property_address || formatCustomerAddress(selectedCustomer) || '').trim();
+  const wdoAddressRef = useRef(wdoAddressContext);
+  wdoAddressRef.current = wdoAddressContext;
+  // Invalidate the extraction the moment the report type changes — waiting
+  // for the in-flight request to resolve would leave the switched-to type's
+  // Save button stuck disabled at "Reading photo…" until the old request
+  // returned (Codex r3 on #2748). The seq bump makes the eventual response a
+  // silent no-op; a type round-trip back to WDO also invalidates, which is
+  // right because the switch cleared the findings the result was meant for.
+  // What the photo extraction actually WROTE into the Section-3 fields —
+  // per field, the pre-extraction value and the value we left behind. Same
+  // ownership rule as wdoAutoFillRef: on a customer switch, a field still
+  // holding exactly what we wrote is restored to its pre-extraction value
+  // (customer A's sticker details must never file on customer B's report);
+  // a field the tech edited since is theirs and survives.
+  const treatmentExtractAppliedRef = useRef(null);
+  useEffect(() => {
+    treatmentExtractSeqRef.current += 1;
+    treatmentExtractAppliedRef.current = null;
+    setTreatmentExtract({ status: 'idle', message: '' });
+    // Queued prior-treatment evidence photos are WDO-specific: handleSave
+    // uploads the whole queue to whatever project it creates, so leaving
+    // them behind would attach a treatment-sticker image to the switched-to
+    // non-WDO report. Same purge the customer-change path already does.
+    setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
+  }, [projectType]);
+
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
@@ -840,6 +885,29 @@ export default function CreateProjectModal({
     // (category 'previous_treatment') would still upload on save. It shows
     // the PREVIOUS customer's property; never carry it to the next one.
     setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
+    // Same reasoning for the field-level photo extraction: invalidate any
+    // in-flight request and clear its status line.
+    treatmentExtractSeqRef.current += 1;
+    setTreatmentExtract({ status: 'idle', message: '' });
+    // And unwind what a COMPLETED extraction wrote: the Section-3 values came
+    // from the previous customer's photo, so any field still holding exactly
+    // what the extraction left is restored to its pre-extraction value —
+    // another property's sticker details must never file on the next
+    // customer's FDACS report. A field the tech edited since stays theirs.
+    const extractApplied = treatmentExtractAppliedRef.current;
+    treatmentExtractAppliedRef.current = null;
+    if (extractApplied) {
+      setFindings(prev => {
+        const next = { ...prev };
+        if (extractApplied.notes && (prev.previous_treatment_notes || '') === extractApplied.notes.after) {
+          next.previous_treatment_notes = extractApplied.notes.before;
+        }
+        if (extractApplied.evidence && (prev.previous_treatment_evidence || '') === extractApplied.evidence.after) {
+          next.previous_treatment_evidence = extractApplied.evidence.before;
+        }
+        return next;
+      });
+    }
     if (!lastApplied) return;
     setFindings(prev => {
       const next = { ...prev };
@@ -922,9 +990,133 @@ export default function CreateProjectModal({
     setPhotoQueue(prev => [...prev, { file, category, caption: '', id: `q_${Date.now()}_${prev.length}` }]);
   }
 
+  // "Extract from photo" on the Previous Treatment observations field: send
+  // the photo to AI transcription and write the result into the Section-3
+  // fields. The photo also joins the upload queue as prior-treatment evidence
+  // (same category the intelligence bar uses), so it attaches to the report
+  // on save regardless of how the extraction goes.
+  // Stale-response check shared by the success and error paths below. A
+  // superseded request (newer extraction owns the state) just drops out; a
+  // context switch (customer, project type, or property address changed
+  // mid-flight) additionally clears the pending state — leaving it at
+  // 'working' would wedge the Save gate shut on the new context — and drops
+  // the request's own queued evidence photo: the first-customer-selection
+  // and address-edit paths have no queue purge of their own (unlike the
+  // Change / type-switch paths), so a stale sticker photo would otherwise
+  // upload onto the new context's report (Codex P1/P2s on #2748).
+  function treatmentExtractWentStale(seq, started) {
+    // An empty starting address ADOPTING a value (the async customer record
+    // finishing its load) is not a property switch — only a change away
+    // from a known address invalidates.
+    const addressChanged = started.address !== '' && wdoAddressRef.current !== started.address;
+    const contextChanged = customerIdRef.current !== started.customer
+      || projectTypeRef.current !== started.type
+      || addressChanged;
+    if (contextChanged) {
+      // The photo cleanup must run even for a SUPERSEDED request — checking
+      // seq first let a request that was both superseded and context-stale
+      // (extract → edit address → extract again) leave its photo queued for
+      // the new property's report (Codex r7 P1). Only the LATEST request
+      // owns the pending state, though: resetting it here while a newer
+      // extraction is mid-flight would un-wedge its Save gate early.
+      setPhotoQueue(prev => prev.filter(p => p.id !== started.photoId));
+      if (treatmentExtractSeqRef.current === seq) setTreatmentExtract({ status: 'idle', message: '' });
+      return true;
+    }
+    return treatmentExtractSeqRef.current !== seq;
+  }
+
+  async function handleTreatmentPhotoExtract(file) {
+    if (!file || saving || aiWriting) return;
+    const seq = ++treatmentExtractSeqRef.current;
+    const started = {
+      customer: customerIdRef.current,
+      type: projectTypeRef.current,
+      address: wdoAddressRef.current,
+      photoId: `q_extract_${Date.now()}_${seq}`,
+    };
+    // Queued with a known id (not via queuePhoto) so the stale guard can
+    // remove exactly this photo if the context changes mid-request.
+    setPhotoQueue(prev => [...prev, { file, category: 'previous_treatment', caption: '', id: started.photoId }]);
+    setTreatmentExtract({ status: 'working', message: '' });
+    try {
+      const fd = new FormData();
+      if (customerId) fd.append('customer_id', customerId);
+      if (createdProject?.id) fd.append('project_id', createdProject.id);
+      if (defaultServiceRecordId) fd.append('service_record_id', defaultServiceRecordId);
+      if (defaultScheduledServiceId) fd.append('scheduled_service_id', defaultScheduledServiceId);
+      if (started.address) fd.append('property_address', started.address);
+      fd.append('previous_treatment_photo', file);
+      const res = await adminFetch('/admin/projects/wdo-treatment-photo', { method: 'POST', body: fd, headers: {} });
+      const data = await res.json();
+      if (treatmentExtractWentStale(seq, started)) return;
+      if (!res.ok) throw new Error(data?.error || 'Photo extraction failed');
+      const suggested = data?.suggestedFindings || {};
+      const notes = String(suggested.previous_treatment_notes || '').trim();
+      const evidence = String(suggested.previous_treatment_evidence || '').trim();
+      if (!notes && !evidence) {
+        setTreatmentExtract({ status: 'done', message: 'No treatment details could be read from that photo — verify on site.' });
+        return;
+      }
+      // The tech explicitly asked to read THIS photo, so a readable sticker
+      // may upgrade an earlier "No" to "Yes" — filing "No" beside observations
+      // describing prior treatment is the inconsistency to prevent. The
+      // reverse never overwrites: one photo of a clean area can't prove
+      // property-wide absence, so "No" only fills a blank select.
+      const evidenceUpgraded = evidence === 'Yes'
+        && hasMeaningfulValue(findings.previous_treatment_evidence)
+        && findings.previous_treatment_evidence !== 'Yes';
+      userDirtyRef.current = true;
+      setFindings(prev => {
+        const next = { ...prev };
+        // Record before/after per written field so the customer-switch path
+        // can restore them. `before` is kept from the FIRST extraction since
+        // the record was last cleared — a second extraction stacks on the
+        // first, and a restore must unwind both. (Idempotent under a
+        // StrictMode double-invoke: the second run sees the same prev and an
+        // already-populated record.)
+        const record = treatmentExtractAppliedRef.current || {};
+        if (notes) {
+          // Append below anything the tech already wrote — never clobber it.
+          const existing = String(prev.previous_treatment_notes || '').trim();
+          const applied = existing ? `${existing}\n${notes}` : notes;
+          record.notes = { before: record.notes ? record.notes.before : (prev.previous_treatment_notes || ''), after: applied };
+          next.previous_treatment_notes = applied;
+        }
+        if (evidence === 'Yes' || (evidence && !hasMeaningfulValue(prev.previous_treatment_evidence))) {
+          record.evidence = { before: record.evidence ? record.evidence.before : (prev.previous_treatment_evidence || ''), after: evidence };
+          next.previous_treatment_evidence = evidence;
+        }
+        treatmentExtractAppliedRef.current = record;
+        return next;
+      });
+      // Pass the AI's own caveats through (e.g. a smudged handwritten year)
+      // so the tech sees WHICH detail needs confirming, not just a generic
+      // verify reminder.
+      const reviewNotes = Array.isArray(data?.reviewNotes) ? data.reviewNotes.filter(Boolean) : [];
+      setTreatmentExtract({
+        status: 'done',
+        message: [
+          evidenceUpgraded ? 'Evidence of previous treatment changed to "Yes" based on the photo.' : '',
+          'Extracted from photo — verify before filing.',
+          ...reviewNotes,
+        ].filter(Boolean).join(' '),
+      });
+    } catch (e) {
+      if (treatmentExtractWentStale(seq, started)) return;
+      setTreatmentExtract({ status: 'error', message: e.message || 'Photo extraction failed' });
+    }
+  }
+
   async function handleSave() {
     if (!projectType) return setError('Pick a project type');
     if (!customerId) return setError('Pick a customer');
+    // Saving mid-extraction would persist the pre-extraction findings and
+    // close the modal, silently discarding the AI-read treatment details
+    // (Codex P2 on #2748) — the save is a moment behind the photo anyway.
+    if (treatmentExtract.status === 'working') {
+      return setError('Photo extraction is still running — it fills the Previous Treatment fields when it finishes.');
+    }
     setSaving(true);
     setError(null);
     try {
@@ -1426,6 +1618,38 @@ export default function CreateProjectModal({
                         Fill from customer
                       </button>
                     )}
+                    {projectType === 'wdo_inspection' && field.key === 'previous_treatment_notes' && (
+                      /* Camera-to-field: photograph a prior company's
+                         treatment sticker (or visible evidence) and let AI
+                         transcribe it into this box. */
+                      <label
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: P.accent,
+                          fontSize: 11,
+                          fontWeight: wStrong,
+                          cursor: (saving || aiWriting || treatmentExtract.status === 'working') ? 'default' : 'pointer',
+                          opacity: (saving || aiWriting || treatmentExtract.status === 'working') ? 0.55 : 1,
+                          padding: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {treatmentExtract.status === 'working' ? 'Reading photo…' : 'Extract from photo'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          disabled={saving || aiWriting || treatmentExtract.status === 'working'}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null;
+                            e.target.value = '';
+                            if (f) handleTreatmentPhotoExtract(f);
+                          }}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                    )}
                     {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
                       <button
                         type="button"
@@ -1464,6 +1688,11 @@ export default function CreateProjectModal({
                     palette={P}
                     appearance={theme}
                   />
+                  {field.key === 'previous_treatment_notes' && treatmentExtract.message && (
+                    <div style={{ fontSize: 11, color: treatmentExtract.status === 'error' ? P.red : P.muted, marginTop: 6 }}>
+                      {treatmentExtract.message}
+                    </div>
+                  )}
                   {field.key === 'product_name' && chemAuto?.status === 'not_applicable' && chemAuto.note && (
                     <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{chemAuto.note}</div>
                   )}
@@ -1600,19 +1829,19 @@ export default function CreateProjectModal({
           <button
             type="button"
             onClick={handleSave}
-            disabled={saving || !projectType || !customerId}
+            disabled={saving || !projectType || !customerId || treatmentExtract.status === 'working'}
             style={{
               minHeight: isEstimateStyle || isSheet ? 48 : undefined,
               padding: isEstimateStyle ? '0 18px' : '10px 18px',
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
               fontWeight: wStrong,
-              background: (!projectType || !customerId) ? P.muted : P.accent,
+              background: (!projectType || !customerId || treatmentExtract.status === 'working') ? P.muted : P.accent,
               color: P.accentText, border: 'none',
-              cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',
+              cursor: (saving || !projectType || !customerId || treatmentExtract.status === 'working') ? 'default' : 'pointer',
               ...(isSheet ? { flex: 1 } : {}),
             }}
-          >{saving ? 'Saving…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
+          >{saving ? 'Saving…' : treatmentExtract.status === 'working' ? 'Reading photo…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
         </div>
       </div>
     </div>,
