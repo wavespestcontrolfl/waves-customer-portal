@@ -241,6 +241,28 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
 // validation and shadow accounting flows through one place (the processor).
 async function sweepTimeRules(now = new Date()) {
   const nowMs = now.getTime();
+  // Complete any extension re-arm the in-flight window escaped (codex 2736
+  // r16): a claim that finished its send ACROSS an extension leaves a
+  // counted expiring row stamped with the OLD deadline. It already counted
+  // toward cap/spacing — its only remaining effect is wrongly blocking the
+  // re-armed reminder (enqueue sends-guard, the claim's unique slot, and
+  // the legacy cross-lane claim). Counted, deadline-stamped rows whose
+  // deadline no longer matches are safe to clear; uncounted rows wait for
+  // the heal to count them first, and unstamped rows are never touched.
+  try {
+    await db.raw(
+      `DELETE FROM estimate_followup_sends s
+       USING estimates e
+       WHERE s.estimate_id = e.id
+         AND s.rule_key IN ('expiring_engaged', 'expiring_never_viewed')
+         AND s.counted_at IS NOT NULL
+         AND s.trigger->>'deadline' IS NOT NULL
+         AND e.expires_at IS NOT NULL
+         AND (s.trigger->>'deadline')::timestamptz <> date_trunc('milliseconds', e.expires_at)`,
+    );
+  } catch (err) {
+    logger.warn(`[est-engage] stale-deadline ledger cleanup failed (continuing): ${err.message}`);
+  }
   const rules = await loadRules('time_sweep');
   let queued = 0;
   for (const rule of rules) {
@@ -618,6 +640,11 @@ async function processDueBatch(now = new Date()) {
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
+        // Deadline stamp (codex 2736 r16): lets the sweep recognize this
+        // row as belonging to a SPECIFIC deadline, so an extension's
+        // re-arm can clear it once counted instead of it blocking the new
+        // deadline's reminder forever.
+        ...(expiringLifecycle ? { deadline: expiringLifecycle.toISOString() } : {}),
       }, {
         blockLegacyFlags: legacyFlagsFor(rule.rule_key),
         blockRuleKeys: siblings,

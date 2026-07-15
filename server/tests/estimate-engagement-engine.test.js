@@ -619,9 +619,11 @@ describe('processDueJobs', () => {
     );
     // codex 2736 r12: the claim is PINNED to the deadline the copy was
     // validated against — a concurrent extension makes it a lost-claim skip
-    // instead of a wrong-deadline email.
+    // instead of a wrong-deadline email. r16: the ledger row is STAMPED
+    // with that deadline so the sweep can clear it after a re-arm.
     expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
-      'est-1', 'expiring_engaged', 'estimate.engage_expiring', expect.any(Object),
+      'est-1', 'expiring_engaged', 'estimate.engage_expiring',
+      expect.objectContaining({ deadline: expires.toISOString() }),
       expect.objectContaining({ requireExpiresAt: expires }),
     );
   });
