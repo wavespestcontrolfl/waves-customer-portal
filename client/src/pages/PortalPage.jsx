@@ -6983,9 +6983,12 @@ const SERVICE_CATALOG = [
   // coverage (PLAN_NON_QUALIFIER_RE mirrors the server classifier), so this
   // entry exists for the My Plan added-service row and ?service= deep-links
   // only. Tier slices (max 4) and entitlement padding never reach it.
+  // Cadence matches the scheduled program ('Quarterly Rodent Bait Station
+  // Service', 4 applications/year — estimate-converter), not the monthly
+  // billing rate.
   {
     id: 'rodent_bait', name: 'Rodent Bait Stations', icon: 'shield',
-    frequencies: ['Monthly monitoring'],
+    frequencies: ['Quarterly (4x)'],
     basePrice: 49, description: 'Exterior bait station inspection, bait replenishment and rotation, exclusion check around entry points',
   },
 ];
@@ -7767,8 +7770,12 @@ function MyPlanTab({ customer, focusService }) {
       (svcId === 'termite' && svcType.includes('termite')) ||
       // Powers the schedule/calendar helpers for the standalone rodent row.
       // Plan-coverage detection still never sees rodent rows — the
-      // PLAN_NON_QUALIFIER_RE filter runs upstream of detection.
-      (svcId === 'rodent_bait' && svcType.includes('rodent'))
+      // PLAN_NON_QUALIFIER_RE filter runs upstream of detection. Narrowed to
+      // bait/station/monitoring labels: serviceHistory carries no recurring
+      // signal, so a bare /rodent/ match would count a one-time "Rodent
+      // Exclusion" project as a completed bait application (codex P2).
+      (svcId === 'rodent_bait' && svcType.includes('rodent')
+        && (svcType.includes('bait') || svcType.includes('station') || svcType.includes('monitor')))
     );
   };
 
@@ -8097,9 +8104,14 @@ function MyPlanTab({ customer, focusService }) {
               Your plan
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              {/* A rodent-only customer has no WaveGuard plan but DOES have a
+                  recurring service on the schedule — "no recurring plan"
+                  would contradict the row rendered below (codex P2). */}
               {activeTierName
                 ? `${bundleSummary || 'Recurring service'} - ${numServices} service${numServices > 1 ? 's' : ''} bundled`
-                : 'No recurring plan on file'}
+                : displayedServices.length
+                  ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule - no WaveGuard plan`
+                  : 'No recurring plan on file'}
             </div>
           </div>
           <div style={{
@@ -8130,7 +8142,7 @@ function MyPlanTab({ customer, focusService }) {
             { label: 'Next visit', value: nextVisitLabel, sub: nextService?.serviceType || 'Schedule' },
             // 0% is not a perk — hide the discount tile entirely at zero
             // (eyeball 07-12 finding 6).
-            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: 'off every service' },
+            discount > 0 && { label: 'Bundle discount', value: `${Math.round(discount * 100)}%`, sub: hasRodentBait ? 'off every plan service' : 'off every service' },
             { label: 'Member since', value: memberSinceLabel, sub: `${memberMonths} month${memberMonths === 1 ? '' : 's'}` },
           ].filter(Boolean).map((item) => (
             <div key={item.label} style={{
@@ -8161,7 +8173,9 @@ function MyPlanTab({ customer, focusService }) {
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
                 {activeTierName
                   ? `${tierName} covers ${numServices} recurring service${numServices > 1 ? 's' : ''}`
-                  : 'No recurring services on file'}
+                  : displayedServices.length
+                    ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule`
+                    : 'No recurring services on file'}
               </div>
             </div>
 
@@ -8487,7 +8501,12 @@ function MyPlanTab({ customer, focusService }) {
                 {Math.round(discount * 100)}% off
               </div>
               <div style={{ marginTop: 6, color: muted, fontSize: 14, lineHeight: 1.5 }}>
-                Your {tierName} bundle rate, applied to every application.
+                {/* Rodent bait is billed separately — "every application"
+                    must not claim the bundle rate for its visits when its
+                    row is on this page (codex P2). */}
+                {hasRodentBait
+                  ? `Your ${tierName} bundle rate, applied to every plan application. Rodent bait stations are billed separately.`
+                  : `Your ${tierName} bundle rate, applied to every application.`}
               </div>
             </section>
           )}
