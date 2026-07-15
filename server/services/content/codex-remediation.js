@@ -282,35 +282,54 @@ function canonValue(v) {
  * changes past gates that only scanned the original.
  *
  * Two fields are exempt because Codex keeps flagging them, they key NOTHING
- * (no routing, no merge-target resolution, no gate input), and every park
- * they caused needed a trivial human push (4th occurrence 2026-07-15,
- * astro PR #376; heroAlt class on #372/#377 before it):
+ * (no routing, no merge-target resolution), and every park they caused
+ * needed a trivial human push (4th occurrence 2026-07-15, astro PR #376;
+ * heroAlt class on #372/#377 before it):
  *   - `meta_description` — must stay inside the blog schema's hard
  *     115–160-char bound (it feeds the page meta/OG description and the
  *     visible hero intro).
- *   - `hero_image.alt` — non-empty, ≤300 chars; the hero PATH (src) and
- *     og_image stay frozen (they reference committed bytes).
+ *   - `hero_image.alt` — non-empty, ≤255 chars (the scheduler-lane mirror
+ *     column blog_posts.hero_image_alt is varchar(255) — a longer value
+ *     would push the branch and then park on the row sync); the hero PATH
+ *     (src) and og_image stay frozen (they reference committed bytes).
+ * A whitelisted delta is additionally accepted ONLY when one of the round's
+ * Codex findings actually targets that field — otherwise an LLM that
+ * spontaneously rewrote SERP/hero copy while fixing a body-only finding
+ * would smuggle the change past the frontmatter freeze.
  * Callers mirror both into the portal row / draft payload after the push so
- * a later republish or social share can't resurrect the flagged value.
+ * a later republish or social share can't resurrect the flagged value, and
+ * the autonomous lane re-runs its SEO/quality gates on the REWRITTEN
+ * metadata (validateAutonomousRunGates swaps the fixed values into the
+ * draft before evaluating).
  *
  * Returns { violation: string|null, changed: { meta_description?, hero_alt? } }.
- * Any other added/removed/altered key — or an invalid whitelisted value — is
- * a violation (parse failure fails closed).
+ * Any other added/removed/altered key — or an invalid or un-targeted
+ * whitelisted value — is a violation (parse failure fails closed).
  */
 const META_DESCRIPTION_MIN = 115;
 const META_DESCRIPTION_MAX = 160;
-const HERO_ALT_MAX = 300;
+// blog_posts.hero_image_alt is a Knex string() → varchar(255); the whitelist
+// bound must not exceed what the mirror column can store.
+const HERO_ALT_MAX = 255;
+const META_FINDING_RE = /meta[\s_-]?description/i;
+const HERO_ALT_FINDING_RE = /\balt\b|hero[\s_-]?image|hero art/i;
 
-function frontmatterFixViolation(originalMd, fixedMd) {
+function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
   try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) {
     return { violation: 'frontmatter unparseable after fix', changed: {} };
   }
+  const findingBodies = (Array.isArray(findings) ? findings : []).map((f) => String((f && f.body) || ''));
+  const metaTargeted = findingBodies.some((t) => META_FINDING_RE.test(t));
+  const altTargeted = findingBodies.some((t) => HERO_ALT_FINDING_RE.test(t));
   const changed = {};
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const k of keys) {
     if (canonValue(a[k]) === canonValue(b[k])) continue;
     if (k === 'meta_description') {
+      if (!metaTargeted) {
+        return { violation: 'meta_description changed but no finding in this round targets it', changed: {} };
+      }
       const v = b.meta_description;
       const len = typeof v === 'string' ? v.trim().length : 0;
       if (len < META_DESCRIPTION_MIN || len > META_DESCRIPTION_MAX) {
@@ -327,6 +346,9 @@ function frontmatterFixViolation(originalMd, fixedMd) {
         if (sk !== 'alt' && canonValue(av[sk]) !== canonValue(bv[sk])) {
           return { violation: `hero_image.${sk} changed (only hero_image.alt is fixable — the path references committed bytes)`, changed: {} };
         }
+      }
+      if (!altTargeted) {
+        return { violation: 'hero_image.alt changed but no finding in this round targets it', changed: {} };
       }
       const alt = bv.alt;
       if (typeof alt !== 'string' || !alt.trim() || alt.trim().length > HERO_ALT_MAX) {
@@ -481,6 +503,28 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
+    // The fix may carry whitelisted frontmatter rewrites (meta_description /
+    // hero alt). The stored payload predates them, so swap the FIXED values
+    // into the draft before evaluating — otherwise the SEO/quality gates
+    // below re-validate the STALE metadata and a rewritten meta_description
+    // reaches the branch (and the draft_payload mirror) ungated.
+    const fixedData = (parsed && parsed.data) || {};
+    if (typeof fixedData.meta_description === 'string' && fixedData.meta_description.trim()) {
+      draft.meta_description = fixedData.meta_description;
+      if (draft.frontmatter && typeof draft.frontmatter === 'object') {
+        draft.frontmatter = { ...draft.frontmatter, meta_description: fixedData.meta_description };
+      }
+    }
+    const fixedAlt = (fixedData.hero_image && typeof fixedData.hero_image === 'object') ? fixedData.hero_image.alt : undefined;
+    if (typeof fixedAlt === 'string' && fixedAlt.trim() && draft.frontmatter && typeof draft.frontmatter === 'object') {
+      draft.frontmatter = {
+        ...draft.frontmatter,
+        hero_image: {
+          ...(draft.frontmatter.hero_image && typeof draft.frontmatter.hero_image === 'object' ? draft.frontmatter.hero_image : {}),
+          alt: fixedAlt,
+        },
+      };
+    }
 
     // 0a. Claims-ledger validation for facts-gated runs (runner step 3b): the
     //     run's claims_ledger_result was rendered against the ORIGINAL body,
@@ -781,7 +825,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // columns written before the fix that nothing restamps. Compared against
   // the restamped baseline, so the deterministic date restamp above plus the
   // whitelist are the ONLY frontmatter deltas that can ever pass.
-  const fmDelta = frontmatterFixViolation(baseline, fixed);
+  const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
   if (fmDelta.violation) {
     return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
   }
