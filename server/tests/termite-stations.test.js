@@ -24,6 +24,7 @@ const {
   syncStationsForCompletion,
   loadStationsForPropertyMap,
   buildStationMapReportContext,
+  buildStationMapCurrentContext,
   rodentConsumptionConflict,
   trapCaptureConflict,
 } = require('../services/termite-stations');
@@ -882,4 +883,70 @@ test('drift is all-or-nothing: ONE dropped visit pin fails the whole map closed 
 
 test('status vocabulary stays in lockstep with the DB CHECK', () => {
   expect(STATION_STATUSES).toEqual(['ok', 'activity', 'serviced', 'inaccessible']);
+});
+
+// ── current context (portal My Plan embeds) ──────────────────────────────────
+
+test('current context pins one program\'s ACTIVE stations with latest statuses; unchecked pin as on-file null', () => {
+  const rows = [
+    stationRow('st-t1', 1, pin(0.2, 0.3), { program: 'termite' }),
+    stationRow('st-t2', 2, pin(0.5, 0.5), { program: 'termite' }),
+    stationRow('st-t9', 9, pin(0.8, 0.6), { program: 'termite', is_active: false }),
+    stationRow('st-r1', 1, pin(0.7, 0.6), { program: 'rodent' }),
+  ];
+  const context = buildStationMapCurrentContext({
+    stationRows: rows,
+    latestStatusByStationId: new Map([['st-t1', 'activity']]),
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    program: 'termite',
+  });
+  expect(context.available).toBe(true);
+  expect(context.program).toBe('termite');
+  // retired termite pin and the rodent pin never render on the termite map
+  expect(context.stations.map((s) => s.id)).toEqual(['st-t1', 'st-t2']);
+  expect(context.stations.find((s) => s.id === 'st-t1').status).toBe('activity');
+  expect(context.stations.find((s) => s.id === 'st-t2').status).toBeNull();
+  expect(context.summary).toEqual({ total: 2, checked: 1, activity: 1, serviced: 0, inaccessible: 0 });
+  expect(context.image.url).toBe(SATELLITE.live.url);
+});
+
+test('current context gates: unknown program, no stations for the program, satellite down, bogus status', () => {
+  const rows = [stationRow('st-1', 1, pin(0.2, 0.3), { program: 'termite' })];
+  expect(buildStationMapCurrentContext({
+    stationRows: rows, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT, program: 'sentry',
+  })).toMatchObject({ available: false, reason: 'unknown_program' });
+  expect(buildStationMapCurrentContext({
+    stationRows: rows, satelliteMap: SATELLITE, imageContext: IMAGE_CONTEXT, program: 'rodent',
+  })).toMatchObject({ available: false, reason: 'no_stations' });
+  expect(buildStationMapCurrentContext({
+    stationRows: rows,
+    satelliteMap: { available: false, fallbackReason: 'provider_unavailable' },
+    imageContext: IMAGE_CONTEXT,
+    program: 'termite',
+  })).toMatchObject({ available: false, reason: 'provider_unavailable' });
+  // a status outside the DB vocabulary never leaks to the client — on-file instead
+  const bogus = buildStationMapCurrentContext({
+    stationRows: rows,
+    latestStatusByStationId: new Map([['st-1', 'exploded']]),
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    program: 'termite',
+  });
+  expect(bogus.available).toBe(true);
+  expect(bogus.stations[0].status).toBeNull();
+});
+
+test('current context drift is all-or-nothing like the report map', () => {
+  const context = buildStationMapCurrentContext({
+    stationRows: [
+      stationRow('st-1', 1, pin(0.5, 0.5, { ref: { ...REF, lat: REF.lat + 0.01 } }), { program: 'termite' }),
+      stationRow('st-2', 2, pin(0.3, 0.3), { program: 'termite' }),
+    ],
+    latestStatusByStationId: new Map([['st-2', 'ok']]),
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    program: 'termite',
+  });
+  expect(context).toMatchObject({ available: false, reason: 'marks_stale' });
 });

@@ -5,6 +5,7 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const TermiteStations = require('../services/termite-stations');
 
 // Cap the JSON body for this route family. The global limit is generous;
 // property preferences never need more than a few KB.
@@ -272,6 +273,127 @@ router.put('/preferences', async (req, res, next) => {
     }
 
     res.json({ preferences: camelFields, saved: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/property/station-map — current bait-station layout for the
+// authenticated customer's own home, grouped by program (termite / rodent),
+// for the My Plan service-row embeds. Each pin carries the station's LATEST
+// check status across all visits (never checked → null → "on file" state).
+// Dark behind GATE_PORTAL_STATION_MAP (default OFF — owner flips after
+// stations are mapped); the satellite provider gates still apply beneath it.
+// Trapping pins are deliberately excluded: the plan rows cover the two bait
+// programs; the trap map remains a report artifact.
+const PORTAL_STATION_MAP_PROGRAMS = ['termite', 'rodent'];
+function portalStationMapEnabled() {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env.GATE_PORTAL_STATION_MAP || '').trim().toLowerCase());
+}
+
+router.get('/station-map', async (req, res, next) => {
+  try {
+    if (!portalStationMapEnabled()) {
+      return res.json({ available: false, reason: 'disabled', programs: {} });
+    }
+    const { getBasemapProvider, isSatelliteTreatmentMapEnabled } = require('../services/maps/basemap-provider');
+    if (!isSatelliteTreatmentMapEnabled()) {
+      return res.json({ available: false, reason: 'disabled', programs: {} });
+    }
+    const provider = getBasemapProvider();
+    if (!provider?.capabilities?.canDisplayLive) {
+      return res.json({ available: false, reason: 'provider_unavailable', programs: {} });
+    }
+
+    const stationRows = await db('termite_stations')
+      .where({ customer_id: req.customerId, is_active: true })
+      .orderBy('station_number')
+      .catch(() => []);
+    if (!stationRows.length) {
+      return res.json({ available: false, reason: 'no_stations', programs: {} });
+    }
+
+    const customer = await db('customers')
+      .where({ id: req.customerId })
+      .select('latitude', 'longitude')
+      .first();
+    // Number(null) = 0 trap: null coordinates must read as missing, not 0,0.
+    const lat = customer?.latitude == null ? NaN : Number(customer.latitude);
+    const lng = customer?.longitude == null ? NaN : Number(customer.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return res.json({ available: false, reason: 'missing_coordinates', programs: {} });
+    }
+
+    // Same provider params as the report + marking surfaces (center/zoom,
+    // 640x340) so pins stay pixel-consistent with where they were dropped.
+    const geometryRow = await db('property_geometries')
+      .where({ customer_id: req.customerId })
+      .orderBy('version', 'desc')
+      .first()
+      .catch(() => null);
+    const zoom = Number(geometryRow?.zoom) || 20;
+    const center = { lat, lng };
+    const liveConfig = await provider.getLiveMapConfig({
+      center,
+      zoom,
+      width: 640,
+      height: 340,
+      mapType: 'satellite',
+    });
+    if (!liveConfig?.imageUrl) {
+      return res.json({ available: false, reason: 'provider_config_unavailable', programs: {} });
+    }
+
+    // Latest check per station: ascending by visit so the last assignment
+    // wins. Same-day tie-break is the service record's completion write
+    // time (service_records rows are created at completion), NOT the check
+    // row's updated_at — a delayed retry/resync of the OLDER visit's checks
+    // would otherwise overwrite the newer visit's status (codex P2).
+    // Fail-soft — a checks error renders every pin as on-file rather than
+    // dropping the map.
+    const checkRows = await db('termite_station_checks as c')
+      .join('service_records as sr', 'sr.id', 'c.service_record_id')
+      .whereIn('c.station_id', stationRows.map((row) => row.id))
+      .select('c.station_id', 'c.status', 'sr.service_date', 'sr.created_at', 'c.updated_at')
+      .orderBy([
+        { column: 'sr.service_date', order: 'asc' },
+        { column: 'sr.created_at', order: 'asc' },
+        { column: 'c.updated_at', order: 'asc' },
+      ])
+      .catch(() => []);
+    const latestStatusByStationId = new Map();
+    for (const row of checkRows) {
+      latestStatusByStationId.set(String(row.station_id), row.status);
+    }
+
+    const satelliteMap = {
+      available: true,
+      live: {
+        url: liveConfig.imageUrl,
+        width: liveConfig.width || 640,
+        height: liveConfig.height || 340,
+      },
+      attributionText: liveConfig.attributionText || '',
+    };
+    const imageContext = {
+      center: liveConfig.center || center,
+      zoom,
+      width: liveConfig.width || 640,
+      height: liveConfig.height || 340,
+    };
+
+    const programs = {};
+    for (const program of PORTAL_STATION_MAP_PROGRAMS) {
+      const context = TermiteStations.buildStationMapCurrentContext({
+        stationRows,
+        latestStatusByStationId,
+        satelliteMap,
+        imageContext,
+        program,
+      });
+      if (context.available) programs[program] = context;
+    }
+    return res.json({ available: Object.keys(programs).length > 0, programs });
   } catch (err) {
     next(err);
   }

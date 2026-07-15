@@ -680,6 +680,83 @@ function buildStationMapReportContext({
   };
 }
 
+// Customer-portal "current layout" map (My Plan service rows): ACTIVE
+// stations for ONE program, each pinned with its LATEST recorded check
+// status across all visits — unlike buildStationMapReportContext, which
+// freezes one visit's checks so historical reports never mutate. Stations
+// never checked pin as status null → the client renders the on-file state.
+// Same context shape as the report builder so the shared StationMapCard
+// renders both. Same all-or-nothing rule: drift resolution dropping a
+// single pin would publish a summary that contradicts the registry, so
+// every active station renders or no map.
+function buildStationMapCurrentContext({
+  stationRows = [],
+  latestStatusByStationId = new Map(),
+  satelliteMap = null,
+  imageContext = {},
+  program = null,
+} = {}) {
+  // Validate the RAW parameter — normalizeProgram maps unknown values to
+  // 'termite' (a legacy-row default), which would silently render the wrong
+  // program's map for a bad caller.
+  if (!STATION_PROGRAMS.includes(program)) {
+    return { available: false, reason: 'unknown_program' };
+  }
+  const normalizedProgram = program;
+  const programRows = (Array.isArray(stationRows) ? stationRows : [])
+    .filter((row) => row.is_active !== false)
+    .filter((row) => normalizeProgram(row.program) === normalizedProgram);
+  if (!programRows.length) return { available: false, reason: 'no_stations' };
+  if (!satelliteMap?.available || !satelliteMap.live?.url) {
+    return { available: false, reason: satelliteMap?.fallbackReason || 'satellite_unavailable' };
+  }
+
+  const resolved = resolveZoneRowsImageDrift(programRows, imageContext);
+  const pins = [];
+  for (const row of resolved) {
+    const shape = typeof row.geometry_image === 'string'
+      ? (() => { try { return JSON.parse(row.geometry_image); } catch { return null; } })()
+      : row.geometry_image;
+    if (!shape || shape.type !== 'circle') continue;
+    const cx = Number(shape.cx);
+    const cy = Number(shape.cy);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+    const status = latestStatusByStationId.get(String(row.id)) || null;
+    pins.push({
+      id: String(row.id),
+      number: Number(row.station_number) || null,
+      label: row.label || null,
+      cx,
+      cy,
+      status: STATION_STATUSES.includes(status) ? status : null,
+    });
+  }
+  if (pins.length !== programRows.length || !pins.length) {
+    return { available: false, reason: 'marks_stale' };
+  }
+
+  const summary = {
+    total: pins.length,
+    checked: pins.filter((pin) => pin.status && pin.status !== 'inaccessible').length,
+    activity: pins.filter((pin) => pin.status === 'activity').length,
+    serviced: pins.filter((pin) => pin.status === 'serviced').length,
+    inaccessible: pins.filter((pin) => pin.status === 'inaccessible').length,
+  };
+
+  return {
+    available: true,
+    program: normalizedProgram,
+    image: {
+      url: satelliteMap.live.url,
+      width: satelliteMap.live.width || 640,
+      height: satelliteMap.live.height || 340,
+    },
+    attributionText: satelliteMap.attributionText || '',
+    stations: pins,
+    summary,
+  };
+}
+
 module.exports = {
   STATION_STATUSES,
   STATION_PROGRAMS,
@@ -696,5 +773,6 @@ module.exports = {
   syncStationsForCompletion,
   loadStationsForPropertyMap,
   buildStationMapReportContext,
+  buildStationMapCurrentContext,
   isStationMapReportEnabled,
 };
