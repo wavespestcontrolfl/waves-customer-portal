@@ -329,6 +329,13 @@ export default function CreateProjectModal({
   // not write previous_treatment_* keys into the new type's report.
   const projectTypeRef = useRef(projectType);
   projectTypeRef.current = projectType;
+  // Mirrors the WDO address context (typed property address, else the
+  // customer's) the same way WdoIntelligenceBar keys its lookups on the
+  // address: an extraction result must not land after the tech re-points
+  // the report at a different property mid-request.
+  const wdoAddressContext = String(findings.property_address || formatCustomerAddress(selectedCustomer) || '').trim();
+  const wdoAddressRef = useRef(wdoAddressContext);
+  wdoAddressRef.current = wdoAddressContext;
   // Invalidate the extraction the moment the report type changes — waiting
   // for the in-flight request to resolve would leave the switched-to type's
   // Save button stuck disabled at "Reading photo…" until the old request
@@ -990,12 +997,21 @@ export default function CreateProjectModal({
   // on save regardless of how the extraction goes.
   // Stale-response check shared by the success and error paths below. A
   // superseded request (newer extraction owns the state) just drops out; a
-  // context switch (customer or project type changed mid-flight) additionally
-  // clears the pending state — leaving it at 'working' would wedge the Save
-  // gate shut on the new context (Codex P2s on #2748).
-  function treatmentExtractWentStale(seq, startedCustomer, startedType) {
+  // context switch (customer, project type, or property address changed
+  // mid-flight) additionally clears the pending state — leaving it at
+  // 'working' would wedge the Save gate shut on the new context — and drops
+  // the request's own queued evidence photo: the first-customer-selection
+  // and address-edit paths have no queue purge of their own (unlike the
+  // Change / type-switch paths), so a stale sticker photo would otherwise
+  // upload onto the new context's report (Codex P1/P2s on #2748).
+  function treatmentExtractWentStale(seq, started) {
     if (treatmentExtractSeqRef.current !== seq) return true;
-    if (customerIdRef.current !== startedCustomer || projectTypeRef.current !== startedType) {
+    // An empty starting address ADOPTING a value (the async customer record
+    // finishing its load) is not a property switch — only a change away
+    // from a known address invalidates.
+    const addressChanged = started.address !== '' && wdoAddressRef.current !== started.address;
+    if (customerIdRef.current !== started.customer || projectTypeRef.current !== started.type || addressChanged) {
+      setPhotoQueue(prev => prev.filter(p => p.id !== started.photoId));
       setTreatmentExtract({ status: 'idle', message: '' });
       return true;
     }
@@ -1004,10 +1020,16 @@ export default function CreateProjectModal({
 
   async function handleTreatmentPhotoExtract(file) {
     if (!file || saving || aiWriting) return;
-    const startedCustomer = customerIdRef.current;
-    const startedType = projectTypeRef.current;
     const seq = ++treatmentExtractSeqRef.current;
-    queuePhoto(file, 'previous_treatment');
+    const started = {
+      customer: customerIdRef.current,
+      type: projectTypeRef.current,
+      address: wdoAddressRef.current,
+      photoId: `q_extract_${Date.now()}_${seq}`,
+    };
+    // Queued with a known id (not via queuePhoto) so the stale guard can
+    // remove exactly this photo if the context changes mid-request.
+    setPhotoQueue(prev => [...prev, { file, category: 'previous_treatment', caption: '', id: started.photoId }]);
     setTreatmentExtract({ status: 'working', message: '' });
     try {
       const fd = new FormData();
@@ -1015,12 +1037,11 @@ export default function CreateProjectModal({
       if (createdProject?.id) fd.append('project_id', createdProject.id);
       if (defaultServiceRecordId) fd.append('service_record_id', defaultServiceRecordId);
       if (defaultScheduledServiceId) fd.append('scheduled_service_id', defaultScheduledServiceId);
-      const address = findings.property_address || formatCustomerAddress(selectedCustomer);
-      if (address) fd.append('property_address', address);
+      if (started.address) fd.append('property_address', started.address);
       fd.append('previous_treatment_photo', file);
       const res = await adminFetch('/admin/projects/wdo-treatment-photo', { method: 'POST', body: fd, headers: {} });
       const data = await res.json();
-      if (treatmentExtractWentStale(seq, startedCustomer, startedType)) return;
+      if (treatmentExtractWentStale(seq, started)) return;
       if (!res.ok) throw new Error(data?.error || 'Photo extraction failed');
       const suggested = data?.suggestedFindings || {};
       const notes = String(suggested.previous_treatment_notes || '').trim();
@@ -1074,7 +1095,7 @@ export default function CreateProjectModal({
         ].filter(Boolean).join(' '),
       });
     } catch (e) {
-      if (treatmentExtractWentStale(seq, startedCustomer, startedType)) return;
+      if (treatmentExtractWentStale(seq, started)) return;
       setTreatmentExtract({ status: 'error', message: e.message || 'Photo extraction failed' });
     }
   }
