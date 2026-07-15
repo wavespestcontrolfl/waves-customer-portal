@@ -250,6 +250,17 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
   });
 
+  test('midges and no-see-ums are the mosquito program (codex P1)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and biting midges',
+    })).toBe('Quarterly Lawn Care Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn plus no-see-ums on the lanai',
+    })).toBe('Quarterly Lawn Care Service + Mosquito Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
