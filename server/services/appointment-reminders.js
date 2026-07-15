@@ -42,6 +42,10 @@ const { buildRescheduleLink } = require('./reschedule-link');
 const SELF_HEAL_TERMINAL_STATUSES = new Set(['cancelled', 'canceled', 'completed', 'skipped', 'no_show']);
 const REMINDER_BLOCKING_STATUSES = new Set([...SELF_HEAL_TERMINAL_STATUSES, 'rescheduled']);
 
+// Per-run cap for the registration self-heal sweep (selfHealMissingReminderRows).
+// Bounds each 15-min cron run; a large backlog drains within a few hours.
+const SELF_HEAL_REGISTRATION_LIMIT = 25;
+
 // ── SMS → email fallback ──
 // Appointment texts are SMS-first. When the SMS cannot be delivered (landline /
 // carrier-undeliverable / no mobile / blocked) we send the same information by
@@ -1133,12 +1137,76 @@ const AppointmentReminders = {
   },
 
   /**
+   * Registration self-heal. Every cron / reschedule / cancel path in this
+   * service drives off appointment_reminders — but a visit inserted outside
+   * the booking paths (manual DB backfill, one-off script) never got a row
+   * registered, so that customer silently gets no confirmation and no
+   * 72h/24h reminders (2026-07-15: a customer's re-anchored quarterly series
+   * had no rows — no reminder would ever have fired). Register any future,
+   * non-terminal visit that lacks a row. registerVisitReminderInTx semantics
+   * apply: no confirmation SMS goes out (confirmation_sent=true),
+   * already-unreachable windows are pre-marked, and same-customer/same-time
+   * visits merge into one reminder. Capped per run; the 15-min cadence
+   * drains a backlog within hours. Never throws.
+   */
+  async selfHealMissingReminderRows() {
+    let healed = 0;
+    try {
+      const todayStartET = parseETDateTime(`${etDateString(new Date())}T00:00`);
+      const missing = await db('scheduled_services as ss')
+        .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
+        .whereNull('ar.id')
+        .whereNotNull('ss.customer_id')
+        .whereNotIn('ss.status', [...SELF_HEAL_TERMINAL_STATUSES])
+        .where('ss.scheduled_date', '>=', todayStartET)
+        .whereNotExists(function () {
+          this.select(1)
+            .from('customers')
+            .whereRaw('customers.id = ss.customer_id')
+            .whereNotNull('customers.deleted_at');
+        })
+        .orderBy('ss.scheduled_date', 'asc')
+        .limit(SELF_HEAL_REGISTRATION_LIMIT)
+        .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type');
+
+      for (const svc of missing) {
+        try {
+          const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
+          const record = await db.transaction((trx) => AppointmentReminders.registerVisitReminderInTx(trx, {
+            scheduledServiceId: svc.id,
+            customerId: svc.customer_id,
+            appointmentTime: `${etDateString(svc.scheduled_date)}T${windowStart}`,
+            serviceType: svc.service_type,
+            source: 'cron_selfheal',
+          }));
+          if (record) healed += 1;
+        } catch (err) {
+          logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);
+        }
+      }
+      if (healed) {
+        logger.info(
+          `[appt-remind] Self-healed ${healed} missing reminder row(s)` +
+          (missing.length === SELF_HEAL_REGISTRATION_LIMIT ? ' (cap hit — more next run)' : '')
+        );
+      }
+    } catch (err) {
+      logger.error(`[appt-remind] Self-heal registration sweep failed: ${err.message}`);
+    }
+    return healed;
+  },
+
+  /**
    * Check and send 72h and 24h reminders.
    * Called by cron every 15 minutes.
    */
   async checkAndSendReminders() {
     const results = { sent72h: 0, sent24h: 0, skipped: 0, errors: 0 };
     const now = new Date();
+
+    // Registration self-heal first, so a visit missing its reminder row joins
+    // this same run's confirmation-recovery and reminder passes below.
+    await AppointmentReminders.selfHealMissingReminderRows();
 
     // Durability backstop for deferred confirmations. Admin saves insert the
     // reminder row with confirmation_sent=false and fire the Twilio send off the
