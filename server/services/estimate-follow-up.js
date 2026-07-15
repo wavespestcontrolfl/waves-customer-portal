@@ -641,11 +641,17 @@ async function bumpFollowupCounters(estimateId, ruleKey) {
 // timestamps, so a newer successful send can't mask an older lost bump.
 // Returns the healed counters (null when nothing was uncounted) so callers
 // can overlay a stale in-memory row before judging caps/spacing.
-async function repairFollowupCounters(estimateId) {
+// olderThanMinutes (codex 2736 r14): callers OUTSIDE the follow-up advisory
+// lock (the extension re-arm) must not count a seconds-old claim a live
+// processor inserted pre-send — a deadline-moved abort would release it,
+// leaving a phantom touch on the counters. Cron-side callers run under the
+// shared lock, where an uncounted row is always a genuinely lost bump.
+async function repairFollowupCounters(estimateId, { olderThanMinutes = 0 } = {}) {
   const result = await db.raw(
     `WITH uncounted AS (
        UPDATE estimate_followup_sends SET counted_at = now()
        WHERE estimate_id = ? AND counted_at IS NULL
+       AND sent_at <= now() - (? * interval '1 minute')
        RETURNING sent_at
      )
      UPDATE estimates SET
@@ -653,7 +659,7 @@ async function repairFollowupCounters(estimateId) {
        last_follow_up_at = GREATEST(COALESCE(last_follow_up_at, '-infinity'::timestamptz), (SELECT max(sent_at) FROM uncounted))
      WHERE id = ? AND EXISTS (SELECT 1 FROM uncounted)
      RETURNING follow_up_count, last_follow_up_at`,
-    [estimateId, estimateId],
+    [estimateId, olderThanMinutes, estimateId],
   );
   return result?.rows?.[0] || null;
 }

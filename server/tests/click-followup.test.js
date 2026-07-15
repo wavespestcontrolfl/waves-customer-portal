@@ -958,6 +958,12 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     expect(await gate.engagementJobDueSoon(makeEstimate({ customer_email: null }), NOW)).toBe(false);
   });
 
+  test('accepted estimates: a stale pre-acceptance job never costs the booking nudge (codex 2736 r14)', async () => {
+    // The processor will skip this job as estimate-inactive — not a touch.
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    expect(await gate.engagementJobDueSoon(makeEstimate({ status: 'accepted' }), NOW)).toBe(false);
+  });
+
   test('an UPCOMING sweep window counts as due-soon — unopened window opens in 6h (codex 2736 r12)', async () => {
     const engine = require('../services/estimate-engagement-engine')._private;
     engine.loadRules.mockResolvedValueOnce([

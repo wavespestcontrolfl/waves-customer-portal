@@ -525,8 +525,14 @@ async function processDueBatch(now = new Date()) {
         if (conv.reason === 'guard-error') {
           // A transient lookup failure fails CLOSED for this tick, not
           // forever (codex 2736 r13): a terminal skip here would drop the
-          // durable job over a DB hiccup — retry like any plumbing error.
-          await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'conversion-unverifiable', { countAttempt: true });
+          // durable job over a DB hiccup — retry like any plumbing error,
+          // BOUNDED like every other retry (codex 2736 r14: a persistent
+          // guard failure must fail closed, not defer indefinitely).
+          if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
+            await markJob(job.id, 'failed', 'conversion-unverifiable', { attempts: db.raw('attempts + 1') });
+          } else {
+            await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'conversion-unverifiable', { countAttempt: true });
+          }
           continue;
         }
         await markJob(job.id, 'skipped', `converted:${conv.reason}`);
@@ -584,7 +590,12 @@ async function processDueBatch(now = new Date()) {
             continue;
           }
         } catch {
-          await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'prefs-unverifiable', { countAttempt: true });
+          // Bounded like the guard-error retry above (r14).
+          if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
+            await markJob(job.id, 'failed', 'prefs-unverifiable', { attempts: db.raw('attempts + 1') });
+          } else {
+            await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'prefs-unverifiable', { countAttempt: true });
+          }
           continue;
         }
       }

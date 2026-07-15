@@ -513,6 +513,17 @@ describe('processDueJobs', () => {
     expect(defer.payload.attempts).toBeDefined(); // bounded by the 5-try cap
   });
 
+  test('guard-error retries are BOUNDED — the 5th failure fails the job closed (codex 2736 r14)', async () => {
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'guard-error' });
+    enqueueProcessorHappyPath({ job: pendingJob({ attempts: 4 }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'failed', outcome_reason: 'conversion-unverifiable' }));
+  });
+
   test('lead-only estimates run the lead conversion chain before sending (codex 2736 r13)', async () => {
     const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
     const { leadConvertedSince } = require('../services/click-followup-gate');

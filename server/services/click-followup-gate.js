@@ -232,6 +232,11 @@ async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
   // Email is the engine's only channel — no address means it can never
   // touch this contact, queued or upcoming.
   if (!est.customer_email) return false;
+  // The engine only ever emails 'sent'/'viewed' estimates (processor skips
+  // everything else as estimate-inactive) — an accepted booking-kind click
+  // with a stale pre-acceptance job pending must not lose its booking
+  // nudge to an email that can never send (codex 2736 r14).
+  if (!['sent', 'viewed'].includes(est.status)) return false;
   try {
     const nowMs = now.getTime();
     const soonMs = nowMs + soonHours * 3600000;

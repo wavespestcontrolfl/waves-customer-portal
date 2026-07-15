@@ -133,7 +133,9 @@ describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', ()
     expect(res.newExpiry).toBeInstanceOf(Date);
     // Uncounted sends are healed into the estimate's counters BEFORE their
     // rows are deleted (codex 2736 r11) — never destroy uncounted evidence.
-    expect(repairFollowupCounters).toHaveBeenCalledWith('est-9');
+    // Age-thresholded (r14): a seconds-old row can be a live processor's
+    // pre-send claim — counting it would leave a phantom touch.
+    expect(repairFollowupCounters).toHaveBeenCalledWith('est-9', { olderThanMinutes: 10 });
     // The one-lifecycle enqueue guard + sends-group budget key on these rows;
     // deleting them IS the re-arm for the new deadline (mirrors the
     // followup_expiring_sent reset).

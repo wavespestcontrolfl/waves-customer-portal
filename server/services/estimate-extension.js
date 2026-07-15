@@ -172,7 +172,12 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     // never destroy evidence that hasn't been counted. Lazy require avoids
     // loading the follow-up module graph on every extension.
     const { repairFollowupCounters } = require('./estimate-follow-up')._private;
-    await repairFollowupCounters(estimate.id);
+    // olderThanMinutes (codex 2736 r14): this runs OUTSIDE the follow-up
+    // advisory lock, so a seconds-old uncounted row can be a live
+    // processor's pre-send claim (which the deadline-moved abort will
+    // release) — counting it would leave a phantom touch. Ten minutes is
+    // far beyond any in-flight send; genuinely lost bumps are older.
+    await repairFollowupCounters(estimate.id, { olderThanMinutes: 10 });
     const EXPIRING_RULE_KEYS = ['expiring_engaged', 'expiring_never_viewed'];
     await db('estimate_followup_jobs')
       .where({ estimate_id: estimate.id })
