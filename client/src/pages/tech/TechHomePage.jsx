@@ -46,7 +46,7 @@ import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
-import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -350,9 +350,9 @@ export default function TechHomePage() {
       // inspection date. slice(0,10) also guards a raw ISO-serialized DATE
       // column from an alternate payload shape.
       projectDate: String(service.scheduledDate || service.scheduled_date || '').slice(0, 10) || etDateString(),
-      // NET visit price (estimated_price is final after discounts) — the
-      // pre-discount primaryLinePrice would un-discount the WDO auto-invoice.
-      visitPrice: service.estimatedPrice ?? null,
+      // The WDO line's own net price (never the pre-discount base, never a
+      // multi-service group total) — see wdoFeeSeedFromVisit.
+      visitPrice: wdoFeeSeedFromVisit(service),
       // The linked service's own profile picks the project type (same as the
       // DispatchPageV2 path) — the explicit allowedProjectTypes override also
       // keeps project_required keys creatable after their project type became

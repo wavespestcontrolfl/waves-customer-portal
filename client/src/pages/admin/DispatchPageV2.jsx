@@ -69,7 +69,7 @@ import CreateAppointmentModal from "../../components/schedule/CreateAppointmentM
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
-import CreateProjectModal from "../../components/tech/CreateProjectModal";
+import CreateProjectModal, { wdoFeeSeedFromVisit } from "../../components/tech/CreateProjectModal";
 import { ProjectDetail } from "./ProjectsPage";
 import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
@@ -2494,9 +2494,9 @@ export default function DispatchPageV2({
             String(projectService.scheduledDate || date || "").split("T")[0]
           }
           defaultInspectionFee={
-            /* NET visit price (final after discounts) — the pre-discount
-               primaryLinePrice would un-discount the WDO auto-invoice. */
-            projectService.estimatedPrice ?? ""
+            /* The WDO line's own net price (never the pre-discount base,
+               never a multi-service group total) — see wdoFeeSeedFromVisit. */
+            wdoFeeSeedFromVisit(projectService)
           }
           defaultProjectType={projectService.completionProfile?.projectType || ""}
           allowedProjectTypes={

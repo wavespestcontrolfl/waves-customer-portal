@@ -20,7 +20,7 @@ vi.mock('./WdoIntelligenceBar', () => ({ default: () => null }));
 vi.mock('./DictationButton', () => ({ default: () => null }));
 vi.mock('../AddressAutocomplete', () => ({ default: () => null }));
 
-import CreateProjectModal from './CreateProjectModal';
+import CreateProjectModal, { wdoFeeSeedFromVisit } from './CreateProjectModal';
 import * as projectTypesModule from '../../../../server/services/project-types.js';
 
 const PROJECT_TYPES = projectTypesModule.PROJECT_TYPES
@@ -125,5 +125,32 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
     // Contact autofill has landed by now — the fee stays untouched.
     await waitFor(() => expect(field('requested_by').value).toContain('Mike Padil'));
     expect(field('inspection_fee').value).toBe('');
+  });
+});
+
+describe('wdoFeeSeedFromVisit', () => {
+  it('seeds the net visit price for a single-line WDO visit', () => {
+    expect(wdoFeeSeedFromVisit({ estimatedPrice: 150, serviceAddons: [] })).toBe(150);
+  });
+
+  it('seeds nothing when the visit has a billable add-on — estimatedPrice is the group total', () => {
+    // $175 WDO + $80 add-on: the auto-invoice bills inspection_fee as a
+    // single WDO line, so the $255 total must never seed the fee (Codex P1).
+    expect(wdoFeeSeedFromVisit({
+      estimatedPrice: 255,
+      serviceAddons: [{ serviceName: 'Rodent exclusion check', estimatedPrice: 80 }],
+    })).toBe('');
+  });
+
+  it('still seeds when add-ons carry no dollars', () => {
+    expect(wdoFeeSeedFromVisit({
+      estimatedPrice: 175,
+      serviceAddons: [{ serviceName: 'Free re-check', estimatedPrice: 0 }],
+    })).toBe(175);
+  });
+
+  it('seeds nothing when the visit has no price', () => {
+    expect(wdoFeeSeedFromVisit({ estimatedPrice: null, serviceAddons: [] })).toBe('');
+    expect(wdoFeeSeedFromVisit(undefined)).toBe('');
   });
 });

@@ -173,6 +173,22 @@ function formatStructureType(customer) {
   return '';
 }
 
+// The WDO fee seed for a schedule row — the inspection line's OWN net price,
+// or nothing. estimatedPrice is the visit's final total: on a single-line
+// visit that IS the inspection's net, but with billable add-ons it includes
+// their dollars too, and the auto-invoice bills findings.inspection_fee as a
+// single WDO line — a group total would fold add-on dollars into the fee
+// (Codex P1 r2). The primary line's own net isn't on the schedule payloads
+// (primaryLinePrice is the pre-discount base, and an appointment-level
+// discount's allocation isn't visible client-side), so with billable add-ons
+// we seed nothing and the tech enters the fee.
+export function wdoFeeSeedFromVisit(service) {
+  const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
+  const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
+  if (hasBillableAddon) return '';
+  return service?.estimatedPrice ?? '';
+}
+
 // Populate the WDO contact/address fields from the selected customer. With
 // overwrite=false (on selection) only blank fields are filled so typed values
 // are preserved; the explicit "Fill from customer" button passes overwrite=true.
