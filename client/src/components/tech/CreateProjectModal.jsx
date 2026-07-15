@@ -335,8 +335,16 @@ export default function CreateProjectModal({
   // returned (Codex r3 on #2748). The seq bump makes the eventual response a
   // silent no-op; a type round-trip back to WDO also invalidates, which is
   // right because the switch cleared the findings the result was meant for.
+  // What the photo extraction actually WROTE into the Section-3 fields —
+  // per field, the pre-extraction value and the value we left behind. Same
+  // ownership rule as wdoAutoFillRef: on a customer switch, a field still
+  // holding exactly what we wrote is restored to its pre-extraction value
+  // (customer A's sticker details must never file on customer B's report);
+  // a field the tech edited since is theirs and survives.
+  const treatmentExtractAppliedRef = useRef(null);
   useEffect(() => {
     treatmentExtractSeqRef.current += 1;
+    treatmentExtractAppliedRef.current = null;
     setTreatmentExtract({ status: 'idle', message: '' });
   }, [projectType]);
 
@@ -869,6 +877,25 @@ export default function CreateProjectModal({
     // in-flight request and clear its status line.
     treatmentExtractSeqRef.current += 1;
     setTreatmentExtract({ status: 'idle', message: '' });
+    // And unwind what a COMPLETED extraction wrote: the Section-3 values came
+    // from the previous customer's photo, so any field still holding exactly
+    // what the extraction left is restored to its pre-extraction value —
+    // another property's sticker details must never file on the next
+    // customer's FDACS report. A field the tech edited since stays theirs.
+    const extractApplied = treatmentExtractAppliedRef.current;
+    treatmentExtractAppliedRef.current = null;
+    if (extractApplied) {
+      setFindings(prev => {
+        const next = { ...prev };
+        if (extractApplied.notes && (prev.previous_treatment_notes || '') === extractApplied.notes.after) {
+          next.previous_treatment_notes = extractApplied.notes.before;
+        }
+        if (extractApplied.evidence && (prev.previous_treatment_evidence || '') === extractApplied.evidence.after) {
+          next.previous_treatment_evidence = extractApplied.evidence.before;
+        }
+        return next;
+      });
+    }
     if (!lastApplied) return;
     setFindings(prev => {
       const next = { ...prev };
@@ -1008,14 +1035,25 @@ export default function CreateProjectModal({
       userDirtyRef.current = true;
       setFindings(prev => {
         const next = { ...prev };
+        // Record before/after per written field so the customer-switch path
+        // can restore them. `before` is kept from the FIRST extraction since
+        // the record was last cleared — a second extraction stacks on the
+        // first, and a restore must unwind both. (Idempotent under a
+        // StrictMode double-invoke: the second run sees the same prev and an
+        // already-populated record.)
+        const record = treatmentExtractAppliedRef.current || {};
         if (notes) {
           // Append below anything the tech already wrote — never clobber it.
           const existing = String(prev.previous_treatment_notes || '').trim();
-          next.previous_treatment_notes = existing ? `${existing}\n${notes}` : notes;
+          const applied = existing ? `${existing}\n${notes}` : notes;
+          record.notes = { before: record.notes ? record.notes.before : (prev.previous_treatment_notes || ''), after: applied };
+          next.previous_treatment_notes = applied;
         }
         if (evidence === 'Yes' || (evidence && !hasMeaningfulValue(prev.previous_treatment_evidence))) {
+          record.evidence = { before: record.evidence ? record.evidence.before : (prev.previous_treatment_evidence || ''), after: evidence };
           next.previous_treatment_evidence = evidence;
         }
+        treatmentExtractAppliedRef.current = record;
         return next;
       });
       // Pass the AI's own caveats through (e.g. a smudged handwritten year)
