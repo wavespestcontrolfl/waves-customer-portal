@@ -346,6 +346,11 @@ export default function CreateProjectModal({
     treatmentExtractSeqRef.current += 1;
     treatmentExtractAppliedRef.current = null;
     setTreatmentExtract({ status: 'idle', message: '' });
+    // Queued prior-treatment evidence photos are WDO-specific: handleSave
+    // uploads the whole queue to whatever project it creates, so leaving
+    // them behind would attach a treatment-sticker image to the switched-to
+    // non-WDO report. Same purge the customer-change path already does.
+    setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
   }, [projectType]);
 
   // Photo buffer — queued locally, uploaded after project is created.
