@@ -821,7 +821,53 @@ router.get('/:id', async (req, res, next) => {
       .where('lead_id', req.params.id)
       .orderBy('created_at', 'desc');
 
-    res.json({ lead, activities });
+    // Recent calls for this lead, so the expanded lead card can show what the
+    // caller actually asked for (transcript + recording) — the AI summary alone
+    // is not enough to quote from, and it can fail outright ("AI extraction
+    // returned invalid JSON"). Match by the lead's call SID when present, else
+    // by 10-digit phone (same RIGHT-match the call pipeline uses to reuse
+    // leads, so a call attached to a form lead is still found). Best-effort:
+    // a call_log failure must never break the lead fetch.
+    let calls = [];
+    try {
+      const digits = String(lead.phone || '').replace(/\D/g, '');
+      const ten = digits.length >= 10 ? digits.slice(-10) : null;
+      if (lead.twilio_call_sid || ten) {
+        const rows = await db('call_log')
+          .where(function () {
+            if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+            if (ten) {
+              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+              this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
+            }
+          })
+          .where(function () {
+            this.whereNotNull('transcription').orWhereNotNull('recording_url');
+          })
+          .orderBy('created_at', 'desc')
+          .limit(3)
+          .select(
+            'id', 'direction', 'duration_seconds', 'recording_sid',
+            'recording_url', 'transcription', 'transcription_status', 'created_at',
+          );
+        // The raw Twilio recording_url stays server-side (the client plays via
+        // the authenticated /admin/call-recordings/audio proxy by sid or id).
+        calls = rows.map((c) => ({
+          id: c.id,
+          direction: c.direction,
+          duration_seconds: c.duration_seconds,
+          recording_sid: c.recording_sid,
+          has_recording: !!c.recording_url,
+          transcription: c.transcription,
+          transcription_status: c.transcription_status,
+          created_at: c.created_at,
+        }));
+      }
+    } catch (e) {
+      console.error('[leads] call_log lookup failed (non-blocking):', e.message);
+    }
+
+    res.json({ lead, activities, calls });
   } catch (err) { next(err); }
 });
 

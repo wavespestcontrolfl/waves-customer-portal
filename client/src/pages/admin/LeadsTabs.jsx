@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
+import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -129,6 +130,28 @@ function leadEstimateParams(lead) {
   if (lead.service_interest)
     params.set("serviceInterest", lead.service_interest);
   return params;
+}
+
+// leads.extracted_data arrives as jsonb (object) or a JSON string depending on
+// which pipeline wrote it — parse defensively, never crash the row on bad data.
+function parseLeadExtractedData(raw) {
+  if (!raw) return {};
+  try {
+    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function fmtPreferredDateTime(value) {
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+}
+
+function fmtCallDuration(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
 function Badge({ label, color, style }) {
@@ -649,6 +672,7 @@ export function LeadsSection() {
   const [leadActivities, setLeadActivities] = useState([]);
   const [leadActivitiesLoading, setLeadActivitiesLoading] = useState(false);
   const [leadActivitiesError, setLeadActivitiesError] = useState(null);
+  const [leadCalls, setLeadCalls] = useState([]);
   const [showModal, setShowModal] = useState(null);
   const [formData, setFormData] = useState({});
   const [filters, setFilters] = useState(() => {
@@ -842,6 +866,7 @@ export function LeadsSection() {
       const requestedLeadId = String(leadId);
       if (!silent) {
         setLeadActivities([]);
+        setLeadCalls([]);
         setLeadActivitiesError(null);
         setLeadActivitiesLoading(true);
       }
@@ -849,12 +874,14 @@ export function LeadsSection() {
         const data = await adminFetch(`/admin/leads/${leadId}`);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         setLeadActivities(data.activities || []);
+        setLeadCalls(data.calls || []);
         if (!silent) setLeadActivitiesError(null);
       } catch (e) {
         console.error("loadLeadActivities", e);
         if (String(expandedLeadRef.current || "") !== requestedLeadId) return;
         if (!silent) {
           setLeadActivities([]);
+          setLeadCalls([]);
           setLeadActivitiesError(e);
         }
       } finally {
@@ -1697,7 +1724,139 @@ export function LeadsSection() {
                                           </span>
                                         </div>
                                       )}
+                                      {(() => {
+                                        const ex = parseLeadExtractedData(
+                                          lead.extracted_data,
+                                        );
+                                        const quoteFlags = [
+                                          ex.quote_requested &&
+                                            "Quote requested on call",
+                                          ex.quote_promised &&
+                                            "Quote promised to caller",
+                                        ].filter(Boolean);
+                                        if (
+                                          !ex.pain_points &&
+                                          !ex.preferred_date_time &&
+                                          quoteFlags.length === 0
+                                        )
+                                          return null;
+                                        return (
+                                          <>
+                                            {ex.pain_points && (
+                                              <div>
+                                                Concerns:{" "}
+                                                <span
+                                                  style={{ color: C.text }}
+                                                >
+                                                  {ex.pain_points}
+                                                </span>
+                                              </div>
+                                            )}
+                                            {ex.preferred_date_time && (
+                                              <div>
+                                                Preferred Time:{" "}
+                                                <span
+                                                  style={{ color: C.text }}
+                                                >
+                                                  {fmtPreferredDateTime(
+                                                    ex.preferred_date_time,
+                                                  )}
+                                                </span>
+                                              </div>
+                                            )}
+                                            {quoteFlags.length > 0 && (
+                                              <div style={{ marginTop: 4 }}>
+                                                {quoteFlags.map((f) => (
+                                                  <Badge
+                                                    key={f}
+                                                    label={f}
+                                                    color={C.amber}
+                                                    style={{
+                                                      marginRight: 6,
+                                                    }}
+                                                  />
+                                                ))}
+                                              </div>
+                                            )}
+                                          </>
+                                        );
+                                      })()}
                                     </div>{" "}
+                                    {leadCalls.length > 0 && (
+                                      <div style={{ marginTop: 12 }}>
+                                        <h4
+                                          style={{
+                                            margin: "0 0 8px",
+                                            color: C.heading,
+                                            fontSize: 14,
+                                          }}
+                                        >
+                                          Calls
+                                        </h4>
+                                        {leadCalls.map((call) => (
+                                          <div
+                                            key={call.id}
+                                            style={{
+                                              border: `1px solid ${C.border}`,
+                                              borderRadius: 8,
+                                              padding: 10,
+                                              marginBottom: 8,
+                                              fontSize: 12,
+                                              color: C.muted,
+                                            }}
+                                          >
+                                            <div style={{ marginBottom: 6 }}>
+                                              {new Date(
+                                                call.created_at,
+                                              ).toLocaleString()}
+                                              {call.duration_seconds
+                                                ? ` — ${fmtCallDuration(call.duration_seconds)}`
+                                                : ""}
+                                              {call.direction === "outbound"
+                                                ? " (outbound)"
+                                                : ""}
+                                            </div>
+                                            {call.has_recording && (
+                                              <AuthenticatedCallAudio
+                                                recordingId={
+                                                  call.recording_sid || call.id
+                                                }
+                                                style={{
+                                                  marginBottom: 6,
+                                                  color: C.text,
+                                                }}
+                                              />
+                                            )}
+                                            {call.transcription && (
+                                              <details>
+                                                <summary
+                                                  style={{
+                                                    cursor: "pointer",
+                                                    color: C.teal,
+                                                    fontSize: 12,
+                                                  }}
+                                                >
+                                                  View transcript
+                                                </summary>
+                                                <div
+                                                  style={{
+                                                    marginTop: 6,
+                                                    maxHeight: 180,
+                                                    overflowY: "auto",
+                                                    whiteSpace: "pre-wrap",
+                                                    color: C.text,
+                                                    fontSize: 12,
+                                                    lineHeight: 1.5,
+                                                  }}
+                                                >
+                                                  {call.transcription}
+                                                </div>
+                                              </details>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>{" "}
                                   <div style={{ flex: "1 1 300px" }}>
                                     {" "}
@@ -1773,6 +1932,36 @@ export function LeadsSection() {
                                           <span style={{ color: C.text }}>
                                             {a.description}
                                           </span>{" "}
+                                          {(() => {
+                                            if (
+                                              a.activity_type !== "ai_triage" ||
+                                              !a.metadata
+                                            )
+                                              return null;
+                                            let meta = {};
+                                            try {
+                                              meta =
+                                                typeof a.metadata === "string"
+                                                  ? JSON.parse(a.metadata)
+                                                  : a.metadata;
+                                            } catch (e) {}
+                                            const lines = [
+                                              meta.call_summary,
+                                              meta.pain_points &&
+                                                `Concerns: ${meta.pain_points}`,
+                                            ].filter(Boolean);
+                                            if (!lines.length) return null;
+                                            return (
+                                              <div
+                                                style={{
+                                                  marginTop: 2,
+                                                  color: C.text,
+                                                }}
+                                              >
+                                                {lines.join(" — ")}
+                                              </div>
+                                            );
+                                          })()}
                                           <div
                                             style={{
                                               fontSize: 10,
