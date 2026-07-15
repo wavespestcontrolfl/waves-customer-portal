@@ -1447,6 +1447,11 @@ export function LeadsSection() {
                             >
                               {lead.phone || lead.email || "--"}
                             </div>{" "}
+                            {isMobile && lead.service_interest && (
+                              <div style={{ color: C.text, fontSize: 12 }}>
+                                {lead.service_interest}
+                              </div>
+                            )}{" "}
                           </td>{" "}
                           {!isMobile && (
                             <>
@@ -1632,6 +1637,17 @@ export function LeadsSection() {
                                       }}
                                     >
                                       {" "}
+                                      <div>
+                                        Service:{" "}
+                                        <span
+                                          style={{
+                                            color: C.heading,
+                                            fontWeight: 600,
+                                          }}
+                                        >
+                                          {lead.service_interest || "--"}
+                                        </span>
+                                      </div>{" "}
                                       <div>
                                         Email:{" "}
                                         <span style={{ color: C.text }}>
