@@ -148,6 +148,7 @@ const express = require('express');
 const db = require('../models/db');
 const ProjectEmail = require('../services/project-email');
 const InvoiceService = require('../services/invoice');
+const PayerService = require('../services/payer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { buildWdoReportPDFBuffer } = require('../services/pdf/wdo-report-pdf');
 const projectsRouter = require('../routes/admin-projects');
@@ -407,6 +408,29 @@ describe('send-with-invoice hold_report_until_paid', () => {
     });
   });
 
+  test('hold on a would-be statement-accrued invoice is rejected BEFORE creating it', async () => {
+    // NET-terms payer + statements gate on: InvoiceService.create would stamp
+    // payer_statement_id and roll the line onto the open monthly statement —
+    // the guard must fire before any invoice exists (Codex P1).
+    PayerService.resolveForInvoice.mockResolvedValueOnce({
+      payerId: 'payer-1',
+      paymentTerms: 'net30',
+      snapshot: { company_name: 'ABC Title' },
+    });
+    mockTables({ project: wdoProject({ invoice_id: null }) });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(422);
+      expect(body.code).toBe('hold_statement_accrued');
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+    });
+  });
+
   test('hold is rejected while the feature gate is off', async () => {
     mockGates.wdoReportPaymentHold = false;
     mockTables();
@@ -592,6 +616,25 @@ describe('public report routes while held', () => {
       // No report content leaks on the 402 payload.
       expect(body.findings).toBeUndefined();
       expect(body.photos).toBeUndefined();
+    });
+  });
+
+  test('402 never exposes the payer AP pay link to report-token holders', async () => {
+    mockTables({
+      project: wdoProject({ report_hold_status: 'held' }),
+      invoice: invoiceRow({ status: 'sent', payer_id: 'payer-1' }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(402);
+      expect(body.code).toBe('report_payment_required');
+      // The pay link routes to the payer's AP inbox only — the homeowner (or
+      // a forwarded third party) never receives it, and no billing metadata
+      // rides the card.
+      expect(body.payUrl).toBeNull();
+      expect(body.payerBilled).toBe(true);
+      expect(body.invoiceNumber).toBeNull();
     });
   });
 

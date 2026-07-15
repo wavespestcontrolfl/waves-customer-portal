@@ -2393,7 +2393,7 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
 // be ad-hoc (no service_record_id / scheduled_service_id), so reuse must not
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
-async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false }) {
+async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false, holdRequested = false }) {
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
@@ -2481,6 +2481,38 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
     // 3. Nothing to reuse — mint the project's draft invoice. How the draft is
     //    built depends on the project type.
     if (project.project_type === 'wdo_inspection') {
+      // Hold-until-paid must never CREATE a statement-accrued invoice as a
+      // side effect of a send the route is about to reject (Codex P1 on
+      // #2753): InvoiceService.create would resolve a NET-terms payer, stamp
+      // payer_statement_id, and roll the line onto the open monthly statement
+      // BEFORE the route's accrued guard runs. Predict accrual here with the
+      // same read-only payer resolution the dry-run preview uses, mirroring
+      // create()'s accrual condition (NET-terms payer + GATE_PAYER_STATEMENTS
+      // — see invoice.js), and refuse before anything exists. Runs on the
+      // dry-run too so the operator learns at preview time. Existing invoices
+      // (explicit id / reuse paths above) are covered by the route's
+      // payer_statement_id check instead — no creation happens there.
+      if (holdRequested) {
+        let holdSsId = project.scheduled_service_id || null;
+        if (!holdSsId && project.service_record_id) {
+          const srLink = await trx('service_records')
+            .where({ id: project.service_record_id, customer_id: project.customer_id })
+            .first('scheduled_service_id').catch(() => null);
+          if (srLink?.scheduled_service_id) holdSsId = srLink.scheduled_service_id;
+        }
+        const resolvedHoldPayer = await require('../services/payer').resolveForInvoice({
+          customerId: project.customer_id,
+          scheduledServiceId: holdSsId,
+        }).catch(() => null);
+        if (resolvedHoldPayer?.payerId
+          && ['net15', 'net30'].includes(String(resolvedHoldPayer.paymentTerms || ''))
+          && isEnabled('payerStatements')) {
+          const err = new Error('This inspection bills on the payer\'s monthly statement — hold-until-paid is not supported for statement-accrued invoices');
+          err.code = 'hold_statement_accrued';
+          throw err;
+        }
+      }
+
       // WDO bills a single auto-priced "WDO Inspection" line. On a dry-run, DON'T
       // mint a real draft just to show the amount — every cancelled preview would
       // strand an orphan invoice + burn an invoice number. Return a non-persisted
@@ -3644,6 +3676,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       customer,
       invoiceId: req.body?.invoice_id,
       dryRun,
+      holdRequested,
     });
 
     // Match the canonical invoice non-sendable statuses (invoice.js): don't
@@ -4316,6 +4349,11 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // derivable pricing) — surface the actionable reason as a 422 rather than an
     // opaque 500.
     if (err?.code === 'invoice_build_failed') {
+      return res.status(422).json({ error: err.message, code: err.code });
+    }
+    // Hold-until-paid on a would-be statement-accrued invoice — refused
+    // BEFORE the invoice was created (nothing to clean up).
+    if (err?.code === 'hold_statement_accrued') {
       return res.status(422).json({ error: err.message, code: err.code });
     }
     // The visit is already billed on a paid/in-flight invoice — block the

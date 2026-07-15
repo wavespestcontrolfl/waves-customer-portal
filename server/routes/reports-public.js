@@ -418,30 +418,38 @@ async function heldReportPaymentContext(project) {
   let payUrl = null;
   let invoiceNumber = null;
   let paymentProcessing = false;
+  let payerBilled = false;
   if (project.invoice_id) {
     const invoice = await db('invoices')
       .where({ id: project.invoice_id })
-      .first('id', 'token', 'invoice_number', 'status')
+      .first('id', 'token', 'invoice_number', 'status', 'payer_id')
       .catch(() => null);
     const invoiceStatus = String(invoice?.status || '').toLowerCase();
+    // Third-party Bill-To isolation (Codex P1 on #2753): a payer-billed
+    // invoice's pay link belongs to the payer's AP inbox ONLY — the send
+    // paths never hand it to the homeowner, and this token page is opened by
+    // homeowners AND the third parties a WDO link is forwarded to. No pay
+    // CTA, no billing metadata; just "billed to the requesting party".
+    payerBilled = Boolean(invoice?.payer_id);
     // ACH clearing window: pay-v2 rejects 'processing' invoices (an in-flight
     // bank payment), so a pay CTA here would dead-end — tell the customer the
     // payment is processing instead of asking them to pay again.
-    paymentProcessing = invoiceStatus === 'processing';
+    paymentProcessing = !payerBilled && invoiceStatus === 'processing';
     // Only offer the pay CTA while the invoice is actually collectible:
     // settled-but-not-yet-swept rows still 402 (the sweep delivers within a
     // minute), and non-collectible statuses (void/refunded/cancelled — pay-v2
     // rejects them all) must not render a button that errors on the pay page.
     if (
-      invoice?.token
+      !payerBilled
+      && invoice?.token
       && !['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'sending'].includes(invoiceStatus)
     ) {
       const { publicPortalUrl } = require('../utils/portal-url');
       payUrl = `${publicPortalUrl()}/pay/${invoice.token}`;
     }
-    invoiceNumber = invoice?.invoice_number || null;
+    invoiceNumber = payerBilled ? null : (invoice?.invoice_number || null);
   }
-  return { payUrl, invoiceNumber, paymentProcessing };
+  return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
 }
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
@@ -464,6 +472,7 @@ router.get('/project/:token/data', async (req, res, next) => {
         payUrl: heldContext.payUrl,
         invoiceNumber: heldContext.invoiceNumber,
         paymentProcessing: heldContext.paymentProcessing,
+        payerBilled: heldContext.payerBilled,
       });
     }
 
