@@ -456,6 +456,83 @@ async function analyzeWdoProjectIntelligence({ customer, propertyAddress, curren
   };
 }
 
+// --- Previous-treatment photo extraction (WDO Section 3) -------------------
+// Reads ONE field photo — typically a prior company's treatment sticker or
+// notice on the electrical panel (company name, dates, materials, organism,
+// often handwritten), or physical evidence like drill holes / bait stations —
+// and transcribes it into the previous-treatment fields. Unlike
+// /wdo-intelligence this deliberately skips the (slow, web-search) property
+// lookup: it is the point-the-camera-at-the-sticker fast path.
+
+function buildWdoTreatmentPhotoPrompt(propertyAddress) {
+  return `You are reading a field photo taken during a Florida FDACS-13645 WDO (wood-destroying organism) inspection${propertyAddress ? ` at ${propertyAddress}` : ''}. The photo may show evidence of PREVIOUS WDO treatment: a termite-protection or treatment sticker/notice from a prior pest-control company (often affixed to the electrical panel, water heater, or a garage wall), drill holes in the slab or foundation, bait-station covers, patched drill marks, trench lines, or an old treatment tag.
+
+Return JSON only. Transcribe, don't invent: only report company names, dates, products, and organisms you can actually read in the photo. Handwriting is common on these stickers — transcribe it carefully and write "[illegible]" for any part you cannot read with confidence. Transcribe dates exactly as written (do not expand two-digit years).
+
+Fields:
+- previous_treatment_evidence: "Yes" only if the photo clearly shows prior-treatment evidence (sticker, notice, tag, drill holes, bait stations). "No" only if the photo clearly shows a relevant area with no treatment indicators. Leave blank if the photo is unclear or unrelated.
+- previous_treatment_notes: 1-4 short sentences written for the report's "Previous treatment observations" field. If a sticker or notice is present, state what it is, the company, where it appears if identifiable, and every legible detail: date of WDO inspection, date(s) of treatment, materials/products used, organism treated for, and any lot or permit number. If only physical evidence is visible, describe it and its location. Do not speculate beyond what is visible.
+
+Respond with exactly this JSON shape:
+{
+  "suggestedFindings": {
+    "previous_treatment_evidence": "Yes|No|",
+    "previous_treatment_notes": "<field text or blank>"
+  },
+  "confidence": "high|medium|low",
+  "reviewNotes": ["<operator review note>", "..."]
+}`;
+}
+
+function normalizeWdoTreatmentPhotoResult(raw) {
+  const suggested = raw?.suggestedFindings || raw?.findings || {};
+  const evidence = cleanOneLine(suggested.previous_treatment_evidence || '', 20);
+  return {
+    suggestedFindings: {
+      previous_treatment_evidence: /^yes$/i.test(evidence) ? 'Yes' : /^no$/i.test(evidence) ? 'No' : '',
+      previous_treatment_notes: cleanMultiline(suggested.previous_treatment_notes, 1200),
+    },
+    confidence: ['high', 'medium', 'low'].includes(String(raw?.confidence || '').toLowerCase())
+      ? String(raw.confidence).toLowerCase()
+      : 'low',
+    reviewNotes: Array.isArray(raw?.reviewNotes || raw?.review_notes)
+      ? (raw.reviewNotes || raw.review_notes).map((item) => cleanOneLine(item, 260)).filter(Boolean).slice(0, 4)
+      : [],
+  };
+}
+
+async function extractWdoTreatmentPhoto({ photo, propertyAddress }) {
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const msg = await anthropic.messages.create({
+    model: MODELS.VISION,
+    max_tokens: 700,
+    temperature: 0.2,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: buildWdoTreatmentPhotoPrompt(propertyAddress) },
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: photo.mediaType,
+            data: photo.buffer.toString('base64'),
+          },
+        },
+      ],
+    }],
+  });
+  const text = (msg.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('\n');
+  const parsed = parseAiJsonObject(text);
+  if (!parsed) {
+    const err = new Error('AI returned an unreadable treatment-photo response');
+    err.status = 502;
+    throw err;
+  }
+  return normalizeWdoTreatmentPhotoResult(parsed);
+}
+
 // Section-1 administrative fields the WDO property lookup auto-fills on its own.
 // They are NOT inspection findings — a report carrying only these would file
 // with a blank inspection body, so they must not satisfy "Findings captured".
@@ -1610,6 +1687,61 @@ router.post('/wdo-intelligence', upload.single('previous_treatment_photo'), asyn
     res.json(result);
   } catch (err) {
     logger.error(`[projects] WDO intelligence failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/projects/wdo-treatment-photo — extract prior-treatment
+// details from a single photo (a previous company's treatment sticker/notice,
+// or visible evidence) into the WDO Previous Treatment fields. Photo-only
+// fast path: no property lookup, one vision call.
+// ---------------------------------------------------------------------------
+router.post('/wdo-treatment-photo', upload.single('previous_treatment_photo'), async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
+    if (!req.file) return res.status(400).json({ error: 'Previous-treatment photo required' });
+    if (req.file.buffer.length > AI_PHOTO_MAX_BYTES) {
+      return res.status(400).json({ error: 'Prior-treatment photo is too large for AI review' });
+    }
+    const mediaType = validateUploadedImage(req.file);
+
+    // Same access posture as /wdo-intelligence: an existing project scopes by
+    // project access; a pre-save technician call must be linked to an
+    // assigned visit; admins can extract freely.
+    const customerId = req.body.customer_id || null;
+    const projectId = req.body.project_id || null;
+    if (projectId) {
+      const project = await db('projects').where({ id: projectId }).first();
+      if (!(await requireProjectAccess(req, res, project))) return;
+      if (project.project_type !== 'wdo_inspection') return res.status(400).json({ error: 'Project is not a WDO inspection' });
+      if (customerId && project.customer_id && String(customerId) !== String(project.customer_id)) {
+        return res.status(400).json({ error: 'Customer does not belong to the selected project' });
+      }
+    } else if (!isAdmin(req)) {
+      if (!customerId) return res.status(400).json({ error: 'Customer required for technician WDO intelligence' });
+      await validateProjectCreateScope(req, {
+        customer_id: customerId,
+        service_record_id: req.body.service_record_id || null,
+        scheduled_service_id: req.body.scheduled_service_id || null,
+      });
+    }
+
+    const result = await extractWdoTreatmentPhoto({
+      photo: { buffer: req.file.buffer, mediaType },
+      propertyAddress: cleanOneLine(req.body.property_address, 500),
+    });
+
+    logger.info('[projects] WDO treatment-photo extraction', {
+      customerId,
+      projectId,
+      confidence: result.confidence,
+      evidence: result.suggestedFindings.previous_treatment_evidence || '(blank)',
+      notesChars: result.suggestedFindings.previous_treatment_notes.length,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error(`[projects] WDO treatment-photo extraction failed: ${err.message}`);
     next(err);
   }
 });

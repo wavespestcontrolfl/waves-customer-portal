@@ -315,6 +315,16 @@ export default function CreateProjectModal({
   const [error, setError] = useState(null);
   const [createdProject, setCreatedProject] = useState(null);
 
+  // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
+  // company's treatment sticker/notice (or visible evidence) into the
+  // previous-treatment fields. Seq + customer refs guard a slow extraction
+  // against a mid-flight customer switch — like the intelligence bar, another
+  // property's treatment details must never land on this FDACS filing.
+  const [treatmentExtract, setTreatmentExtract] = useState({ status: 'idle', message: '' });
+  const treatmentExtractSeqRef = useRef(0);
+  const customerIdRef = useRef(customerId);
+  customerIdRef.current = customerId;
+
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
@@ -840,6 +850,10 @@ export default function CreateProjectModal({
     // (category 'previous_treatment') would still upload on save. It shows
     // the PREVIOUS customer's property; never carry it to the next one.
     setPhotoQueue(prev => prev.filter(p => p.category !== 'previous_treatment'));
+    // Same reasoning for the field-level photo extraction: invalidate any
+    // in-flight request and clear its status line.
+    treatmentExtractSeqRef.current += 1;
+    setTreatmentExtract({ status: 'idle', message: '' });
     if (!lastApplied) return;
     setFindings(prev => {
       const next = { ...prev };
@@ -920,6 +934,59 @@ export default function CreateProjectModal({
 
   function queuePhoto(file, category) {
     setPhotoQueue(prev => [...prev, { file, category, caption: '', id: `q_${Date.now()}_${prev.length}` }]);
+  }
+
+  // "Extract from photo" on the Previous Treatment observations field: send
+  // the photo to AI transcription and write the result into the Section-3
+  // fields. The photo also joins the upload queue as prior-treatment evidence
+  // (same category the intelligence bar uses), so it attaches to the report
+  // on save regardless of how the extraction goes.
+  async function handleTreatmentPhotoExtract(file) {
+    if (!file || saving || aiWriting) return;
+    const startedCustomer = customerIdRef.current;
+    const seq = ++treatmentExtractSeqRef.current;
+    queuePhoto(file, 'previous_treatment');
+    setTreatmentExtract({ status: 'working', message: '' });
+    try {
+      const fd = new FormData();
+      if (customerId) fd.append('customer_id', customerId);
+      if (createdProject?.id) fd.append('project_id', createdProject.id);
+      if (defaultServiceRecordId) fd.append('service_record_id', defaultServiceRecordId);
+      if (defaultScheduledServiceId) fd.append('scheduled_service_id', defaultScheduledServiceId);
+      const address = findings.property_address || formatCustomerAddress(selectedCustomer);
+      if (address) fd.append('property_address', address);
+      fd.append('previous_treatment_photo', file);
+      const res = await adminFetch('/admin/projects/wdo-treatment-photo', { method: 'POST', body: fd, headers: {} });
+      const data = await res.json();
+      // Stale response: a newer extraction started, or the tech switched
+      // customers while this one was in flight — drop it.
+      if (treatmentExtractSeqRef.current !== seq || customerIdRef.current !== startedCustomer) return;
+      if (!res.ok) throw new Error(data?.error || 'Photo extraction failed');
+      const suggested = data?.suggestedFindings || {};
+      const notes = String(suggested.previous_treatment_notes || '').trim();
+      const evidence = String(suggested.previous_treatment_evidence || '').trim();
+      if (!notes && !evidence) {
+        setTreatmentExtract({ status: 'done', message: 'No treatment details could be read from that photo — verify on site.' });
+        return;
+      }
+      userDirtyRef.current = true;
+      setFindings(prev => {
+        const next = { ...prev };
+        if (notes) {
+          // Append below anything the tech already wrote — never clobber it.
+          const existing = String(prev.previous_treatment_notes || '').trim();
+          next.previous_treatment_notes = existing ? `${existing}\n${notes}` : notes;
+        }
+        if (evidence && !hasMeaningfulValue(prev.previous_treatment_evidence)) {
+          next.previous_treatment_evidence = evidence;
+        }
+        return next;
+      });
+      setTreatmentExtract({ status: 'done', message: 'Extracted from photo — verify before filing.' });
+    } catch (e) {
+      if (treatmentExtractSeqRef.current !== seq || customerIdRef.current !== startedCustomer) return;
+      setTreatmentExtract({ status: 'error', message: e.message || 'Photo extraction failed' });
+    }
   }
 
   async function handleSave() {
@@ -1426,6 +1493,38 @@ export default function CreateProjectModal({
                         Fill from customer
                       </button>
                     )}
+                    {projectType === 'wdo_inspection' && field.key === 'previous_treatment_notes' && (
+                      /* Camera-to-field: photograph a prior company's
+                         treatment sticker (or visible evidence) and let AI
+                         transcribe it into this box. */
+                      <label
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: P.accent,
+                          fontSize: 11,
+                          fontWeight: wStrong,
+                          cursor: (saving || aiWriting || treatmentExtract.status === 'working') ? 'default' : 'pointer',
+                          opacity: (saving || aiWriting || treatmentExtract.status === 'working') ? 0.55 : 1,
+                          padding: 0,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {treatmentExtract.status === 'working' ? 'Reading photo…' : 'Extract from photo'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          disabled={saving || aiWriting || treatmentExtract.status === 'working'}
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null;
+                            e.target.value = '';
+                            if (f) handleTreatmentPhotoExtract(f);
+                          }}
+                          style={{ display: 'none' }}
+                        />
+                      </label>
+                    )}
                     {projectType !== 'wdo_inspection' && field.key === addressFieldKey && formatCustomerAddress(selectedCustomer) && (
                       <button
                         type="button"
@@ -1464,6 +1563,11 @@ export default function CreateProjectModal({
                     palette={P}
                     appearance={theme}
                   />
+                  {field.key === 'previous_treatment_notes' && treatmentExtract.message && (
+                    <div style={{ fontSize: 11, color: treatmentExtract.status === 'error' ? P.red : P.muted, marginTop: 6 }}>
+                      {treatmentExtract.message}
+                    </div>
+                  )}
                   {field.key === 'product_name' && chemAuto?.status === 'not_applicable' && chemAuto.note && (
                     <div style={{ fontSize: 11, color: P.muted, marginTop: 6 }}>{chemAuto.note}</div>
                   )}
