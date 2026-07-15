@@ -402,6 +402,10 @@ class ApiClient {
     return this.request('/property/preferences');
   }
 
+  getStationMap() {
+    return this.request('/property/station-map');
+  }
+
   updatePropertyPreferences(data) {
     return this.request('/property/preferences', {
       method: 'PUT',

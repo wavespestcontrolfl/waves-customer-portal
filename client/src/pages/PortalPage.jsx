@@ -12,6 +12,7 @@ import NotificationBell from '../components/NotificationBell';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
+import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import { etDateString } from '../lib/timezone';
 import { getStripe } from '../lib/stripeLoader';
 import {
@@ -7724,6 +7725,71 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // =========================================================================
 // MY PLAN TAB
 // =========================================================================
+// Station-map dropdown inside a plan row (owner 2026-07-15: the map sits
+// behind a click, never always-on). Chevron flips and the map fades/slides
+// in so the reveal reads as motion, not a static swap.
+function PlanStationMap({ map }) {
+  const [open, setOpen] = useState(false);
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    if (!open) { setEntered(false); return undefined; }
+    const frame = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+  const meta = STATION_CARD_PROGRAM_META[map.program] || STATION_CARD_PROGRAM_META.termite;
+  const panelId = `plan-station-map-${map.program}`;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls={panelId}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          width: '100%',
+          padding: '11px 12px',
+          borderRadius: 8,
+          border: '1px solid #E7E2D7',
+          background: '#F8FCFE',
+          color: B.glassNavy,
+          fontFamily: FONTS.body,
+          fontSize: 14,
+          fontWeight: 800,
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <Icon name="property" size={16} strokeWidth={1.9} />
+          <span>{meta.title}</span>
+        </span>
+        <Icon
+          name="chevronDown"
+          size={16}
+          strokeWidth={2}
+          style={{ transition: 'transform 0.2s ease', transform: open ? 'rotate(180deg)' : 'none', flexShrink: 0 }}
+        />
+      </button>
+      {open && (
+        <div style={{ overflow: 'hidden' }}>
+          <div style={{
+            marginTop: 12,
+            transition: 'opacity 0.25s ease, transform 0.25s ease',
+            opacity: entered ? 1 : 0,
+            transform: entered ? 'translateY(0)' : 'translateY(-8px)',
+          }}>
+            <StationMapCard variant="plan" hideTitle stationMap={map} sectionId={panelId} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MyPlanTab({ customer, focusService }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
@@ -7750,6 +7816,9 @@ function MyPlanTab({ customer, focusService }) {
   // must not present a "$X per month" plan rate — same source of truth as
   // the Billing tab's AutopayCard.
   const [billingMode, setBillingMode] = useState(null);
+  // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
+  // lane). Fail-soft: no data or gate off simply renders no map.
+  const [stationMaps, setStationMaps] = useState(null);
 
   useEffect(() => {
     api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
@@ -7758,6 +7827,7 @@ function MyPlanTab({ customer, focusService }) {
       if (d.services) setServiceHistory(d.services);
     }).catch(console.error);
     api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
+    api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
   }, []);
 
   const serviceMatches = (svcId, service = {}) => {
@@ -8328,6 +8398,16 @@ function MyPlanTab({ customer, focusService }) {
                             </div>
                           )
                         )}
+                        {/* Bait-station map (station-map-v1 lane): current
+                            layout with each station's latest check, behind
+                            a dropdown toggle. Data + gate driven — no
+                            stations or gate off renders nothing. Termite
+                            row ↔ termite program; rodent row ↔ rodent
+                            program (trap map stays a report artifact). */}
+                        {(svc.id === 'termite' || svc.id === 'rodent_bait') && (() => {
+                          const map = stationMaps?.programs?.[svc.id === 'termite' ? 'termite' : 'rodent'];
+                          return map ? <PlanStationMap map={map} /> : null;
+                        })()}
                       </div>
                     )}
                   </div>
