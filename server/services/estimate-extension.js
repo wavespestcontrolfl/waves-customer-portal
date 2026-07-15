@@ -164,6 +164,15 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // follow_up_count keeps counting the old send toward the inbox cap).
   // Post-write invariant applies (see below): never throws.
   try {
+    // Count any uncounted sends BEFORE deleting their rows (codex 2736
+    // r11): a sent-but-unbumped expiring email leaves counted_at NULL as
+    // the heal marker — deleting it first would erase the only evidence
+    // and quietly loosen the inbox cap/spacing for an email the customer
+    // really received. Repair failure skips the deletes too (same catch):
+    // never destroy evidence that hasn't been counted. Lazy require avoids
+    // loading the follow-up module graph on every extension.
+    const { repairFollowupCounters } = require('./estimate-follow-up')._private;
+    await repairFollowupCounters(estimate.id);
     const EXPIRING_RULE_KEYS = ['expiring_engaged', 'expiring_never_viewed'];
     await db('estimate_followup_jobs')
       .where({ estimate_id: estimate.id })

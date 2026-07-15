@@ -44,9 +44,10 @@ jest.mock('../services/estimate-deposits', () => ({
 jest.mock('../services/estimate-engagement-engine', () => ({
   _private: {
     loadRules: jest.fn(async () => [
-      { rule_key: 'viewed_gone_quiet_72h', enabled: true, params: { eligibleCategories: ['pest', 'lawn'] } },
+      { rule_key: 'viewed_gone_quiet_72h', enabled: true, trigger_type: 'time_sweep', params: { eligibleCategories: ['pest', 'lawn'] } },
     ]),
     categoryEligible: jest.fn(() => true),
+    rulePredicateStillHolds: jest.fn(() => true),
   },
 }));
 
@@ -925,6 +926,14 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
   test('a category-ineligible job never suppresses the click — the processor will skip it (codex 2736 r10)', async () => {
     const engine = require('../services/estimate-engagement-engine')._private;
     engine.categoryEligible.mockReturnValueOnce(false);
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('a STALE time-sweep job never suppresses the click — the processor will skip it too (codex 2736 r11)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.rulePredicateStillHolds.mockReturnValueOnce(false);
     enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
     const v = await gate.evaluateClickFollowupGate(baseInput());
     expect(v.ok).toBe(true);

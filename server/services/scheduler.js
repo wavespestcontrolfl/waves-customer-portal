@@ -2261,11 +2261,31 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {
     try {
-      await runExclusive('estimate-follow-up', async () => {
-        const EstimateFollowUp = require('./estimate-follow-up');
-        const result = await EstimateFollowUp.checkAll();
-        if (result.sent > 0) logger.info(`Estimate follow-ups: ${result.sent} sent`);
-      });
+      // The 5-min engine tick shares this lock (codex 2736 r6), fires on
+      // the same :00 boundary, and its dark-mode backlog drain can hold it
+      // for minutes — a plain non-blocking skip would cost this job a whole
+      // 2h tick and age estimates out of the legacy stages' bounded windows
+      // (codex 2736 r11: sent_at 24–48h etc.). Retry the lease a few times;
+      // sweep-style queries make a slightly-late run equivalent to an
+      // on-time one, and the atomic claims keep a duplicate-adjacent run
+      // safe. The ENGINE stays the only lane allowed to skip outright.
+      const LEASE_RETRIES = 5;
+      const LEASE_RETRY_MS = 60000;
+      for (let attempt = 0; attempt <= LEASE_RETRIES; attempt++) {
+        const result = await runExclusive('estimate-follow-up', async () => {
+          const EstimateFollowUp = require('./estimate-follow-up');
+          const res = await EstimateFollowUp.checkAll();
+          if (res.sent > 0) logger.info(`Estimate follow-ups: ${res.sent} sent`);
+          return res;
+        });
+        if (!result?.skipped) break;
+        if (attempt < LEASE_RETRIES) {
+          logger.info(`[est-followup] lease held (attempt ${attempt + 1}/${LEASE_RETRIES + 1}) — retrying in ${LEASE_RETRY_MS / 1000}s`);
+          await new Promise((resolve) => setTimeout(resolve, LEASE_RETRY_MS));
+        } else {
+          logger.warn('[est-followup] lease still held after retries — skipping this 2h tick');
+        }
+      }
     } catch (err) {
       logger.error(`Estimate follow-up job failed: ${err.message}`);
     }

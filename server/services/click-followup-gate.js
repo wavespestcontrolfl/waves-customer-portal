@@ -250,9 +250,16 @@ async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
     const engine = require('./estimate-engagement-engine')._private;
     const rules = await engine.loadRules();
     const byKey = new Map(rules.map((r) => [r.rule_key, r]));
+    // Same stale-predicate re-check the processor runs (codex 2736 r11): a
+    // time-sweep job whose condition no longer holds (the "unopened"
+    // estimate was just opened) will be skipped as stale-condition, not
+    // sent — it must not suppress the click either.
+    const nowMs = now.getTime();
     return liveJobs.some((j) => {
       const rule = byKey.get(j.rule_key);
-      return !!rule && engine.categoryEligible(est, rule);
+      return !!rule
+        && engine.categoryEligible(est, rule)
+        && engine.rulePredicateStillHolds(est, rule, nowMs);
     });
   } catch (e) {
     logger.warn(`[click-followup-gate] engagement-job check failed — suppressing: ${e.message}`);

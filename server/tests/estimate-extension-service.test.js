@@ -19,8 +19,14 @@ jest.mock('../models/db', () => {
   return dbFn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The re-arm heals uncounted sends before deleting their rows — pin the
+// boundary; repair behavior itself is pinned in the follow-up suites.
+jest.mock('../services/estimate-follow-up', () => ({
+  _private: { repairFollowupCounters: jest.fn(async () => null) },
+}));
 
 const db = require('../models/db');
+const { repairFollowupCounters } = require('../services/estimate-follow-up')._private;
 const {
   extendEstimate,
   computeExtensionExpiry,
@@ -125,6 +131,9 @@ describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', ()
       workflow: 'test',
     });
     expect(res.newExpiry).toBeInstanceOf(Date);
+    // Uncounted sends are healed into the estimate's counters BEFORE their
+    // rows are deleted (codex 2736 r11) — never destroy uncounted evidence.
+    expect(repairFollowupCounters).toHaveBeenCalledWith('est-9');
     // The one-lifecycle enqueue guard + sends-group budget key on these rows;
     // deleting them IS the re-arm for the new deadline (mirrors the
     // followup_expiring_sent reset).
