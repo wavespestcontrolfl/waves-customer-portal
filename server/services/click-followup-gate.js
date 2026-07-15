@@ -216,6 +216,28 @@ async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
   }
 }
 
+// Engagement-engine job due soon (codex 2736 r9): the behavior engine
+// (estimate-engagement-engine.js) queues durable EMAIL jobs in
+// estimate_followup_jobs — a pending job due inside the lookahead is an
+// imminent touch exactly like a legacy cadence stage, and a click-followup
+// SMS on top of it would stack two nudges. Only live while the engine's
+// gate is on (off = jobs are shadow-consumed, no customer touch). Fails
+// toward suppression like depositStageDueSoon.
+async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
+  if (!isEnabled('estimateEngagementFollowup')) return false;
+  if (!est || !est.id) return false;
+  try {
+    const row = await db('estimate_followup_jobs')
+      .where({ estimate_id: est.id, status: 'pending' })
+      .where('due_at', '<=', new Date(now.getTime() + soonHours * 3600000))
+      .first('id');
+    return !!row;
+  } catch (e) {
+    logger.warn(`[click-followup-gate] engagement-job check failed — suppressing: ${e.message}`);
+    return true;
+  }
+}
+
 // Lead-side conversion for lead-only estimates. customerConvertedSince(est)
 // short-circuits to false when the estimate carries no customer_id, but
 // conversion CREATES the customer without backfilling the estimate (e.g. the
@@ -390,8 +412,10 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
     return { ok: false, code: 'suppressed' };
   }
 
-  // 4. Cadence stages, incl. the gated deposit-abandonment stage.
-  if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)) {
+  // 4. Cadence stages: the legacy timestamp stages, the gated
+  //    deposit-abandonment stage, and the engagement engine's queued jobs.
+  if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)
+      || await engagementJobDueSoon(estimate, now)) {
     return { ok: false, code: 'cadence_due' };
   }
 
@@ -411,6 +435,7 @@ module.exports = {
   evaluateClickFollowupGate,
   cadenceStageDueSoon,
   depositStageDueSoon,
+  engagementJobDueSoon,
   leadConvertedSince,
   acceptedBookingConvertedSince,
   phoneConvertedSince,

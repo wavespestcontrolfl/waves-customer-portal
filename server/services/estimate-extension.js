@@ -154,6 +154,29 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     throw err;
   }
 
+  // Re-arm the ENGAGEMENT ENGINE's expiring lifecycle for the new deadline
+  // too (codex 2736 r9): the engine's one-lifecycle enqueue guard and the
+  // expiring sends-group budget would otherwise suppress expiring_* forever
+  // — job and ledger rows from the OLD deadline don't describe this one,
+  // and a lingering ledger row also blocks the legacy cron's cross-lane
+  // claim. Deletion IS the re-arm, mirroring the followup_expiring_sent
+  // reset above (the extension itself is the audit trail; the estimate's
+  // follow_up_count keeps counting the old send toward the inbox cap).
+  // Post-write invariant applies (see below): never throws.
+  try {
+    const EXPIRING_RULE_KEYS = ['expiring_engaged', 'expiring_never_viewed'];
+    await db('estimate_followup_jobs')
+      .where({ estimate_id: estimate.id })
+      .whereIn('rule_key', EXPIRING_RULE_KEYS)
+      .del();
+    await db('estimate_followup_sends')
+      .where({ estimate_id: estimate.id })
+      .whereIn('rule_key', EXPIRING_RULE_KEYS)
+      .del();
+  } catch (e) {
+    logger.warn(`[estimate-extension] engine expiring re-arm failed (non-fatal): ${e.message}`);
+  }
+
   // Customer notification — Waves voice. Skipped if no phone or the caller
   // asked for silence; consent/opt-out/gate enforcement lives inside
   // sendCustomerMessage.

@@ -272,6 +272,20 @@ describe('onEstimateViewed (view-event rules)', () => {
     expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('queued'));
   });
 
+  test('gate off at enqueue stamps the job enqueued_dark', async () => {
+    isEnabled.mockReturnValue(false);
+    enqueueViewRules();
+    sessionsForEstimate.mockResolvedValue([
+      session('2026-06-10T12:00:00Z', '2026-06-10T12:10:00Z'),
+      session('2026-06-10T14:55:00Z'),
+    ]);
+
+    await Engine.onEstimateViewed(baseEstimate(), NOW);
+
+    expect(rawJobs).toHaveLength(1);
+    expect(JSON.parse(rawJobs[0].bindings[3])).toEqual(expect.objectContaining({ enqueued_dark: true }));
+  });
+
   test('terminal/archived/email-less estimates never evaluate', async () => {
     await Engine.onEstimateViewed(baseEstimate({ status: 'accepted' }));
     await Engine.onEstimateViewed(baseEstimate({ archived_at: new Date() }));
@@ -354,6 +368,37 @@ describe('processDueJobs', () => {
       status: 'shadow',
       outcome_reason: expect.stringContaining('gate-off:error'),
     }));
+  });
+
+  test('an enqueued_dark job stays shadow even after the gate flips ON', async () => {
+    isEnabled.mockReturnValue(true); // gate is on by fire time…
+    enqueueProcessorHappyPath({
+      job: pendingJob({ trigger: '{"enqueued_dark":true}' }), // …but the session happened dark
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 1 });
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'shadow', outcome_reason: 'enqueued-dark' }));
+  });
+
+  test('gate off: a FULL due batch keeps draining — no >batch leftovers survive to a flip', async () => {
+    isEnabled.mockReturnValue(false);
+    const batch = Array.from({ length: 50 }, (_, i) => pendingJob({ id: `job-${i}`, estimate_id: `est-${i}` }));
+    enqueue('estimate_followup_jobs', { rows: batch }); // pass 1: full batch
+    enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
+    for (let i = 0; i < 50; i++) {
+      enqueue('estimates', { first: baseEstimate({ id: `est-${i}` }) });
+      enqueue('notification_prefs', { first: { email_enabled: true } });
+    }
+    // pass 2's due scan drains to empty via the builder default (rows: [])
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 50 });
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
   });
 
   test('v1 category scope: a termite estimate is skipped', async () => {
@@ -453,17 +498,21 @@ describe('processDueJobs', () => {
     expect(defer.payload.status).toBeUndefined(); // deferred, not failed (attempt 1 of 5)
   });
 
-  test('a gone-quiet job goes stale when the customer returns before it fires', async () => {
+  test('a customer return DEFERS the gone-quiet job to the new quiet boundary — never consumes the rule', async () => {
+    const freshView = new Date(NOW.getTime() - 2 * H);
     enqueueProcessorHappyPath({
-      est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 2 * H) }),
+      est: baseEstimate({ last_viewed_at: freshView }),
     });
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(0);
     expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
-    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
-    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    // Pending defer, NOT a terminal skip (codex 2736 r9): the one-lifecycle
+    // enqueue guard would otherwise lose the gone-quiet reminder forever.
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(freshView.getTime() + 72 * H);
   });
 
   test('an unopened job goes stale once the estimate is viewed', async () => {
@@ -522,16 +571,18 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
   });
 
-  test('a resend resets the gone-quiet clock', async () => {
+  test('a resend resets the gone-quiet clock — job defers to sent_at + minQuiet', async () => {
+    const freshSend = new Date(NOW.getTime() - 1 * H);
     enqueueProcessorHappyPath({
-      est: baseEstimate({ sent_at: new Date(NOW.getTime() - 1 * H) }),
+      est: baseEstimate({ sent_at: freshSend }),
     });
 
     const result = await Engine.processDueJobs(NOW);
 
     expect(result.sent).toBe(0);
-    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
-    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'stale-condition' }));
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined();
+    expect(defer.payload.due_at.getTime()).toBe(freshSend.getTime() + 72 * H);
   });
 
   test('a lapsed expires_at skips BEFORE the daily sweep flips status', async () => {

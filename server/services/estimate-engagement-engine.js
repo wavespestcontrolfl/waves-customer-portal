@@ -147,6 +147,12 @@ async function enqueueJob(estimateId, rule, dueAt, trigger) {
   // is per dedupe GROUP — one actual send covers the whole concept.
   const group = dedupeGroup(rule.rule_key);
   const groupIn = group.map(() => '?').join(', ');
+  // Stamp jobs born while dark (codex 2736 r9): a view-event job's fire
+  // delay outlives a gate flip — the processor shadows stamped jobs even if
+  // the gate is on by the time they fire, so a session that happened while
+  // dark never becomes a live send.
+  const fullTrigger = { ...(trigger || {}) };
+  if (!isEnabled('estimateEngagementFollowup')) fullTrigger.enqueued_dark = true;
   const result = await db.raw(
     `INSERT INTO estimate_followup_jobs (estimate_id, rule_key, due_at, trigger)
      SELECT ?, ?, ?, ?::jsonb
@@ -161,7 +167,7 @@ async function enqueueJob(estimateId, rule, dueAt, trigger) {
      ON CONFLICT (estimate_id, rule_key) WHERE status = 'pending' DO NOTHING
      RETURNING id`,
     [
-      estimateId, rule.rule_key, dueAt, JSON.stringify(trigger || {}),
+      estimateId, rule.rule_key, dueAt, JSON.stringify(fullTrigger),
       estimateId, rule.rule_key,
       estimateId, ...group,
     ],
@@ -359,7 +365,27 @@ async function deferJob(jobId, dueAt, { countAttempt = false } = {}) {
     });
 }
 
+// Runaway backstop for the dark drain loop below — 100 passes × batch size
+// covers any plausible backlog; leftovers stay pending for the next 5-min
+// tick, still dark.
+const MAX_DARK_DRAIN_PASSES = 100;
+
 async function processDueJobs(now = new Date()) {
+  // Gate off ⇒ drain the ENTIRE due backlog this tick (codex 2736 r9): a
+  // single LIMITed batch would leave overflow pending, and a mid-window
+  // gate flip would send that overflow live. Gate on keeps the one-batch
+  // behavior — the cap is deliberate throttling there.
+  const totals = { sent: 0, shadow: 0 };
+  for (let pass = 0; pass < MAX_DARK_DRAIN_PASSES; pass++) {
+    const batch = await processDueBatch(now);
+    totals.sent += batch.sent;
+    totals.shadow += batch.shadow;
+    if (!batch.drainMore) break;
+  }
+  return totals;
+}
+
+async function processDueBatch(now = new Date()) {
   const nowMs = now.getTime();
   // Priority joins the SQL ordering (codex 2736 r5): the LIMIT applies in
   // the database, so a same-due_at overflow (a sweep queues everything at
@@ -372,7 +398,7 @@ async function processDueJobs(now = new Date()) {
     .orderByRaw('j.due_at asc, COALESCE(r.priority, 100) asc')
     .limit(ENGINE_LIMITS.jobBatchSize)
     .select('j.*');
-  if (!jobs.length) return { sent: 0, shadow: 0 };
+  if (!jobs.length) return { sent: 0, shadow: 0, drainMore: false };
 
   const rules = await loadRules();
   const rulesByKey = new Map(rules.map((r) => [r.rule_key, r]));
@@ -392,20 +418,30 @@ async function processDueJobs(now = new Date()) {
   // pending across a mid-window flip, so a candidate that became due while
   // dark would send after rollout (exactly the backlog burst shadow mode
   // promises away). Gate off ⇒ every defer point CONSUMES the job as shadow
-  // instead, keeping the would-defer reason for volume judgment.
+  // instead, keeping the would-defer reason for volume judgment. Per-job
+  // `live` additionally honors the enqueued_dark stamp (r9): a job whose
+  // qualifying event happened while dark stays shadow even after a flip.
   const gateOn = isEnabled('estimateEngagementFollowup');
-  const deferOrShadow = async (job, dueAt, reason, opts) => {
-    if (gateOn) {
+  const shadowPrefix = (live) => (gateOn && !live ? 'enqueued-dark' : 'gate-off');
+  const deferOrShadow = async (live, job, dueAt, reason, opts) => {
+    if (live) {
       await deferJob(job.id, dueAt, opts);
     } else {
       logger.info(`[est-engage] shadow: would defer ${job.rule_key} for estimate ${job.estimate_id} (${reason})`);
-      await markJob(job.id, 'shadow', `gate-off:${reason}`);
+      await markJob(job.id, 'shadow', `${shadowPrefix(live)}:${reason}`);
       shadow++;
     }
   };
 
   for (const job of jobs) {
     let claimed = false;
+    let trig = {};
+    try {
+      trig = typeof job.trigger === 'string' ? JSON.parse(job.trigger) : (job.trigger || {});
+    } catch {
+      trig = {};
+    }
+    const live = gateOn && !trig.enqueued_dark;
     try {
       const rule = rulesByKey.get(job.rule_key);
       if (!rule) {
@@ -441,7 +477,22 @@ async function processDueJobs(now = new Date()) {
         && est.status === 'sent' && !est.viewed_at && !est.followup_unviewed_sent) {
         const sentAtMs = est.sent_at ? new Date(est.sent_at).getTime() : 0;
         if (sentAtMs && nowMs - sentAtMs < rule.params.minAgeHours * 3600000) {
-          await deferOrShadow(job, new Date(sentAtMs + rule.params.minAgeHours * 3600000), 'resend-restart');
+          await deferOrShadow(live, job, new Date(sentAtMs + rule.params.minAgeHours * 3600000), 'resend-restart');
+          continue;
+        }
+      }
+      // A fresh touch RESTARTS the gone-quiet clock rather than consuming
+      // the rule (codex 2736 r9): a terminal 'stale-condition' skip here
+      // plus the one-lifecycle enqueue guard would permanently lose the
+      // gone-quiet reminder after any mid-window view or resend. Same shape
+      // as the unopened resend defer above; the missing-lastView case still
+      // falls through to the terminal skip.
+      if (rule.rule_key === 'viewed_gone_quiet_72h') {
+        const quietView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
+        const quietSent = est.sent_at ? new Date(est.sent_at).getTime() : 0;
+        const lastTouch = Math.max(quietView, quietSent);
+        if (quietView && lastTouch && nowMs - lastTouch < rule.params.minQuietHours * 3600000) {
+          await deferOrShadow(live, job, new Date(lastTouch + rule.params.minQuietHours * 3600000), 'quiet-restart');
           continue;
         }
       }
@@ -452,7 +503,7 @@ async function processDueJobs(now = new Date()) {
       // Mid-read hold: they're literally on the page — try again shortly.
       const lastView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
       if (lastView && nowMs - lastView < ENGINE_LIMITS.activeViewHoldMinutes * 60000) {
-        await deferOrShadow(job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'active-view-hold');
+        await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'active-view-hold');
         continue;
       }
       const conv = await customerConvertedSince(est);
@@ -497,7 +548,7 @@ async function processDueJobs(now = new Date()) {
       const lastSendMs = est.last_follow_up_at ? new Date(est.last_follow_up_at).getTime() : 0;
       const spacingMs = ENGINE_LIMITS.minSpacingHours * 3600000;
       if (lastSendMs && !rule.params.spacingExempt && nowMs - lastSendMs < spacingMs) {
-        await deferOrShadow(job, new Date(lastSendMs + spacingMs), 'spacing');
+        await deferOrShadow(live, job, new Date(lastSendMs + spacingMs), 'spacing');
         continue;
       }
       // Portal-wide email opt-out — same gate the stage engine applies.
@@ -512,13 +563,13 @@ async function processDueJobs(now = new Date()) {
             continue;
           }
         } catch {
-          await deferOrShadow(job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'prefs-unverifiable', { countAttempt: true });
+          await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'prefs-unverifiable', { countAttempt: true });
           continue;
         }
       }
-      if (!gateOn) {
+      if (!live) {
         logger.info(`[est-engage] shadow: would send ${rule.rule_key} for estimate ${est.id}`);
-        await markJob(job.id, 'shadow', 'gate-off');
+        await markJob(job.id, 'shadow', shadowPrefix(live));
         shadow++;
         continue;
       }
@@ -576,8 +627,8 @@ async function processDueJobs(now = new Date()) {
       // Gate-aware like the defers (r8): an error retry can outlive the
       // gate state too — while dark, consume instead of leaving pending.
       try {
-        if (!gateOn) {
-          await markJob(job.id, 'shadow', `gate-off:error:${err.message}`.slice(0, 128));
+        if (!live) {
+          await markJob(job.id, 'shadow', `${shadowPrefix(live)}:error:${err.message}`.slice(0, 128));
           shadow++;
         } else if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
           await markJob(job.id, 'failed', `error:${err.message}`.slice(0, 128), { attempts: db.raw('attempts + 1') });
@@ -592,7 +643,8 @@ async function processDueJobs(now = new Date()) {
   if (sent > 0 || shadow > 0) {
     logger.info(`[est-engage] processed: ${sent} sent, ${shadow} shadow`);
   }
-  return { sent, shadow };
+  // Dark + a full batch ⇒ more due work may remain — keep draining.
+  return { sent, shadow, drainMore: !gateOn && jobs.length === ENGINE_LIMITS.jobBatchSize };
 }
 
 module.exports = {

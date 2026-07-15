@@ -892,6 +892,26 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
   });
 
+  test('cadence_due: a pending ENGAGEMENT ENGINE job due within 24h (codex 2736 r9)', async () => {
+    enqueue('estimate_followup_jobs', { first: { id: 'job-1' } });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
+  });
+
+  test('engine jobs are invisible while the engagement gate is off (shadow = no customer touch)', async () => {
+    isEnabled.mockImplementation((key) => key !== 'estimateEngagementFollowup');
+    // A pending job exists, but the engine can only shadow-consume it.
+    enqueue('estimate_followup_jobs', { first: { id: 'job-1' } });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('engagement-job lookup failure fails toward suppression (cadence_due)', async () => {
+    enqueue('estimate_followup_jobs', { firstError: new Error('db down') });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
+  });
+
   test('recent_outbound / replied_recently: touch holds', async () => {
     enqueue('sms_log', { first: { id: 'sms-1' } });
     expect((await gate.evaluateClickFollowupGate(baseInput())).code).toBe('recent_outbound');
