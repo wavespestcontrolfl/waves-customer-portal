@@ -7,10 +7,11 @@
  * serialized at UTC midnight); a raw timestamp is invalid for a date input,
  * which silently blanks the field on iOS and saves the raw string.
  *
- * Prefill: structure footprint (customers.property_sqft), the
- * manufactured/mobile construction mapping (customers.property_type), and
- * the inspection fee (the linked visit's quoted price) seed blank fields
- * only — hand-typed values always win.
+ * Prefill: the manufactured/mobile construction mapping
+ * (customers.property_type) and the inspection fee (the linked visit's NET
+ * price) seed blank fields only — hand-typed values always win. The
+ * structure footprint is NEVER seeded from customers.property_sqft: that
+ * column is treated lawn area, not the building footprint (Codex P1).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, cleanup, waitFor } from '@testing-library/react';
@@ -99,11 +100,14 @@ describe('CreateProjectModal WDO inspection date', () => {
 });
 
 describe('CreateProjectModal WDO Property & scope prefill', () => {
-  it('prefills footprint from property_sqft and fee from the visit price', async () => {
+  it('prefills the fee from the visit price and keeps lawn sqft out of the footprint', async () => {
+    // property_sqft is the customer's treated LAWN area — it must never be
+    // copied into the FDACS structure-footprint field (Codex P1).
+    customerPayload.property_sqft = 8000;
     renderWdoSheet();
-    await waitFor(() => expect(field('structure_sqft')).toBeTruthy());
-    await waitFor(() => expect(field('structure_sqft').value).toBe('2200'));
-    expect(field('inspection_fee').value).toBe('175');
+    await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
+    await waitFor(() => expect(field('inspection_fee').value).toBe('175'));
+    expect(field('structure_sqft').value).toBe('');
     // Construction is not derivable for a single-family home — never guessed.
     expect(field('structure_type').value).toBe('');
   });
@@ -118,7 +122,8 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
   it('leaves the fee blank when the visit carries no price', async () => {
     renderWdoSheet({ defaultInspectionFee: '' });
     await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
-    await waitFor(() => expect(field('structure_sqft').value).toBe('2200'));
+    // Contact autofill has landed by now — the fee stays untouched.
+    await waitFor(() => expect(field('requested_by').value).toContain('Mike Padil'));
     expect(field('inspection_fee').value).toBe('');
   });
 });

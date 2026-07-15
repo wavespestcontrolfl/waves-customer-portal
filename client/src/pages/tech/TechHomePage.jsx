@@ -350,7 +350,9 @@ export default function TechHomePage() {
       // inspection date. slice(0,10) also guards a raw ISO-serialized DATE
       // column from an alternate payload shape.
       projectDate: String(service.scheduledDate || service.scheduled_date || '').slice(0, 10) || etDateString(),
-      visitPrice: service.primaryLinePrice ?? service.estimatedPrice ?? null,
+      // NET visit price (estimated_price is final after discounts) — the
+      // pre-discount primaryLinePrice would un-discount the WDO auto-invoice.
+      visitPrice: service.estimatedPrice ?? null,
       // The linked service's own profile picks the project type (same as the
       // DispatchPageV2 path) — the explicit allowedProjectTypes override also
       // keeps project_required keys creatable after their project type became

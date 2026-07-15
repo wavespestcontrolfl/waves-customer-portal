@@ -2494,7 +2494,9 @@ export default function DispatchPageV2({
             String(projectService.scheduledDate || date || "").split("T")[0]
           }
           defaultInspectionFee={
-            projectService.primaryLinePrice ?? projectService.estimatedPrice ?? ""
+            /* NET visit price (final after discounts) — the pre-discount
+               primaryLinePrice would un-discount the WDO auto-invoice. */
+            projectService.estimatedPrice ?? ""
           }
           defaultProjectType={projectService.completionProfile?.projectType || ""}
           allowedProjectTypes={

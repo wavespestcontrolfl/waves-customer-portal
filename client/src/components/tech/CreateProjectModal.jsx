@@ -157,12 +157,11 @@ function formatStructuresInspected(customer) {
   return 'Single-family residential structure';
 }
 
-// Structure footprint from the customer's stored home sqft (the same
-// under-roof number the pricing engine uses).
-function formatStructureSqft(customer) {
-  const sqft = Number(customer?.property_sqft ?? customer?.propertySqft);
-  return Number.isFinite(sqft) && sqft > 0 ? String(Math.round(sqft)) : '';
-}
+// NOTE: structure_sqft is deliberately NOT prefilled from the customer
+// record. customers.property_sqft is the treated LAWN area (initial schema),
+// not the building footprint — the WDO invoice path refuses it for the same
+// reason (admin-projects resolveWdoInspectionFee). Footprint comes from the
+// WDO Intelligence property lookup or the tech on site.
 
 // Construction type is only derivable from the customer record for
 // manufactured/mobile homes (property_type says so, and it's a
@@ -181,14 +180,12 @@ function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
   const address = formatCustomerAddress(customer);
   const contact = formatCustomerContact(customer);
   const structures = formatStructuresInspected(customer);
-  const structureSqft = formatStructureSqft(customer);
   const structureType = formatStructureType(customer);
   const next = { ...prev };
   if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
   if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
   if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
   if (structures && (overwrite || !hasMeaningfulValue(next.structures_inspected))) next.structures_inspected = structures;
-  if (structureSqft && (overwrite || !hasMeaningfulValue(next.structure_sqft))) next.structure_sqft = structureSqft;
   if (structureType && (overwrite || !hasMeaningfulValue(next.structure_type))) next.structure_type = structureType;
   return next;
 }
@@ -202,7 +199,6 @@ function customerWdoAutoFillValues(customer) {
     requested_by: formatCustomerContact(customer),
     report_sent_to: formatCustomerContact(customer),
     structures_inspected: formatStructuresInspected(customer),
-    structure_sqft: formatStructureSqft(customer),
     structure_type: formatStructureType(customer),
   };
 }
@@ -244,8 +240,12 @@ export default function CreateProjectModal({
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
   defaultCustomerLabel,
   defaultProjectDate,
-  // The linked visit's quoted price — seeds the WDO inspection-fee field
-  // (blank-only) since the fee charged IS what the office booked the visit at.
+  // The linked visit's NET price (estimated_price = final price after line
+  // and appointment discounts) — seeds the WDO inspection-fee field
+  // (blank-only) since the fee charged IS what the office booked the visit
+  // at. Never the pre-discount primary_line_price: findings.inspection_fee
+  // drives the WDO auto-invoice, so a base-price seed would un-discount it
+  // (Codex P1 on this PR).
   defaultInspectionFee = '',
   defaultProjectType = '',
   allowedProjectTypes = null,

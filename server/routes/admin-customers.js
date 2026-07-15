@@ -1795,9 +1795,6 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
         'address_line1', 'city', 'state', 'zip',
         'waveguard_tier', 'active', 'created_at',
         'property_type', 'company_name',
-        // property_sqft rides along for the WDO report's structure-footprint
-        // autofill (CreateProjectModal reads this payload as selectedCustomer).
-        'property_sqft',
         'lead_source', 'lead_source_detail',
       )
       .first();
