@@ -979,6 +979,18 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // retry produces — the lead path passes ignoreNoLead to dedupe only against
 // equivalent (lead-path) bells, while the no-lead path dedupes against any.
 // Fail-open: a dedupe-query error must cost a duplicate bell, never the bell.
+// Estimator engine gate (GATE_ESTIMATOR_ENGINE): when ON, the engine posts
+// the single quote-promised notification itself — with a priced draft
+// attached when it can compose one — so the generic bells below stay quiet
+// (one bell per call). Gate OFF preserves today's behavior exactly.
+function estimatorEngineOn() {
+  try {
+    return require('./estimator-engine').estimatorEngineEnabled();
+  } catch {
+    return false;
+  }
+}
+
 async function quotePromisedAlreadyNotified(callSid, { ignoreNoLead = false } = {}) {
   if (!callSid) return false;
   try {
@@ -5951,7 +5963,7 @@ const CallRecordingProcessor = {
           // as an admin notification with the deadline. Without this the
           // promise lives only in the recording and dies if nobody remembers
           // (this is exactly what happened on real multi-property quote calls).
-          if (callQuotePromised && enriched
+          if (callQuotePromised && enriched && !estimatorEngineOn()
             && !(await quotePromisedAlreadyNotified(call.twilio_call_sid, { ignoreNoLead: true }))) {
             try {
               const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
@@ -6005,7 +6017,7 @@ const CallRecordingProcessor = {
     // lead-path notification above never fires for them, so the promise would
     // live only in the recording — the exact failure mode this notification
     // exists to prevent. Surface it at the customer level instead.
-    if (callQuotePromised && !leadId && !extracted.is_spam
+    if (callQuotePromised && !leadId && !extracted.is_spam && !estimatorEngineOn()
       && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
       try {
         const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
@@ -6030,6 +6042,24 @@ const CallRecordingProcessor = {
         );
       } catch (notifyErr) {
         logger.warn(`[call-proc] quote-promised (no-lead) admin notify failed: ${notifyErr.message}`);
+      }
+    }
+
+    // Estimator engine (GATE_ESTIMATOR_ENGINE, default OFF): quote-flavored
+    // calls get a priced DRAFT estimate composed from the transcript + SMS
+    // thread + profile + arbitrated property data. The engine owns the
+    // quote-promised notification while the gate is on (the generic bells
+    // above are suppressed) and degrades to the classic "send it" text when
+    // it can't draft. Non-blocking by contract — a drafting failure must
+    // never break call processing or eat the promise.
+    if (estimatorEngineOn() && !extracted.is_spam
+      && (callQuotePromised || callQuoteRequested)) {
+      try {
+        const { maybeDraftEstimateForCall } = require('./estimator-engine');
+        const engineOutcome = await maybeDraftEstimateForCall({ callLogId: call.id });
+        logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
+      } catch (engineErr) {
+        logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
       }
     }
 
