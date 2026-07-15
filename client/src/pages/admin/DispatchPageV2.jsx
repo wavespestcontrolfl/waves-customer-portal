@@ -2493,6 +2493,9 @@ export default function DispatchPageV2({
           defaultProjectDate={
             String(projectService.scheduledDate || date || "").split("T")[0]
           }
+          defaultInspectionFee={
+            projectService.primaryLinePrice ?? projectService.estimatedPrice ?? ""
+          }
           defaultProjectType={projectService.completionProfile?.projectType || ""}
           allowedProjectTypes={
             projectService.completionProfile?.projectType
