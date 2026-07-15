@@ -945,7 +945,7 @@ function attachParcelMeta(merged, parcel) {
     dorUseCode: parcel.dorUseCode,
     // County land-use description — mergePropertyRecords keeps _raw from the
     // WINNING record only, so without this a PAO merge win drops the roll's
-    // "Vacant Residential Platted" wording and the pending-new-construction
+    // "Vacant Residential Platted" wording and the unassessed-vacant-parcel
     // detection loses its strongest signal.
     landUseDescription: parcel.landUseDescription ?? undefined,
     residentialUnits: parcel.residentialUnits,
@@ -964,17 +964,20 @@ function attachParcelMeta(merged, parcel) {
   return merged;
 }
 
-// County roll knows the parcel but not the HOME: vacant land use with no
-// building facts = the new-construction window (plat filed → CO → next roll
-// posting) that Waves quotes constantly in Parrish / LWR / North River Ranch.
-// Every remote source inherits the same county lag, so the missing
-// sqft/stories/yearBuilt need the customer's plan numbers, not another
-// provider. Returns the vacant evidence (drives flag copy and the short
-// cache TTL in lookup-cache) or null.
+// County roll knows the parcel but no BUILDING: vacant land use with no
+// building facts. Two real states share this signature — a genuinely unbuilt
+// lot, and the new-construction window (plat filed → CO → next roll posting)
+// that Waves quotes constantly in Parrish / LWR / North River Ranch. The roll
+// alone can't split them (codex P1), so callers must present it as
+// "vacant/unassessed, possibly new construction" and let the customer
+// conversation resolve it. Every remote source inherits the same county lag,
+// so the missing sqft/stories/yearBuilt need the customer's plan numbers,
+// not another provider. Returns the vacant evidence (drives flag copy and
+// the short cache TTL in lookup-cache) or null.
 // Live probe 2026-07-15 against a just-platted Manatee parcel (2026 Parrish
 // subdivision): CUR_MAN_LUC_DESC "Vacant Residential Platted (1554)",
 // CUR_DOR_LUC_CODE '00', every BLDG_* field null, lot sqft on the roll.
-function detectPendingNewConstruction(record) {
+function detectUnassessedVacantParcel(record) {
   if (!record) return null;
   // Any building fact means the roll (or a stronger source, incl. a tech
   // verified override) knows the home — not the pending-roll window.
@@ -4083,7 +4086,7 @@ module.exports = {
   auditAddressHouseNumber,
   hasCountyEvidence,
   buildPropertyDataQuality,
-  detectPendingNewConstruction,
+  detectUnassessedVacantParcel,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupPropertyFromAI,
