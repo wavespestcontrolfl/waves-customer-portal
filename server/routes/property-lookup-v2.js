@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1460,6 +1460,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
     lotSqFt: rc?.lotSize || 0,
+    // Machine-readable twin of the vacantParcel verify flag (vacant roll
+    // parcel, no building record — possibly new construction) — consumers
+    // that would otherwise trust the defaulted dimensions can see they're
+    // placeholders.
+    unassessedVacantParcel: detectUnassessedVacantParcel(rc) ? true : undefined,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
@@ -2581,11 +2586,29 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     });
   }
 
-  // Footprint estimated from lot
+  // Unassessed vacant parcel: the roll knows the parcel but carries no
+  // building. Could be an unbuilt lot OR new construction the roll hasn't
+  // caught up to — the roll alone can't split them (codex P1), so the copy
+  // presents both and every remote source is blind either way: the
+  // customer's answer is the only fix. One situation flag plus accurate
+  // per-field copy below.
+  const vacantParcel = detectUnassessedVacantParcel(rc);
+  if (vacantParcel) {
+    flags.push({
+      field: 'vacantParcel',
+      reason: `County roll shows ${vacantParcel.landUseDescription || 'vacant land'} with no building record — an unbuilt lot, or new construction the county hasn't assessed yet. If a home is standing or under way, ask the customer for plan sq ft and stories and save them as field-verified.`,
+      priority: 'HIGH',
+    });
+  }
+
+  // Home sq ft has no source (client + lead automation fall back to a flat
+  // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
     flags.push({
       field: 'homeSqFt',
-      reason: 'Home sq ft missing from records — estimated from lot size',
+      reason: vacantParcel
+        ? 'Home sq ft not on the county roll (vacant parcel — possibly new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft'
+        : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
     });
   }
