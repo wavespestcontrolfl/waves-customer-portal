@@ -2655,6 +2655,37 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
 
     const token = project.report_token || crypto.randomBytes(16).toString('hex');
     const projectCols = await db('projects').columnInfo().catch(() => ({}));
+
+    // Payment-hold mutual exclusion (Codex P2 on #2753): a manual send on a
+    // HELD report is the manual release, and it must take the SAME atomic
+    // claim the payment sweep takes — otherwise an admin click while the
+    // sweep is mid-delivery ('releasing') would email + archive the same
+    // FDACS filing twice. Already-releasing rows 409 instead of racing; a
+    // crashed claim un-sticks via the sweep's 10-minute stale recovery.
+    let manualHoldClaim = false;
+    if (reportHoldColumnsPresent(projectCols)
+      && ['held', 'releasing'].includes(String(project.report_hold_status || ''))) {
+      const claimed = await db('projects')
+        .where({ id: project.id, report_hold_status: 'held' })
+        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
+      if (!claimed) {
+        return res.status(409).json({
+          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
+          code: 'release_in_progress',
+        });
+      }
+      manualHoldClaim = true;
+    }
+    // Return the manual claim to 'held' on any abort so the sweep can retry
+    // and a later manual send isn't blocked behind a stale claim.
+    const revertManualHoldClaim = async () => {
+      if (!manualHoldClaim) return;
+      await db('projects')
+        .where({ id: project.id, report_hold_status: 'releasing' })
+        .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
+        .catch((err) => logger.warn(`[projects] manual hold claim revert failed for ${project.id}: ${err.message}`));
+    };
+
     const portalAttachment = await resolveProjectPortalAttachment(project).catch((err) => {
       logger.warn(`[projects] portal attachment resolution failed for ${project.id}: ${err.message}`);
       return { portalAttached: false, portalAttachReason: 'resolution_failed', completionProfile: null };
@@ -2687,6 +2718,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // delivered without an email address — fail up front rather than text a bare
     // link and record the official report as sent.
     if (isWdo && !ProjectEmail.resolveProjectEmailRecipient(customer || {}).email) {
+      await revertManualHoldClaim();
       return res.status(422).json({ error: 'A WDO report is delivered as the FDACS-13645 PDF by email — add an email address for this customer first.', code: 'email_required' });
     }
 
@@ -2697,6 +2729,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       wdoPdf = await buildWdoPdfAttachment(updatedProject, customer);
     } catch (e) {
+      await revertManualHoldClaim();
       logger.error(`[projects] WDO PDF build failed for ${updatedProject.id}: ${e.message}`);
       return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
     }
@@ -2714,6 +2747,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           sentByTechId: req.technicianId || null,
         });
       } catch (e) {
+        await revertManualHoldClaim();
         logger.error(`[projects] WDO filing archive failed for ${updatedProject.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not archive the FDACS filing; nothing was sent.' });
       }
@@ -2846,9 +2880,26 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
 
     // A manual Send report on a payment-held project IS the release escape
-    // hatch (requireAdmin): clear the hold so the public routes unlock and
-    // the sweep can't re-deliver on payment.
-    if (delivered) await markHoldReleasedByManualSend(project, projectCols);
+    // hatch (requireAdmin): flip the claim this send took to 'released' so
+    // the public routes unlock and the sweep can't re-deliver on payment —
+    // or return it to 'held' when nothing was delivered.
+    if (manualHoldClaim) {
+      if (delivered) {
+        await db('projects')
+          .where({ id: project.id, report_hold_status: 'releasing' })
+          .update({
+            report_hold_status: 'released',
+            report_hold_released_at: db.fn.now(),
+            report_hold_release_source: 'manual_send',
+            report_hold_locked_at: null,
+            report_hold_last_error: null,
+            updated_at: db.fn.now(),
+          })
+          .catch((err) => logger.warn(`[projects] manual hold release stamp failed for ${project.id}: ${err.message}`));
+      } else {
+        await revertManualHoldClaim();
+      }
+    }
 
     const sendAction = delivered
       ? (project.sent_at || project.status === 'sent' ? 'project_report_resent' : 'project_report_sent')
@@ -3248,15 +3299,17 @@ function safeIdempotencySegment(value) {
   return String(value || '').replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
 }
 
-// Clear an active hold after an operator-initiated delivery (/send or an
-// un-held combined resend): the report just went out by explicit admin action,
-// so the sweep must never re-deliver it on payment.
+// Clear an active hold after an un-held combined resend delivered the report:
+// the report just went out by explicit admin action, so the sweep must never
+// re-deliver it on payment. STRICTLY 'held' rows (Codex P2 on #2753): a
+// 'releasing' row is an in-flight sweep (or manual /send) claim mid-delivery,
+// and clearing it from a second path would let both paths email + archive the
+// same FDACS filing. /send takes the claim itself and never calls this.
 async function markHoldReleasedByManualSend(project, projectCols) {
   if (!reportHoldColumnsPresent(projectCols)) return;
-  if (!['held', 'releasing'].includes(String(project.report_hold_status || ''))) return;
+  if (String(project.report_hold_status || '') !== 'held') return;
   await db('projects')
-    .where({ id: project.id })
-    .whereIn('report_hold_status', ['held', 'releasing'])
+    .where({ id: project.id, report_hold_status: 'held' })
     .update({
       report_hold_status: 'released',
       report_hold_released_at: db.fn.now(),

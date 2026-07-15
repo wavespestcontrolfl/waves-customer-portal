@@ -298,9 +298,10 @@ function invoiceRow(overrides = {}) {
   };
 }
 
-function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = {} } = {}) {
+function mockTables({ project = wdoProject(), invoice = invoiceRow(), updates = {}, projectUpdateResult = null } = {}) {
   const recordUpdate = (table) => jest.fn(async (payload) => {
     (updates[table] = updates[table] || []).push(payload);
+    if (table === 'projects' && projectUpdateResult) return projectUpdateResult(payload);
     return 1;
   });
   const projectUpdate = recordUpdate('projects');
@@ -482,6 +483,50 @@ describe('releaseHeldProjectReport', () => {
     expect(revert).toBeTruthy();
     expect(revert.report_hold_attempts).toBe(1);
     expect(revert.report_hold_last_error).toMatch(/re-sign/i);
+  });
+});
+
+describe('manual /send vs in-flight release (Codex P2)', () => {
+  test('manual send on a HELD report takes the claim and releases it', async () => {
+    const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }) });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      const projectUpdates = updates.projects || [];
+      // Atomic claim first (same claim the sweep takes)…
+      expect(projectUpdates[0].report_hold_status).toBe('releasing');
+      // …then the delivered flip to released with the manual source.
+      const released = projectUpdates.find((u) => u.report_hold_status === 'released');
+      expect(released).toBeTruthy();
+      expect(released.report_hold_release_source).toBe('manual_send');
+      expect(ProjectEmail.sendProjectReportReady).toHaveBeenCalled();
+    });
+  });
+
+  test('manual send 409s while the sweep is mid-release, and delivers nothing', async () => {
+    mockTables({
+      project: wdoProject({ report_hold_status: 'releasing' }),
+      // The row is already claimed, so the manual claim UPDATE matches 0 rows.
+      projectUpdateResult: (payload) => (payload.report_hold_status === 'releasing' ? 0 : 1),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('release_in_progress');
+      expect(ProjectEmail.sendProjectReportReady).not.toHaveBeenCalled();
+      expect(mockS3Send).not.toHaveBeenCalled();
+    });
   });
 });
 
