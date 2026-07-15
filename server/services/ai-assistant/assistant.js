@@ -20,6 +20,26 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const CONVERSATION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MODEL = require('../../config/models').FLAGSHIP;
 
+// Prompt-cache breakpoint (same pattern as admin-intelligence-bar.js). Applied
+// to a shallow copy of the messages array at call time — never to the array we
+// keep appending to — so markers don't accumulate across tool-use rounds past
+// the API's 4-breakpoint limit.
+const EPHEMERAL_CACHE = { cache_control: { type: 'ephemeral' } };
+
+function withCacheBreakpoint(messages) {
+  if (!messages.length) return messages;
+  const last = messages[messages.length - 1];
+  let content = last.content;
+  if (typeof content === 'string') {
+    content = [{ type: 'text', text: content, ...EPHEMERAL_CACHE }];
+  } else if (Array.isArray(content) && content.length) {
+    content = [...content.slice(0, -1), { ...content[content.length - 1], ...EPHEMERAL_CACHE }];
+  } else {
+    return messages;
+  }
+  return [...messages.slice(0, -1), { ...last, content }];
+}
+
 // Escalation triggers — Phase 1: escalate all sensitive actions
 const ESCALATION_TRIGGERS = [
   'cancel', 'cancellation', 'stop service', 'end service', 'discontinue',
@@ -140,17 +160,37 @@ class WavesAssistant {
       let escalated = false;
       let escalationId = null;
 
-      const systemPrompt = SYSTEM_PROMPT + (contextStr ? `\n\nCUSTOMER CONTEXT:\n${contextStr}` : '');
+      // Two system blocks: the static prompt carries a 1-hour cache breakpoint
+      // (tools render before system, so the entry covers TOOLS + SYSTEM_PROMPT
+      // and is shared across every customer and conversation); the
+      // per-conversation context block sits AFTER the breakpoint so it never
+      // fragments that shared entry. 1h TTL because customer replies routinely
+      // arrive more than 5 minutes apart.
+      const system = [
+        { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral', ttl: '1h' } },
+      ];
+      if (contextStr) {
+        system.push({ type: 'text', text: `CUSTOMER CONTEXT:\n${contextStr}` });
+      }
 
       // Tool-use loop — Claude may call multiple tools before responding
       for (let turn = 0; turn < 5; turn++) {
         const response = await anthropic.messages.create({
           model: MODEL,
           max_tokens: 800,
-          system: systemPrompt,
+          system,
           tools: TOOLS,
-          messages,
+          messages: withCacheBreakpoint(messages),
         });
+
+        // Cache-hit visibility: cache_read > 0 on later rounds / follow-up
+        // customer turns is the prod verification signal.
+        const u = response.usage || {};
+        logger.info(
+          `[ai-assistant] usage turn=${turn} in=${u.input_tokens ?? 0} ` +
+          `cache_write=${u.cache_creation_input_tokens ?? 0} ` +
+          `cache_read=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0}`
+        );
 
         // Check if Claude wants to use tools
         const toolUses = response.content.filter(c => c.type === 'tool_use');
