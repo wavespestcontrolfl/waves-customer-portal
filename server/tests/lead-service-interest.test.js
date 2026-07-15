@@ -225,6 +225,23 @@ describe('composeServiceInterest', () => {
       matched_service: 'Quarterly Pest Control Service',
       requested_service: "don't want mosquito, just pest and lawn",
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    // coordinated negated LIST drops whole (codex P1 round 2)
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: "don't need lawn, mosquito, or termite — pest only",
+    })).toBe('Quarterly Pest Control Service');
+    // contrast word rescues the positive after a negation
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not lawn but mosquito control',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+  });
+
+  test('nearby pest "treatment" is not termite work (codex P1)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest treatment plus a termite inspection / WDO report',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
   });
 
   test('non-service chatter appends nothing', () => {

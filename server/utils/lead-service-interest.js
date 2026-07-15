@@ -63,8 +63,12 @@ const SERVICE_FAMILIES = [
 ];
 
 // Termite wording that means WORK, not the lender's inspection — this is what
-// keeps "+ Termite Service" alive next to a WDO match.
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat(?:ment)?s?\b|\b(?:treat(?:ment)?s?|termidor|termiticide|trench(?:ing)?|liquid|bait(?:ing|s)?|foam(?:ing)?|fumigat\w*|tent(?:ing)?)\b[^.;,]{0,30}\btermites?\b|\btermites?\b[^.;,]{0,30}\b(?:treat(?:ment)?s?|termidor|termiticide|trench(?:ing)?|liquid|bait(?:ing|s)?|foam(?:ing)?|fumigat\w*|tent(?:ing)?)\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermidor\b|\btermiticide\b/i;
+// keeps "+ Termite Service" alive next to a WDO match. Patterns bind the
+// treatment cue DIRECTLY to the termite mention ("termite treatment",
+// "liquid termite …", "treat the termites", product/method names) — loose
+// proximity windows made "pest treatment plus a termite inspection" read as
+// termite work (codex P1).
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b/i;
 
 // Location phrases are pest CONTEXT, not service requests: "fire ants in the
 // lawn" is an ant call, not a lawn-care request. Strip preposition + article/
@@ -74,11 +78,25 @@ const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughou
 const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 
 // Declined services are not requests: "pest control only, not lawn care"
-// must not grow a lawn tail. Drop the negator plus the rest of ITS clause
-// (up to the next , ; . ! ?) so a positive mention in a LATER clause still
-// wins — "don't want mosquito, just pest and lawn" keeps pest + lawn.
-const NEGATED_CLAUSE_RE = /\b(?:no|not|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b[^.,;!?]{0,60}/gi;
-const stripNegatedClauses = (s) => s.replace(NEGATED_CLAUSE_RE, ' ');
+// must not grow a lawn tail. Scope: from a negator to the end of its
+// SEGMENT, where segments break on sentence enders and contrast markers
+// (but/however/except, dashes) — so a coordinated negated list ("don't need
+// lawn, mosquito, or termite") drops whole, while a positive after a
+// contrast ("not lawn but mosquito control", "…—pest only") survives. A
+// bare comma does NOT end the negation (that's how lists were leaking), but
+// a comma followed by a non-list continuation like "just …" reads as a new
+// segment via the contrast split below.
+const NEGATOR_RE = /\b(?:no|not|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i;
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then))\b)/gi;
+function stripNegatedClauses(s) {
+  return s
+    .split(SEGMENT_SPLIT_RE)
+    .map((seg) => {
+      const at = seg.search(NEGATOR_RE);
+      return at === -1 ? seg : seg.slice(0, at);
+    })
+    .join(' ');
+}
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
 // bugs" / "mole crickets" with a lawn match must not invent a pest tail.
