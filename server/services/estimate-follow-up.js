@@ -121,11 +121,24 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // SMS/email to the customer. Re-checks archived_at at claim time: the
 // candidate queries filter on it, but a manual/sweep archive landing between
 // the read and this UPDATE must still block the send.
+// Shared-lane minimum spacing, mirroring the engine's knob (both lanes bump
+// last_follow_up_at, so this is ONE inbox budget).
+const LANE_MIN_SPACING_HOURS = parseFloat(process.env.ESTIMATE_ENGAGEMENT_MIN_SPACING_HOURS) || 12;
+
 async function claimStage(estId, flag, { excludeEngineRuleKeys = [] } = {}) {
   const q = db("estimates")
     .where({ id: estId })
     .whereNull("archived_at")
-    .where((qq) => qq.where(flag, false).orWhereNull(flag));
+    .where((qq) => qq.where(flag, false).orWhereNull(flag))
+    // Shared-lane spacing INSIDE the atomic claim (codex 2736 r13): the
+    // engine's 5-min processor bumps last_follow_up_at on its sends, but
+    // the legacy stages only checked their own booleans — a
+    // return_visit_hot email could be chased by the viewed/final nudge a
+    // couple of hours later. Legacy stages sit ≥24h apart by their own
+    // windows, so this only blocks CROSS-lane stacking; a blocked claim
+    // leaves the flag unset and the next 2h tick retries.
+    .where((qq) => qq.whereNull("last_follow_up_at")
+      .orWhere("last_follow_up_at", "<", new Date(Date.now() - LANE_MIN_SPACING_HOURS * 3600000)));
   // Cross-lane dedupe INSIDE the atomic claim (codex 2736 r3): the legacy
   // cron and the engagement engine run under different advisory locks, so
   // the candidate-query whereNotExists alone leaves a read-then-claim race

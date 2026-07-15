@@ -506,8 +506,29 @@ async function processDueBatch(now = new Date()) {
         await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'active-view-hold');
         continue;
       }
-      const conv = await customerConvertedSince(est);
+      let conv = await customerConvertedSince(est);
+      if (!conv.converted && !est.customer_id) {
+        // Lead-only estimates (codex 2736 r13): conversion marks the lead
+        // won or creates the customer WITHOUT backfilling the estimate, so
+        // the customer-guard alone never sees it — same evidence chain the
+        // click-followup gate runs (lead stamp/status, then phone-matched
+        // customer/booking). Lazy requires keep the module graphs apart.
+        const { leadIdForEstimate } = require('./estimate-lead-linkage');
+        const gate = require('./click-followup-gate');
+        const leadId = await leadIdForEstimate(est);
+        if (leadId) conv = await gate.leadConvertedSince(leadId, est);
+        if (!conv.converted && est.customer_phone) {
+          conv = await gate.phoneConvertedSince(est.customer_phone, est.created_at);
+        }
+      }
       if (conv.converted) {
+        if (conv.reason === 'guard-error') {
+          // A transient lookup failure fails CLOSED for this tick, not
+          // forever (codex 2736 r13): a terminal skip here would drop the
+          // durable job over a DB hiccup — retry like any plumbing error.
+          await deferOrShadow(live, job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'conversion-unverifiable', { countAttempt: true });
+          continue;
+        }
         await markJob(job.id, 'skipped', `converted:${conv.reason}`);
         continue;
       }
@@ -595,6 +616,22 @@ async function processDueBatch(now = new Date()) {
         continue;
       }
       claimed = true;
+      if (expiringLifecycle) {
+        // Re-read the deadline AFTER winning the claim (codex 2736 r13): an
+        // extension landing between the pinned claim and the send moves
+        // expires_at and deletes the expiring rows for its re-arm — the
+        // copy below would describe the OLD deadline. A changed deadline
+        // aborts; the re-armed sweep owns the new one. The residual window
+        // is the ms between this read and the provider call.
+        const fresh = await db('estimates').where({ id: est.id }).first('expires_at');
+        const freshMs = fresh?.expires_at ? new Date(fresh.expires_at).getTime() : 0;
+        if (!freshMs || freshMs !== expiringLifecycle.getTime()) {
+          await followupShared.releaseFollowupSend(est.id, rule.rule_key); // no-op if the re-arm already deleted it
+          claimed = false;
+          await markJob(job.id, 'skipped', 'deadline-moved'); // no-op if the re-arm deleted the job
+          continue;
+        }
+      }
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
       const ok = await followupShared.sendDualChannel(est, {

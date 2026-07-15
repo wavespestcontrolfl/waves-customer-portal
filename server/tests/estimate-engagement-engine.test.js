@@ -32,6 +32,13 @@ jest.mock('../services/estimate-service-lines', () => ({
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
 }));
+jest.mock('../services/estimate-lead-linkage', () => ({
+  leadIdForEstimate: jest.fn(async () => null),
+}));
+jest.mock('../services/click-followup-gate', () => ({
+  leadConvertedSince: jest.fn(async () => ({ converted: false })),
+  phoneConvertedSince: jest.fn(async () => ({ converted: false })),
+}));
 jest.mock('../services/estimate-engagement-sessions', () => ({
   sessionsForEstimate: jest.fn(async () => []),
   SESSION_GAP_MINUTES: 30,
@@ -56,6 +63,8 @@ const logger = require('../services/logger');
 const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
 const { customerConvertedSince } = require('../services/estimate-conversion-guard');
 const { sessionsForEstimate } = require('../services/estimate-engagement-sessions');
+const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
+const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
 const followupShared = require('../services/estimate-follow-up')._private;
 const Engine = require('../services/estimate-engagement-engine');
 
@@ -182,6 +191,9 @@ beforeEach(() => {
   isEnabled.mockReturnValue(true);
   inferEstimateServiceLines.mockReturnValue([{ key: 'pest' }]);
   customerConvertedSince.mockResolvedValue({ converted: false });
+  leadIdForEstimate.mockResolvedValue(null);
+  leadConvertedSince.mockResolvedValue({ converted: false });
+  phoneConvertedSince.mockResolvedValue({ converted: false });
   followupShared.claimFollowupSend.mockResolvedValue(true);
   followupShared.sendDualChannel.mockResolvedValue(true);
   followupShared.hasRepliedRecently.mockResolvedValue(false);
@@ -488,6 +500,34 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ outcome_reason: 'converted:paid-invoice' }));
   });
 
+  test('a guard-error conversion DEFERS the job — a DB hiccup never consumes it (codex 2736 r13)', async () => {
+    customerConvertedSince.mockResolvedValue({ converted: true, reason: 'guard-error' });
+    enqueueProcessorHappyPath();
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(defer.payload.status).toBeUndefined(); // still pending
+    expect(defer.payload.due_at).toBeInstanceOf(Date);
+    expect(defer.payload.attempts).toBeDefined(); // bounded by the 5-try cap
+  });
+
+  test('lead-only estimates run the lead conversion chain before sending (codex 2736 r13)', async () => {
+    const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
+    const { leadConvertedSince } = require('../services/click-followup-gate');
+    leadIdForEstimate.mockResolvedValue('lead-1');
+    leadConvertedSince.mockResolvedValue({ converted: true, reason: 'lead-won' });
+    enqueueProcessorHappyPath({ est: baseEstimate({ customer_id: null }) });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(leadConvertedSince).toHaveBeenCalledWith('lead-1', expect.objectContaining({ id: 'est-1' }));
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'converted:lead-won' }));
+  });
+
   test('send failure releases the claim and defers for retry', async () => {
     followupShared.sendDualChannel.mockResolvedValue(false);
     enqueueProcessorHappyPath();
@@ -553,6 +593,7 @@ describe('processDueJobs', () => {
     enqueue('estimates', { first: baseEstimate({ expires_at: expires }) });
     enqueue('estimate_followup_sends', { first: undefined }); // no sibling send
     enqueue('notification_prefs', { first: { email_enabled: true } });
+    enqueue('estimates', { first: { expires_at: expires } }); // post-claim deadline re-read (unchanged)
 
     const result = await Engine.processDueJobs(NOW);
 
@@ -572,6 +613,26 @@ describe('processDueJobs', () => {
       'est-1', 'expiring_engaged', 'estimate.engage_expiring', expect.any(Object),
       expect.objectContaining({ requireExpiresAt: expires }),
     );
+  });
+
+  test('an extension landing between claim and send ABORTS the expiring email (codex 2736 r13)', async () => {
+    const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
+    const expires = new Date(NOW.getTime() + 1 * 86400000);
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });
+    enqueue('estimate_followup_rules', { rows: [EXPIRING_RULE] });
+    enqueue('estimates', { first: baseEstimate({ expires_at: expires }) });
+    enqueue('estimate_followup_sends', { first: undefined });
+    enqueue('notification_prefs', { first: { email_enabled: true } });
+    // Post-claim re-read: the deadline MOVED (extension re-arm ran).
+    enqueue('estimates', { first: { expires_at: new Date(expires.getTime() + 7 * 86400000) } });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'expiring_engaged');
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'deadline-moved' }));
   });
 
   test('a sibling expiring send suppresses the other variant', async () => {
@@ -677,9 +738,11 @@ describe('processDueJobs', () => {
     });
     enqueue('estimate_followup_rules', { rows: [QUIET_RULE, EXPIRING_RULE, HOT_RULE] });
     // Processed order after the priority sort: expiring (30) then quiet (50).
-    enqueue('estimates', { first: baseEstimate({ id: 'est-2', expires_at: new Date(NOW.getTime() + 1 * 86400000) }) });
+    const est2Expires = new Date(NOW.getTime() + 1 * 86400000);
+    enqueue('estimates', { first: baseEstimate({ id: 'est-2', expires_at: est2Expires }) });
     enqueue('estimate_followup_sends', { first: undefined }); // expiring sibling check
     enqueue('notification_prefs', { first: { email_enabled: true } });
+    enqueue('estimates', { first: { expires_at: est2Expires } }); // post-claim deadline re-read (unchanged)
     enqueue('estimates', { first: baseEstimate({ id: 'est-1' }) });
     enqueue('notification_prefs', { first: { email_enabled: true } });
 
