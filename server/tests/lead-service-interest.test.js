@@ -283,6 +283,25 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Lawn Care Service + Mosquito Control Service');
   });
 
+  test('"treatment for termites" next to a WDO request stays visible as work (codex r3)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'WDO Inspection Service',
+      requested_service: 'WDO report and treatment for termites',
+    })).toBe('WDO Inspection Service + Termite Service');
+  });
+
+  test('coordinated vegetation locations strip whole ("bushes and shrubs", codex r3)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mosquitoes around the bushes and shrubs',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    // ...but a genuine request after the location survives the backtrack
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants around the bushes and shrub care',
+    })).toBe('Quarterly Pest Control Service + Tree & Shrub Care Service');
+  });
+
   test('"termite extermination" next to a WDO request stays visible as work (codex PR P2)', () => {
     expect(composeServiceInterest({
       matched_service: 'WDO Inspection Service',

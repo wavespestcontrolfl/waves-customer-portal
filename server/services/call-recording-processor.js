@@ -5794,10 +5794,14 @@ const CallRecordingProcessor = {
             isPaid: callAttr.isPaid,
             leadSourceDetail: leadSourceRow.name || 'inbound call',
             // service_interest isn't on the lead row yet (enrichment writes it
-            // later) — pass the COMPOSED multi-service label (same value
-            // enrichment will persist) so service-line ROI sees every family
-            // the caller asked for, not just the single catalog match.
-            serviceInterest: composeServiceInterest(extracted) || extracted.requested_service || null,
+            // later) — pass the PRIMARY matched service, NOT the composed
+            // multi-service label: attribution derives a single service_line
+            // via inferServiceLine, whose keyword order (lawn before pest)
+            // would bucket a pest-primary "… + Lawn Care Service" composite
+            // as lawn and skew paid/organic ROI (codex r3). The secondary
+            // families live on the lead's service_interest; the single-line
+            // funnel field carries the primary by design.
+            serviceInterest: extracted.matched_service || extracted.requested_service || null,
             leadDate: call.created_at || null, // date by the actual call
           }).catch(() => {});
         }

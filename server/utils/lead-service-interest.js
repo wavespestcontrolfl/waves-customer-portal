@@ -70,7 +70,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -83,7 +83,19 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid
 // Article optional (codex P2: "around palm trees", "in lawn"), but a place
 // noun followed by care/service/etc is a REQUEST, not a location — the
 // lookahead keeps "interested in lawn care" intact.
-const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:(?:the|my|our|his|her|their|a|an|some)\s+)?(?:front\s+|back\s+)?(?:palm\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)\b(?!\s+(?:care|service|program|treatment|maintenance))/gi;
+// Location noun phrase, shared by the base match and the coordinated tail:
+// "around the bushes AND SHRUBS" is one location phrase — without the tail,
+// the leftover "shrubs" reads as a Tree & Shrub request (codex P2). The
+// service-word lookahead sits after the LAST noun so "…and shrub care"
+// backtracks to keep the genuine request.
+const LOC_ARTICLE = '(?:(?:the|my|our|his|her|their|a|an|some)\\s+)?';
+const LOC_NOUN = '(?:front\\s+|back\\s+)?(?:palm\\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)';
+const LOCATION_PHRASE_RE = new RegExp(
+  `\\b(?:in|on|around|near|under|inside|behind|throughout)\\s+${LOC_ARTICLE}${LOC_NOUN}`
+  + `(?:\\s+(?:and|or|&)\\s+${LOC_ARTICLE}${LOC_NOUN})*`
+  + '\\b(?!\\s+(?:care|service|program|treatment|maintenance))',
+  'gi',
+);
 const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 
 // Declined services are not requests: "pest control only, not lawn care"
