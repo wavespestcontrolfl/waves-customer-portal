@@ -25,6 +25,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { properCase } = require('../utils/name-case');
+const { composeServiceInterest } = require('../utils/lead-service-interest');
 
 const isEmpty = (v) => v === null || v === undefined || v === '';
 const phoneDigits = (v) => String(v || '').replace(/\D/g, '');
@@ -117,7 +118,10 @@ async function resolveLeadSourceId(toPhone) {
 async function createLeadFromExtraction(extracted = {}, opts = {}) {
   const phone = opts.phone || extracted.phone || null;
   const language = opts.language ? String(opts.language).toLowerCase().slice(0, 8) : null;
-  const service = extracted.matched_service || extracted.requested_service || null;
+  // composeServiceInterest returns the matched service plus any requested
+  // families it doesn't cover (multi-service calls), or null when nothing
+  // matched — preserving the legacy matched || requested fallback order.
+  const service = composeServiceInterest(extracted) || extracted.requested_service || null;
 
   let customerId = null;
   let leadId = null;

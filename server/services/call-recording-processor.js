@@ -30,6 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
+const { composeServiceInterest } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5585,6 +5586,11 @@ const CallRecordingProcessor = {
     // because Step 3 already created the customer — attribution would find the customer
     // and skip lead creation (race condition).
     let leadId = null;
+    // The composed service_interest the enrichment pass actually wrote (null
+    // when it wrote nothing) — the V2 recurring-default backfill's ownership
+    // predicate must match THIS persisted value, not a label recomputed after
+    // the V2 merge has overwritten matched/requested (codex P1 07-15).
+    let persistedServiceInterestLabel = null;
     let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
@@ -5804,7 +5810,14 @@ const CallRecordingProcessor = {
           if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
           if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
           if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
-          if (extracted.matched_service && isEmpty(current?.service_interest)) leadUpdates.service_interest = extracted.matched_service;
+          // Multi-service calls: matched_service is single-slot, so append the
+          // requested families it doesn't cover ("pest and lawn" must not
+          // price as pest-only). Fill-if-empty semantics unchanged.
+          const serviceInterestLabel = composeServiceInterest(extracted);
+          if (serviceInterestLabel && isEmpty(current?.service_interest)) {
+            leadUpdates.service_interest = serviceInterestLabel;
+            persistedServiceInterestLabel = serviceInterestLabel;
+          }
           // Urgency is a triage signal, not a hand-edited field — and the
           // leads schema defaults it to 'normal' at insert (migration
           // 20260401000095_lead_attribution.js:43), so an empty-only guard
@@ -6134,8 +6147,26 @@ const CallRecordingProcessor = {
               .where((qb) => {
                 qb.whereNull('service_interest').orWhere({ service_interest: '' });
                 if (preReassertMatched) qb.orWhere({ service_interest: preReassertMatched });
+                // Enrichment may have persisted a COMPOSED label (matched +
+                // uncovered requested families) from the pre-V2-merge
+                // extraction — match the exact value it wrote, not a label
+                // recomputed from the since-mutated fields.
+                if (persistedServiceInterestLabel && persistedServiceInterestLabel !== preReassertMatched) {
+                  qb.orWhere({ service_interest: persistedServiceInterestLabel });
+                }
               })
-              .update({ service_interest: extracted.matched_service });
+              .update({
+                // Recompose over BOTH the post-merge request and the label
+                // enrichment already persisted: the V2 merge can narrow
+                // requested_service to the primary category only, and a
+                // primary-only recompose here would erase the secondary
+                // families enrichment captured (codex P1 07-15).
+                service_interest: composeServiceInterest({
+                  ...extracted,
+                  requested_service: [persistedServiceInterestLabel, extracted.requested_service]
+                    .filter(Boolean).join(' '),
+                }) || extracted.matched_service,
+              });
           }
         } catch (bfErr) {
           logger.warn(`[call-proc] recurring-default backfill failed open: ${bfErr.message}`);
