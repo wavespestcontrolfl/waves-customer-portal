@@ -25,6 +25,7 @@ function sweepChain(rows) {
     whereNotNull: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     where: jest.fn().mockReturnThis(),
+    whereNot: jest.fn().mockReturnThis(),
     whereNotExists: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     limit: jest.fn().mockReturnThis(),
@@ -40,13 +41,17 @@ describe('selfHealMissingReminderRows', () => {
   });
 
   test('registers a row for a future visit missing one, via registerVisitReminderInTx with cron_selfheal source', async () => {
-    // Midnight-ET timestamptz the way scheduled_services stores it (EDT = UTC-4).
+    // scheduled_date is a DATE column — node-pg hydrates it as a JS Date at
+    // UTC midnight under prod's TZ=UTC. The sweep must take the UTC calendar
+    // day, NOT format the instant in ET (which would yield 2026-07-31).
+    const bookedAt = new Date('2026-07-09T15:00:00.000Z');
     const visit = {
       id: 'svc-1',
       customer_id: 'cust-1',
-      scheduled_date: new Date('2026-08-01T04:00:00.000Z'),
+      scheduled_date: new Date('2026-08-01T00:00:00.000Z'),
       window_start: '15:00:00',
       service_type: 'Quarterly Pest Control Service',
+      created_at: bookedAt,
     };
     db.mockImplementation(() => sweepChain([visit]));
     const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
@@ -62,6 +67,7 @@ describe('selfHealMissingReminderRows', () => {
       appointmentTime: '2026-08-01T15:00',
       serviceType: 'Quarterly Pest Control Service',
       source: 'cron_selfheal',
+      createdAt: bookedAt,
     });
   });
 
@@ -69,7 +75,7 @@ describe('selfHealMissingReminderRows', () => {
     const visit = {
       id: 'svc-2',
       customer_id: 'cust-2',
-      scheduled_date: new Date('2026-08-02T04:00:00.000Z'),
+      scheduled_date: new Date('2026-08-02T00:00:00.000Z'),
       window_start: null,
       service_type: 'Every 6 Weeks Lawn Care Service',
     };
@@ -109,6 +115,38 @@ describe('selfHealMissingReminderRows', () => {
 
     expect(healed).toBe(1);
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Self-heal registration failed for svc-3'));
+  });
+
+  test('registerVisitReminderInTx stamps the caller-provided booking time as created_at', async () => {
+    const bookedAt = new Date('2026-07-09T15:00:00.000Z');
+    const lookup = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    const sameTime = {
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const insertRow = {
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-9' }]),
+    };
+    const queue = [lookup, sameTime, insertRow];
+    const conn = jest.fn(() => queue.shift());
+    conn.raw = jest.fn().mockResolvedValue();
+
+    await AppointmentReminders.registerVisitReminderInTx(conn, {
+      scheduledServiceId: 'svc-9',
+      customerId: 'cust-9',
+      appointmentTime: '2026-08-01T15:00',
+      serviceType: 'Quarterly Pest Control Service',
+      source: 'cron_selfheal',
+      createdAt: bookedAt,
+    });
+
+    expect(insertRow.insert).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'cron_selfheal',
+      confirmation_sent: true,
+      created_at: bookedAt,
+    }));
   });
 
   test('sweep query failure logs and returns 0 instead of throwing', async () => {

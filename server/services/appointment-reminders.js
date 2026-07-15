@@ -872,13 +872,17 @@ const AppointmentReminders = {
    * roll back the visit/payment it rides with. Unlike registerAppointment() this
    * takes the caller's conn rather than opening its own transaction.
    */
-  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source }) {
+  async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const apptTime = parseETDateTime(appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
     const serviceLabel = smsServiceLabelStored(serviceType) || serviceType || null;
     const reminderSource = source || 'system_seed';
+    // Optional booking-time override (self-heal passes the visit's real
+    // created_at): the 72h pass reads created_at as the booking time, so a
+    // late-registered row must not look freshly booked. Default DB now().
+    const createdAtOverride = createdAt ? { created_at: createdAt } : {};
 
     // Serialize against concurrent registrations for the same customer+time
     // (mirrors registerAppointment) so the same-time check below can't race.
@@ -927,6 +931,7 @@ const AppointmentReminders = {
           reminder_24h_sent: true,
           reminder_24h_sent_at: now,
           cancelled: false,
+          ...createdAtOverride,
         })
         .returning('*');
       return suppressed;
@@ -954,6 +959,7 @@ const AppointmentReminders = {
         reminder_24h_sent: twentyFourMissed,
         reminder_24h_sent_at: twentyFourMissed ? now : null,
         cancelled: false,
+        ...createdAtOverride,
       })
       .returning('*');
     return record;
@@ -1152,13 +1158,24 @@ const AppointmentReminders = {
   async selfHealMissingReminderRows() {
     let healed = 0;
     try {
-      const todayStartET = parseETDateTime(`${etDateString(new Date())}T00:00`);
+      const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
       const missing = await db('scheduled_services as ss')
         .leftJoin('appointment_reminders as ar', 'ar.scheduled_service_id', 'ss.id')
         .whereNull('ar.id')
         .whereNotNull('ss.customer_id')
         .whereNotIn('ss.status', [...SELF_HEAL_TERMINAL_STATUSES])
-        .where('ss.scheduled_date', '>=', todayStartET)
+        // scheduled_date is a DATE column — compare against the ET calendar
+        // day as a plain date string (a timestamptz bound would shift the
+        // boundary by the session offset).
+        .where('ss.scheduled_date', '>=', etDateString(new Date()))
+        // Dispatch-owned pending bookings (call follow-ups, outbound-review
+        // bookings) are left unarmed ON PURPOSE until the office confirms —
+        // arming them here would text the customer first. admin-schedule
+        // registers them at the office-confirm transition.
+        .whereNot(function () {
+          this.where('ss.status', 'pending')
+            .whereIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+        })
         .whereNotExists(function () {
           this.select(1)
             .from('customers')
@@ -1167,17 +1184,27 @@ const AppointmentReminders = {
         })
         .orderBy('ss.scheduled_date', 'asc')
         .limit(SELF_HEAL_REGISTRATION_LIMIT)
-        .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type');
+        .select('ss.id', 'ss.customer_id', 'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.created_at');
 
       for (const svc of missing) {
         try {
+          // DATE columns hydrate as a JS Date at UTC midnight (TZ=UTC in
+          // prod) — take the UTC calendar day, same as scheduledServiceApptTime.
+          // Formatting that instant in ET would move the day back by one.
+          const datePart = svc.scheduled_date instanceof Date
+            ? svc.scheduled_date.toISOString().slice(0, 10)
+            : String(svc.scheduled_date || '').slice(0, 10);
           const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
           const record = await db.transaction((trx) => AppointmentReminders.registerVisitReminderInTx(trx, {
             scheduledServiceId: svc.id,
             customerId: svc.customer_id,
-            appointmentTime: `${etDateString(svc.scheduled_date)}T${windowStart}`,
+            appointmentTime: `${datePart}T${windowStart}`,
             serviceType: svc.service_type,
             source: 'cron_selfheal',
+            // Preserve the visit's real booking time: the 72h pass skips
+            // "booked < 72h before appointment" off created_at, and a healed
+            // row stamped with the cron time would wrongly skip that reminder.
+            createdAt: svc.created_at,
           }));
           if (record) healed += 1;
         } catch (err) {
