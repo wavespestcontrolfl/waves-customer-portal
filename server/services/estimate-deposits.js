@@ -1145,7 +1145,10 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 // only their unapplied remainder; the credited slice stays credited.
 // Best-effort by design: a Stripe failure reverts the claim, raises the
 // reconcile alert, and leaves the truth on the ledger.
-async function refundUnconsumedDeposits({ estimateId, reason }) {
+// includeSurchargeShare=false returns FACE VALUE ONLY (the captured card
+// surcharge stays earned) — owner ruling 2026-07-15 for the cancel-signup
+// offboarding path; the automated sweeps keep returning the prorated fee.
+async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeShare = true }) {
   const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
     .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge');
@@ -1177,18 +1180,21 @@ async function refundUnconsumedDeposits({ estimateId, reason }) {
     // so the reconstruction matches what was actually refunded before).
     const faceCents = Math.round(Number(row.amount || 0) * 100);
     const surchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
-    const priorSurchargeRefundCents = computeRefundSurcharge({
-      refundBaseCents: priorRefundedCents,
-      originalBaseCents: faceCents,
-      originalSurchargeCents: surchargeCents,
-    });
-    const surchargeRefundCents = computeRefundSurcharge({
-      refundBaseCents: remainderCents,
-      originalBaseCents: faceCents,
-      originalSurchargeCents: surchargeCents,
-      totalRefundedBaseCents: priorRefundedCents,
-      alreadyRefundedSurchargeCents: priorSurchargeRefundCents,
-    });
+    let surchargeRefundCents = 0;
+    if (includeSurchargeShare) {
+      const priorSurchargeRefundCents = computeRefundSurcharge({
+        refundBaseCents: priorRefundedCents,
+        originalBaseCents: faceCents,
+        originalSurchargeCents: surchargeCents,
+      });
+      surchargeRefundCents = computeRefundSurcharge({
+        refundBaseCents: remainderCents,
+        originalBaseCents: faceCents,
+        originalSurchargeCents: surchargeCents,
+        totalRefundedBaseCents: priorRefundedCents,
+        alreadyRefundedSurchargeCents: priorSurchargeRefundCents,
+      });
+    }
     try {
       await StripeService.refundPaymentIntent(row.stripe_payment_intent_id, {
         amountCents: remainderCents + surchargeRefundCents,

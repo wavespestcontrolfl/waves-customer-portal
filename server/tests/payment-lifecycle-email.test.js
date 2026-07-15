@@ -466,4 +466,35 @@ describe('payment lifecycle email sender', () => {
     expect(result).toMatchObject({ deduped: true, messageId: 'sg-existing' });
     expect(db).not.toHaveBeenCalledWith('customer_interactions');
   });
+
+  test('sends the combined cancellation + deposit-refund notice without needing a payments row', async () => {
+    setDbQueues(lifecycleQueues());
+
+    await PaymentLifecycleEmail.sendCancellationRefundIssued({
+      customerId: 'cust-1',
+      refundAmount: 49,
+      refundDate: '2026-07-15',
+      planLabel: 'WaveGuard Bronze',
+      idempotencyKey: 'account.cancellation_refund:cust-1:dep-1',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'account.cancellation_refund',
+      idempotencyKey: 'account.cancellation_refund:cust-1:dep-1',
+      payload: expect.objectContaining({
+        refund_amount: '$49.00',
+        plan_label: 'WaveGuard Bronze',
+      }),
+    }));
+    expect(db).not.toHaveBeenCalledWith('payments');
+  });
+
+  test('cancellation notice refuses a zero refund amount', async () => {
+    const result = await PaymentLifecycleEmail.sendCancellationRefundIssued({
+      customerId: 'cust-1',
+      refundAmount: 0,
+    });
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'no_refund_amount' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
 });

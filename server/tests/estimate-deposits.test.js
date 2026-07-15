@@ -1602,6 +1602,20 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 
+  it('includeSurchargeShare:false refunds FACE VALUE only — the captured fee stays earned (cancel-signup ruling 2026-07-15)', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(49);
+    // Face cents only — no prorated fee share rides the refund.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+  });
+
   it('rows consumed mid-sweep are skipped — their claim simply loses', async () => {
     mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
     const { handler, state } = sweepDb({

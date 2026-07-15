@@ -3283,6 +3283,35 @@ router.post('/:id/refund', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// =========================================================================
+// Cancel signup & refund deposit — deposit-stage offboarding orchestration.
+// GET returns the confirm-modal preview (what will void/cancel/refund, or
+// why the run is blocked); POST executes. The orchestrator re-runs the
+// eligibility check itself, so a stale modal can't authorize a stale run.
+// =========================================================================
+router.get('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
+  try {
+    const CustomerOffboarding = require('../services/customer-offboarding');
+    res.json(await CustomerOffboarding.previewCancelSignup(req.params.id));
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/cancel-signup', requireAdmin, async (req, res, next) => {
+  try {
+    const CustomerOffboarding = require('../services/customer-offboarding');
+    await auditCustomerMutation(req, 'customer.cancel_signup', req.params.id, {
+      reason: cleanOptionalText(req.body?.reason) || 'requested_by_customer',
+    }, true);
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit(req.params.id, {
+      actorId: req.technicianId || null,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    if (err.blockers) return res.status(409).json({ error: err.message, blockers: err.blockers });
+    next(err);
+  }
+});
+
 // GET /:id/credits — account credit balance + ledger history for Customer 360.
 router.get('/:id/credits', async (req, res, next) => {
   try {

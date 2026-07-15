@@ -1,0 +1,330 @@
+const db = require('../models/db');
+const logger = require('./logger');
+
+// Deposit-stage cancellation orchestration (owner-scoped 2026-07-15):
+// a customer who accepted an estimate, paid a deposit, and cancelled before
+// any money beyond the deposit was collected. One admin action replaces the
+// manual sequence across three pages + the Stripe dashboard:
+//
+//   1. void the unpaid signup invoice(s)  — the existing void side effects
+//      cancel the annual-prepay term, reset billing_mode, restore the
+//      deposit credit (credited → received), and stop dunning
+//   2. cancel every non-terminal scheduled visit (business-initiated:
+//      card-hold late-cancel fees are waived)
+//   3. clear the membership tier (customer stays ACTIVE — "No Plan")
+//   4. refund the deposit remainder at FACE VALUE (surcharge stays earned —
+//      owner ruling 2026-07-15), Stripe touched LAST so the DB never trails
+//      the money
+//   5. send the combined cancellation-confirmed + refund-issued email
+//
+// ORDER IS LOAD-BEARING: voiding before refunding is what turns a credited
+// deposit back into an unapplied 'received' row, so the refund reconciles
+// cleanly instead of tripping the manual-reconciliation alert.
+//
+// Paid/mid-term cancellations are deliberately OUT of scope — a term with
+// collected money needs a proration decision, which is the owner's, not
+// this service's. Every guard below fails toward "blocked and loud".
+
+const TERMINAL_VISIT_STATUSES = ['completed', 'skipped', 'no_show', 'cancelled'];
+// Statuses voidInvoice would refuse; preview mirrors them so the modal can
+// explain the block instead of the void throwing mid-run.
+const NON_VOIDABLE_INVOICE_STATUSES = ['paid', 'prepaid', 'processing', 'refunded'];
+// Terms with collected money — presence of any of these blocks the flow.
+const PAID_TERM_STATUSES = ['active', 'renewal_pending'];
+
+function toCents(value) {
+  return Math.round(Number(value || 0) * 100);
+}
+
+function parseLineItems(invoice) {
+  try {
+    const raw = invoice?.line_items;
+    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+// Resolve the invoice carrying a deposit's credit: the stamped
+// credited_invoice_id when present, else the non-void invoice whose
+// deposit_credit line references the deposit's estimate (pre-stamp rows).
+async function invoiceCarryingDepositCredit(row) {
+  if (row.credited_invoice_id) {
+    return db('invoices').where({ id: row.credited_invoice_id }).first();
+  }
+  const candidates = await db('invoices')
+    .where({ customer_id: row.customer_id })
+    .whereNot({ status: 'void' })
+    .select('*');
+  return candidates.find((inv) => parseLineItems(inv).some(
+    (item) => item?.category === 'deposit_credit' && item?.estimate_id === row.estimate_id,
+  )) || null;
+}
+
+// Everything the confirm modal shows, and every reason the run would be
+// refused. Re-run by the POST handler immediately before executing so a
+// stale modal can't authorize a run the current state forbids.
+async function previewCancelSignup(customerId) {
+  const customer = await db('customers')
+    .where({ id: customerId })
+    .first('id', 'first_name', 'last_name', 'waveguard_tier', 'billing_mode', 'active');
+  if (!customer) {
+    const err = new Error('Customer not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const blockers = [];
+
+  const deposits = await db('estimate_deposits')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['received', 'credited', 'refunding'])
+    .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge', 'credited_invoice_id', 'customer_id');
+
+  if (deposits.some((d) => d.status === 'refunding')) {
+    blockers.push('a deposit refund is already in flight — retry after it settles');
+  }
+
+  const refundableDeposits = deposits.filter((d) => ['received', 'credited'].includes(d.status));
+  let refundTotalCents = 0;
+  const invoicesToVoid = new Map();
+
+  for (const row of refundableDeposits) {
+    const remainderCents = toCents(row.amount) - toCents(row.refunded_amount);
+    if (remainderCents <= 0) continue;
+    refundTotalCents += remainderCents;
+    if (toCents(row.credited_amount) > 0) {
+      const invoice = await invoiceCarryingDepositCredit(row);
+      if (!invoice) {
+        blockers.push('a deposit credit could not be traced to its invoice — manual reconciliation required');
+        continue;
+      }
+      if (NON_VOIDABLE_INVOICE_STATUSES.includes(String(invoice.status)) || invoice.payment_recorded_at) {
+        blockers.push(`deposit credit sits on ${invoice.invoice_number || 'an invoice'} which is ${invoice.status} — refund that payment instead`);
+        continue;
+      }
+      invoicesToVoid.set(invoice.id, invoice);
+    }
+  }
+
+  if (refundTotalCents <= 0) {
+    blockers.push('no refundable deposit on file');
+  }
+
+  // Annual-prepay terms: a payment_pending term cancels via its invoice
+  // void; a term with collected money blocks the whole flow.
+  const terms = await db('annual_prepay_terms')
+    .where({ customer_id: customerId })
+    .whereNot({ status: 'cancelled' })
+    .select('id', 'status', 'plan_label', 'prepay_invoice_id', 'prepay_amount', 'term_start', 'term_end');
+  for (const term of terms) {
+    if (PAID_TERM_STATUSES.includes(String(term.status))) {
+      blockers.push(`annual prepay term is ${term.status} (money collected) — out of scope for signup cancellation`);
+      continue;
+    }
+    if (term.prepay_invoice_id && !invoicesToVoid.has(term.prepay_invoice_id)) {
+      const invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
+      if (invoice && String(invoice.status) !== 'void') {
+        if (NON_VOIDABLE_INVOICE_STATUSES.includes(String(invoice.status)) || invoice.payment_recorded_at) {
+          blockers.push(`prepay invoice ${invoice.invoice_number || ''} is ${invoice.status} — refund that payment instead`);
+        } else {
+          invoicesToVoid.set(invoice.id, invoice);
+        }
+      }
+    }
+  }
+
+  const visits = await db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+    .select('id', 'status', 'service_date', 'service_type')
+    .orderBy('service_date', 'asc');
+
+  return {
+    eligible: blockers.length === 0,
+    blockers,
+    customer: {
+      id: customer.id,
+      tier: customer.waveguard_tier || null,
+      billingMode: customer.billing_mode || null,
+    },
+    refundTotal: refundTotalCents / 100,
+    deposits: refundableDeposits.map((d) => ({
+      id: d.id,
+      estimateId: d.estimate_id,
+      status: d.status,
+      amount: Number(d.amount || 0),
+      refundedAmount: Number(d.refunded_amount || 0),
+    })),
+    invoices: [...invoicesToVoid.values()].map((inv) => ({
+      id: inv.id,
+      invoiceNumber: inv.invoice_number,
+      status: inv.status,
+      total: Number(inv.total || 0),
+      annualPrepayTermId: inv.annual_prepay_term_id || null,
+    })),
+    terms: terms.map((t) => ({
+      id: t.id,
+      status: t.status,
+      planLabel: t.plan_label || null,
+      prepayAmount: t.prepay_amount != null ? Number(t.prepay_amount) : null,
+    })),
+    visits: visits.map((v) => ({
+      id: v.id,
+      status: v.status,
+      serviceDate: v.service_date,
+      serviceType: v.service_type,
+    })),
+  };
+}
+
+// Cancel one visit with the exact side-effect set the schedule bulk-cancel
+// runs (business-initiated: hold fees waived). Idempotent — an already-
+// cancelled row reruns the handlers harmlessly.
+async function cancelVisitForOffboarding(visit, { actorId }) {
+  const { transitionJobStatus } = require('./job-status');
+  await db.transaction(async (trx) => {
+    await transitionJobStatus({
+      jobId: visit.id,
+      fromStatus: visit.status,
+      toStatus: 'cancelled',
+      transitionedBy: actorId || null,
+      notes: 'Signup cancellation',
+      trx,
+    });
+  });
+  try {
+    const AppointmentReminders = require('./appointment-reminders');
+    await AppointmentReminders.handleCancellation(visit.id);
+  } catch {}
+  try {
+    const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
+  } catch (e) {
+    logger.error(`[customer-offboarding] call follow-up cascade failed for ${visit.id}: ${e.message}`);
+  }
+  await require('./invoice').voidOpenInvoicesForCancelledService(visit.id);
+  try {
+    const CardHolds = require('./estimate-card-holds');
+    await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true });
+  } catch (e) {
+    logger.error(`[customer-offboarding] card-hold handling failed for ${visit.id}: ${e.message}`);
+  }
+}
+
+async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {}) {
+  const preview = await previewCancelSignup(customerId);
+  if (!preview.eligible) {
+    const err = new Error(`Signup cancellation blocked: ${preview.blockers.join('; ')}`);
+    err.status = 409;
+    err.blockers = preview.blockers;
+    throw err;
+  }
+
+  const result = {
+    invoicesVoided: [],
+    visitsCancelled: 0,
+    visitFailures: [],
+    tierCleared: false,
+    refunded: 0,
+    email: null,
+  };
+
+  // 1. Void the unpaid signup invoice(s). voidInvoice re-runs its own hard
+  // money guards under a row lock, cancels the linked annual-prepay term,
+  // resets billing_mode, and restores the deposit credit. A failure here
+  // aborts the run BEFORE any visit or money is touched.
+  const InvoiceService = require('./invoice');
+  for (const inv of preview.invoices) {
+    const voided = await InvoiceService.voidInvoice(inv.id);
+    result.invoicesVoided.push(voided.invoice_number || inv.id);
+  }
+
+  // 2. Cancel every non-terminal visit. Per-visit failure isolation
+  // (mirrors schedule bulk-cancel): one stuck row must not strand the
+  // refund; failures are reported, not swallowed.
+  for (const visit of preview.visits) {
+    try {
+      await cancelVisitForOffboarding(visit, { actorId });
+      result.visitsCancelled += 1;
+    } catch (e) {
+      result.visitFailures.push({ id: visit.id, reason: e.message });
+    }
+  }
+
+  // 3. No Plan: clear the tier, keep the record ACTIVE (win-back visible;
+  // owner ruling 2026-07-15). billing_mode was already reset by the term
+  // cancellation riding the invoice void.
+  const tierCleared = await db('customers')
+    .where({ id: customerId })
+    .whereNotNull('waveguard_tier')
+    .update({ waveguard_tier: null, updated_at: db.fn.now() });
+  result.tierCleared = tierCleared > 0;
+
+  // 4. Refund the deposit remainder — face value only, Stripe last. The
+  // sweep owns the claim discipline; a Stripe failure reverts the claim,
+  // raises the reconcile alert, and this run still reports what happened.
+  const { refundUnconsumedDeposits } = require('./estimate-deposits');
+  const estimateIds = [...new Set(preview.deposits.map((d) => d.estimateId).filter(Boolean))];
+  for (const estimateId of estimateIds) {
+    const { refunded } = await refundUnconsumedDeposits({
+      estimateId,
+      reason: 'cancel_signup',
+      includeSurchargeShare: false,
+    });
+    result.refunded += refunded;
+  }
+
+  // 5. Combined cancellation + refund email — only once money actually
+  // moved. Re-runs retry a failed send for money refunded on a PRIOR run
+  // (the idempotency key dedupes an already-delivered one); refundedTotal
+  // re-reads the ledger so the email states what Stripe actually returned.
+  const depositIds = preview.deposits.map((d) => d.id).sort();
+  const ledgerRows = await db('estimate_deposits')
+    .whereIn('id', depositIds)
+    .select('refunded_amount');
+  const refundedTotal = ledgerRows.reduce((sum, r) => sum + Number(r.refunded_amount || 0), 0);
+  if (refundedTotal > 0) {
+    const PaymentLifecycleEmail = require('./payment-lifecycle-email');
+    result.email = await PaymentLifecycleEmail.sendCancellationRefundIssued({
+      customerId,
+      refundAmount: refundedTotal,
+      refundDate: new Date(),
+      planLabel: preview.terms[0]?.planLabel || preview.customer.tier || '',
+      idempotencyKey: `account.cancellation_refund:${customerId}:${depositIds.join(',')}`,
+    });
+  } else {
+    result.email = { ok: false, skipped: true, reason: 'no_refund_recorded' };
+  }
+
+  try {
+    const { triggerNotification } = require('./notification-triggers');
+    const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+    await triggerNotification('payment_refunded', {
+      amount: refundedTotal,
+      customerName: [customer?.first_name, customer?.last_name].filter(Boolean).join(' '),
+      isFullRefund: true,
+    });
+  } catch (e) {
+    logger.warn(`[customer-offboarding] admin refund notification failed: ${e.message}`);
+  }
+
+  logger.info('[customer-offboarding] signup cancelled', {
+    customerId,
+    invoicesVoided: result.invoicesVoided,
+    visitsCancelled: result.visitsCancelled,
+    visitFailures: result.visitFailures.length,
+    refunded: result.refunded,
+  });
+  return result;
+}
+
+module.exports = {
+  previewCancelSignup,
+  cancelSignupAndRefundDeposit,
+  _private: {
+    invoiceCarryingDepositCredit,
+    cancelVisitForOffboarding,
+  },
+};
