@@ -107,12 +107,15 @@ function stripNegatedClauses(s) {
     .join(' ');
 }
 
-// "termite extermination" is ONE service — drop the exterminat token when it
-// is bound to a specific family word so it can't add a generic pest tail
-// (codex P2); a standalone "exterminator" still counts as pest.
+// "termite extermination" is ONE service — rewrite the exterminat token to
+// "treatment" when it is bound to a specific family word so it can't add a
+// generic pest tail (codex P2) while STAYING treatment evidence for the
+// WDO⇄termite lane check ("WDO report and termite extermination" must keep
+// the termite work — codex PR P2). A standalone "exterminator" still counts
+// as pest.
 const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed\s*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
 const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed\s*bugs?\b|bedbugs?\b|mosquito)/gi;
-const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1').replace(EXTERMINATE_FOR_RE, '');
+const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
 // bugs" / "mole crickets" with a lawn match must not invent a pest tail.

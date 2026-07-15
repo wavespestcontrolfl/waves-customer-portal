@@ -283,6 +283,17 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Lawn Care Service + Mosquito Control Service');
   });
 
+  test('"termite extermination" next to a WDO request stays visible as work (codex PR P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'WDO Inspection Service',
+      requested_service: 'WDO report and termite extermination',
+    })).toBe('WDO Inspection Service + Termite Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'WDO report plus an exterminator for the termites',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service + Termite Service');
+  });
+
   test('"X extermination" is one service, standalone exterminator is pest (codex P2)', () => {
     expect(composeServiceInterest({
       matched_service: 'Termite Inspection',
