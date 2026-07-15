@@ -1161,6 +1161,15 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
       - priorRefundedCents;
     if (remainderCents <= 0) continue;
 
+    // Face-only refunds pre-stamp the cumulative face total AT CLAIM TIME:
+    // the webhook echo deflates Stripe's gross assuming a prorated fee share
+    // rode along, so a face-only echo landing mid-'refunding' would stamp
+    // LESS than face and no-op the terminal update below. With the stamp
+    // already at the face total, the echo's replay guard (deflated gross <=
+    // recorded) recognizes it and leaves the row alone. Deflation only ever
+    // understates face, so the guard holds for mixed prior refunds too. A
+    // Stripe failure reverts the stamp with the claim.
+    const cumulativeFaceRefund = (priorRefundedCents + remainderCents) / 100;
     const claimedCount = await db('estimate_deposits')
       .where({
         id: row.id,
@@ -1168,7 +1177,11 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
         credited_amount: row.credited_amount,
         refunded_amount: row.refunded_amount,
       })
-      .update({ status: 'refunding', updated_at: db.fn.now() });
+      .update({
+        status: 'refunding',
+        ...(includeSurchargeShare ? {} : { refunded_amount: cumulativeFaceRefund }),
+        updated_at: db.fn.now(),
+      });
     if (!claimedCount) continue; // consumed or reversed mid-sweep — their win
 
     const creditedCents = Math.round(Number(row.credited_amount || 0) * 100);
@@ -1212,7 +1225,13 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
     } catch (err) {
       await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
-        .update({ status: 'received', updated_at: db.fn.now() })
+        .update({
+          status: 'received',
+          // Roll back the face-only pre-stamp with the claim — the money
+          // never left Stripe, so the ledger must not say it did.
+          ...(includeSurchargeShare ? {} : { refunded_amount: row.refunded_amount }),
+          updated_at: db.fn.now(),
+        })
         .catch(() => {});
       logger.error('[estimate-deposits] unconsumed-deposit refund FAILED — row reverted to received', {
         estimateId,

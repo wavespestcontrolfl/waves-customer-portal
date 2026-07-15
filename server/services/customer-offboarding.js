@@ -26,11 +26,22 @@ const logger = require('./logger');
 // this service's. Every guard below fails toward "blocked and loud".
 
 const TERMINAL_VISIT_STATUSES = ['completed', 'skipped', 'no_show', 'cancelled'];
+// Mirrors cancellation-processor: only not-yet-started visits auto-cancel.
+// Live in-progress work (en_route / on_site) blocks the flow — a tech
+// rolling or on property is a dispatch decision, not a button's.
+const CANCELLABLE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 // Statuses voidInvoice would refuse; preview mirrors them so the modal can
-// explain the block instead of the void throwing mid-run.
-const NON_VOIDABLE_INVOICE_STATUSES = ['paid', 'prepaid', 'processing', 'refunded'];
+// explain the block instead of the void throwing mid-run. 'prepaid' is NOT
+// listed: a credit-covered prepaid invoice (no payment_recorded_at, no
+// payments row) is legitimately voidable and voidInvoice restores its
+// credit; the cash-backed variant is caught by payment_recorded_at here
+// and by voidInvoice's own money guards at execute time.
+const NON_VOIDABLE_INVOICE_STATUSES = ['paid', 'processing', 'refunded'];
 // Terms with collected money — presence of any of these blocks the flow.
-const PAID_TERM_STATUSES = ['active', 'renewal_pending'];
+// 'renewed'/'switch_plan' are DECIDED_COVERED_STATUSES in
+// annual-prepay-renewals: still a paid coverage window, still a proration
+// decision this service leaves to the owner.
+const PAID_TERM_STATUSES = ['active', 'renewal_pending', 'renewed', 'switch_plan'];
 
 function toCents(value) {
   return Math.round(Number(value || 0) * 100);
@@ -137,9 +148,17 @@ async function previewCancelSignup(customerId) {
 
   const visits = await db('scheduled_services')
     .where({ customer_id: customerId })
-    .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-    .select('id', 'status', 'service_date', 'service_type')
-    .orderBy('service_date', 'asc');
+    .whereIn('status', CANCELLABLE_VISIT_STATUSES)
+    .select('id', 'status', 'scheduled_date', 'service_type')
+    .orderBy('scheduled_date', 'asc');
+
+  const inProgress = await db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNotIn('status', [...TERMINAL_VISIT_STATUSES, ...CANCELLABLE_VISIT_STATUSES])
+    .select('id', 'status');
+  if (inProgress.length > 0) {
+    blockers.push(`a visit is in progress (${inProgress.map((v) => v.status).join(', ')}) — resolve it on the dispatch board first`);
+  }
 
   return {
     eligible: blockers.length === 0,
@@ -173,7 +192,7 @@ async function previewCancelSignup(customerId) {
     visits: visits.map((v) => ({
       id: v.id,
       status: v.status,
-      serviceDate: v.service_date,
+      serviceDate: v.scheduled_date,
       serviceType: v.service_type,
     })),
   };
@@ -241,9 +260,16 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     result.invoicesVoided.push(voided.invoice_number || inv.id);
   }
 
-  // 2. Cancel every non-terminal visit. Per-visit failure isolation
-  // (mirrors schedule bulk-cancel): one stuck row must not strand the
-  // refund; failures are reported, not swallowed.
+  // 2. Stop any recurring series BEFORE sweeping visits (mirrors
+  // cancellation-processor): a racing completion reads recurring_ongoing
+  // and would otherwise mint a fresh pending visit behind the sweep.
+  await db('scheduled_services')
+    .where({ customer_id: customerId, recurring_ongoing: true })
+    .update({ recurring_ongoing: false, updated_at: db.fn.now() });
+
+  // Cancel every cancellable visit. Per-visit failure isolation (mirrors
+  // schedule bulk-cancel): one stuck row must not strand the refund;
+  // failures are reported, not swallowed.
   for (const visit of preview.visits) {
     try {
       await cancelVisitForOffboarding(visit, { actorId });
@@ -252,14 +278,36 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
       result.visitFailures.push({ id: visit.id, reason: e.message });
     }
   }
+  // Straggler re-sweep: an auto-extension already in flight past the flag
+  // flip can land after the preview read — catch anything cancellable that
+  // appeared since.
+  const stragglers = await db('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereIn('status', CANCELLABLE_VISIT_STATUSES)
+    .whereNotIn('id', preview.visits.map((v) => v.id))
+    .select('id', 'status');
+  for (const visit of stragglers) {
+    try {
+      await cancelVisitForOffboarding(visit, { actorId });
+      result.visitsCancelled += 1;
+    } catch (e) {
+      result.visitFailures.push({ id: visit.id, reason: e.message });
+    }
+  }
 
-  // 3. No Plan: clear the tier, keep the record ACTIVE (win-back visible;
-  // owner ruling 2026-07-15). billing_mode was already reset by the term
-  // cancellation riding the invoice void.
+  // 3. No Plan: clear the tier AND the monthly rate, keep the record ACTIVE
+  // (win-back visible; owner ruling 2026-07-15). monthly_rate must go too —
+  // the monthly billing cron selects active customers by monthly_rate > 0,
+  // so a lingering rate would keep a "No Plan" customer billable. NULL, not
+  // 0 (repo rule: 0 means "charge nothing", NULL means "no rate").
+  // billing_mode was already reset by the term cancellation riding the
+  // invoice void.
   const tierCleared = await db('customers')
     .where({ id: customerId })
-    .whereNotNull('waveguard_tier')
-    .update({ waveguard_tier: null, updated_at: db.fn.now() });
+    .where((qb) => {
+      qb.whereNotNull('waveguard_tier').orWhere('monthly_rate', '>', 0);
+    })
+    .update({ waveguard_tier: null, monthly_rate: null, updated_at: db.fn.now() });
   result.tierCleared = tierCleared > 0;
 
   // 4. Refund the deposit remainder — face value only, Stripe last. The
@@ -287,12 +335,16 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   const refundedTotal = ledgerRows.reduce((sum, r) => sum + Number(r.refunded_amount || 0), 0);
   if (refundedTotal > 0) {
     const PaymentLifecycleEmail = require('./payment-lifecycle-email');
+    // The key carries the CUMULATIVE refunded cents: a retry that refunds a
+    // deposit the first run couldn't must send a corrected email with the
+    // new total, while an identical re-run still dedupes.
+    const refundedCents = Math.round(refundedTotal * 100);
     result.email = await PaymentLifecycleEmail.sendCancellationRefundIssued({
       customerId,
       refundAmount: refundedTotal,
       refundDate: new Date(),
       planLabel: preview.terms[0]?.planLabel || preview.customer.tier || '',
-      idempotencyKey: `account.cancellation_refund:${customerId}:${depositIds.join(',')}`,
+      idempotencyKey: `account.cancellation_refund:${customerId}:${depositIds.join(',')}:${refundedCents}`,
     });
   } else {
     result.email = { ok: false, skipped: true, reason: 'no_refund_recorded' };

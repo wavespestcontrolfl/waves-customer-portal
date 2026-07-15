@@ -1614,6 +1614,22 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     // Face cents only — no prorated fee share rides the refund.
     expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
     expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+    // The CLAIM update pre-stamped the face total so a webhook echo landing
+    // mid-'refunding' hits the replay guard instead of deflating the stamp.
+    const claimUpdate = state.updates.find((u) => u.payload.status === 'refunding');
+    expect(claimUpdate.payload.refunded_amount).toBe(49);
+  });
+
+  it('face-only Stripe failure reverts the pre-stamp with the claim — the ledger never says money moved', async () => {
+    mockRefundPaymentIntent.mockRejectedValue(new Error('stripe down'));
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(0);
+    expect(state.rows[0]).toMatchObject({ status: 'received', refunded_amount: 0 });
   });
 
   it('rows consumed mid-sweep are skipped — their claim simply loses', async () => {

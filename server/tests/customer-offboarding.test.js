@@ -97,17 +97,17 @@ const PENDING_TERM = {
   prepay_invoice_id: 'inv-1', prepay_amount: '420.00', term_start: null, term_end: null,
 };
 const VISITS = [
-  { id: 'v-1', status: 'pending', service_date: '2026-07-09', service_type: 'quarterly' },
-  { id: 'v-2', status: 'confirmed', service_date: '2026-10-09', service_type: 'quarterly' },
+  { id: 'v-1', status: 'pending', scheduled_date: '2026-07-09', service_type: 'quarterly' },
+  { id: 'v-2', status: 'confirmed', scheduled_date: '2026-10-09', service_type: 'quarterly' },
 ];
 
-function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], invoiceFirsts = [UNPAID_INVOICE], terms = [PENDING_TERM], visits = VISITS } = {}) {
+function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], invoiceFirsts = [UNPAID_INVOICE], terms = [PENDING_TERM], visits = VISITS, inProgress = [] } = {}) {
   return {
     customers: [chain({ first: customer })],
     estimate_deposits: [chain({ rows: deposits })],
     invoices: invoiceFirsts.map((inv) => chain({ first: inv })),
     annual_prepay_terms: [chain({ rows: terms })],
-    scheduled_services: [chain({ rows: visits })],
+    scheduled_services: [chain({ rows: visits }), chain({ rows: inProgress })],
   };
 }
 
@@ -164,12 +164,37 @@ describe('previewCancelSignup — eligibility fails closed', () => {
     expect(p.eligible).toBe(false);
     expect(p.blockers.join(' ')).toMatch(/in flight/);
   });
+
+  it('blocks when a visit is in progress (tech en route / on property)', async () => {
+    setDbQueues(previewQueues({ inProgress: [{ id: 'v-9', status: 'en_route' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/en_route.*dispatch board/);
+  });
+
+  it('blocks a DECIDED paid term (renewed) — still a paid coverage window', async () => {
+    setDbQueues(previewQueues({ terms: [{ ...PENDING_TERM, status: 'renewed' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers.join(' ')).toMatch(/out of scope/);
+  });
+
+  it('allows a credit-covered PREPAID invoice through (no payment recorded — voidInvoice restores its credit)', async () => {
+    setDbQueues(previewQueues({
+      invoiceFirsts: [{ ...UNPAID_INVOICE, status: 'prepaid', payment_recorded_at: null }],
+    }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(true);
+    expect(p.invoices).toHaveLength(1);
+  });
 });
 
 describe('cancelSignupAndRefundDeposit — order and side effects', () => {
-  function executeQueues({ ledgerRefunded = '49.00' } = {}) {
+  function executeQueues({ ledgerRefunded = '49.00', stragglers = [] } = {}) {
     const q = previewQueues();
-    // step 3 tier clear, step 5 ledger re-read, notification name lookup
+    // step 2 recurrence flip + straggler re-query, step 3 tier/rate clear,
+    // step 5 ledger re-read, notification name lookup
+    q.scheduled_services.push(chain({ update: 1 }), chain({ rows: stragglers }));
     q.customers.push(chain({ update: 1 }), chain({ first: { first_name: 'Taylor', last_name: 'Morgan' } }));
     q.estimate_deposits.push(chain({ rows: [{ refunded_amount: ledgerRefunded }] }));
     return q;
@@ -197,7 +222,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(mockSendEmail).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1',
       refundAmount: 49,
-      idempotencyKey: 'account.cancellation_refund:cust-1:dep-1',
+      // Amount-keyed: a retry that refunds more sends a corrected email
+      // instead of deduping against the partial one.
+      idempotencyKey: 'account.cancellation_refund:cust-1:dep-1:4900',
     }));
     expect(mockTriggerNotification).toHaveBeenCalledWith('payment_refunded', expect.objectContaining({ amount: 49 }));
     expect(result).toMatchObject({
@@ -242,5 +269,12 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(result.visitsCancelled).toBe(1);
     expect(result.visitFailures).toEqual([{ id: 'v-1', reason: 'invalid transition' }]);
     expect(result.refunded).toBe(49);
+  });
+
+  it('sweeps stragglers minted by a racing auto-extension after the recurrence flip', async () => {
+    setDbQueues(executeQueues({ stragglers: [{ id: 'v-99', status: 'pending' }] }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(3);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'v-99' }));
   });
 });
