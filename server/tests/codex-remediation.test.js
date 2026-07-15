@@ -1288,3 +1288,77 @@ describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1
     }
   });
 });
+
+describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  test('an image/path finding does NOT authorize an alt rewrite (alt-specific wording required)', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'New alt text');
+    // "hero image"/"hero art" findings are about the asset, not the alt.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Replace the misleading roach hero image' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Use accurate smokybrown hero art' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    // Alt-specific wording still authorizes.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'The hero alt describes the wrong species' }]).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'heroAlt claims a red spider' }]).violation).toBeNull();
+  });
+
+  test('hero_image.alt over 255 chars parks (mirror column is varchar(255))', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'A'.repeat(260));
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'hero alt is wrong' }]).violation)
+      .toMatch(/>255 chars/);
+  });
+
+  test('scheduler lane: rewritten meta failing the title/meta spam check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: false, hard_failures: [{ code: 'near_me_stuffing' }] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: true }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/metadata quality checks: title\/meta spam: near_me_stuffing/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('scheduler lane: rewritten meta failing the PII check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: true, hard_failures: [], soft_failures: [] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: false, reason: 'email_in_meta_description' }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/pii: email_in_meta_description/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('validateRewrittenMeta passes clean copy through the REAL spam + PII gates', () => {
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const fixedMd = `---\ntitle: 'Florida Spiders: Which Ones Matter'\nmeta_description: ${VALID_META}\n---\nBODY`;
+    const res = rem.validateRewrittenMeta(VALID_META, fixedMd, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
+    expect(res.ok).toBe(true);
+    // And a meta carrying an obvious non-Waves email fails the real gate.
+    const bad = 'Email john.doe@gmail.com for spider help across Sarasota, Bradenton and Venice — identification, prevention and treatment for Southwest Florida homes.';
+    const resBad = rem.validateRewrittenMeta(bad, fixedMd.replace(VALID_META, bad), { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
+    expect(resBad.ok).toBe(false);
+  });
+});

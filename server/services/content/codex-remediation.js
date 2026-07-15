@@ -132,7 +132,7 @@ const FIX_SYSTEM = [
   'You fix Waves Pest Control blog post markdown files in response to automated code-review (Codex) findings.',
   'Rules:',
   '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
-  '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 300 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
+  '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 255 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -312,7 +312,12 @@ const META_DESCRIPTION_MAX = 160;
 // bound must not exceed what the mirror column can store.
 const HERO_ALT_MAX = 255;
 const META_FINDING_RE = /meta[\s_-]?description/i;
-const HERO_ALT_FINDING_RE = /\balt\b|hero[\s_-]?image|hero art/i;
+// Alt-SPECIFIC wording only: a finding about the hero IMAGE or its path
+// ("replace the misleading hero image", "use accurate hero art") must NOT
+// authorize an alt rewrite — the image problem stays for a human while the
+// LLM would happily "fix" the alt and mirror it. `\balt\b` covers "alt",
+// "alt text", "hero alt"; `hero_?alt` covers heroAlt / hero_alt casings.
+const HERO_ALT_FINDING_RE = /\balt\b|hero_?alt/i;
 
 function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
@@ -360,6 +365,57 @@ function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
     return { violation: `frontmatter key "${k}" changed (immutable during remediation; fixable: meta_description, hero_image.alt)`, changed: {} };
   }
   return { violation: null, changed };
+}
+
+/**
+ * Metadata quality re-check for a rewritten meta_description on the
+ * SCHEDULER lane. The autonomous lane re-runs the full quality gate on the
+ * rewritten metadata (validateAutonomousRunGates swaps it into the draft),
+ * but the scheduler lane's only gate is validateFixedBlogFile, which never
+ * invokes content-quality-gate — so a 115–160-char rewrite carrying PII or
+ * title/meta spam would ship and mirror into blog_posts unchecked. Re-run
+ * exactly the two checks the publish-time gate applies to SEO fields, on
+ * the REWRITTEN text only (the legacy body is deliberately NOT re-scanned —
+ * it predates the fix, and grading old content with a stricter-than-publish
+ * gate parks every fix on legacy posts, the PR #368 lesson).
+ */
+function validateRewrittenMeta(metaDescription, fixedMd, factContext = null, deps = {}) {
+  try {
+    let data = {};
+    try { data = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { data = {}; }
+    const title = data.title || (factContext && factContext.title) || '';
+    const spamGate = deps.titleMetaSpamGate || require('./title-meta-spam-gate');
+    const spam = spamGate.evaluateTitleMetaSpam({
+      title,
+      meta_description: metaDescription,
+      city: factContext ? factContext.city : undefined,
+      service: factContext ? factContext.tag : undefined,
+      target_keyword: factContext ? factContext.keyword : undefined,
+    });
+    if (!spam || spam.ok !== true) {
+      const reasons = ((spam && spam.hard_failures) || []).map((f) => f.reason || f.code).join(',');
+      return { ok: false, reason: `title/meta spam: ${reasons || 'no result'}` };
+    }
+    // PII: reuse the quality gate's own redaction evaluator, scoped to the
+    // REWRITTEN text only (body = the meta gets the same prose-style scan
+    // the gate applies to meta fields). The unchanged title is deliberately
+    // NOT passed: it predates the fix, and the gate's Title-Case
+    // heading-pair heuristic would park legitimate meta fixes on legacy
+    // posts whose titles were never graded by this gate at publish time.
+    const qualityGate = deps.contentQualityGate || require('./content-quality-gate');
+    const pii = qualityGate._internals.checkRedactionPassed({
+      body: metaDescription,
+      title: '',
+      meta_description: metaDescription,
+      frontmatter: {},
+    });
+    if (!pii || pii.ok !== true) {
+      return { ok: false, reason: `pii: ${(pii && pii.reason) || 'no result'}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `metadata quality re-check threw: ${e.message}` };
+  }
 }
 
 // ── Deterministic date-restamp carve-out ──────────────────────────────────
@@ -829,6 +885,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (fmDelta.violation) {
     return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
   }
+  // Scheduler-lane metadata quality re-check (the autonomous lane covers
+  // this inside revalidateFix — validateAutonomousRunGates swaps the
+  // rewritten metadata into the draft before its quality gate runs).
+  if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
+    const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, fixed, factContext, deps);
+    if (!metaVerdict.ok) {
+      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
+    }
+  }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
   // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
   // body fix that adds/removes a FAQ section would ship structured data for
@@ -1136,6 +1201,7 @@ module.exports = {
   validateFixedBlogFile,
   validateAutonomousRunGates,
   frontmatterFixViolation,
+  validateRewrittenMeta,
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
