@@ -132,7 +132,7 @@ const FIX_SYSTEM = [
   'You fix Waves Pest Control blog post markdown files in response to automated code-review (Codex) findings.',
   'Rules:',
   '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
-  '- NEVER change the YAML frontmatter — reproduce every key and value byte-for-byte. All fixes go in the Markdown body. If a finding can only be resolved by changing frontmatter, leave that part unchanged (it will be routed to a human).',
+  '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 300 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -273,21 +273,71 @@ function canonValue(v) {
 }
 
 /**
- * The ENTIRE frontmatter is immutable during remediation — fixes are body-only.
- * slug/canonical/domains would mark a different Astro route published than the
- * portal recorded, and everything else (title, description, hero/og images,
- * author/reviewer, dates) feeds merge stamps and portal columns that were
- * written BEFORE the fix and are never restamped — a frontmatter delta both
- * diverges from that source of truth and can smuggle changes past gates that
- * only scanned the original. Returns true if ANY key was added, removed, or
- * altered (parse failure counts as changed — fail closed).
+ * Frontmatter is immutable during remediation — with a narrow, validated
+ * whitelist. slug/canonical/domains would mark a different Astro route
+ * published than the portal recorded, and most other keys (title, hero/og
+ * image PATHS, author/reviewer, dates) feed merge stamps and portal columns
+ * that were written BEFORE the fix and are never restamped — a frontmatter
+ * delta there both diverges from that source of truth and can smuggle
+ * changes past gates that only scanned the original.
+ *
+ * Two fields are exempt because Codex keeps flagging them, they key NOTHING
+ * (no routing, no merge-target resolution, no gate input), and every park
+ * they caused needed a trivial human push (4th occurrence 2026-07-15,
+ * astro PR #376; heroAlt class on #372/#377 before it):
+ *   - `meta_description` — must stay inside the blog schema's hard
+ *     115–160-char bound (it feeds the page meta/OG description and the
+ *     visible hero intro).
+ *   - `hero_image.alt` — non-empty, ≤300 chars; the hero PATH (src) and
+ *     og_image stay frozen (they reference committed bytes).
+ * Callers mirror both into the portal row / draft payload after the push so
+ * a later republish or social share can't resurrect the flagged value.
+ *
+ * Returns { violation: string|null, changed: { meta_description?, hero_alt? } }.
+ * Any other added/removed/altered key — or an invalid whitelisted value — is
+ * a violation (parse failure fails closed).
  */
-function immutableFrontmatterChanged(originalMd, fixedMd) {
+const META_DESCRIPTION_MIN = 115;
+const META_DESCRIPTION_MAX = 160;
+const HERO_ALT_MAX = 300;
+
+function frontmatterFixViolation(originalMd, fixedMd) {
   let a; let b;
-  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { return true; }
+  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) {
+    return { violation: 'frontmatter unparseable after fix', changed: {} };
+  }
+  const changed = {};
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) { if (canonValue(a[k]) !== canonValue(b[k])) return true; }
-  return false;
+  for (const k of keys) {
+    if (canonValue(a[k]) === canonValue(b[k])) continue;
+    if (k === 'meta_description') {
+      const v = b.meta_description;
+      const len = typeof v === 'string' ? v.trim().length : 0;
+      if (len < META_DESCRIPTION_MIN || len > META_DESCRIPTION_MAX) {
+        return { violation: `meta_description rewrite is ${len} chars (schema bound ${META_DESCRIPTION_MIN}–${META_DESCRIPTION_MAX})`, changed: {} };
+      }
+      changed.meta_description = v;
+      continue;
+    }
+    if (k === 'hero_image') {
+      const av = (a.hero_image && typeof a.hero_image === 'object') ? a.hero_image : {};
+      const bv = (b.hero_image && typeof b.hero_image === 'object') ? b.hero_image : {};
+      const subKeys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+      for (const sk of subKeys) {
+        if (sk !== 'alt' && canonValue(av[sk]) !== canonValue(bv[sk])) {
+          return { violation: `hero_image.${sk} changed (only hero_image.alt is fixable — the path references committed bytes)`, changed: {} };
+        }
+      }
+      const alt = bv.alt;
+      if (typeof alt !== 'string' || !alt.trim() || alt.trim().length > HERO_ALT_MAX) {
+        return { violation: `hero_image.alt rewrite invalid (empty or >${HERO_ALT_MAX} chars)`, changed: {} };
+      }
+      changed.hero_alt = alt;
+      continue;
+    }
+    return { violation: `frontmatter key "${k}" changed (immutable during remediation; fixable: meta_description, hero_image.alt)`, changed: {} };
+  }
+  return { violation: null, changed };
 }
 
 // ── Deterministic date-restamp carve-out ──────────────────────────────────
@@ -724,15 +774,16 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
   }
-  // Frontmatter is immutable during remediation (fixes are body-only) — any
-  // added/removed/altered key parks: routing keys would mark a different URL
-  // published than the portal recorded, and the rest feed merge stamps and
-  // portal columns written before the fix that nothing restamps. Compared
-  // against the restamped baseline, so the deterministic date restamp above is
-  // the ONLY frontmatter delta that can ever pass — the LLM still can't touch
-  // frontmatter at all.
-  if (immutableFrontmatterChanged(baseline, fixed)) {
-    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark, headSha);
+  // Frontmatter is immutable during remediation outside the validated
+  // meta_description / hero_image.alt whitelist — any other added/removed/
+  // altered key parks: routing keys would mark a different URL published
+  // than the portal recorded, and the rest feed merge stamps and portal
+  // columns written before the fix that nothing restamps. Compared against
+  // the restamped baseline, so the deterministic date restamp above plus the
+  // whitelist are the ONLY frontmatter deltas that can ever pass.
+  const fmDelta = frontmatterFixViolation(baseline, fixed);
+  if (fmDelta.violation) {
+    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
   // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
@@ -815,7 +866,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof onRemediated === 'function') {
     try {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
-      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
+      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped, frontmatterChanges: fmDelta.changed });
     } catch (e) {
       // Stamp the park with newHead, NOT the pre-push headSha: the fix commit
       // is already on the branch, so a headSha stamp would make the re-arm
@@ -873,8 +924,18 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // publishing sweep or an admin republish can move the row (or repoint it
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
-    onRemediated: async ({ markdown, body, datesRestamped }) => {
+    onRemediated: async ({ markdown, body, datesRestamped, frontmatterChanges }) => {
       const patch = { content: body, updated_at: new Date() };
+      // Whitelisted frontmatter fixes mirror into their row columns for the
+      // same reason the body does: publishAstro rebuilds frontmatter from
+      // blog_posts on a republish, so an unmirrored meta_description /
+      // hero alt would resurrect the exact value Codex flagged.
+      if (frontmatterChanges && frontmatterChanges.meta_description !== undefined) {
+        patch.meta_description = frontmatterChanges.meta_description;
+      }
+      if (frontmatterChanges && frontmatterChanges.hero_alt !== undefined) {
+        patch.hero_image_alt = frontmatterChanges.hero_alt;
+      }
       // When the deterministic date restamp is part of the committed fix,
       // mirror the corrected dates into the row's DATE columns too —
       // otherwise the PR merges with healed frontmatter while blog_posts
@@ -976,6 +1037,39 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         updated_at: new Date(),
       });
     } : null,
+    // Mirror whitelisted frontmatter fixes into the run's draft payload: the
+    // poller's finalize path builds the social-share caption from
+    // draft_payload's meta_description, so an unmirrored fix would post the
+    // exact truncated snippet Codex flagged. Fail-SOFT, unlike the scheduler
+    // lane's row sync (runRemediationForPr parks when onRemediated throws):
+    // a stale caption degrades to the title-only fallback, never a wrong
+    // route — not worth parking a pushed fix over, so failures only warn.
+    onRemediated: run && run.id ? async ({ frontmatterChanges }) => {
+      if (!frontmatterChanges
+        || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
+      try {
+        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+        if (!fresh || !fresh.draft_payload) return;
+        const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
+        if (!payload || typeof payload !== 'object') return;
+        payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
+        if (frontmatterChanges.meta_description !== undefined) {
+          payload.frontmatter.meta_description = frontmatterChanges.meta_description;
+        }
+        if (frontmatterChanges.hero_alt !== undefined) {
+          payload.frontmatter.hero_image = {
+            ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
+            alt: frontmatterChanges.hero_alt,
+          };
+        }
+        await db('autonomous_runs').where({ id: run.id }).update({
+          draft_payload: JSON.stringify(payload),
+          updated_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${pr && pr.number}: ${e.message} — social caption may use the pre-fix value`);
+      }
+    } : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
@@ -997,7 +1091,7 @@ module.exports = {
   reviewRequestedForHead,
   validateFixedBlogFile,
   validateAutonomousRunGates,
-  immutableFrontmatterChanged,
+  frontmatterFixViolation,
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
