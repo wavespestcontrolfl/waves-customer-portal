@@ -992,6 +992,12 @@ export default function CreateProjectModal({
   async function handleSave() {
     if (!projectType) return setError('Pick a project type');
     if (!customerId) return setError('Pick a customer');
+    // Saving mid-extraction would persist the pre-extraction findings and
+    // close the modal, silently discarding the AI-read treatment details
+    // (Codex P2 on #2748) — the save is a moment behind the photo anyway.
+    if (treatmentExtract.status === 'working') {
+      return setError('Photo extraction is still running — it fills the Previous Treatment fields when it finishes.');
+    }
     setSaving(true);
     setError(null);
     try {
@@ -1704,19 +1710,19 @@ export default function CreateProjectModal({
           <button
             type="button"
             onClick={handleSave}
-            disabled={saving || !projectType || !customerId}
+            disabled={saving || !projectType || !customerId || treatmentExtract.status === 'working'}
             style={{
               minHeight: isEstimateStyle || isSheet ? 48 : undefined,
               padding: isEstimateStyle ? '0 18px' : '10px 18px',
               borderRadius: isEstimateStyle ? 10 : 8,
               fontSize: isEstimateStyle ? 14 : 13,
               fontWeight: wStrong,
-              background: (!projectType || !customerId) ? P.muted : P.accent,
+              background: (!projectType || !customerId || treatmentExtract.status === 'working') ? P.muted : P.accent,
               color: P.accentText, border: 'none',
-              cursor: (saving || !projectType || !customerId) ? 'default' : 'pointer',
+              cursor: (saving || !projectType || !customerId || treatmentExtract.status === 'working') ? 'default' : 'pointer',
               ...(isSheet ? { flex: 1 } : {}),
             }}
-          >{saving ? 'Saving…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
+          >{saving ? 'Saving…' : treatmentExtract.status === 'working' ? 'Reading photo…' : isSheet ? 'Save Report' : 'Save Draft'}</button>
         </div>
       </div>
     </div>,
