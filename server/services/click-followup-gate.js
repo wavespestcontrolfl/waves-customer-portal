@@ -258,6 +258,11 @@ async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
       .select('rule_key', 'status', 'due_at', 'trigger');
     // Lazy require: the engine pulls the whole follow-up module graph.
     const engine = require('./estimate-engagement-engine')._private;
+    // Max-send cap mirror (codex 2736 r15): a capped estimate gets NO
+    // engine email — the processor skips its jobs as max-sends-cap — so
+    // neither its jobs nor its upcoming windows are touches. A stale-low
+    // counter (lost bump) errs toward suppressing the SMS, never stacking.
+    if (Number(est.follow_up_count || 0) >= engine.ENGINE_LIMITS.maxSendsPerEstimate) return false;
     const rules = await engine.loadRules();
     const byKey = new Map(rules.map((r) => [r.rule_key, r]));
 

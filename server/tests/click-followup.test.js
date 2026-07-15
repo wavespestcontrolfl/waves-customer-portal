@@ -49,6 +49,7 @@ jest.mock('../services/estimate-engagement-engine', () => ({
     categoryEligible: jest.fn(() => true),
     rulePredicateStillHolds: jest.fn(() => true),
     dedupeGroup: jest.fn((key) => [key]),
+    ENGINE_LIMITS: { maxSendsPerEstimate: 4 },
   },
 }));
 
@@ -962,6 +963,11 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
     // The processor will skip this job as estimate-inactive — not a touch.
     enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
     expect(await gate.engagementJobDueSoon(makeEstimate({ status: 'accepted' }), NOW)).toBe(false);
+  });
+
+  test('a capped estimate (follow_up_count ≥ 4) gets no engine email — never suppresses the click (codex 2736 r15)', async () => {
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    expect(await gate.engagementJobDueSoon(makeEstimate({ follow_up_count: 4 }), NOW)).toBe(false);
   });
 
   test('an UPCOMING sweep window counts as due-soon — unopened window opens in 6h (codex 2736 r12)', async () => {

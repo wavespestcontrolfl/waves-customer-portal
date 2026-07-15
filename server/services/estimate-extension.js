@@ -183,9 +183,17 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
       .where({ estimate_id: estimate.id })
       .whereIn('rule_key', EXPIRING_RULE_KEYS)
       .del();
+    // Only COUNTED rows are deleted (codex 2736 r15): the age-thresholded
+    // repair above deliberately leaves sub-10-min uncounted rows (possible
+    // in-flight claims), and deleting one would erase the only marker that
+    // can later heal the counters for a real send. A surviving row is
+    // either an in-flight claim (the deadline-moved abort releases it) or
+    // a fresh lost bump — the cron-side heal counts it later, and its
+    // group-guard suppression of the re-arm errs toward fewer emails.
     await db('estimate_followup_sends')
       .where({ estimate_id: estimate.id })
       .whereIn('rule_key', EXPIRING_RULE_KEYS)
+      .whereNotNull('counted_at')
       .del();
   } catch (e) {
     logger.warn(`[estimate-extension] engine expiring re-arm failed (non-fatal): ${e.message}`);

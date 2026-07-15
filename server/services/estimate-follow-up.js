@@ -664,6 +664,32 @@ async function repairFollowupCounters(estimateId, { olderThanMinutes = 0 } = {})
   return result?.rows?.[0] || null;
 }
 
+// Global heal for lost bumps (codex 2736 r15): a delivered email whose
+// counter bump failed leaves counted_at NULL, and the per-estimate repairs
+// only run when the engagement engine or an extension later touches that
+// estimate — a payment-step-only estimate could stay stale forever, letting
+// later follow-ups ignore a real touch. Runs at the START of the legacy 2h
+// cron, under the shared advisory lock, where any uncounted row is a
+// genuinely lost bump (both sending lanes claim under this lock, and a
+// claim released on failure deletes its row).
+async function repairAllFollowupCounters() {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE counted_at IS NULL
+       RETURNING estimate_id, sent_at
+     ), agg AS (
+       SELECT estimate_id, count(*) AS cnt, max(sent_at) AS max_sent
+       FROM uncounted GROUP BY estimate_id
+     )
+     UPDATE estimates e SET
+       follow_up_count = COALESCE(e.follow_up_count, 0) + agg.cnt,
+       last_follow_up_at = GREATEST(COALESCE(e.last_follow_up_at, '-infinity'::timestamptz), agg.max_sent)
+     FROM agg WHERE e.id = agg.estimate_id`,
+  );
+  return result?.rowCount || 0;
+}
+
 // Fail-CLOSED re-check that the abandoned payment step is still the thing
 // standing between this customer and acceptance. Runs the SAME policy
 // resolvers the intent endpoints ran (lazy-required to avoid loading the
@@ -912,6 +938,16 @@ async function checkPaymentStepAbandoned(now = new Date()) {
 const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
+
+    // Heal lost counter bumps BEFORE any stage judges spacing/caps
+    // (codex 2736 r15) — non-fatal: a failed heal just means this tick
+    // judges the same slightly-stale counters the previous one did.
+    try {
+      const healed = await repairAllFollowupCounters();
+      if (healed > 0) logger.info(`[est-followup] healed lost counter bumps on ${healed} estimate(s)`);
+    } catch (e) {
+      logger.warn(`[est-followup] global counter heal failed (continuing): ${e.message}`);
+    }
 
     // 1. Sent but NOT viewed after 24 hours
     try {
@@ -1314,6 +1350,7 @@ module.exports._private = {
   repairFollowupCounters,
   safetyGate,
   claimStage,
+  repairAllFollowupCounters,
   mintStageLinks,
   hasRepliedRecently,
   wasRecentlyOpened,
