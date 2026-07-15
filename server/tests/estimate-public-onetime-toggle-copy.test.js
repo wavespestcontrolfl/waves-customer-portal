@@ -9,7 +9,7 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
-const { oneTimeToggleCopyForCategory } = require('../routes/estimate-public');
+const { oneTimeToggleCopyForCategory, isOneTimeChoiceItemForCategory } = require('../routes/estimate-public');
 
 describe('oneTimeToggleCopyForCategory', () => {
   test('lawn_care: lawn labels, turf note, NO pest callback line', () => {
@@ -31,6 +31,24 @@ describe('oneTimeToggleCopyForCategory', () => {
     expect(oneTimeToggleCopyForCategory('pest_control')).toBeNull();
     expect(oneTimeToggleCopyForCategory('bundle')).toBeNull();
     expect(oneTimeToggleCopyForCategory(undefined)).toBeNull();
+  });
+
+  test('one-time mode closing headline is category-aware (codex r2)', () => {
+    expect(oneTimeToggleCopyForCategory('lawn_care').finalHeading).toBe('Go Waves! Wave Goodbye to Lawn Pests!');
+    expect(oneTimeToggleCopyForCategory('mosquito').finalHeading).toBe('Go Waves! Wave Goodbye to Mosquitoes!');
+  });
+
+  test('the lawn choice row is recognized so recurring mode can suppress it (codex r2)', () => {
+    // The SSR "billed separately" filter drops the alternate choice row via
+    // isOneTimeChoiceItemForCategory for non-pest choice shapes — pin that
+    // the real one_time_lawn engine row matches (and a genuine add-on
+    // without one-time wording does not).
+    expect(isOneTimeChoiceItemForCategory(
+      { service: 'one_time_lawn', name: 'One-Time Lawn', price: 174 }, 'lawn_care',
+    )).toBe(true);
+    expect(isOneTimeChoiceItemForCategory(
+      { service: 'top_dressing', name: 'Top Dressing', price: 420 }, 'lawn_care',
+    )).toBe(false);
   });
 
   test('labels match the SPA map in EstimateViewPage (cross-surface contract)', () => {

@@ -882,6 +882,7 @@ function oneTimeToggleCopyForCategory(category) {
       oneTimeLabel: 'One-Time Lawn Treatment',
       oneTimeNote: 'One lawn treatment for the measured turf, pay on service day. No recurring schedule, no tier discount.',
       callbackNote: null,
+      finalHeading: 'Go Waves! Wave Goodbye to Lawn Pests!',
     };
     case 'mosquito': return {
       groupLabel: 'Mosquito service type',
@@ -889,6 +890,7 @@ function oneTimeToggleCopyForCategory(category) {
       oneTimeLabel: 'One-Time Mosquito Treatment',
       oneTimeNote: 'One visit, pay on service day. No recurring schedule, no tier discount.',
       callbackNote: 'Includes a 30-day callback period if pests return after this visit.',
+      finalHeading: 'Go Waves! Wave Goodbye to Mosquitoes!',
     };
     case 'tree_shrub': return {
       groupLabel: 'Tree & shrub service type',
@@ -896,6 +898,7 @@ function oneTimeToggleCopyForCategory(category) {
       oneTimeLabel: 'One-Time Tree & Shrub Visit',
       oneTimeNote: 'One visit, pay on service day. No recurring schedule, no tier discount.',
       callbackNote: 'Includes a 30-day callback period if pests return after this visit.',
+      finalHeading: 'Ready to book?',
     };
     default: return null; // pest/bundle/unknown → legacy pest strings inline in the template
   }
@@ -3782,9 +3785,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Category-aware toggle wording (codex P2 on #2754): the SSR page is what a
   // customer opens from the sent link — it must match the SPA's category
   // labels, or a lawn estimate offers "One-Time Pest Control".
-  const oneTimeToggleCopy = canChooseOneTime
-    ? oneTimeToggleCopyForCategory(serviceCategoryForOneTimeChoice(estData))
-    : null;
+  const oneTimeChoiceCategory = canChooseOneTime ? serviceCategoryForOneTimeChoice(estData) : null;
+  const oneTimeToggleCopy = oneTimeToggleCopyForCategory(oneTimeChoiceCategory);
   const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, est);
   const displayPestOnly = canChooseOneTime && Number(pestRecurring?.monthlyBase || 0) > 0;
   const billingRecurring = displayPestOnly
@@ -4398,6 +4400,13 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const separatelyBilledOneTimeItems = oneTimeItems.filter((it) => {
     if (isWaveGuardSetupOneTimeItem(it)) return false;
     if (canChooseOneTime && isOneTimePestChoiceItem(it)) return false;
+    // Non-pest choice shapes (lawn, mosquito, …): the ALTERNATE one-time
+    // choice row must not re-list under "billed separately" in recurring
+    // mode — the customer would read it as owed on top of the plan (codex
+    // r2; the React path hides the whole breakdown when showOneTimeOption).
+    // Pest keeps its dedicated matcher above.
+    if (canChooseOneTime && oneTimeChoiceCategory && oneTimeChoiceCategory !== 'pest_control'
+      && isOneTimeChoiceItemForCategory(it, oneTimeChoiceCategory)) return false;
     return true;
   });
   const displayableOneTimeItems = quoteRequired
@@ -5227,7 +5236,7 @@ ${shellTopBar()}
   <div class="final">
     <h2${isOneTimeOnly ? '' : ' data-mode-only="recurring"'}>${escapeHtml(isOneTimeOnly ? 'Ready to book?' : pageCopy.finalHeading)}</h2>
     ${pageCopy.finalSubhead && !isOneTimeOnly ? `<div class="final-subhead" data-mode-only="recurring">${escapeHtml(pageCopy.finalSubhead)}</div>` : ''}
-    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>Go Waves! Wave Goodbye to Pests!</h2>` : ''}
+    ${canChooseOneTime ? `<h2 data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.finalHeading || 'Go Waves! Wave Goodbye to Pests!')}</h2>` : ''}
     ${pageCopy.finalBody ? `<p>${escapeHtml(pageCopy.finalBody)}</p>` : ''}
     ${locked ? '' : `<button type="button" class="cta pick-time-cta" style="max-width:360px;margin:16px auto 0;background:#fff;color:#1B2C5B">${commercialManualAccept ? 'Approve estimate' : 'Pick a time and book'}</button>`}
     <div style="margin-top:20px;font-size:14px">
@@ -16239,6 +16248,7 @@ module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
+module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
 module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;

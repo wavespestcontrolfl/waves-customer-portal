@@ -415,6 +415,18 @@ describe('oneTimePriceCopy', () => {
     expect(copy).not.toMatch(/lawn treatment for the measured turf/i);
   });
 
+  it('turf-curative labels (chinch, fungicide, weed) get lawn copy even without a lawn key (codex r2)', () => {
+    expect(oneTimePriceCopy({ total: 174, items: [{ service: 'lawn_pest_curative', label: 'Chinch Bug Curative', amount: 174 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    expect(oneTimePriceCopy({ total: 210, items: [{ label: 'Fungicide Treatment', amount: 210 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    expect(oneTimePriceCopy({ total: 160, items: [{ label: 'Weed Control Treatment', amount: 160 }] }))
+      .toMatch(/lawn treatment for the measured turf/i);
+    // fungus GNATS stay a pest
+    expect(oneTimePriceCopy({ total: 120, items: [{ label: 'Fungus Gnat Treatment', amount: 120 }] }))
+      .not.toMatch(/lawn treatment for the measured turf/i);
+  });
+
   it('a mixed lawn + pest one-time set keeps the default pest callback copy', () => {
     const copy = oneTimePriceCopy({
       total: 458,

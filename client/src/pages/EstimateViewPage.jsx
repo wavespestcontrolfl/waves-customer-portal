@@ -1460,7 +1460,11 @@ function isLawnOneTimeBreakdownItem(item = {}) {
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
   if (/\brodent|\bexclusion\b|entry point/.test(raw)) return false;
-  return /\blawn\b|top ?dress|dethatch|\bplugging\b/.test(raw);
+  // Turf-curative vocabulary (chinch, webworm, weed, fertilizer, fungicide…)
+  // counts as lawn even when the engine row isn't literally named
+  // one_time_lawn — a "Chinch Bug Curative" row must not fall through to the
+  // pest callback copy (codex r2). `fungus gnats` stays a pest.
+  return /\blawn\b|top ?dress|dethatch|\bplugging\b|\bchinch\b|\bsod\s?web\s?worms?\b|\barmy\s?worms?\b|\bgrubs?\b|\bturf\b|\bweed\b|\bfertiliz|\bfungicide\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/.test(raw);
 }
 
 function germanRoachVisitPhrase(visits) {
