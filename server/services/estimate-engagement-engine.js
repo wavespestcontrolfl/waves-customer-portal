@@ -33,7 +33,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
-const { sessionsForEstimate } = require('./estimate-engagement-sessions');
+const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
 const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 // Shared lane mechanics from the stage engine (see module doc above).
@@ -188,13 +188,27 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
     for (const rule of rules) {
       const p = rule.params;
       let matches = false;
+      let matchSessions = sessions;
       if (rule.rule_key === 'return_visit_hot') {
         // Exactly the SECOND visit, soon after the first: a later return
         // is dark_then_return's job (the 48h ceiling keeps them disjoint).
-        matches = sessions.length === 2
-          && prev
-          && latest.startedAt - prev.endedAt >= p.minReturnGapMinutes * 60000
-          && latest.startedAt - sessions[0].startedAt <= p.maxSinceFirstSessionHours * 3600000;
+        // Sessionized AT the rule's own return threshold (codex 2736 r7):
+        // with the fixed 30-min gap, a 15–29-min return folded into the
+        // first session and the advertised minReturnGapMinutes window was
+        // unreachable. Using the knob as the gap keeps the session boundary
+        // and the rule agreeing in BOTH directions — clicks inside the
+        // threshold still fold into one sitting (owner: multi-clicks never
+        // double-fire), and tuning the knob past 30 coarsens the fold too.
+        const hot = p.minReturnGapMinutes === SESSION_GAP_MINUTES
+          ? sessions
+          : await sessionsForEstimate(estimate.id, { gapMinutes: p.minReturnGapMinutes });
+        const hotLatest = hot[hot.length - 1];
+        const hotPrev = hot[hot.length - 2] || null;
+        matches = hot.length === 2
+          && hotPrev
+          && hotLatest.startedAt - hotPrev.endedAt >= p.minReturnGapMinutes * 60000
+          && hotLatest.startedAt - hot[0].startedAt <= p.maxSinceFirstSessionHours * 3600000;
+        matchSessions = hot;
       } else if (rule.rule_key === 'multi_view_high_intent') {
         const windowStart = now - p.windowHours * 3600000;
         matches = sessions.filter((s) => s.startedAt.getTime() >= windowStart).length >= p.minSessions;
@@ -204,8 +218,8 @@ async function onEstimateViewed(estimate, nowDate = new Date()) {
       if (!matches) continue;
       const dueAt = new Date(now + (p.fireDelayMinutes || 15) * 60000);
       const queued = await enqueueJob(estimate.id, rule, dueAt, {
-        sessions: sessions.length,
-        latest_session_start: latest.startedAt.toISOString(),
+        sessions: matchSessions.length,
+        latest_session_start: matchSessions[matchSessions.length - 1].startedAt.toISOString(),
       });
       if (queued) {
         logger.info(`[est-engage] queued ${rule.rule_key} for estimate ${estimate.id} (due ${dueAt.toISOString()})`);

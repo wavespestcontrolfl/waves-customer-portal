@@ -212,6 +212,23 @@ describe('onEstimateViewed (view-event rules)', () => {
     expect(dueAt).toBeInstanceOf(Date);
   });
 
+  test('a 20-min return (inside the 30-min session gap) still queues return_visit_hot', async () => {
+    enqueueViewRules();
+    // The default 30-min gap folds the 14:30 reopen into one session — the
+    // hot rule sessionizes at its OWN 15-min threshold and sees two visits
+    // (codex 2736 r7: the advertised window was unreachable otherwise).
+    sessionsForEstimate.mockImplementation(async (id, opts = {}) => (
+      opts.gapMinutes === 15
+        ? [session('2026-06-10T14:00:00Z', '2026-06-10T14:10:00Z'), session('2026-06-10T14:30:00Z')]
+        : [session('2026-06-10T14:00:00Z', '2026-06-10T14:30:00Z')]
+    ));
+
+    await Engine.onEstimateViewed(baseEstimate(), NOW);
+
+    expect(sessionsForEstimate).toHaveBeenCalledWith('est-1', { gapMinutes: 15 });
+    expect(rawJobs.map((j) => j.bindings[1])).toEqual(['return_visit_hot']);
+  });
+
   test('a return after 4 days dark queues dark_then_return, NOT return_visit_hot', async () => {
     enqueueViewRules();
     sessionsForEstimate.mockResolvedValue([

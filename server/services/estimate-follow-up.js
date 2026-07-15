@@ -532,6 +532,12 @@ const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
 // cross-lane race at the 2h boundary — column names are allowlisted, never
 // caller-interpolated), and blockRuleKeys blocks sibling rules that share a
 // send budget (e.g. the two expiring variants = one expiry reminder).
+// The claim also re-checks active status + a live link (codex 2736 r7):
+// accepting an estimate flips status WITHOUT archiving the row, so a
+// customer accepting between the caller's current-state checks and this
+// claim would otherwise still get followed up. Every caller (engine rules
+// AND the payment-step stage) only ever emails sent/viewed estimates with
+// an unexpired link, so the guard lives here as the final race-closer.
 const CLAIM_LEGACY_FLAG_COLUMNS = new Set([
   "followup_unviewed_sent",
   "followup_expiring_sent",
@@ -555,6 +561,8 @@ async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, opti
     `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
      SELECT id, ?, ?, ?::jsonb FROM estimates
      WHERE id = ? AND archived_at IS NULL
+     AND status IN ('sent', 'viewed')
+     AND (expires_at IS NULL OR expires_at > now())
      ${flagClause}
      ${siblingClause}
      ON CONFLICT (estimate_id, rule_key) DO NOTHING

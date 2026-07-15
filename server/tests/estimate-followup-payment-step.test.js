@@ -248,6 +248,11 @@ describe('checkPaymentStepAbandoned', () => {
     // (no delete).
     expect(rawClaims).toHaveLength(1);
     expect(rawClaims[0].sql).toContain('archived_at IS NULL');
+    // The claim is the final race-closer (codex 2736 r7): an accept flips
+    // status without archiving, and expiry can lapse mid-tick — both must
+    // block the insert in the same statement.
+    expect(rawClaims[0].sql).toContain("status IN ('sent', 'viewed')");
+    expect(rawClaims[0].sql).toContain('expires_at IS NULL OR expires_at > now()');
     expect(rawClaims[0].sql).toContain('ON CONFLICT (estimate_id, rule_key) DO NOTHING');
     const [ruleKey, templateKey, triggerJson, estimateId] = rawClaims[0].bindings;
     expect(ruleKey).toBe('payment_step_abandoned');
