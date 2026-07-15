@@ -433,6 +433,45 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service');
   });
 
+  test('exterminator FOR hyphenated bed-bugs is one service (codex r6)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and an exterminator for bed-bugs',
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+  });
+
+  test('termite bait stations are termite work, not rodent (codex r6)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus termite bait stations',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'bait stations for the rats',
+    })).toBe('Quarterly Pest Control Service + Rodent Control Service');
+  });
+
+  test('a positive after a comma survives an instead-of decline (codex r6)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control instead of lawn care, mosquito service too',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+  });
+
+  test('palm injection is its own service, not tree & shrub (codex r6)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and palm injection',
+    })).toBe('Quarterly Pest Control Service + Palm Injection');
+  });
+
+  test('article-marked located noun sheds, service-bound final noun stays (codex r6)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants in the lawn and shrub care',
+    })).toBe('Quarterly Pest Control Service + Tree & Shrub Care Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

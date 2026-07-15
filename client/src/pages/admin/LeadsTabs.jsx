@@ -2150,29 +2150,35 @@ export function LeadsSection() {
                                     color={C.green}
                                     onClick={() => {
                                       // Multi-service call leads persist a
-                                      // composed label ("Quarterly Pest
-                                      // Control Service + Lawn Care Service")
-                                      // — the PRIMARY service is always the
-                                      // first segment, so match the catalog
-                                      // on that; the composite as a whole
-                                      // matches no row.
-                                      const interest = (
-                                        lead.service_interest || ""
-                                      )
-                                        .split(" + ")[0]
-                                        .trim()
-                                        .toLowerCase();
-                                      const match = interest
-                                        ? services.find((s) =>
-                                            [s.name, s.short_name, s.service_key]
-                                              .filter(Boolean)
-                                              .some((v) =>
-                                                v
-                                                  .toLowerCase()
-                                                  .includes(interest),
-                                              ),
-                                          )
-                                        : null;
+                                      // composed label ("A + B + C") whose
+                                      // PRIMARY may itself be a catalog row
+                                      // containing " + " ("Lawn + Tree &
+                                      // Shrub"). Try the longest prefix
+                                      // first, shedding one " + " segment at
+                                      // a time, so a plus-named combo row
+                                      // still matches before falling back to
+                                      // the bare first segment.
+                                      const segs = (lead.service_interest || "")
+                                        .split(" + ")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean);
+                                      const candidates = segs.map((_, i) =>
+                                        segs
+                                          .slice(0, segs.length - i)
+                                          .join(" + ")
+                                          .toLowerCase(),
+                                      );
+                                      let match = null;
+                                      for (const cand of candidates) {
+                                        match = services.find((s) =>
+                                          [s.name, s.short_name, s.service_key]
+                                            .filter(Boolean)
+                                            .some((v) =>
+                                              v.toLowerCase().includes(cand),
+                                            ),
+                                        );
+                                        if (match) break;
+                                      }
                                       setApptForm({
                                         leadId: lead.id,
                                         date: "",
@@ -2183,7 +2189,7 @@ export function LeadsSection() {
                                         // — the appointment books ONE service.
                                         serviceType: match
                                           ? match.name
-                                          : (lead.service_interest || "").split(" + ")[0].trim(),
+                                          : ((lead.service_interest || "").split(" + ")[0] || "").trim(),
                                         technicianId: "",
                                         notes: "",
                                       });

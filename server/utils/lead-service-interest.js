@@ -54,12 +54,16 @@ const SERVICE_FAMILIES = [
   { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
   { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
-  // palm(?!\s+rat): "palm rats" are roof rats — rodent, not tree & shrub
-  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+rats?)/i },
+  // palm(?! rat| injection): "palm rats" are roof rats (rodent) and palm
+  // injection is its own project type — neither is tree & shrub care.
+  { key: 'palm_injection', label: 'Palm Injection', re: /\bpalm\s+injections?\b|\btrunk\s+injections?\b/i },
+  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+(?:rats?|injections?))/i },
   // midges / no-see-ums are treated by the mosquito program in this repo
   { key: 'mosquito', label: 'Mosquito Control Service', re: /\bmosquito(?:es|s)?\b|\bmidges?\b|\bno[-\s]?see[-\s]?ums?\b/i },
   { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
-  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait\s+stations?\b/i },
+  // bait station is rodent wording ONLY when not termite-qualified —
+  // "termite bait stations" is a termite deliverable in this repo.
+  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|(?<!termite\s)\bbait\s+stations?\b/i },
   { key: 'wildlife', label: 'Wildlife Control Service', re: /\bwildlife\b|\braccoons?\b|\bsquirrels?\b|\bo?possums?\b|\barmadillos?\b/i },
   { key: 'wdo', label: 'WDO Inspection Service', re: /\bwdo\b|\bwood[\s-]?destroying\b/i },
 ];
@@ -110,7 +114,17 @@ const LOCATION_HAS_ARTICLE_RE = /^\s*\w+\s+(?:the|my|our|his|her|their|a|an|some
 function stripLocationPhrases(s) {
   return s.replace(LOCATION_PHRASE_RE, (match, offset, whole) => {
     const after = whole.slice(offset + match.length);
-    if (IMMEDIATE_SERVICE_WORD_RE.test(after)) return match;
+    if (IMMEDIATE_SERVICE_WORD_RE.test(after)) {
+      // Article-marked AND coordinated: only the FINAL noun is bound to the
+      // service word — "ants in THE lawn and shrub care" requests shrub
+      // care, the lawn is where the ants are (codex r6). Article-less
+      // phrases stay whole ("interested in lawn and shrub care").
+      const parts = match.split(/\s+(?:and|or|&)\s+/i);
+      if (parts.length > 1 && LOCATION_HAS_ARTICLE_RE.test(match)) {
+        return ` ${parts[parts.length - 1]}`;
+      }
+      return match;
+    }
     if (!LOCATION_HAS_ARTICLE_RE.test(match) && COORDINATED_SERVICE_TAIL_RE.test(after)) return match;
     return ' ';
   });
@@ -125,7 +139,14 @@ function stripLocationPhrases(s) {
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?|instead\s+of|rather\s+than|in\s+lieu\s+of)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH; instead-of/rather-than: the compared-away service is declined (codex r5)
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
+
+// Comparison declines ("instead of lawn care", "rather than mosquito
+// service") scope only to their own clause — a comma ends them, so
+// "pest control instead of lawn care, mosquito service too" keeps the
+// mosquito request (codex r6). Stripped BEFORE segment-based negation.
+const COMPARED_AWAY_RE = /\b(?:instead\s+of|rather\s+than|in\s+lieu\s+of)\b[^,.;!?]*/gi;
+const stripComparedAway = (s) => s.replace(COMPARED_AWAY_RE, ' ');
 const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)/gi;
 function stripNegatedClauses(s) {
   return s
@@ -144,7 +165,7 @@ function stripNegatedClauses(s) {
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
 const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
-const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed\s*bugs?\b|bedbugs?\b|mosquito)/gi;
+const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
@@ -180,7 +201,7 @@ function composeServiceInterest(extracted = {}) {
 
   const requested = cleanText(extracted.requested_service);
   const scanText = requested
-    ? normalizeExterminator(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(requested))))
+    ? normalizeExterminator(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested)))))
     : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane
