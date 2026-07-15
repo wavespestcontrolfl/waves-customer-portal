@@ -852,6 +852,98 @@ async function pollRun(run, { allowMerge = true } = {}) {
   }
 }
 
+// ── Pending-reason observability ───────────────────────────────────
+//
+// A pending verdict is normal for minutes-to-hours (Codex review, preview
+// build, deploy lag) — but a reason that NEVER clears (e.g.
+// `preview_build_stale_commit` from the pre-single-commit publish race, PR
+// #374 2026-07-15) used to be invisible: nothing logged per run, nothing on
+// the row, and the run was indistinguishable from one healthily waiting.
+// Track the current reason + since on the run, and stamp reviewer_notes ONCE
+// when a reason outlives its expected window. Everything here is fail-soft:
+// observability must never block reconciliation.
+//
+// Reasons a human explicitly owns (or a budget resets on its own) never
+// annotate. Preview-build reasons should clear within one Pages build cycle
+// (fleet lag ~30–45 min), so 2h means something is wedged; everything else
+// (codex_review_pending, pr_not_found, …) gets a generous day.
+const PENDING_ANNOTATION_EXPECTED = new Set([
+  'awaiting_human_merge',
+  'awaiting_human_merge_metadata_lane',
+  'daily_publish_cap_reached',
+]);
+const PENDING_ANNOTATION_PREVIEW_MS = 2 * 60 * 60 * 1000;
+const PENDING_ANNOTATION_DEFAULT_MS = 24 * 60 * 60 * 1000;
+
+// Stable key for a pending reason — `codex_review_pending: <err.message>`
+// carries a message that can drift between ticks, so compare on the prefix.
+function pendingReasonKey(reason) {
+  const key = String(reason || '').split(':')[0].trim();
+  return key || null;
+}
+
+function pendingAnnotationThresholdMs(key) {
+  if (PENDING_ANNOTATION_EXPECTED.has(key)) return null;
+  if (key.startsWith('preview_build_')) return PENDING_ANNOTATION_PREVIEW_MS;
+  return PENDING_ANNOTATION_DEFAULT_MS;
+}
+
+async function trackPendingReason(run, result) {
+  try {
+    if (result && result.transient) return; // GitHub blip — keep the window
+    if (!result || result.pending !== true) {
+      // Run left the pending state (finalized / closed / superseded) —
+      // clear so a later re-park starts a fresh window.
+      if (run.poll_pending_reason) {
+        await db('autonomous_runs').where('id', run.id).update({
+          poll_pending_reason: null,
+          poll_pending_since: null,
+          poll_pending_annotated_at: null,
+          updated_at: new Date(),
+        });
+      }
+      return;
+    }
+    const key = pendingReasonKey(result.reason);
+    if (!key) return; // per-poll merge deferral etc. — no signal to track
+
+    if (key !== run.poll_pending_reason) {
+      await db('autonomous_runs').where('id', run.id).update({
+        poll_pending_reason: key,
+        poll_pending_since: new Date(),
+        poll_pending_annotated_at: null,
+        updated_at: new Date(),
+      });
+      return;
+    }
+
+    if (run.poll_pending_annotated_at) return;
+    const thresholdMs = pendingAnnotationThresholdMs(key);
+    const sinceMs = run.poll_pending_since ? new Date(run.poll_pending_since).getTime() : NaN;
+    if (thresholdMs == null || !Number.isFinite(sinceMs)) return;
+    const elapsedMs = Date.now() - sinceMs;
+    if (elapsedMs < thresholdMs) return;
+
+    // Append-only, like the remediation park note; fresh read so parallel
+    // annotations (park notes land on the same column) aren't clobbered.
+    const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+    if (!fresh) return;
+    const prNumber = prNumberFromUrl(run.astro_pr_url);
+    const hours = Math.round(elapsedMs / 3600000);
+    const note = `Auto-merge for PR #${prNumber ?? '?'} has been pending on "${key}" for ~${hours}h — `
+      + 'the poller is waiting on a signal that is not arriving (check the Cloudflare preview deployment '
+      + 'and Codex review for the CURRENT head; a new push to the PR branch re-arms everything).';
+    await db('autonomous_runs').where('id', run.id).update({
+      reviewer_notes: [fresh.reviewer_notes, note].filter(Boolean).join(' | '),
+      poll_pending_annotated_at: new Date(),
+      updated_at: new Date(),
+    });
+    logger.warn(`[autonomous-pr-poller] run ${run.id}: ${note}`);
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] pending-reason tracking failed for run ${run.id}: ${err.message}`);
+  }
+}
+
 async function pollPending() {
   let rows;
   try {
@@ -869,7 +961,11 @@ async function pollPending() {
       // coverage to before.
       .orderByRaw('random()')
       .limit(25)
-      .select('id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url', 'draft_payload', 'reviewer_notes', 'created_at');
+      .select(
+        'id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
+        'draft_payload', 'reviewer_notes', 'created_at',
+        'poll_pending_reason', 'poll_pending_since', 'poll_pending_annotated_at',
+      );
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
@@ -915,6 +1011,7 @@ async function pollPending() {
     }
     const r = await pollRun(run, { allowMerge: autoMerges < maxAutoMerges });
     if (r.autoMerged) autoMerges += 1;
+    await trackPendingReason(run, r);
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
@@ -941,5 +1038,8 @@ module.exports = {
     finalizeClosed,
     reconcileQueueRow,
     supersedeRun,
+    pendingReasonKey,
+    pendingAnnotationThresholdMs,
+    trackPendingReason,
   },
 };

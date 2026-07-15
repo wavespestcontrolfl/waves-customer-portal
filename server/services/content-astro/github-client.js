@@ -116,6 +116,70 @@ async function deleteFile({ path, message, branch, sha }) {
   });
 }
 
+// ── Git Data API (atomic multi-file commit) ───────────────────────
+//
+// The Contents API above writes ONE commit per file, so a publish that
+// carries a hero image + markdown (+ a legacy-file delete) lands as 2–3
+// commits pushed seconds apart. Cloudflare Pages can register its branch
+// deployment against the FIRST commit of that burst; the autonomous PR
+// poller's fail-closed head==deployment gate then reads
+// `preview_build_stale_commit` on every tick, remediation never runs (it
+// sits behind that gate), and the PR silently starves — no new push ever
+// arrives to mint a fresh deployment (PR #374, 2026-07-15). One commit per
+// publish removes the race at the source.
+//
+// files:   [{ path, content }] for UTF-8 text, or [{ path, buffer }] for
+//          binary (routed through a base64 blob — the tree API's inline
+//          `content` field is UTF-8 only and would corrupt image bytes).
+// deletes: [path, ...] removed in the same commit.
+//
+// Return shape matches what publish callers read off putFile:
+// `{ commit: { sha } }`.
+async function commitFiles({ branch, message, files = [], deletes = [] }) {
+  const { owner, repo } = env();
+  if (!branch) throw new Error('commitFiles requires branch');
+  if (!files.length && !deletes.length) throw new Error('commitFiles requires at least one file or delete');
+
+  const headSha = await getBranchSha(branch);
+  if (!headSha) throw new Error(`branch not found: ${branch}`);
+  const baseCommit = await ghFetch(`/repos/${owner}/${repo}/git/commits/${headSha}`);
+  const baseTreeSha = baseCommit?.tree?.sha;
+  if (!baseTreeSha) throw new Error(`could not resolve tree for ${branch}@${headSha}`);
+
+  const tree = [];
+  for (const f of files) {
+    if (Buffer.isBuffer(f.buffer)) {
+      const blob = await ghFetch(`/repos/${owner}/${repo}/git/blobs`, {
+        method: 'POST',
+        body: { content: f.buffer.toString('base64'), encoding: 'base64' },
+      });
+      tree.push({ path: f.path, mode: '100644', type: 'blob', sha: blob.sha });
+    } else {
+      tree.push({ path: f.path, mode: '100644', type: 'blob', content: String(f.content ?? '') });
+    }
+  }
+  // sha:null in a tree entry deletes the path from the base tree.
+  for (const path of deletes) {
+    tree.push({ path, mode: '100644', type: 'blob', sha: null });
+  }
+
+  const newTree = await ghFetch(`/repos/${owner}/${repo}/git/trees`, {
+    method: 'POST',
+    body: { base_tree: baseTreeSha, tree },
+  });
+  const commit = await ghFetch(`/repos/${owner}/${repo}/git/commits`, {
+    method: 'POST',
+    body: { message, tree: newTree.sha, parents: [headSha] },
+  });
+  // force:false → GitHub 422s if the branch moved since headSha was read,
+  // the same lost-update protection the Contents API gives via `sha`.
+  await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
+    method: 'PATCH',
+    body: { sha: commit.sha, force: false },
+  });
+  return { commit: { sha: commit.sha } };
+}
+
 // ── Branches + PRs ────────────────────────────────────────────────
 
 async function getBranchSha(branch) {
@@ -246,6 +310,7 @@ module.exports = {
   putFile,
   putBinary,
   deleteFile,
+  commitFiles,
   getBranchSha,
   createBranch,
   createPr,
