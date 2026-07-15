@@ -98,11 +98,22 @@ const LOCATION_PHRASE_RE = new RegExp(
   + `(?:\\s+(?:and|or|&)\\s+${LOC_ARTICLE}${LOC_NOUN})*\\b`,
   'gi',
 );
-const SERVICE_WORD_AFTER_RE = /^\s+(?:care|service|program|treatment|maintenance)s?\b|^\s+(?:and|or|&)\b[^.;,]{0,40}?\b(?:care|service|program|treatment|maintenance)s?\b/i;
+// An IMMEDIATE service word after the phrase always marks a request
+// ("interested in lawn care", "in the lawn program"). A coordinated
+// "…and X service" continuation only rescues an ARTICLE-LESS phrase:
+// bare "in lawn and mosquito service" is service shorthand, while "ants in
+// THE lawn and mosquito service" is a located pest plus a separate request —
+// the article is the deterministic location marker (codex r5).
+const IMMEDIATE_SERVICE_WORD_RE = /^\s+(?:care|service|program|treatment|maintenance)s?\b/i;
+const COORDINATED_SERVICE_TAIL_RE = /^\s+(?:and|or|&)\b[^.;,]{0,40}?\b(?:care|service|program|treatment|maintenance)s?\b/i;
+const LOCATION_HAS_ARTICLE_RE = /^\s*\w+\s+(?:the|my|our|his|her|their|a|an|some)\b/i;
 function stripLocationPhrases(s) {
-  return s.replace(LOCATION_PHRASE_RE, (match, offset, whole) => (
-    SERVICE_WORD_AFTER_RE.test(whole.slice(offset + match.length)) ? match : ' '
-  ));
+  return s.replace(LOCATION_PHRASE_RE, (match, offset, whole) => {
+    const after = whole.slice(offset + match.length);
+    if (IMMEDIATE_SERVICE_WORD_RE.test(after)) return match;
+    if (!LOCATION_HAS_ARTICLE_RE.test(match) && COORDINATED_SERVICE_TAIL_RE.test(after)) return match;
+    return ' ';
+  });
 }
 
 // Declined services are not requests: "pest control only, not lawn care"
@@ -114,7 +125,7 @@ function stripLocationPhrases(s) {
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?|instead\s+of|rather\s+than|in\s+lieu\s+of)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH; instead-of/rather-than: the compared-away service is declined (codex r5)
 const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)/gi;
 function stripNegatedClauses(s) {
   return s
@@ -132,7 +143,7 @@ function stripNegatedClauses(s) {
 // WDO⇄termite lane check ("WDO report and termite extermination" must keep
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
-const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed\s*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
+const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
 const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed\s*bugs?\b|bedbugs?\b|mosquito)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 

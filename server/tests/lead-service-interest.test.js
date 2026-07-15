@@ -404,6 +404,35 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
   });
 
+  test('hyphenated bed-bug extermination is one service (codex r5)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'bed-bug extermination',
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+  });
+
+  test('a located pest plus a separate service keeps only the request (codex r5)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants in the lawn and mosquito service',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'roaches around the bushes and shrubs and mosquito service',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+  });
+
+  test('instead-of / rather-than alternatives are declined (codex r5)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control instead of lawn care',
+    })).toBe('Quarterly Pest Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control rather than mosquito service',
+    })).toBe('Quarterly Pest Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

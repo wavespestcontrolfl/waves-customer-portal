@@ -2149,9 +2149,17 @@ export function LeadsSection() {
                                     small
                                     color={C.green}
                                     onClick={() => {
+                                      // Multi-service call leads persist a
+                                      // composed label ("Quarterly Pest
+                                      // Control Service + Lawn Care Service")
+                                      // — the PRIMARY service is always the
+                                      // first segment, so match the catalog
+                                      // on that; the composite as a whole
+                                      // matches no row.
                                       const interest = (
                                         lead.service_interest || ""
                                       )
+                                        .split(" + ")[0]
                                         .trim()
                                         .toLowerCase();
                                       const match = interest
@@ -2170,9 +2178,12 @@ export function LeadsSection() {
                                         date: "",
                                         time: "",
                                         serviceId: match ? match.id : "",
+                                        // No catalog match: prefill the
+                                        // primary segment, not the composite
+                                        // — the appointment books ONE service.
                                         serviceType: match
                                           ? match.name
-                                          : lead.service_interest || "",
+                                          : (lead.service_interest || "").split(" + ")[0].trim(),
                                         technicianId: "",
                                         notes: "",
                                       });
