@@ -2875,30 +2875,26 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
           [JSON.stringify([wdoFiling])],
         );
       }
+      // A manual Send report on a payment-held project IS the release escape
+      // hatch (requireAdmin). The release fields ride the SAME row update as
+      // the sent stamp (Codex P2 on #2753): a separate follow-up write could
+      // fail/crash after the project was marked sent, leaving a delivered
+      // report 402ing publicly and the sweep primed to re-deliver it.
+      if (manualHoldClaim) {
+        deliveryUpdate.report_hold_status = 'released';
+        deliveryUpdate.report_hold_released_at = db.fn.now();
+        deliveryUpdate.report_hold_release_source = 'manual_send';
+        deliveryUpdate.report_hold_locked_at = null;
+        deliveryUpdate.report_hold_last_error = null;
+      }
     }
 
     await db('projects').where({ id: req.params.id }).update(deliveryUpdate);
 
-    // A manual Send report on a payment-held project IS the release escape
-    // hatch (requireAdmin): flip the claim this send took to 'released' so
-    // the public routes unlock and the sweep can't re-deliver on payment —
-    // or return it to 'held' when nothing was delivered.
-    if (manualHoldClaim) {
-      if (delivered) {
-        await db('projects')
-          .where({ id: project.id, report_hold_status: 'releasing' })
-          .update({
-            report_hold_status: 'released',
-            report_hold_released_at: db.fn.now(),
-            report_hold_release_source: 'manual_send',
-            report_hold_locked_at: null,
-            report_hold_last_error: null,
-            updated_at: db.fn.now(),
-          })
-          .catch((err) => logger.warn(`[projects] manual hold release stamp failed for ${project.id}: ${err.message}`));
-      } else {
-        await revertManualHoldClaim();
-      }
+    // Nothing went out — return the manual claim so the sweep (or a retry
+    // of this endpoint) can deliver later.
+    if (manualHoldClaim && !delivered) {
+      await revertManualHoldClaim();
     }
 
     const sendAction = delivered
@@ -3299,28 +3295,6 @@ function safeIdempotencySegment(value) {
   return String(value || '').replace(/[^a-zA-Z0-9_.:-]/g, '_').slice(0, 40);
 }
 
-// Clear an active hold after an un-held combined resend delivered the report:
-// the report just went out by explicit admin action, so the sweep must never
-// re-deliver it on payment. STRICTLY 'held' rows (Codex P2 on #2753): a
-// 'releasing' row is an in-flight sweep (or manual /send) claim mid-delivery,
-// and clearing it from a second path would let both paths email + archive the
-// same FDACS filing. /send takes the claim itself and never calls this.
-async function markHoldReleasedByManualSend(project, projectCols) {
-  if (!reportHoldColumnsPresent(projectCols)) return;
-  if (String(project.report_hold_status || '') !== 'held') return;
-  await db('projects')
-    .where({ id: project.id, report_hold_status: 'held' })
-    .update({
-      report_hold_status: 'released',
-      report_hold_released_at: db.fn.now(),
-      report_hold_release_source: 'manual_send',
-      report_hold_locked_at: null,
-      report_hold_last_error: null,
-      updated_at: db.fn.now(),
-    })
-    .catch((err) => logger.warn(`[projects] manual hold release stamp failed for ${project.id}: ${err.message}`));
-}
-
 // ---------------------------------------------------------------------------
 // GET /api/admin/projects/:id/fdacs-pdf — preview/download the filled
 // FDACS-13645 WDO inspection report. Admin-only.
@@ -3527,6 +3501,19 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
   // Tracks an invoice claimed as 'sending' so any abort (a throw before the
   // normal finalize/restore path) releases it instead of stranding it.
   let claimedInvoice = null;
+  // Tracks a held→releasing claim taken for an UN-HELD delivery of a
+  // currently-held report (Codex P2 on #2753) — hoisted like claimedInvoice
+  // so the outer catch returns the row to 'held' on any abort. The revert
+  // matches status='releasing' only, so it no-ops after a successful release.
+  let heldReportClaim = null;
+  const revertHeldReportClaimOnAbort = async () => {
+    if (!heldReportClaim) return;
+    await db('projects')
+      .where({ id: heldReportClaim.projectId, report_hold_status: 'releasing' })
+      .update({ report_hold_status: 'held', report_hold_locked_at: null, updated_at: db.fn.now() })
+      .catch((err) => logger.warn(`[projects] combined-send hold claim revert failed for ${heldReportClaim.projectId}: ${err.message}`));
+    heldReportClaim = null;
+  };
   // Seam-applied credit on the combined report+invoice send. Hoisted (with its
   // reversal) so the outer catch can return it on ANY abort, not just the
   // explicit WDO/no-delivery paths. Reverses ONLY this send's amount; on full
@@ -3837,6 +3824,30 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // Un-held delivery of a currently-HELD report (operator unchecked the
+    // box on a resend, or this send's credit fully settled a hold request):
+    // take the SAME atomic held→releasing claim the payment sweep takes
+    // BEFORE any delivery work (Codex P2 on #2753). Flipping held→released
+    // only after emailing left a window where a just-settled invoice let the
+    // sweep claim the row and deliver the same FDACS filing concurrently.
+    if (!holdActive
+      && reportHoldColumnsPresent(projectCols)
+      && ['held', 'releasing'].includes(String(refreshed.report_hold_status || ''))) {
+      const claimedHold = await db('projects')
+        .where({ id: project.id, report_hold_status: 'held' })
+        .update({ report_hold_status: 'releasing', report_hold_locked_at: db.fn.now(), updated_at: db.fn.now() });
+      if (!claimedHold) {
+        await db('invoices').where({ id: invoice.id, status: 'sending' })
+          .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
+        await reverseProjectCreditOnAbort();
+        return res.status(409).json({
+          error: 'The paid-report release is already delivering this report — give it a moment, then refresh.',
+          code: 'release_in_progress',
+        });
+      }
+      heldReportClaim = { projectId: project.id };
+    }
+
     // Pay link (short URL, same shape as invoice-email).
     const domain = publicPortalUrl();
     const payUrl = await shortenOrPassthrough(`${domain}/pay/${invoice.token}`, {
@@ -3873,6 +3884,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         await db('invoices').where({ id: invoice.id, status: 'sending' })
           .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
         await reverseProjectCreditOnAbort();
+        await revertHeldReportClaimOnAbort();
         logger.error(`[projects] WDO PDF build/archive failed for ${refreshed.id}: ${e.message}`);
         return res.status(500).json({ error: 'Could not generate the FDACS report; nothing was sent.' });
       }
@@ -4199,6 +4211,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
       await db('invoices').where({ id: invoice.id, status: 'sending' })
         .update({ status: previousInvoiceStatus, updated_at: db.fn.now() }).catch(() => {});
       await reverseProjectCreditOnAbort();
+      await revertHeldReportClaimOnAbort();
     }
 
     if (delivered && holdActive) {
@@ -4236,10 +4249,20 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
             [JSON.stringify([wdoFiling])],
           ),
         } : {}),
+        // An explicit un-held (re)send while a hold was active IS the report
+        // delivery — the release fields ride the SAME sent-stamp update
+        // (atomic, Codex P2) so the sweep can't re-send it on payment and a
+        // crash can't leave a delivered report 402ing publicly.
+        ...(heldReportClaim ? {
+          report_hold_status: 'released',
+          report_hold_released_at: db.fn.now(),
+          report_hold_release_source: 'manual_send',
+          report_hold_locked_at: null,
+          report_hold_last_error: null,
+        } : {}),
       });
-      // An explicit un-held (re)send while a hold was active IS the report
-      // delivery — clear the hold so the sweep can't re-send it on payment.
-      await markHoldReleasedByManualSend(project, projectCols);
+      // Released atomically above — nothing left for the outer catch to revert.
+      heldReportClaim = null;
     }
 
     await logProjectActivity(
@@ -4283,6 +4306,9 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // pay link delivered. Runs after the claim release above so reverseAppliedCredit
     // isn't refused on a still-'sending' row.
     await reverseProjectCreditOnAbort();
+    // And return any held→releasing claim this send took, so the sweep isn't
+    // blocked behind a stale claim until the 10-minute recovery.
+    await revertHeldReportClaimOnAbort();
     if (err?.message === 'Invoice not found for this customer') {
       return res.status(404).json({ error: err.message });
     }

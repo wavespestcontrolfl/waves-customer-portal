@@ -417,20 +417,31 @@ async function heldReportPaymentContext(project) {
   if (!['held', 'releasing'].includes(String(project?.report_hold_status || ''))) return null;
   let payUrl = null;
   let invoiceNumber = null;
+  let paymentProcessing = false;
   if (project.invoice_id) {
     const invoice = await db('invoices')
       .where({ id: project.invoice_id })
       .first('id', 'token', 'invoice_number', 'status')
       .catch(() => null);
-    // Settled-but-not-yet-swept rows still 402 (the sweep delivers within a
-    // minute); only offer the pay CTA while the invoice is actually unpaid.
-    if (invoice?.token && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
+    const invoiceStatus = String(invoice?.status || '').toLowerCase();
+    // ACH clearing window: pay-v2 rejects 'processing' invoices (an in-flight
+    // bank payment), so a pay CTA here would dead-end — tell the customer the
+    // payment is processing instead of asking them to pay again.
+    paymentProcessing = invoiceStatus === 'processing';
+    // Only offer the pay CTA while the invoice is actually collectible:
+    // settled-but-not-yet-swept rows still 402 (the sweep delivers within a
+    // minute), and non-collectible statuses (void/refunded/cancelled — pay-v2
+    // rejects them all) must not render a button that errors on the pay page.
+    if (
+      invoice?.token
+      && !['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'sending'].includes(invoiceStatus)
+    ) {
       const { publicPortalUrl } = require('../utils/portal-url');
       payUrl = `${publicPortalUrl()}/pay/${invoice.token}`;
     }
     invoiceNumber = invoice?.invoice_number || null;
   }
-  return { payUrl, invoiceNumber };
+  return { payUrl, invoiceNumber, paymentProcessing };
 }
 
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
@@ -452,6 +463,7 @@ router.get('/project/:token/data', async (req, res, next) => {
         reportTypeLabel: typeCfg?.label || 'Inspection',
         payUrl: heldContext.payUrl,
         invoiceNumber: heldContext.invoiceNumber,
+        paymentProcessing: heldContext.paymentProcessing,
       });
     }
 

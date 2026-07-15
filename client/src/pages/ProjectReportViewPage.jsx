@@ -397,8 +397,10 @@ export default function ProjectReportViewPage() {
           Your {data.reportTypeLabel || 'inspection'} report is ready
         </div>
         <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          Once your invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''} is paid, your official
-          report is emailed to you automatically and unlocks right here — no extra steps needed.
+          {data.paymentProcessing
+            ? 'Your bank payment is processing — as soon as it clears, your official report is emailed to you automatically and unlocks right here. No extra steps needed.'
+            : <>Once your invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''} is paid, your official
+              report is emailed to you automatically and unlocks right here — no extra steps needed.</>}
         </div>
         {data.payUrl ? (
           <a href={data.payUrl} style={{ ...primaryButtonStyle, marginTop: 16 }}>

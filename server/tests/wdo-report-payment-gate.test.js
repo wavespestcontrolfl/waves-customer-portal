@@ -509,6 +509,52 @@ describe('manual /send vs in-flight release (Codex P2)', () => {
     });
   });
 
+  test('un-held combined resend on a HELD row claims before delivering, then releases atomically', async () => {
+    const { updates } = mockTables({ project: wdoProject({ report_hold_status: 'held' }) });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: 'inv-1' }), // hold NOT requested
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(true);
+      const projectUpdates = updates.projects || [];
+      const claimIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'releasing');
+      const releasedIdx = projectUpdates.findIndex((u) => u.report_hold_status === 'released');
+      // Claim taken BEFORE any delivery work; release rides the sent-stamp
+      // update itself (atomic), not a separate follow-up write.
+      expect(claimIdx).toBeGreaterThanOrEqual(0);
+      expect(releasedIdx).toBeGreaterThan(claimIdx);
+      expect(projectUpdates[releasedIdx].status).toBe('sent');
+      expect(projectUpdates[releasedIdx].report_hold_release_source).toBe('manual_send');
+      expect(ProjectEmail.sendProjectReportWithInvoice).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('un-held combined resend 409s while the sweep is mid-release', async () => {
+    mockTables({
+      project: wdoProject({ report_hold_status: 'releasing' }),
+      invoice: invoiceRow({ status: 'draft' }),
+      // The sweep owns the claim: only the held→releasing claim UPDATE misses.
+      projectUpdateResult: (payload) => (payload.report_hold_status === 'releasing' ? 0 : 1),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe('release_in_progress');
+      expect(ProjectEmail.sendProjectReportWithInvoice).not.toHaveBeenCalled();
+      expect(ProjectEmail.sendProjectInvoiceBeforeReport).not.toHaveBeenCalled();
+      expect(mockS3Send).not.toHaveBeenCalled();
+    });
+  });
+
   test('manual send 409s while the sweep is mid-release, and delivers nothing', async () => {
     mockTables({
       project: wdoProject({ report_hold_status: 'releasing' }),
@@ -546,6 +592,22 @@ describe('public report routes while held', () => {
       // No report content leaks on the 402 payload.
       expect(body.findings).toBeUndefined();
       expect(body.photos).toBeUndefined();
+    });
+  });
+
+  test('402 suppresses the pay CTA and flags processing during ACH clearing', async () => {
+    mockTables({
+      project: wdoProject({ report_hold_status: 'held' }),
+      invoice: invoiceRow({ status: 'processing' }),
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/reports/project/0123456789abcdef0123456789abcdef/data`);
+      const body = await res.json();
+      expect(res.status).toBe(402);
+      expect(body.code).toBe('report_payment_required');
+      // pay-v2 rejects 'processing' invoices — no dead-end pay button.
+      expect(body.payUrl).toBeNull();
+      expect(body.paymentProcessing).toBe(true);
     });
   });
 
