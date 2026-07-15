@@ -344,15 +344,20 @@ router.get('/station-map', async (req, res, next) => {
       return res.json({ available: false, reason: 'provider_config_unavailable', programs: {} });
     }
 
-    // Latest check per station: ascending by visit date (then check write
-    // time) so the last assignment wins. Fail-soft — a checks error renders
-    // every pin as on-file rather than dropping the map.
+    // Latest check per station: ascending by visit so the last assignment
+    // wins. Same-day tie-break is the service record's completion write
+    // time (service_records rows are created at completion), NOT the check
+    // row's updated_at — a delayed retry/resync of the OLDER visit's checks
+    // would otherwise overwrite the newer visit's status (codex P2).
+    // Fail-soft — a checks error renders every pin as on-file rather than
+    // dropping the map.
     const checkRows = await db('termite_station_checks as c')
       .join('service_records as sr', 'sr.id', 'c.service_record_id')
       .whereIn('c.station_id', stationRows.map((row) => row.id))
-      .select('c.station_id', 'c.status', 'sr.service_date', 'c.updated_at')
+      .select('c.station_id', 'c.status', 'sr.service_date', 'sr.created_at', 'c.updated_at')
       .orderBy([
         { column: 'sr.service_date', order: 'asc' },
+        { column: 'sr.created_at', order: 'asc' },
         { column: 'c.updated_at', order: 'asc' },
       ])
       .catch(() => []);

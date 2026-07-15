@@ -50,12 +50,19 @@ const STATION_STATUS_META = {
 };
 const STATION_ON_FILE_META = { color: '#64748B', label: 'On file (not checked this visit)' };
 // Current-state variant labels: the plan embed aggregates the LATEST check
-// per station, so "this visit" framing would be wrong there.
+// per station, so "this visit" framing would be wrong there — a station
+// serviced weeks ago must not read as serviced on the current visit
+// (codex P3). 'ok'/'activity' labels are already visit-neutral.
 const PLAN_ON_FILE_META = { color: '#64748B', label: 'On file (not yet checked)' };
+const PLAN_STATUS_LABELS = {
+  serviced: 'Serviced at last check',
+  inaccessible: 'Not accessible at last check',
+};
 const PLAN_INTRO_SUFFIX = 'Colors reflect the most recent check.';
 
-function stationStatusMeta(status, programMeta) {
+function stationStatusMeta(status, programMeta, plan = false) {
   const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
+  if (plan && PLAN_STATUS_LABELS[status]) return { ...base, label: PLAN_STATUS_LABELS[status] };
   if (status === 'activity') return { ...base, label: programMeta.activityLegend };
   if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.rodent) {
     return { ...base, label: 'Checked — no consumption' };
@@ -98,7 +105,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   });
   const legend = legendKeys.map((key) => (key === 'on_file'
     ? { key, ...onFileMeta }
-    : { key, ...stationStatusMeta(key, programMeta) }));
+    : { key, ...stationStatusMeta(key, programMeta, plan) }));
   const summaryLine = stationSummaryLine(stationMap.summary, programMeta);
   const mutedColor = plan ? '#475569' : 'var(--muted)';
   const lineColor = plan ? '#E7E2D7' : 'var(--line)';
@@ -126,7 +133,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           <image href={stationMap.image.url} x="0" y="0" width={width} height={height} preserveAspectRatio="xMidYMid slice" />
           {stations.map((station) => {
             const meta = STATION_STATUS_META[station.status]
-              ? stationStatusMeta(station.status, programMeta)
+              ? stationStatusMeta(station.status, programMeta, plan)
               : onFileMeta;
             const cx = station.cx * width;
             const cy = station.cy * height;
