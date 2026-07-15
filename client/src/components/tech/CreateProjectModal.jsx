@@ -324,6 +324,11 @@ export default function CreateProjectModal({
   const treatmentExtractSeqRef = useRef(0);
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
+  // Mirrors projectType for the same in-flight guard: switching the modal to
+  // another project type clears the findings, and a late WDO extraction must
+  // not write previous_treatment_* keys into the new type's report.
+  const projectTypeRef = useRef(projectType);
+  projectTypeRef.current = projectType;
 
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
@@ -941,9 +946,24 @@ export default function CreateProjectModal({
   // fields. The photo also joins the upload queue as prior-treatment evidence
   // (same category the intelligence bar uses), so it attaches to the report
   // on save regardless of how the extraction goes.
+  // Stale-response check shared by the success and error paths below. A
+  // superseded request (newer extraction owns the state) just drops out; a
+  // context switch (customer or project type changed mid-flight) additionally
+  // clears the pending state — leaving it at 'working' would wedge the Save
+  // gate shut on the new context (Codex P2s on #2748).
+  function treatmentExtractWentStale(seq, startedCustomer, startedType) {
+    if (treatmentExtractSeqRef.current !== seq) return true;
+    if (customerIdRef.current !== startedCustomer || projectTypeRef.current !== startedType) {
+      setTreatmentExtract({ status: 'idle', message: '' });
+      return true;
+    }
+    return false;
+  }
+
   async function handleTreatmentPhotoExtract(file) {
     if (!file || saving || aiWriting) return;
     const startedCustomer = customerIdRef.current;
+    const startedType = projectTypeRef.current;
     const seq = ++treatmentExtractSeqRef.current;
     queuePhoto(file, 'previous_treatment');
     setTreatmentExtract({ status: 'working', message: '' });
@@ -958,9 +978,7 @@ export default function CreateProjectModal({
       fd.append('previous_treatment_photo', file);
       const res = await adminFetch('/admin/projects/wdo-treatment-photo', { method: 'POST', body: fd, headers: {} });
       const data = await res.json();
-      // Stale response: a newer extraction started, or the tech switched
-      // customers while this one was in flight — drop it.
-      if (treatmentExtractSeqRef.current !== seq || customerIdRef.current !== startedCustomer) return;
+      if (treatmentExtractWentStale(seq, startedCustomer, startedType)) return;
       if (!res.ok) throw new Error(data?.error || 'Photo extraction failed');
       const suggested = data?.suggestedFindings || {};
       const notes = String(suggested.previous_treatment_notes || '').trim();
@@ -969,6 +987,14 @@ export default function CreateProjectModal({
         setTreatmentExtract({ status: 'done', message: 'No treatment details could be read from that photo — verify on site.' });
         return;
       }
+      // The tech explicitly asked to read THIS photo, so a readable sticker
+      // may upgrade an earlier "No" to "Yes" — filing "No" beside observations
+      // describing prior treatment is the inconsistency to prevent. The
+      // reverse never overwrites: one photo of a clean area can't prove
+      // property-wide absence, so "No" only fills a blank select.
+      const evidenceUpgraded = evidence === 'Yes'
+        && hasMeaningfulValue(findings.previous_treatment_evidence)
+        && findings.previous_treatment_evidence !== 'Yes';
       userDirtyRef.current = true;
       setFindings(prev => {
         const next = { ...prev };
@@ -977,14 +1003,25 @@ export default function CreateProjectModal({
           const existing = String(prev.previous_treatment_notes || '').trim();
           next.previous_treatment_notes = existing ? `${existing}\n${notes}` : notes;
         }
-        if (evidence && !hasMeaningfulValue(prev.previous_treatment_evidence)) {
+        if (evidence === 'Yes' || (evidence && !hasMeaningfulValue(prev.previous_treatment_evidence))) {
           next.previous_treatment_evidence = evidence;
         }
         return next;
       });
-      setTreatmentExtract({ status: 'done', message: 'Extracted from photo — verify before filing.' });
+      // Pass the AI's own caveats through (e.g. a smudged handwritten year)
+      // so the tech sees WHICH detail needs confirming, not just a generic
+      // verify reminder.
+      const reviewNotes = Array.isArray(data?.reviewNotes) ? data.reviewNotes.filter(Boolean) : [];
+      setTreatmentExtract({
+        status: 'done',
+        message: [
+          evidenceUpgraded ? 'Evidence of previous treatment changed to "Yes" based on the photo.' : '',
+          'Extracted from photo — verify before filing.',
+          ...reviewNotes,
+        ].filter(Boolean).join(' '),
+      });
     } catch (e) {
-      if (treatmentExtractSeqRef.current !== seq || customerIdRef.current !== startedCustomer) return;
+      if (treatmentExtractWentStale(seq, startedCustomer, startedType)) return;
       setTreatmentExtract({ status: 'error', message: e.message || 'Photo extraction failed' });
     }
   }
