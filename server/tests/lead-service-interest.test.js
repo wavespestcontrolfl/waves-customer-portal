@@ -93,6 +93,12 @@ describe('composeServiceInterest', () => {
       matched_service: 'Quarterly Pest Control Service',
       requested_service: ' + Lawn Care Service pest control',
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    // a carried "+ Termite Service" tail is pre-vetted work — WDO in the same
+    // tail must not re-suppress it on the backfill recompose (codex P1)
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: ' + WDO Inspection Service + Termite Service',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service + Termite Service');
   });
 
   test('wdo/termite same-lane suppression is order-independent (codex P1)', () => {

@@ -68,7 +68,11 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b/i;
+// ("termite service" — incl. the canonical "+ Termite Service" tail the V2
+// backfill carries forward — counts as work: it only ever got composed
+// because treatment wording passed this gate on the original scan, and a
+// caller asking for "termite service" means work, not the lender's report.)
 
 // Location phrases are pest CONTEXT, not service requests: "fire ants in the
 // lawn" is an ant call, not a lawn-care request. Strip preposition + article/
