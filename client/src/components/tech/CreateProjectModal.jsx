@@ -754,8 +754,13 @@ export default function CreateProjectModal({
   // never arms the draft writer.
   useEffect(() => {
     if (projectType !== 'wdo_inspection') return;
+    // '' means "no price known" — seed nothing. A numeric 0 is different: an
+    // explicitly $0-booked visit seeds "0", which the server reads as
+    // no-charge (send-with-invoice refuses to bill it; the report sends by
+    // itself) instead of falling through to the $250 blank-fee default.
+    if (defaultInspectionFee === '' || defaultInspectionFee == null) return;
     const fee = Number(defaultInspectionFee);
-    if (!Number.isFinite(fee) || fee <= 0) return;
+    if (!Number.isFinite(fee) || fee < 0) return;
     const feeStr = Number.isInteger(fee) ? String(fee) : fee.toFixed(2);
     setFindings(prev => (hasMeaningfulValue(prev.inspection_fee) ? prev : { ...prev, inspection_fee: feeStr }));
   }, [projectType, defaultInspectionFee]);
