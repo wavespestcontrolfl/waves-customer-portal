@@ -69,8 +69,8 @@ Use for: "what's the protocol for quarterly pest?", "lawn care protocol for St. 
     input_schema: {
       type: 'object',
       properties: {
-        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent' },
-        lawn_track: { type: 'string', description: 'For lawn care: A, B, C1, C2, D (grass type tracks)' },
+        service_type: { type: 'string', description: 'pest, lawn, mosquito, termite, tree_shrub, rodent, palm_injection, cockroach, bed_bug' },
+        lawn_track: { type: 'string', description: 'For lawn care: st_augustine, bermuda, zoysia, bahia (legacy A/B → st_augustine, C1 → bermuda, C2 → zoysia, D → bahia)' },
       },
       required: ['service_type'],
     },
@@ -355,28 +355,71 @@ async function getProductInfo(productName) {
 }
 
 
+// Legacy admin track labels → real protocols.json lawn keys (mirrors the
+// TRACK_MAP in routes/admin-protocols.js — A/B are both St. Augustine
+// sun/shade variants of the same track).
+const LAWN_TRACK_ALIASES = {
+  a: 'st_augustine',
+  a_st_aug_sun: 'st_augustine',
+  b: 'st_augustine',
+  b_st_aug_shade: 'st_augustine',
+  c1: 'bermuda',
+  c1_bermuda: 'bermuda',
+  c2: 'zoysia',
+  c2_zoysia: 'zoysia',
+  d: 'bahia',
+  d_bahia: 'bahia',
+  'st augustine': 'st_augustine',
+};
+
+// Tool service_type synonyms → protocols.json top-level program keys.
+const PROTOCOL_KEY_ALIASES = {
+  pest: 'pest',
+  pest_control: 'pest',
+  tree: 'tree_shrub',
+  tree_shrub: 'tree_shrub',
+  mosquito: 'mosquito',
+  termite: 'termite',
+  rodent: 'rodent',
+  palm: 'palm_injection',
+  palm_injection: 'palm_injection',
+  cockroach: 'cockroach',
+  german_roach: 'cockroach',
+  roach: 'cockroach',
+  bed_bug: 'bed_bug',
+  bedbug: 'bed_bug',
+};
+
 async function getProtocol(input) {
   const { service_type, lawn_track } = input;
 
   try {
     const protocols = require('../../config/protocols.json');
+    const requested = String(service_type || '').trim().toLowerCase();
 
-    if (service_type === 'lawn' || service_type === 'lawn_care') {
-      const track = lawn_track || 'A';
-      if (protocols.lawn && protocols.lawn[track]) {
+    if (requested === 'lawn' || requested === 'lawn_care') {
+      const rawTrack = String(lawn_track || '').trim().toLowerCase();
+      const track = protocols.lawn?.[rawTrack]
+        ? rawTrack
+        : LAWN_TRACK_ALIASES[rawTrack] || (rawTrack ? null : 'st_augustine');
+      if (track && protocols.lawn?.[track]) {
         return { protocol: protocols.lawn[track], track, type: 'lawn_care' };
       }
-      return { available_tracks: Object.keys(protocols.lawn || {}), note: 'Specify a track: A (St. Augustine), B (Bermuda), C1 (Zoysia), C2 (Bahia), D (Mixed)' };
+      return {
+        available_tracks: Object.keys(protocols.lawn || {}),
+        note: 'Specify a track: st_augustine, bermuda, zoysia, or bahia (legacy labels A/B = St. Augustine, C1 = Bermuda, C2 = Zoysia, D = Bahia).',
+      };
     }
 
-    if (service_type === 'tree_shrub' || service_type === 'tree') {
-      return { protocol: protocols.tree_shrub, type: 'tree_shrub' };
+    const key = PROTOCOL_KEY_ALIASES[requested] || requested;
+    if (protocols[key] && key !== 'lawn') {
+      return { protocol: protocols[key], type: key };
     }
 
-    // For other service types, return general guidance
     return {
       type: service_type,
-      note: `Specific protocol for "${service_type}" not found in protocols.json. Check the knowledge base for treatment guidance.`,
+      available_programs: Object.keys(protocols).filter((k) => k !== 'lawn').concat('lawn'),
+      note: `No "${service_type}" program in protocols.json — pick one of the available programs.`,
     };
   } catch {
     return { error: 'Protocols config not available' };
