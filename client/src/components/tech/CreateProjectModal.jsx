@@ -329,6 +329,16 @@ export default function CreateProjectModal({
   // not write previous_treatment_* keys into the new type's report.
   const projectTypeRef = useRef(projectType);
   projectTypeRef.current = projectType;
+  // Invalidate the extraction the moment the report type changes — waiting
+  // for the in-flight request to resolve would leave the switched-to type's
+  // Save button stuck disabled at "Reading photo…" until the old request
+  // returned (Codex r3 on #2748). The seq bump makes the eventual response a
+  // silent no-op; a type round-trip back to WDO also invalidates, which is
+  // right because the switch cleared the findings the result was meant for.
+  useEffect(() => {
+    treatmentExtractSeqRef.current += 1;
+    setTreatmentExtract({ status: 'idle', message: '' });
+  }, [projectType]);
 
   // Photo buffer — queued locally, uploaded after project is created.
   const [photoQueue, setPhotoQueue] = useState([]);
