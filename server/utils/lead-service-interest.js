@@ -51,8 +51,8 @@ const cleanText = (v) => {
 // distinct billable deliverables (project-types.js routes real-estate
 // transactions to WDO).
 const SERVICE_FAMILIES = [
-  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed\s)\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
-  { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed\s*bugs?\b|\bbedbugs?\b/i },
+  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
   // palm(?!\s+rat): "palm rats" are roof rats — rodent, not tree & shrub
   { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+rats?)/i },
@@ -70,7 +70,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -85,18 +85,25 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid
 // lookahead keeps "interested in lawn care" intact.
 // Location noun phrase, shared by the base match and the coordinated tail:
 // "around the bushes AND SHRUBS" is one location phrase — without the tail,
-// the leftover "shrubs" reads as a Tree & Shrub request (codex P2). The
-// service-word lookahead sits after the LAST noun so "…and shrub care"
-// backtracks to keep the genuine request.
+// the leftover "shrubs" reads as a Tree & Shrub request (codex P2). Whether
+// a candidate is location or REQUEST is decided by what follows it (a
+// replacer callback, not a lookahead — backtracking let "in lawn and shrub
+// care" shrink to a bare "in lawn" location and eat the lawn request, codex
+// r4): a service word right after the phrase, or a coordinated "…and X
+// service/care" continuation, marks the whole thing a request and keeps it.
 const LOC_ARTICLE = '(?:(?:the|my|our|his|her|their|a|an|some)\\s+)?';
 const LOC_NOUN = '(?:front\\s+|back\\s+)?(?:palm\\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)';
 const LOCATION_PHRASE_RE = new RegExp(
   `\\b(?:in|on|around|near|under|inside|behind|throughout)\\s+${LOC_ARTICLE}${LOC_NOUN}`
-  + `(?:\\s+(?:and|or|&)\\s+${LOC_ARTICLE}${LOC_NOUN})*`
-  + '\\b(?!\\s+(?:care|service|program|treatment|maintenance))',
+  + `(?:\\s+(?:and|or|&)\\s+${LOC_ARTICLE}${LOC_NOUN})*\\b`,
   'gi',
 );
-const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
+const SERVICE_WORD_AFTER_RE = /^\s+(?:care|service|program|treatment|maintenance)s?\b|^\s+(?:and|or|&)\b[^.;,]{0,40}?\b(?:care|service|program|treatment|maintenance)s?\b/i;
+function stripLocationPhrases(s) {
+  return s.replace(LOCATION_PHRASE_RE, (match, offset, whole) => (
+    SERVICE_WORD_AFTER_RE.test(whole.slice(offset + match.length)) ? match : ' '
+  ));
+}
 
 // Declined services are not requests: "pest control only, not lawn care"
 // must not grow a lawn tail. Scope: from a negator to the end of its
@@ -108,7 +115,7 @@ const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
 const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|i\s+(?:need|want|do)|we\s+(?:need|want))\b)/gi;
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)

@@ -364,6 +364,46 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Termite Service');
   });
 
+  test('coordinated service phrases survive the location strip (codex r4)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'interested in lawn and shrub care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service + Tree & Shrub Care Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'interested in lawn and mosquito service',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service + Mosquito Control Service');
+  });
+
+  test('hyphenated bed-bug stays the specialty family (codex r4)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and bed-bug treatment',
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment');
+  });
+
+  test('described termite treatment next to a WDO stays visible (codex r4)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'WDO Inspection Service',
+      requested_service: 'WDO report and treatment for drywood termites',
+    })).toBe('WDO Inspection Service + Termite Service');
+    expect(composeServiceInterest({
+      matched_service: 'WDO Inspection Service',
+      requested_service: 'WDO report and treatment for subterranean termites',
+    })).toBe('WDO Inspection Service + Termite Service');
+  });
+
+  test('pronounless "need/want" after a negation keeps the positive (codex r4)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'no lawn, need mosquito',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not termite, want lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
