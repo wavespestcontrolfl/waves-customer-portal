@@ -144,9 +144,18 @@ function parseLeadExtractedData(raw) {
   }
 }
 
+// preferred_date_time is an ET wall-clock string with NO timezone
+// ("2026-04-20T14:00" — the call extraction stores Eastern local time).
+// Don't route it through new Date(): a non-Eastern browser would reinterpret
+// the zone. Format the stated wall clock directly and label it ET.
 function fmtPreferredDateTime(value) {
-  const d = new Date(value);
-  return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(value));
+  if (!m) return String(value);
+  const [, y, mo, d, h, min] = m;
+  const hour = Number(h);
+  const h12 = hour % 12 || 12;
+  const ampm = hour >= 12 ? "PM" : "AM";
+  return `${Number(mo)}/${Number(d)}/${y}, ${h12}:${min} ${ampm} ET`;
 }
 
 function fmtCallDuration(seconds) {

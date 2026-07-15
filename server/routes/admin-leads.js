@@ -831,7 +831,20 @@ router.get('/:id', async (req, res, next) => {
     let calls = [];
     try {
       const digits = String(lead.phone || '').replace(/\D/g, '');
-      const ten = digits.length >= 10 ? digits.slice(-10) : null;
+      let ten = digits.length >= 10 ? digits.slice(-10) : null;
+      // Shared-line guard: the call pipeline deliberately splits different
+      // callers on the same number into separate leads (name-conflict path in
+      // lead-from-extraction.js). When another live lead shares this last-10,
+      // a phone match could surface the OTHER person's transcript/recording on
+      // this card — so fall back to exact call-SID linkage only.
+      if (ten) {
+        const shared = await db('leads')
+          .whereNull('deleted_at')
+          .whereNot('id', lead.id)
+          .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten])
+          .first('id');
+        if (shared) ten = null;
+      }
       if (lead.twilio_call_sid || ten) {
         const rows = await db('call_log')
           .where(function () {

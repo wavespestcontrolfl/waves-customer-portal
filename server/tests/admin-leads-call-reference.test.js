@@ -43,8 +43,9 @@ async function withServer(fn) {
 function makeBuilder({ firstResult, rows = [], calls = [] } = {}) {
   const builder = {};
   for (const method of [
-    'leftJoin', 'select', 'where', 'whereIn', 'whereNull', 'whereNotNull',
-    'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNotNull', 'orderBy', 'limit',
+    'leftJoin', 'select', 'where', 'whereIn', 'whereNot', 'whereNull',
+    'whereNotNull', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNotNull',
+    'orderBy', 'limit',
   ]) {
     builder[method] = jest.fn((...args) => {
       calls.push([method, ...args]);
@@ -62,6 +63,16 @@ const LEAD = {
   twilio_call_sid: 'CA' + 'a'.repeat(32),
   deleted_at: null,
 };
+
+// db('leads') is hit twice on this route: the lead fetch, then the shared-line
+// guard (another live lead on the same last-10 suppresses the phone fallback).
+function makeLeadsTable({ lead = LEAD, sharedLead = undefined } = {}) {
+  let hits = 0;
+  return () => {
+    hits += 1;
+    return makeBuilder({ firstResult: hits === 1 ? lead : sharedLead });
+  };
+}
 
 describe('GET /admin/leads/:id — call reference (recording + transcript)', () => {
   beforeEach(() => {
@@ -81,8 +92,9 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       transcription_status: 'completed',
       created_at: '2026-07-14T20:09:19.000Z',
     };
+    const leadsTable = makeLeadsTable();
     db.mockImplementation((table) => {
-      if (table === 'leads') return makeBuilder({ firstResult: LEAD });
+      if (table === 'leads') return leadsTable();
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
       if (table === 'call_log') return makeBuilder({ rows: [callRow], calls: callLogCalls });
       throw new Error(`Unexpected table ${table}`);
@@ -114,8 +126,9 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
   });
 
   test('matches calls by call SID and by 10-digit phone on either leg', async () => {
+    const leadsTable = makeLeadsTable();
     db.mockImplementation((table) => {
-      if (table === 'leads') return makeBuilder({ firstResult: LEAD });
+      if (table === 'leads') return leadsTable();
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
       if (table === 'call_log') return makeBuilder({ rows: [] });
       throw new Error(`Unexpected table ${table}`);
@@ -154,6 +167,67 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     expect(recorded).toContainEqual(['orWhereNotNull', 'recording_url']);
   });
 
+  test('shared line: another live lead on the same number suppresses the phone fallback', async () => {
+    // Different callers on one number are split into separate leads on
+    // purpose (name-conflict path) — a phone match here would surface the
+    // OTHER person's transcript/recording on this card. SID linkage only.
+    const leadsTable = makeLeadsTable({ sharedLead: { id: 'lead-other' } });
+    db.mockImplementation((table) => {
+      if (table === 'leads') return leadsTable();
+      if (table === 'lead_activities') return makeBuilder({ rows: [] });
+      if (table === 'call_log') return makeBuilder({ rows: [] });
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/leads/lead-1`);
+      expect(res.status).toBe(200);
+    });
+
+    const callLogWhereFns = db.mock.calls
+      .map((_, i) => db.mock.results[i])
+      .filter((r) => r.type === 'return')
+      .flatMap((r) => (r.value?.where?.mock ? r.value.where.mock.calls : []))
+      .map((args) => args[0])
+      .filter((arg) => typeof arg === 'function');
+
+    const recorded = [];
+    const group = {
+      orWhere: (...args) => { recorded.push(['orWhere', ...args]); return group; },
+      orWhereRaw: (...args) => { recorded.push(['orWhereRaw', ...args]); return group; },
+      whereNotNull: (...args) => { recorded.push(['whereNotNull', ...args]); return group; },
+      orWhereNotNull: (...args) => { recorded.push(['orWhereNotNull', ...args]); return group; },
+    };
+    callLogWhereFns.forEach((fn) => fn.call(group));
+
+    // The SID linkage stays; no phone-leg predicates were added.
+    expect(recorded).toContainEqual(['orWhere', 'twilio_call_sid', LEAD.twilio_call_sid]);
+    expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
+  });
+
+  test('shared line without a call SID skips the call_log lookup entirely', async () => {
+    const tables = [];
+    const leadsTable = makeLeadsTable({
+      lead: { id: 'lead-1', phone: '+12155848892', twilio_call_sid: null },
+      sharedLead: { id: 'lead-other' },
+    });
+    db.mockImplementation((table) => {
+      tables.push(table);
+      if (table === 'leads') return leadsTable();
+      if (table === 'lead_activities') return makeBuilder({ rows: [] });
+      throw new Error(`Unexpected table ${table}`);
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/leads/lead-1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.calls).toEqual([]);
+    });
+
+    expect(tables).not.toContain('call_log');
+  });
+
   test('lead with no phone and no call SID skips the call_log lookup', async () => {
     const tables = [];
     db.mockImplementation((table) => {
@@ -176,8 +250,9 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
   });
 
   test('call_log failure is non-blocking — lead + activities still return', async () => {
+    const leadsTable = makeLeadsTable();
     db.mockImplementation((table) => {
-      if (table === 'leads') return makeBuilder({ firstResult: LEAD });
+      if (table === 'leads') return leadsTable();
       if (table === 'lead_activities') return makeBuilder({ rows: [{ id: 1 }] });
       if (table === 'call_log') throw new Error('relation "call_log" does not exist');
       throw new Error(`Unexpected table ${table}`);
