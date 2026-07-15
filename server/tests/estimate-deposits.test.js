@@ -1602,6 +1602,76 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
   });
 
+  it('includeSurchargeShare:false refunds FACE VALUE only — the captured fee stays earned (cancel-signup ruling 2026-07-15)', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(49);
+    // Face cents only — no prorated fee share rides the refund.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
+    // refunded_surcharge 0 = the explicit "fee stayed earned" marker the
+    // deposit revenue rollup reads (vs NULL = legacy proration fallback).
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 0 });
+    // The CLAIM update pre-stamped the face total so a webhook echo landing
+    // mid-'refunding' hits the replay guard instead of deflating the stamp.
+    const claimUpdate = state.updates.find((u) => u.payload.status === 'refunding');
+    expect(claimUpdate.payload.refunded_amount).toBe(49);
+  });
+
+  it('the prorated sweep stamps the fee share it returned in refunded_surcharge', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'exempt_accept:prepay_annual' });
+    expect(result.refunded).toBe(49);
+    // Full remainder + full fee share rides the refund; the stamp records it.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 5042 });
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 1.42 });
+  });
+
+  it('never rolls back after Stripe succeeds — a failed terminal stamp keeps the refunding claim + pre-stamp', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = (table) => {
+      const c = handler(table);
+      const origUpdate = c.update;
+      c.update = async (payload) => {
+        if (payload.status === 'refunded' || payload.status === 'credited') throw new Error('db blip');
+        return origUpdate(payload);
+      };
+      return c;
+    };
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    // Money moved and is counted; the row stays CLAIMED (sweeps exclude
+    // 'refunding', so nothing can double-refund it) with the face
+    // pre-stamp intact, and a human is paged.
+    expect(result.refunded).toBe(49);
+    expect(state.rows[0]).toMatchObject({ status: 'refunding', refunded_amount: 49 });
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+
+  it('face-only Stripe failure reverts the pre-stamp with the claim — the ledger never says money moved', async () => {
+    mockRefundPaymentIntent.mockRejectedValue(new Error('stripe down'));
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    expect(result.refunded).toBe(0);
+    expect(state.rows[0]).toMatchObject({ status: 'received', refunded_amount: 0 });
+  });
+
   it('rows consumed mid-sweep are skipped — their claim simply loses', async () => {
     mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
     const { handler, state } = sweepDb({

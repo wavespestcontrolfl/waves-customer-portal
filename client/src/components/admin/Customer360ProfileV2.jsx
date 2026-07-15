@@ -4134,6 +4134,165 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 }
 
 // ============================================================================
+// CANCEL SIGNUP & REFUND DEPOSIT
+// Deposit-stage offboarding: previews exactly what the server will do (void
+// the unpaid signup invoice, cancel remaining visits, clear the tier, refund
+// the deposit at face value, email the customer), or explains why the run is
+// blocked. The server re-checks eligibility on confirm.
+// ============================================================================
+function CancelSignupModal({ customer, onClose, onDone }) {
+  const [preview, setPreview] = useState(null);
+  const [loadErr, setLoadErr] = useState("");
+  const [running, setRunning] = useState(false);
+  const [runErr, setRunErr] = useState("");
+  const [result, setResult] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customer.id}/cancel-signup`)
+      .then((r) => { if (!cancelled) setPreview(r); })
+      .catch((e) => { if (!cancelled) setLoadErr(e.message || "Preview failed"); });
+    return () => { cancelled = true; };
+  }, [customer.id]);
+
+  const confirm = async () => {
+    setRunning(true);
+    setRunErr("");
+    try {
+      const r = await adminFetch(`/admin/customers/${customer.id}/cancel-signup`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "requested_by_customer" }),
+      });
+      setResult(r);
+      onDone?.();
+    } catch (e) {
+      setRunErr(e.message || "Cancellation failed");
+    }
+    setRunning(false);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      onClick={() => !running && onClose()}
+    >
+      <div
+        className="bg-white w-full max-w-[560px] rounded-sm border-hairline border-zinc-300 my-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
+          <div className="text-15 font-medium text-zinc-900">
+            Cancel signup &amp; refund deposit
+          </div>
+          <button
+            onClick={() => !running && onClose()}
+            aria-label="Close"
+            className="text-ink-secondary text-22 leading-none px-1 hover:text-zinc-900 u-focus-ring"
+          >
+            ×
+          </button>
+        </div>
+        <div className="p-4 text-13 text-zinc-900">
+          {!preview && !loadErr && (
+            <div className="text-ink-secondary">Checking eligibility…</div>
+          )}
+          {loadErr && (
+            <div className="px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+          )}
+          {preview && !preview.eligible && !result && (
+            <div>
+              <div className="mb-2">This customer can’t be cancelled through this flow:</div>
+              <ul className="list-disc pl-5 text-ink-secondary">
+                {preview.blockers.map((b, i) => (<li key={i}>{b}</li>))}
+              </ul>
+            </div>
+          )}
+          {preview && preview.eligible && !result && (
+            <div>
+              <div className="mb-3">This will, in order:</div>
+              <ul className="list-disc pl-5 mb-3">
+                {preview.invoices.length > 0 && (
+                  <li>
+                    Void {preview.invoices.map((inv) => `${inv.invoiceNumber || "invoice"} (${fmtCurrency(inv.total)})`).join(", ")}
+                    {preview.terms.length > 0 ? " — cancelling the annual prepay term" : ""}
+                  </li>
+                )}
+                <li>
+                  Cancel {preview.visits.length} scheduled visit{preview.visits.length === 1 ? "" : "s"}
+                  {preview.visits.length > 0 && (
+                    <span className="text-ink-secondary">
+                      {" "}({preview.visits.slice(0, 4).map((v) => fmtDate(v.serviceDate)).join(", ")}{preview.visits.length > 4 ? "…" : ""})
+                    </span>
+                  )}
+                </li>
+                <li>Set the plan to <span className="font-medium">No Plan</span> (record stays active)</li>
+                <li>Refund the <span className="font-medium u-nums">{fmtCurrency(preview.refundTotal)}</span> deposit to the original payment method</li>
+                <li>Email the customer a cancellation + refund confirmation</li>
+              </ul>
+              <div className="text-12 text-ink-secondary">
+                The refund is issued through Stripe and typically lands in 5–10 business days.
+              </div>
+            </div>
+          )}
+          {result && (
+            <div>
+              <div className="mb-2 font-medium">
+                {result.refundSkipped || result.refundIncomplete
+                  ? "Partially done — check the notes below."
+                  : "Done."}
+              </div>
+              <ul className="list-disc pl-5">
+                <li>Invoices voided: {result.invoicesVoided.length ? result.invoicesVoided.join(", ") : "none"}</li>
+                <li>Visits cancelled: {result.visitsCancelled}</li>
+                <li>Refunded: <span className="u-nums">{fmtCurrency(result.refunded)}</span></li>
+                <li>
+                  Email: {result.email?.ok
+                    ? "sent"
+                    : `not sent (${result.email?.reason || result.email?.error || "see logs"})`}
+                </li>
+              </ul>
+              {result.refundSkipped && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundSkipped}
+                </div>
+              )}
+              {result.refundIncomplete && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundIncomplete}
+                </div>
+              )}
+              {result.visitFailures?.length > 0 && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
+                </div>
+              )}
+              {result.unresolvedInvoices?.length > 0 && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
+                </div>
+              )}
+            </div>
+          )}
+          {runErr && (
+            <div className="mt-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{runErr}</div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
+          <Button variant="secondary" onClick={onClose} disabled={running}>
+            {result ? "Close" : "Keep customer"}
+          </Button>
+          {preview?.eligible && !result && (
+            <Button variant="danger" onClick={confirm} disabled={running}>
+              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)}`}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // MAIN COMPONENT
 // ============================================================================
 export default function Customer360ProfileV2({
@@ -4160,6 +4319,7 @@ export default function Customer360ProfileV2({
   const [editOpen, setEditOpen] = useState(false);
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
   const [annualPrepayInvoiceOpen, setAnnualPrepayInvoiceOpen] = useState(false);
+  const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [editErr, setEditErr] = useState("");
@@ -5764,6 +5924,22 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
               )}
+              {isAdmin && (
+                <div className="mt-5 px-3 py-2.5 border-hairline border-zinc-200 rounded-sm flex justify-between items-center gap-3">
+                  {" "}
+                  <div className="text-12 text-ink-secondary">
+                    Customer cancelling at the deposit stage? This voids the
+                    signup invoice, cancels visits, and refunds the deposit.
+                  </div>{" "}
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    onClick={() => setCancelSignupOpen(true)}
+                  >
+                    Cancel signup…
+                  </Button>{" "}
+                </div>
+              )}
             </div>
           )}
 
@@ -6810,6 +6986,13 @@ export default function Customer360ProfileV2({
           annualPrepayTerms={data.annualPrepayTerms || []}
           onClose={() => setAnnualPrepayInvoiceOpen(false)}
           onSaved={handleAnnualPrepaySaved}
+        />
+      )}
+      {cancelSignupOpen && (
+        <CancelSignupModal
+          customer={c}
+          onClose={() => setCancelSignupOpen(false)}
+          onDone={reloadCustomer}
         />
       )}
       {editOpen && (

@@ -3692,12 +3692,13 @@ const InvoiceService = {
         ),
         db.raw(
           // Collected = NET CASH: face + captured card surcharge, minus
-          // refunds. refunded_amount is face-denominated and refunds
-          // return the fee's prorated share alongside (estimate-deposits
-          // refund paths), so the fee scales by the UNREFUNDED fraction —
-          // a fully refunded deposit nets 0 including its fee. amount and
-          // on_hand stay face-only by design (the credit authority).
-          "COALESCE(SUM(GREATEST(amount - COALESCE(refunded_amount, 0), 0) + COALESCE(COALESCE(card_surcharge, 0) * GREATEST(amount - COALESCE(refunded_amount, 0), 0) / NULLIF(amount, 0), 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
+          // refunds. refunded_amount is face-denominated. The fee side uses
+          // the explicit refunded_surcharge cumulative when a refund stamped
+          // it (cancel-signup refunds are FACE-ONLY — the retained fee stays
+          // collected); legacy rows without the stamp keep the historical
+          // proration, matching what those sweeps actually returned. amount
+          // and on_hand stay face-only by design (the credit authority).
+          "COALESCE(SUM(GREATEST(amount - COALESCE(refunded_amount, 0), 0) + COALESCE(CASE WHEN refunded_surcharge IS NOT NULL THEN GREATEST(COALESCE(card_surcharge, 0) - refunded_surcharge, 0) ELSE COALESCE(card_surcharge, 0) * GREATEST(amount - COALESCE(refunded_amount, 0), 0) / NULLIF(amount, 0) END, 0)) FILTER (WHERE received_at IS NOT NULL), 0) as collected",
         ),
       );
       deposits = {
@@ -3742,5 +3743,6 @@ module.exports = InvoiceService;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
