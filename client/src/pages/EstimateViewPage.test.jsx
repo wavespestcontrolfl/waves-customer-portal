@@ -410,6 +410,11 @@ describe('oneTimePriceCopy', () => {
     expect(copy).toMatch(/lawn treatment for the measured turf/i);
   });
 
+  it('rodent entry-point plugging is exclusion work, never lawn copy (codex P2)', () => {
+    const copy = oneTimePriceCopy({ total: 350, items: [{ service: 'rodent_plugging', label: 'Rodent Entry-Point Plugging', amount: 350 }] });
+    expect(copy).not.toMatch(/lawn treatment for the measured turf/i);
+  });
+
   it('a mixed lawn + pest one-time set keeps the default pest callback copy', () => {
     const copy = oneTimePriceCopy({
       total: 458,

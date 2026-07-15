@@ -1450,13 +1450,16 @@ function isNonBillableBreakdownRow(item = {}) {
 
 // One-time lawn work: the one_time_lawn engine row plus the lawn specialty
 // rows whose keys carry no 'lawn' substring (top-dressing / dethatching /
-// plugging) — mirrors serviceCategoryForOneTimeItem's lawn heuristics.
+// plugging) — mirrors serviceCategoryForOneTimeItem's lawn heuristics,
+// INCLUDING its rodent-before-lawn ordering: rodent entry-point plugging
+// (service 'rodent_plugging') is exclusion work, not turf care (codex P2).
 function isLawnOneTimeBreakdownItem(item = {}) {
   const raw = [item.service, item.label, item.name]
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
     .replace(/[_-]+/g, ' ');
+  if (/\brodent|\bexclusion\b|entry point/.test(raw)) return false;
   return /\blawn\b|top ?dress|dethatch|\bplugging\b/.test(raw);
 }
 
