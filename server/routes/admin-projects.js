@@ -3806,6 +3806,29 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     // before payment — the release recomputes real portal attachment. If the
     // hold falls through below (credit fully covered), this is re-stamped.
     if (projectCols.portal_visible) tokenUpdate.portal_visible = holdRequested ? false : portalAttachment.portalAttached;
+    // Stamp the hold BEFORE any customer delivery (Codex P1 on #2753), in the
+    // same write that mints the token: a pre-existing report_token (from an
+    // earlier failed send / admin-shared draft link) would otherwise serve
+    // the FULL report for the whole invoice-send window, and a crash after
+    // the invoice email went out would leave the report never-held — pay
+    // link delivered, but nothing for the release sweep to ever deliver.
+    // Deliberately NOT reverted on a failed/aborted send: the operator
+    // declared pay-before-report, so the safe failure mode is "report stays
+    // gated, delivery_status shows the failure" — a retry re-sends the
+    // invoice, and Send report remains the manual escape hatch. If credit
+    // fully covers below (holdActive flips false), the un-held claim
+    // machinery takes over this freshly-held row and releases it atomically
+    // with that delivery.
+    if (holdRequested && reportHoldColumnsPresent(projectCols)) {
+      tokenUpdate.report_hold_status = 'held';
+      tokenUpdate.report_hold_at = db.fn.now();
+      tokenUpdate.report_hold_released_at = null;
+      tokenUpdate.report_hold_release_source = null;
+      tokenUpdate.report_hold_attempts = 0;
+      tokenUpdate.report_hold_next_attempt_at = null;
+      tokenUpdate.report_hold_locked_at = null;
+      tokenUpdate.report_hold_last_error = null;
+    }
     if (projectCols.portal_visibility) {
       tokenUpdate.portal_visibility = portalAttachment.completionProfile?.portalVisibility || project.portal_visibility || 'token_only';
     }
@@ -4248,18 +4271,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     }
 
     if (delivered && holdActive) {
-      // Invoice is out; the report is now formally HELD. The project stays in
-      // its pre-send lifecycle (no status='sent' / sent_at — the report has
-      // not been delivered) and the release sweep owns the next transition.
+      // Invoice is out. The hold itself was stamped BEFORE delivery (in the
+      // token update — see the Codex P1 note there), so this records only
+      // the delivery bookkeeping. The project stays in its pre-send
+      // lifecycle (no status='sent' / sent_at — the report has not been
+      // delivered) and the release sweep owns the next transition.
       await db('projects').where({ id: project.id }).update({
-        report_hold_status: 'held',
-        report_hold_at: db.fn.now(),
-        report_hold_released_at: null,
-        report_hold_release_source: null,
-        report_hold_attempts: 0,
-        report_hold_next_attempt_at: null,
-        report_hold_locked_at: null,
-        report_hold_last_error: null,
         last_delivery_at: db.fn.now(),
         delivery_channels: channels,
         delivery_status: deliveryStatus,

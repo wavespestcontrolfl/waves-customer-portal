@@ -408,6 +408,34 @@ describe('send-with-invoice hold_report_until_paid', () => {
     });
   });
 
+  test('hold is stamped BEFORE delivery and survives a failed invoice send', async () => {
+    // The stamp rides the token update (pre-delivery): a pre-existing token
+    // must 402 for the whole send window, and a crash/failure after the pay
+    // link went out must leave the row held for the sweep (Codex P1).
+    ProjectEmail.sendProjectInvoiceBeforeReport.mockResolvedValueOnce({ ok: false, reason: 'blocked' });
+    const { updates } = mockTables();
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/projects/project-1/send-with-invoice`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hold_report_until_paid: true, invoice_id: 'inv-1' }),
+      });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.sent).toBe(false);
+      expect(body.report_held).toBe(false);
+      const projectUpdates = updates.projects || [];
+      // The hold stamp is the token update itself — before any email/SMS.
+      const stamp = projectUpdates.find((u) => u.report_hold_status === 'held');
+      expect(stamp).toBeTruthy();
+      expect(stamp.report_token).toBeTruthy();
+      // The failed send does NOT un-hold the report — it stays gated.
+      expect(projectUpdates.some((u) => 'report_hold_status' in u && u.report_hold_status === null)).toBe(false);
+      // The invoice 'sending' claim is returned so the send can be retried.
+      expect((updates.invoices || []).some((u) => u.status === 'draft')).toBe(true);
+    });
+  });
+
   test('hold on a would-be statement-accrued invoice is rejected BEFORE creating it', async () => {
     // NET-terms payer + statements gate on: InvoiceService.create would stamp
     // payer_statement_id and roll the line onto the open monthly statement —
