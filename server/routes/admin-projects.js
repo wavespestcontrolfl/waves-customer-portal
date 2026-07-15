@@ -2300,9 +2300,21 @@ function parseWdoFee(value) {
   const n = m ? Number(m[1]) : 0;
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
+// An EXPLICIT zero entry ("0", "$0", "0.00 — comped") is a statement, not an
+// omission: the first number in the field is 0. Digit-free text ("waived",
+// blank) is NOT explicit zero — that's the blank case and keeps the owner's
+// $250 flat default.
+function wdoFeeIsExplicitZero(value) {
+  const m = String(value ?? '').replace(/,/g, '').match(/(\d+(?:\.\d{1,2})?)/);
+  return m != null && Number(m[1]) === 0;
+}
 function resolveWdoInspectionFee(findings) {
   const picked = parseWdoFee(findings?.inspection_fee);
   if (picked > 0) return picked;
+  // Owner ruling 2026-07-15 (#2751 follow-up): an explicitly $0 fee means the
+  // inspection is no-charge — resolve 0 so the invoice paths refuse to bill
+  // it, instead of falling through to the blank-fee default.
+  if (wdoFeeIsExplicitZero(findings?.inspection_fee)) return 0;
   const sqft = Number(String(findings?.structure_sqft ?? '').replace(/[^0-9.]/g, '')) || 0;
   if (sqft > 0) {
     for (const tier of WDO_FEE_TIERS) {
@@ -2331,6 +2343,10 @@ async function maybeRepriceWdoDraft(invoice, project) {
   if (!String(items[0].description || '').startsWith('WDO Inspection (FDACS')) return invoice;
 
   const fee = resolveWdoInspectionFee(parseFindings(project));
+  // Never reprice a draft down to $0 — a no-charge WDO is refused before any
+  // reuse path runs (wdo_no_charge guard); this is defense in depth for any
+  // future caller that skips that guard.
+  if (fee <= 0) return invoice;
   if (Number(items[0].amount ?? items[0].unit_price) === fee) return invoice;
   try {
     const updated = await InvoiceService.update(invoice.id, {
@@ -2387,6 +2403,18 @@ async function previewWdoInvoiceTotals(project, customer, fee) {
 // rely on a service linkage alone — every resolved invoice is recorded back on
 // the project.
 async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dryRun = false }) {
+  // No-charge WDO (owner ruling 2026-07-15, #2751 follow-up): an explicit $0
+  // inspection fee means nothing is billed for this visit. Refuse the
+  // combined report+invoice send on EVERY path — before the explicit-id and
+  // reuse checks, so no draft is minted, repriced, or attached — and point
+  // the operator at the report-only send. Billing it anyway requires typing
+  // a non-zero fee first (the entry always wins).
+  if (project.project_type === 'wdo_inspection'
+    && resolveWdoInspectionFee(parseFindings(project)) === 0) {
+    const err = new Error('This WDO inspection is recorded as no charge ($0 inspection fee) — use "Send report" to deliver the FDACS report without an invoice. To bill it, enter a non-zero inspection fee first.');
+    err.code = 'wdo_no_charge';
+    throw err;
+  }
   if (invoiceId) {
     const explicit = await db('invoices').where({ id: invoiceId, customer_id: project.customer_id }).first();
     if (!explicit) throw new Error('Invoice not found for this customer');
@@ -3799,6 +3827,12 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
     if (err?.code === 'already_billed') {
       return res.status(409).json({ error: err.message, code: err.code, invoice_id: err.invoiceId, invoice_number: err.invoiceNumber });
     }
+    // No-charge WDO ($0 fee): nothing to bill — the operator sends the
+    // report by itself instead. Same shape on dry-run and send, so the UI
+    // shows the actionable message in the confirm flow.
+    if (err?.code === 'wdo_no_charge') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     next(err);
   }
 });
@@ -4231,6 +4265,8 @@ router._private = {
   evaluateProjectSendReadiness,
   completeProjectBackedService,
   dropStaleCertTreatmentDate,
+  resolveWdoInspectionFee,
+  wdoFeeIsExplicitZero,
 };
 
 module.exports = router;

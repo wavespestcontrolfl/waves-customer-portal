@@ -126,6 +126,14 @@ describe('CreateProjectModal WDO Property & scope prefill', () => {
     await waitFor(() => expect(field('requested_by').value).toContain('Mike Padil'));
     expect(field('inspection_fee').value).toBe('');
   });
+
+  it('seeds an explicit "0" for a $0-booked visit — the no-charge statement', async () => {
+    // Distinct from '' (no price known): the server reads "0" as no-charge
+    // and refuses to bill it, instead of the $250 blank-fee default.
+    renderWdoSheet({ defaultInspectionFee: 0 });
+    await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
+    await waitFor(() => expect(field('inspection_fee').value).toBe('0'));
+  });
 });
 
 describe('wdoFeeSeedFromVisit', () => {
@@ -152,5 +160,9 @@ describe('wdoFeeSeedFromVisit', () => {
   it('seeds nothing when the visit has no price', () => {
     expect(wdoFeeSeedFromVisit({ estimatedPrice: null, serviceAddons: [] })).toBe('');
     expect(wdoFeeSeedFromVisit(undefined)).toBe('');
+  });
+
+  it('passes an explicit $0 booking through as numeric 0 (no-charge)', () => {
+    expect(wdoFeeSeedFromVisit({ estimatedPrice: 0, serviceAddons: [] })).toBe(0);
   });
 });
