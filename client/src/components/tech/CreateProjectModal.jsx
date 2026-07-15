@@ -77,6 +77,16 @@ function todayDateInput() {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
+// A date input only accepts 'YYYY-MM-DD'. Schedule payloads have carried the
+// visit date as either that string or a full ISO timestamp (a Postgres DATE
+// serialized at UTC midnight) — a timestamp silently blanks the input and
+// then saves the raw string. Take the date part positionally; never re-parse
+// through `new Date`, which shifts the calendar day for ET viewers.
+function dateInputValueFrom(value) {
+  const raw = String(value || '').trim();
+  return /^\d{4}-\d{2}-\d{2}/.test(raw) ? raw.slice(0, 10) : '';
+}
+
 function hasMeaningfulValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== '';
 }
@@ -147,6 +157,38 @@ function formatStructuresInspected(customer) {
   return 'Single-family residential structure';
 }
 
+// NOTE: structure_sqft is deliberately NOT prefilled from the customer
+// record. customers.property_sqft is the treated LAWN area (initial schema),
+// not the building footprint — the WDO invoice path refuses it for the same
+// reason (admin-projects resolveWdoInspectionFee). Footprint comes from the
+// WDO Intelligence property lookup or the tech on site.
+
+// Construction type is only derivable from the customer record for
+// manufactured/mobile homes (property_type says so, and it's a
+// WDO_CONSTRUCTION_OPTIONS entry). CBS vs wood frame is never guessed here —
+// that stays with the WDO Intelligence property lookup / the tech on site.
+function formatStructureType(customer) {
+  const type = String(customer?.property_type || customer?.propertyType || '').toLowerCase();
+  if (type.includes('manufactured') || type.includes('mobile')) return 'Manufactured / Mobile Home';
+  return '';
+}
+
+// The WDO fee seed for a schedule row — the inspection line's OWN net price,
+// or nothing. estimatedPrice is the visit's final total: on a single-line
+// visit that IS the inspection's net, but with billable add-ons it includes
+// their dollars too, and the auto-invoice bills findings.inspection_fee as a
+// single WDO line — a group total would fold add-on dollars into the fee
+// (Codex P1 r2). The primary line's own net isn't on the schedule payloads
+// (primaryLinePrice is the pre-discount base, and an appointment-level
+// discount's allocation isn't visible client-side), so with billable add-ons
+// we seed nothing and the tech enters the fee.
+export function wdoFeeSeedFromVisit(service) {
+  const addons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
+  const hasBillableAddon = addons.some((a) => Number(a?.estimatedPrice ?? a?.basePrice ?? a?.price ?? 0) > 0);
+  if (hasBillableAddon) return '';
+  return service?.estimatedPrice ?? '';
+}
+
 // Populate the WDO contact/address fields from the selected customer. With
 // overwrite=false (on selection) only blank fields are filled so typed values
 // are preserved; the explicit "Fill from customer" button passes overwrite=true.
@@ -154,11 +196,13 @@ function applyCustomerToWdoFindings(prev, customer, overwrite = false) {
   const address = formatCustomerAddress(customer);
   const contact = formatCustomerContact(customer);
   const structures = formatStructuresInspected(customer);
+  const structureType = formatStructureType(customer);
   const next = { ...prev };
   if (address && (overwrite || !hasMeaningfulValue(next.property_address))) next.property_address = address;
   if (contact && (overwrite || !hasMeaningfulValue(next.requested_by))) next.requested_by = contact;
   if (contact && (overwrite || !hasMeaningfulValue(next.report_sent_to))) next.report_sent_to = contact;
   if (structures && (overwrite || !hasMeaningfulValue(next.structures_inspected))) next.structures_inspected = structures;
+  if (structureType && (overwrite || !hasMeaningfulValue(next.structure_type))) next.structure_type = structureType;
   return next;
 }
 
@@ -171,6 +215,7 @@ function customerWdoAutoFillValues(customer) {
     requested_by: formatCustomerContact(customer),
     report_sent_to: formatCustomerContact(customer),
     structures_inspected: formatStructuresInspected(customer),
+    structure_type: formatStructureType(customer),
   };
 }
 
@@ -211,6 +256,13 @@ export default function CreateProjectModal({
   defaultCustomerId, defaultServiceRecordId, defaultScheduledServiceId,
   defaultCustomerLabel,
   defaultProjectDate,
+  // The linked visit's NET price (estimated_price = final price after line
+  // and appointment discounts) — seeds the WDO inspection-fee field
+  // (blank-only) since the fee charged IS what the office booked the visit
+  // at. Never the pre-discount primary_line_price: findings.inspection_fee
+  // drives the WDO auto-invoice, so a base-price seed would un-discount it
+  // (Codex P1 on this PR).
+  defaultInspectionFee = '',
   defaultProjectType = '',
   allowedProjectTypes = null,
   allowAiDraft = false,
@@ -301,7 +353,8 @@ export default function CreateProjectModal({
   // concentration/gallons override always survives recalculation.
   const chemAutoFillRef = useRef({ concentration_pct: null, gallons_applied: null });
   const [projectDate, setProjectDate] = useState(
-    defaultProjectDate || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
+    dateInputValueFrom(defaultProjectDate)
+    || (defaultServiceRecordId || defaultScheduledServiceId ? '' : todayDateInput())
   );
   const [title, setTitle] = useState('');
   const [serviceSearch, setServiceSearch] = useState('');
@@ -695,6 +748,18 @@ export default function CreateProjectModal({
     });
   }, [projectType, selectedCustomer]);
 
+  // Seed the WDO inspection fee from the linked visit's quoted price.
+  // Blank-only, like the customer autofill above: a hand-typed fee or a
+  // restored draft always wins, and (per the #2717 rule) an autofill effect
+  // never arms the draft writer.
+  useEffect(() => {
+    if (projectType !== 'wdo_inspection') return;
+    const fee = Number(defaultInspectionFee);
+    if (!Number.isFinite(fee) || fee <= 0) return;
+    const feeStr = Number.isInteger(fee) ? String(fee) : fee.toFixed(2);
+    setFindings(prev => (hasMeaningfulValue(prev.inspection_fee) ? prev : { ...prev, inspection_fee: feeStr }));
+  }, [projectType, defaultInspectionFee]);
+
   // Prefill the address field from the selected customer for every OTHER project
   // type that has one (the pre-treatment certificate's `treatment_address`, and
   // any future `type: 'address'` field). WDO keeps its dedicated multi-field
@@ -982,7 +1047,8 @@ export default function CreateProjectModal({
       const svc = d?.service;
       if (!svc) return;
       if (svc.serviceType) setTitle(prev => (prev && prev.trim()) ? prev : svc.serviceType);
-      if (svc.scheduledDate) setProjectDate(String(svc.scheduledDate).slice(0, 10));
+      const svcDate = dateInputValueFrom(svc.scheduledDate);
+      if (svcDate) setProjectDate(svcDate);
     } catch { /* non-blocking: tech can still fill these in manually */ }
   }
 
