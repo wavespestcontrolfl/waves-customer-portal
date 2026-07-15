@@ -882,28 +882,21 @@ async function publishAstro(postId) {
     await gh.createBranch(branch);
     branchCreated = true;
 
-    if (heroImage?.buffer) {
-      const heroPath = `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`;
-      const existingHero = await gh.getFile(heroPath);
-      await gh.putBinary({
-        path: heroPath,
-        buffer: heroImage.buffer,
-        message: `chore(blog): add hero image for ${slug}`,
-        branch,
-        sha: existingHero ? existingHero.sha : undefined,
-      });
-    }
-
-    // 3. Markdown file
-    // If the file already exists on main (republish), pass its SHA so the
-    // branch commit is an update instead of a conflict.
-    const existing = await gh.getFile(filePath);
-    const fileCommit = await gh.putFile({
-      path: filePath,
-      content: markdown,
-      message: `feat(blog): publish ${slug}`,
+    // 3. Hero + markdown in ONE commit (git data API). Splitting them into
+    // per-file Contents API commits let Cloudflare register the branch
+    // deployment against the hero commit instead of the head, which starves
+    // the PR poller's head==deployment gate (PR #374, 2026-07-15). The tree
+    // write replaces existing paths unconditionally, so a republish needs no
+    // per-file SHA.
+    const fileCommit = await gh.commitFiles({
       branch,
-      sha: existing ? existing.sha : undefined,
+      message: `feat(blog): publish ${slug}`,
+      files: [
+        ...(heroImage?.buffer
+          ? [{ path: `${ASTRO_HERO_DIR}/${slug}/hero.${heroImageExt}`, buffer: heroImage.buffer }]
+          : []),
+        { path: filePath, content: markdown },
+      ],
     });
 
     // 4. PR
@@ -1374,34 +1367,22 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const markdown = fm.stringify(frontmatter, `${body}\n`);
 
   await gh.createBranch(branch);
-  if (hero.buffer) {
-    // Same-branch hero commit (mirrors publishAstro): the PR carries both the
-    // markdown and the bytes its frontmatter references, so preview and live
-    // can never reference a hero that isn't merged atomically with the post.
-    const existingHero = await gh.getFile(hero.repoPath);
-    await gh.putBinary({
-      path: hero.repoPath,
-      buffer: hero.buffer,
-      message: `chore(blog): add hero image for ${slug}`,
-      branch,
-      sha: existingHero ? existingHero.sha : undefined,
-    });
-  }
-  const fileCommit = await gh.putFile({
-    path: filePath,
-    content: markdown,
-    message: `feat(blog): publish ${slug}`,
+  // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero
+  // still ships on the same branch as the frontmatter that references it
+  // (mirrors publishAstro), but atomically: the multi-commit version of this
+  // block pushed 2–3 commits seconds apart, Cloudflare Pages could register
+  // the branch deployment against the first one, and the autonomous
+  // PR poller's fail-closed head==deployment gate then starved the PR
+  // forever on `preview_build_stale_commit` (PR #374, 2026-07-15).
+  const fileCommit = await gh.commitFiles({
     branch,
-    sha: existingFile && !isLegacyMd ? existingFile.file.sha : undefined,
+    message: `feat(blog): publish ${slug}`,
+    files: [
+      ...(hero.buffer ? [{ path: hero.repoPath, buffer: hero.buffer }] : []),
+      { path: filePath, content: markdown },
+    ],
+    deletes: isLegacyMd ? [existingFile.path] : [],
   });
-  if (isLegacyMd) {
-    await gh.deleteFile({
-      path: existingFile.path,
-      message: `chore(blog): migrate ${slug} to .mdx`,
-      branch,
-      sha: existingFile.file.sha,
-    });
-  }
 
   const pr = await gh.createPr({
     head: branch,
