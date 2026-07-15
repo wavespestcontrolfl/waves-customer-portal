@@ -863,7 +863,7 @@ function PortalMowingHeight({ mowing }) {
   );
 }
 
-function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, mowingHeight }) {
+function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter, trend, recommendations, seasonalContext, neighborBenchmark, mowingHeight, embedded = false }) {
   const [animated, setAnimated] = useState(false);
   const [showTrend, setShowTrend] = useState(false);
 
@@ -892,7 +892,9 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
   const overallDelta = overallScore - initialOverall;
 
   return (
-    <div data-glass="card" style={{
+    // embedded = rendered inside the My Plan lawn row, which already
+    // provides the card chrome — no second glass wrapper.
+    <div data-glass={embedded ? undefined : 'card'} style={embedded ? { position: 'relative' } : {
       ...PORTAL_CARD_STYLE,
       position: 'relative',
       padding: 20,
@@ -1452,7 +1454,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   );
 }
 
-function DashboardTab({ customer, onSwitchTab }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
@@ -2061,31 +2063,42 @@ function DashboardTab({ customer, onSwitchTab }) {
         </section>
       )}
 
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (
-        <LawnHealthCard
-          customerId={customer.id}
-          scores={lawnHealth.scores}
-          initialScores={lawnHealth.initialScores}
-          photos={lawnHealth.photos}
-          beforeAfter={lawnHealth.beforeAfter}
-          trend={lawnHealth.trend}
-          recommendations={lawnHealth.recommendations}
-          seasonalContext={lawnHealth.seasonalContext}
-          neighborBenchmark={lawnHealth.neighborBenchmark}
-          mowingHeight={lawnHealth.mowingHeight}
-        />
-      )}
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && (!lawnHealth.scores || !lawnHealth.initialScores) && (
-        <section data-glass="card" style={{ ...card, padding: 20 }}>
-          {/* Mowing height shows even before the first vision assessment. */}
-          <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
-          <PortalInlineState
-            icon="sprout"
-            title="Lawn health tracking will start soon"
-            message="Scores and progress photos will appear after the first lawn assessment."
-          />
-        </section>
-      )}
+      {/* Lawn health detail lives in the My Plan lawn row now (owner
+          2026-07-15) — home keeps a one-glance teaser so score movement
+          stays visible without the full card. The pre-assessment state
+          (mowing height + "tracking will start soon") moved with it. */}
+      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+        const lawnScore = Math.round(lawnHealth.scores.overallScore);
+        const lawnInitial = Math.round(lawnHealth.initialScores.overallScore);
+        return (
+          <section data-glass="card" style={{ ...card, padding: 20 }}>
+            <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+              <ScoreRing score={lawnScore} size={56} stroke={5} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={dashboardLabel}>Lawn Health</div>
+                <div style={{ marginTop: 6, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                  {lawnScore}% overall
+                </div>
+                <div style={{ marginTop: 2, fontSize: 14, fontWeight: 700, color: lawnScore >= lawnInitial ? B.green : B.orange }}>
+                  {lawnScore > lawnInitial
+                    ? `Up from ${lawnInitial}% at your first assessment`
+                    : lawnScore === lawnInitial
+                      ? 'Holding steady since your first assessment'
+                      : `Started at ${lawnInitial}%`}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenPlanService?.('lawn_care')}
+                data-glass-accent=""
+                style={dashboardSecondaryButton}
+              >
+                View lawn health
+              </button>
+            </div>
+          </section>
+        );
+      })()}
 
       {/* Home content rows (owner 2026-07-09): Facebook, the Waves blog,
           Instagram, and the newsletter — Social Hub-style cards in glass,
@@ -7698,9 +7711,11 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
 // =========================================================================
 // MY PLAN TAB
 // =========================================================================
-function MyPlanTab({ customer }) {
+function MyPlanTab({ customer, focusService }) {
   const portalGlass = usePortalGlass();
-  const [expandedService, setExpandedService] = useState(null);
+  // focusService pre-expands a row on mount — set by the home-page lawn
+  // teaser and by ?tab=plan&service=<catalog id> deep-links.
+  const [expandedService, setExpandedService] = useState(focusService || null);
   const [hoveredCalendarItem, setHoveredCalendarItem] = useState(null);
   const [nextService, setNextService] = useState(null);
   const [upcomingServices, setUpcomingServices] = useState([]);
@@ -8237,6 +8252,39 @@ function MyPlanTab({ customer }) {
                             ))}
                           </div>
                         ) : null}
+                        {/* Lawn health detail moved here from the home page
+                            (owner 2026-07-15). hasLawnCare guards it — a
+                            tier-entitlement padded lawn row without real
+                            lawn service shows coverage copy only. */}
+                        {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && (
+                          lawnHealth.scores && lawnHealth.initialScores ? (
+                            <div style={{ marginTop: 14 }}>
+                              <LawnHealthCard
+                                embedded
+                                customerId={customer.id}
+                                scores={lawnHealth.scores}
+                                initialScores={lawnHealth.initialScores}
+                                photos={lawnHealth.photos}
+                                beforeAfter={lawnHealth.beforeAfter}
+                                trend={lawnHealth.trend}
+                                recommendations={lawnHealth.recommendations}
+                                seasonalContext={lawnHealth.seasonalContext}
+                                neighborBenchmark={lawnHealth.neighborBenchmark}
+                                mowingHeight={lawnHealth.mowingHeight}
+                              />
+                            </div>
+                          ) : (
+                            <div style={{ marginTop: 14 }}>
+                              {/* Mowing height shows even before the first vision assessment. */}
+                              <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
+                              <PortalInlineState
+                                icon="sprout"
+                                title="Lawn health tracking will start soon"
+                                message="Scores and progress photos will appear after the first lawn assessment."
+                              />
+                            </div>
+                          )
+                        )}
                       </div>
                     )}
                   </div>
@@ -8244,6 +8292,36 @@ function MyPlanTab({ customer }) {
               })}
             </div>
           </section>
+
+          {/* A lawn customer whose visible schedule has no qualifying lawn
+              row (paused plan, tier slice) still gets their health card —
+              without this, moving it off Home would lose it entirely. */}
+          {!includedServices.some(s => s.id === 'lawn_care') && !lawnHealth.loading && lawnHealth.hasLawnCare && (
+            lawnHealth.scores && lawnHealth.initialScores ? (
+              <LawnHealthCard
+                customerId={customer.id}
+                scores={lawnHealth.scores}
+                initialScores={lawnHealth.initialScores}
+                photos={lawnHealth.photos}
+                beforeAfter={lawnHealth.beforeAfter}
+                trend={lawnHealth.trend}
+                recommendations={lawnHealth.recommendations}
+                seasonalContext={lawnHealth.seasonalContext}
+                neighborBenchmark={lawnHealth.neighborBenchmark}
+                mowingHeight={lawnHealth.mowingHeight}
+              />
+            ) : (
+              <section data-glass="card" style={{ ...card, padding: 20 }}>
+                {/* Mowing height shows even before the first vision assessment. */}
+                <PortalMowingHeight mowing={lawnHealth.mowingHeight} />
+                <PortalInlineState
+                  icon="sprout"
+                  title="Lawn health tracking will start soon"
+                  message="Scores and progress photos will appear after the first lawn assessment."
+                />
+              </section>
+            )
+          )}
 
           <WavesAiPricingPanel
             compact={compact}
@@ -12365,20 +12443,29 @@ export default function PortalPage() {
   const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
-  // Returns [tabId, visitsSubTab, openRequest]. Legacy ?tab=schedule /
-  // ?tab=services land on Visits with the matching sub-tab preselected;
-  // ?tab=request opens the request overlay instead of routing to a tab.
-  const [initialTab, initialVisitsSubTab, initialOpenRequest] = (() => {
+  // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
+  // ?tab=schedule / ?tab=services land on Visits with the matching sub-tab
+  // preselected; ?tab=request opens the request overlay instead of routing
+  // to a tab; ?tab=plan&service=<catalog id> (e.g. lawn_care) lands on My
+  // Plan with that service row pre-expanded.
+  const [initialTab, initialVisitsSubTab, initialOpenRequest, initialPlanService] = (() => {
     try {
-      const t = new URLSearchParams(window.location.search).get('tab');
-      if (t === 'schedule') return ['visits', 'upcoming', false];
-      if (t === 'services') return ['visits', 'completed', false];
-      if (t === 'request') return ['dashboard', 'upcoming', true];
+      const params = new URLSearchParams(window.location.search);
+      const t = params.get('tab');
+      if (t === 'schedule') return ['visits', 'upcoming', false, null];
+      if (t === 'services') return ['visits', 'completed', false, null];
+      if (t === 'request') return ['dashboard', 'upcoming', true, null];
       const allowed = ['dashboard', 'plan', 'visits', 'billing', 'refer', 'documents', 'property', 'learn'];
-      return [t && allowed.includes(t) ? t : 'dashboard', 'upcoming', false];
-    } catch { return ['dashboard', 'upcoming', false]; }
+      const tab = t && allowed.includes(t) ? t : 'dashboard';
+      const svc = params.get('service');
+      const planService = tab === 'plan' && SERVICE_CATALOG.some(s => s.id === svc) ? svc : null;
+      return [tab, 'upcoming', false, planService];
+    } catch { return ['dashboard', 'upcoming', false, null]; }
   })();
   const [activeTab, setActiveTab] = useState(initialTab);
+  // Which My Plan service row to open expanded on the next Plan mount —
+  // deep-link above or the home lawn teaser; nav clicks reset it.
+  const [planFocusService, setPlanFocusService] = useState(initialPlanService);
   const [visitsSubTab, setVisitsSubTab] = useState(initialVisitsSubTab);
   const [showMenu, setShowMenu] = useState(false);
   const accountMenuDialogRef = useModalFocus(showMenu);
@@ -12390,10 +12477,17 @@ export default function PortalPage() {
   // their consolidated surfaces (Visits sub-tabs, request overlay) so
   // existing call-sites route correctly without rewriting each one.
   const switchTab = (id) => {
+    // Plain nav clears any pending row focus so Plan doesn't keep
+    // re-expanding a row the customer already closed.
+    setPlanFocusService(null);
     if (id === 'schedule') { setVisitsSubTab('upcoming'); setActiveTab('visits'); return; }
     if (id === 'services') { setVisitsSubTab('completed'); setActiveTab('visits'); return; }
     if (id === 'request') { setShowReportIssue(true); return; }
     setActiveTab(id);
+  };
+  const openPlanService = (svcId) => {
+    setPlanFocusService(svcId);
+    setActiveTab('plan');
   };
   const headerNavItems = [...PRIMARY_TABS, ...MORE_TABS];
   const headerNavButton = (tab) => {
@@ -12930,8 +13024,8 @@ export default function PortalPage() {
           </nav>
         )}
         <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />
-        {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'dashboard' && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={setVisitsSubTab} onRequestVisit={() => setShowReportIssue(true)} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}

@@ -165,9 +165,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
 function runUpdates(updates) {
   // Run STATE transitions only — finalizeMerged's astro_pr_merged_at
   // first-observation stamp (day-cap accounting, fires on every merged-PR
-  // observation) is filtered out so state assertions stay exact; the stamp
-  // has its own dedicated test in the daily-publish-cap suite.
-  return updates.filter((u) => u.table === 'autonomous_runs' && !('astro_pr_merged_at' in u.updates));
+  // observation) and the poll_pending_* observability tracker (fires on
+  // every pending verdict) are filtered out so state assertions stay exact;
+  // both have their own dedicated suites.
+  return updates.filter((u) => u.table === 'autonomous_runs'
+    && !('astro_pr_merged_at' in u.updates)
+    && !Object.keys(u.updates).some((k) => k.startsWith('poll_pending')));
 }
 
 beforeEach(() => {
@@ -1260,5 +1263,140 @@ describe('daily publish cap on auto-merge (audit regression — poller had no da
     // with the PR's merged_at, not "now"
     expect(stamp.filters['null:astro_pr_merged_at']).toBe(true);
     expect(stamp.updates.astro_pr_merged_at.toISOString()).toBe('2026-06-11T05:00:00.000Z');
+  });
+});
+
+describe('pending-reason tracking (silent-starvation observability)', () => {
+  const { trackPendingReason, pendingReasonKey, pendingAnnotationThresholdMs } = require('../services/content/autonomous-pr-poller')._internals;
+
+  function trackDb({ fresh = null } = {}) {
+    const updates = [];
+    db.mockImplementation((table) => {
+      const q = {
+        _f: {},
+        where: jest.fn(function (a, b) {
+          if (a && typeof a === 'object') Object.assign(q._f, a);
+          else q._f[a] = b;
+          return q;
+        }),
+        first: jest.fn(() => Promise.resolve(fresh)),
+        update: jest.fn((u) => { updates.push({ table, filters: { ...q._f }, updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    return updates;
+  }
+
+  const PR_URL = 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/374';
+
+  test('pendingReasonKey strips the volatile message after the colon', () => {
+    expect(pendingReasonKey('codex_review_pending: findings on head abc1234')).toBe('codex_review_pending');
+    expect(pendingReasonKey('preview_build_stale_commit')).toBe('preview_build_stale_commit');
+    expect(pendingReasonKey('')).toBeNull();
+    expect(pendingReasonKey(null)).toBeNull();
+  });
+
+  test('thresholds: preview-build reasons 2h, expected-long reasons never, everything else 24h', () => {
+    expect(pendingAnnotationThresholdMs('preview_build_stale_commit')).toBe(2 * 60 * 60 * 1000);
+    expect(pendingAnnotationThresholdMs('preview_build_pending')).toBe(2 * 60 * 60 * 1000);
+    expect(pendingAnnotationThresholdMs('awaiting_human_merge')).toBeNull();
+    expect(pendingAnnotationThresholdMs('daily_publish_cap_reached')).toBeNull();
+    expect(pendingAnnotationThresholdMs('codex_review_pending')).toBe(24 * 60 * 60 * 1000);
+  });
+
+  test('a NEW pending reason starts a fresh window (reason + since, annotation cleared)', async () => {
+    const updates = trackDb();
+    const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: null, poll_pending_since: null, poll_pending_annotated_at: null };
+    await trackPendingReason(run, { pending: true, reason: 'preview_build_stale_commit' });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].updates.poll_pending_reason).toBe('preview_build_stale_commit');
+    expect(updates[0].updates.poll_pending_since).toBeInstanceOf(Date);
+    expect(updates[0].updates.poll_pending_annotated_at).toBeNull();
+  });
+
+  test('a preview-build reason persisting past 2h annotates reviewer_notes ONCE (append-only)', async () => {
+    const fresh = { id: 'run-1', reviewer_notes: 'Astro PR opened: …' };
+    const updates = trackDb({ fresh });
+    const run = {
+      id: 'run-1',
+      astro_pr_url: PR_URL,
+      poll_pending_reason: 'preview_build_stale_commit',
+      poll_pending_since: new Date(Date.now() - 3 * 60 * 60 * 1000),
+      poll_pending_annotated_at: null,
+    };
+    await trackPendingReason(run, { pending: true, reason: 'preview_build_stale_commit' });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].updates.reviewer_notes).toMatch(/Astro PR opened: … \| Auto-merge for PR #374 has been pending on "preview_build_stale_commit"/);
+    expect(updates[0].updates.poll_pending_annotated_at).toBeInstanceOf(Date);
+
+    // Already-annotated runs never re-annotate.
+    const updates2 = trackDb({ fresh });
+    await trackPendingReason({ ...run, poll_pending_annotated_at: new Date() }, { pending: true, reason: 'preview_build_stale_commit' });
+    expect(updates2).toHaveLength(0);
+  });
+
+  test('the same reason under its threshold writes nothing', async () => {
+    const updates = trackDb();
+    const run = {
+      id: 'run-1',
+      astro_pr_url: PR_URL,
+      poll_pending_reason: 'preview_build_pending',
+      poll_pending_since: new Date(Date.now() - 30 * 60 * 1000),
+      poll_pending_annotated_at: null,
+    };
+    await trackPendingReason(run, { pending: true, reason: 'preview_build_pending' });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('codex message drift does NOT reset the window (prefix key comparison)', async () => {
+    const updates = trackDb();
+    const run = {
+      id: 'run-1',
+      astro_pr_url: PR_URL,
+      poll_pending_reason: 'codex_review_pending',
+      poll_pending_since: new Date(Date.now() - 60 * 60 * 1000),
+      poll_pending_annotated_at: null,
+    };
+    await trackPendingReason(run, { pending: true, reason: 'codex_review_pending: different message this tick' });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('expected-long reasons (human merge, daily cap) never annotate even after days', async () => {
+    const updates = trackDb({ fresh: { id: 'run-1', reviewer_notes: null } });
+    const run = {
+      id: 'run-1',
+      astro_pr_url: PR_URL,
+      poll_pending_reason: 'daily_publish_cap_reached',
+      poll_pending_since: new Date(Date.now() - 72 * 60 * 60 * 1000),
+      poll_pending_annotated_at: null,
+    };
+    await trackPendingReason(run, { pending: true, reason: 'daily_publish_cap_reached' });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('leaving the pending state clears the tracker; a transient error preserves the window', async () => {
+    const updates = trackDb();
+    const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: 'preview_build_pending', poll_pending_since: new Date(), poll_pending_annotated_at: null };
+    await trackPendingReason(run, { published: true });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].updates.poll_pending_reason).toBeNull();
+    expect(updates[0].updates.poll_pending_since).toBeNull();
+
+    const updates2 = trackDb();
+    await trackPendingReason(run, { error: 'boom', transient: true });
+    expect(updates2).toHaveLength(0);
+  });
+
+  test('a per-poll merge deferral (pending with no reason) leaves the tracker untouched', async () => {
+    const updates = trackDb();
+    const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date(), poll_pending_annotated_at: null };
+    await trackPendingReason(run, { pending: true, mergeDeferred: true });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a tracking failure never breaks the poll (fail-soft)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: null };
+    await expect(trackPendingReason(run, { pending: true, reason: 'preview_build_pending' })).resolves.toBeUndefined();
   });
 });

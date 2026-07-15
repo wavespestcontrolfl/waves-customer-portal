@@ -46,7 +46,7 @@ import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
-import CreateProjectModal from '../../components/tech/CreateProjectModal';
+import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
@@ -343,7 +343,16 @@ export default function TechHomePage() {
       customerId: service.customer_id || service.customerId || '',
       customerLabel: service.customer_name || service.customerName || '',
       scheduledServiceId: service.id || '',
-      projectDate: service.scheduled_date || etDateString(),
+      // The visit's own calendar date, NOT "today at tap time": the day-view
+      // payload is camelCase (scheduledDate, already 'YYYY-MM-DD'), so the
+      // old snake_case read always fell through to etDateString() and a
+      // report opened after midnight for yesterday's route stamped the wrong
+      // inspection date. slice(0,10) also guards a raw ISO-serialized DATE
+      // column from an alternate payload shape.
+      projectDate: String(service.scheduledDate || service.scheduled_date || '').slice(0, 10) || etDateString(),
+      // The WDO line's own net price (never the pre-discount base, never a
+      // multi-service group total) — see wdoFeeSeedFromVisit.
+      visitPrice: wdoFeeSeedFromVisit(service),
       // The linked service's own profile picks the project type (same as the
       // DispatchPageV2 path) — the explicit allowedProjectTypes override also
       // keeps project_required keys creatable after their project type became
@@ -642,6 +651,7 @@ export default function TechHomePage() {
           defaultCustomerLabel={projectDefaults?.customerLabel || ''}
           defaultScheduledServiceId={projectDefaults?.scheduledServiceId || ''}
           defaultProjectDate={projectDefaults?.projectDate || ''}
+          defaultInspectionFee={projectDefaults?.visitPrice ?? ''}
           defaultProjectType={projectDefaults?.projectType || ''}
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
           onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}

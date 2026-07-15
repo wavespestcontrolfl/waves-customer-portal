@@ -20,6 +20,8 @@ const {
   validateUploadedImage,
   evaluateProjectSendReadiness,
   dropStaleCertTreatmentDate,
+  resolveWdoInspectionFee,
+  wdoFeeIsExplicitZero,
 } = projectsRouter._private;
 
 describe('admin project route guards', () => {
@@ -400,5 +402,39 @@ describe('admin project route guards', () => {
     const wdo = { project_date: '2026-06-25', findings: { treatment_date: '2026-06-20' } };
     dropStaleCertTreatmentDate({ ...legacyProject, project_type: 'wdo_inspection' }, wdo);
     expect(wdo.findings.treatment_date).toBe('2026-06-20');
+  });
+});
+
+describe('WDO inspection fee resolution (no-charge rule)', () => {
+  test('a positive fee entry always wins, in any reasonable format', () => {
+    expect(resolveWdoInspectionFee({ inspection_fee: '175' })).toBe(175);
+    expect(resolveWdoInspectionFee({ inspection_fee: '$187.50' })).toBe(187.5);
+    expect(resolveWdoInspectionFee({ inspection_fee: '1,250' })).toBe(1250);
+  });
+
+  test('an explicit $0 entry resolves 0 — the no-charge statement', () => {
+    expect(resolveWdoInspectionFee({ inspection_fee: '0' })).toBe(0);
+    expect(resolveWdoInspectionFee({ inspection_fee: '$0.00' })).toBe(0);
+    expect(resolveWdoInspectionFee({ inspection_fee: '0 — comped' })).toBe(0);
+    // Explicit zero beats the sqft tier — the entry always wins.
+    expect(resolveWdoInspectionFee({ inspection_fee: '0', structure_sqft: '2200' })).toBe(0);
+  });
+
+  test('blank or digit-free entries keep the owner-ruled $250 flat default', () => {
+    expect(resolveWdoInspectionFee({ inspection_fee: '' })).toBe(250);
+    expect(resolveWdoInspectionFee({})).toBe(250);
+    expect(resolveWdoInspectionFee(null)).toBe(250);
+    // "waived" carries no number — that is NOT an explicit zero.
+    expect(resolveWdoInspectionFee({ inspection_fee: 'waived' })).toBe(250);
+    expect(resolveWdoInspectionFee({ inspection_fee: '', structure_sqft: '2200' })).toBe(250);
+  });
+
+  test('wdoFeeIsExplicitZero only fires on a leading numeric zero', () => {
+    expect(wdoFeeIsExplicitZero('0')).toBe(true);
+    expect(wdoFeeIsExplicitZero('$0.00')).toBe(true);
+    expect(wdoFeeIsExplicitZero('')).toBe(false);
+    expect(wdoFeeIsExplicitZero('waived')).toBe(false);
+    expect(wdoFeeIsExplicitZero('175')).toBe(false);
+    expect(wdoFeeIsExplicitZero(null)).toBe(false);
   });
 });

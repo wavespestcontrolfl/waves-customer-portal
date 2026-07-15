@@ -943,6 +943,11 @@ function attachParcelMeta(merged, parcel) {
     polygonAreaSqft: parcel.polygonAreaSqft,
     lotSqft: parcel.lotSqft,
     dorUseCode: parcel.dorUseCode,
+    // County land-use description — mergePropertyRecords keeps _raw from the
+    // WINNING record only, so without this a PAO merge win drops the roll's
+    // "Vacant Residential Platted" wording and the unassessed-vacant-parcel
+    // detection loses its strongest signal.
+    landUseDescription: parcel.landUseDescription ?? undefined,
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
     // Stacked-parcel association aggregate extras (buildEnrichedProfile reads
@@ -957,6 +962,51 @@ function attachParcelMeta(merged, parcel) {
     situsLines: parcel.situsLines ?? undefined,
   };
   return merged;
+}
+
+// County roll knows the parcel but no BUILDING: vacant land use with no
+// building facts. Two real states share this signature — a genuinely unbuilt
+// lot, and the new-construction window (plat filed → CO → next roll posting)
+// that Waves quotes constantly in Parrish / LWR / North River Ranch. The roll
+// alone can't split them (codex P1), so callers must present it as
+// "vacant/unassessed, possibly new construction" and let the customer
+// conversation resolve it. Every remote source inherits the same county lag,
+// so the missing sqft/stories/yearBuilt need the customer's plan numbers,
+// not another provider. Returns the vacant evidence (drives flag copy and
+// the short cache TTL in lookup-cache) or null.
+// Live probe 2026-07-15 against a just-platted Manatee parcel (2026 Parrish
+// subdivision): CUR_MAN_LUC_DESC "Vacant Residential Platted (1554)",
+// CUR_DOR_LUC_CODE '00', every BLDG_* field null, lot sqft on the roll.
+function detectUnassessedVacantParcel(record) {
+  if (!record) return null;
+  // Any building fact means the roll (or a stronger source, incl. a tech
+  // verified override) knows the home — not the pending-roll window.
+  if (record.squareFootage || record.yearBuilt) return null;
+  const parcel = record._parcel || {};
+  const raw = record._raw || {};
+  // _raw.landUse joins the read: preserveCountyGisLandUse parks the county
+  // vacancy text THERE (not landUseDescription) when a PAO record wins the
+  // merge, and rows cached before _parcel carried landUseDescription have no
+  // other surviving copy — without it the read-side short TTL never evicts
+  // exactly those old 180-day vacant rows (codex P2 #2749). The synthesized
+  // commercial form ("DOR use code 10 — commercial/industrial") never
+  // contains "vacant", so it can't false-positive here.
+  const landUseDescription = parcel.landUseDescription
+    || raw.landUseDescription
+    || raw.landUse
+    || null;
+  // FL DOR major 00 = vacant residential — '00' (Manatee), '000' (FDOR
+  // statewide), '0000' (Sarasota county form). The description regex covers
+  // parcels whose code didn't come back (Charlotte ownership layer).
+  const dorDigits = String(parcel.dorUseCode ?? raw.dorUseCode ?? '').replace(/\D/g, '');
+  const vacantByCode = dorDigits.length > 0 && Number(dorDigits) === 0;
+  const vacantByDesc = /\bvacant\b/i.test(String(landUseDescription || ''));
+  if (!vacantByCode && !vacantByDesc) return null;
+  return {
+    landUseDescription,
+    dorUseCode: parcel.dorUseCode ?? raw.dorUseCode ?? null,
+    subdivision: raw.subdivision || null,
+  };
 }
 
 // Non-detached residential types the county land-use description captures but
@@ -4046,6 +4096,7 @@ module.exports = {
   auditAddressHouseNumber,
   hasCountyEvidence,
   buildPropertyDataQuality,
+  detectUnassessedVacantParcel,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupPropertyFromAI,

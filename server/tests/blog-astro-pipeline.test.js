@@ -9,6 +9,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   getFile: jest.fn(),
   putBinary: jest.fn(),
   putFile: jest.fn(),
+  commitFiles: jest.fn(),
   createPr: jest.fn(),
   findOpenPrByHead: jest.fn(),
   createIssueComment: jest.fn(),
@@ -47,6 +48,27 @@ const heroAltVision = require('../services/content/hero-alt-vision');
 // 1x1 transparent PNG — enough for the real sharp compressToWebp step that
 // runs inside the autonomous hero pipeline.
 const HERO_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+// publishAstro/publishAstroDraft write hero bytes + markdown (+ any legacy
+// .md removal) as ONE git-data commit via gh.commitFiles — per-file Contents
+// API commits raced Cloudflare's branch-deployment registration (PR #374).
+// This fan-out shim forwards each committed entry to the legacy putFile /
+// putBinary / deleteFile mocks so the content assertions below keep reading
+// through them; the single-commit contract itself is asserted directly on
+// gh.commitFiles where it matters. Installed once at module scope —
+// jest.clearAllMocks() clears calls, not implementations.
+beforeAll(() => {
+  gh.commitFiles.mockImplementation(async ({ branch, message, files = [], deletes = [] }) => {
+    let last = null;
+    for (const f of files) {
+      last = Buffer.isBuffer(f.buffer)
+        ? await gh.putBinary({ path: f.path, buffer: f.buffer, message, branch, sha: undefined })
+        : await gh.putFile({ path: f.path, content: f.content, message, branch, sha: undefined });
+    }
+    for (const path of deletes) await gh.deleteFile({ path, message, branch, sha: 'tree-delete' });
+    return last || { commit: { sha: 'file-sha' } };
+  });
+});
 
 // The autonomous publish path now generates + commits a hero whenever the
 // post has no hero already committed on main, so publish tests must stub the
@@ -875,10 +897,12 @@ describe('Astro publisher autonomous draft adapter', () => {
       path: 'src/content/blog/pest-control/legacy-ant-post.mdx',
       sha: undefined,
     }));
-    // Deletes the superseded flat .md so we never leave both.
+    // Deletes the superseded flat .md so we never leave both — in the SAME
+    // single publish commit as the .mdx write (tree deletes need no sha).
+    expect(gh.commitFiles).toHaveBeenCalledTimes(1);
+    expect(gh.commitFiles.mock.calls[0][0].deletes).toEqual(['src/content/blog/legacy-ant-post.md']);
     expect(gh.deleteFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/legacy-ant-post.md',
-      sha: 'legacy-md-sha',
     }));
   });
 
@@ -912,9 +936,9 @@ describe('Astro publisher autonomous draft adapter', () => {
 
     const fmModule = require('../services/content-astro/frontmatter');
     const markdownCall = gh.putFile.mock.calls.find(([arg]) => String(arg.path || '').endsWith('drain-flies-sarasota-kitchens.mdx'));
-    // Writes the EXISTING nested file (its sha) — an in-place update, not a new file.
+    // Writes the EXISTING nested path — an in-place update, not a new file.
+    // (Tree commits replace the path unconditionally; no per-file sha.)
     expect(markdownCall[0].path).toBe('src/content/blog/pest-control/drain-flies-sarasota-kitchens.mdx');
-    expect(markdownCall[0].sha).toBe('existing-nested-sha');
     // Never opens a second flat file with the same route.
     expect(gh.putFile).not.toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/drain-flies-sarasota-kitchens.mdx',
@@ -1046,6 +1070,14 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     // Hero and markdown land on the SAME feature branch, branch cut first.
     expect(gh.putFile.mock.calls[0][0].branch).toBe(gh.putBinary.mock.calls[0][0].branch);
     expect(gh.createBranch.mock.invocationCallOrder[0]).toBeLessThan(gh.putBinary.mock.invocationCallOrder[0]);
+    // …and atomically, in ONE commit: a hero commit followed by a markdown
+    // commit let Cloudflare register the branch deployment against the first
+    // commit and starve the PR poller's head==deployment gate (PR #374).
+    expect(gh.commitFiles).toHaveBeenCalledTimes(1);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/dollar-spot-venice/hero.webp',
+      'src/content/blog/pest-control/dollar-spot-venice.mdx',
+    ]);
     // Frontmatter stamped with the path that was actually committed.
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image).toEqual({
@@ -1107,7 +1139,6 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
     expect(heroAltVision.describeHeroForAlt).not.toHaveBeenCalled();
     expect(gh.putFile).toHaveBeenCalledWith(expect.objectContaining({
       path: 'src/content/blog/dollar-spot-venice.mdx',
-      sha: 'mdx-sha',
     }));
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image.src).toBe('/images/blog/dollar-spot-venice/hero.webp');
@@ -1373,7 +1404,7 @@ describe('Astro publisher hero image republish', () => {
     gh.createIssueComment.mockResolvedValue({});
   });
 
-  test('passes the existing hero SHA when updating an already-published hero asset', async () => {
+  test('overwrites an already-published hero asset inside the single publish commit', async () => {
     const post = {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
@@ -1401,9 +1432,12 @@ describe('Astro publisher hero image republish', () => {
 
     await AstroPublisher.publishAstro('post-1');
 
+    // The republish carries the fresh hero bytes in the single publish
+    // commit — the tree write replaces the existing path unconditionally,
+    // so no per-file sha handshake is needed (or possible) here.
+    expect(gh.commitFiles).toHaveBeenCalledTimes(1);
     expect(gh.putBinary).toHaveBeenCalledWith(expect.objectContaining({
       path: 'public/images/blog/ant-trails-bradenton/hero.webp',
-      sha: 'existing-hero-sha',
     }));
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
       astro_status: 'pr_open',
