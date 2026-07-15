@@ -658,6 +658,9 @@ router.post('/:token/confirm', async (req, res, next) => {
         source: 'pay_confirm',
       });
       ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 1000, limit: 5 });
+      // Fire-and-forget: release any payment-held WDO report gated on this
+      // invoice (60s interval is the fallback).
+      require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     }
 
     res.json({

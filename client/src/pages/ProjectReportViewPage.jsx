@@ -385,6 +385,39 @@ export default function ProjectReportViewPage() {
     </div>
   );
 
+  // Payment-held report (402 report_payment_required): the inspection is
+  // done and the report exists, but it unlocks — and is emailed automatically
+  // — only once the invoice is paid. Warm customer-surface card with the pay
+  // CTA when the server offered a live pay link.
+  if (data?.code === 'report_payment_required') return (
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, maxWidth: 440, textAlign: 'center' }}>
+        <div style={{ color: ESTIMATE_MUTED }}><Icon name="lock" size={32} strokeWidth={1.75} /></div>
+        <div style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, marginTop: 8 }}>
+          Your {data.reportTypeLabel || 'inspection'} report is ready
+        </div>
+        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+          {data.payerBilled
+            ? 'This inspection is billed directly to the requesting party. As soon as their invoice is paid, your official report is emailed automatically and unlocks right here.'
+            : data.paymentProcessing
+              ? 'Your bank payment is processing — as soon as it clears, your official report is emailed to you automatically and unlocks right here. No extra steps needed.'
+              : <>Once your invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''} is paid, your official
+                report is emailed to you automatically and unlocks right here — no extra steps needed.</>}
+        </div>
+        {data.payUrl ? (
+          <a href={data.payUrl} style={{ ...primaryButtonStyle, marginTop: 16 }}>
+            Pay invoice{data.invoiceNumber ? ` ${data.invoiceNumber}` : ''}
+          </a>
+        ) : null}
+        <div style={{ marginTop: data.payUrl ? 10 : 16 }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={data.payUrl ? { ...secondaryButtonStyle } : { ...primaryButtonStyle }}>
+            Call Waves — {WAVES_PHONE_DISPLAY}
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+
   if (!data || data.error) return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
       <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>

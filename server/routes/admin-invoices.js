@@ -1515,6 +1515,11 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
     }
 
+    // Fire-and-forget: a manually recorded payment (check/cash/Zelle) may
+    // settle an invoice gating a payment-held WDO report — nudge the release
+    // sweep (60s interval is the fallback).
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
+
     try {
       const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
       await AnnualPrepayRenewals.syncTermForInvoicePayment(updatedInvoice);
@@ -1770,6 +1775,10 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
     } catch (err) {
       logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
     }
+
+    // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
+    // payment-held WDO report — nudge the release sweep.
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     try {
       const final = await db('invoices').where({ id }).first();
       await AnnualPrepayRenewals.syncTermForInvoicePayment(final);

@@ -899,6 +899,24 @@ httpServer.listen(PORT, () => {
       setInterval(runReceiptDeliveryQueue, 60 * 1000).unref();
     }
 
+    // WDO report payment-hold release sweep — delivers held reports once
+    // their invoice settles. The interval is the guarantee (every settlement
+    // path converges on invoices.status); payment paths also nudge it via
+    // scheduleHoldReleaseSweep for near-instant release. No-op until the
+    // hold columns migrate and a held row exists.
+    {
+      const runReportHoldSweep = async () => {
+        try {
+          const { sweepHeldReportReleases } = require('./services/project-report-hold');
+          await sweepHeldReportReleases({ limit: 5 });
+        } catch (err) {
+          logger.error(`[report-hold] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runReportHoldSweep, 45 * 1000).unref();
+      setInterval(runReportHoldSweep, 60 * 1000).unref();
+    }
+
     // Call recordings are processed by the every-5-minute scheduler.js
     // cron (recoverMissingRecentRecordings + processAllPending). Running
     // this interval alongside it duplicated the work (harmless only

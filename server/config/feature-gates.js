@@ -712,6 +712,16 @@ const gates = {
   // too) so campaign drafts never accumulate silently in a preview/dev queue.
   campaignDrafts: process.env.GATE_CAMPAIGN_DRAFTS === 'true',
 
+  // WDO Report Payment Hold — "pay before you get the report". Arms the
+  // hold option on the WDO send-with-invoice flow: the customer gets the
+  // invoice + pay link only, and the FDACS-13645 report is emailed
+  // automatically once the invoice settles (release sweep). A money-path +
+  // customer-facing delivery change, so it FAILS CLOSED (explicit opt-in in
+  // EVERY environment). The gate governs CREATING new holds only — releases
+  // of already-held reports (payment sweep, manual send, public 402 gate)
+  // always run, so flipping it off can never strand a held report.
+  wdoReportPaymentHold: process.env.GATE_WDO_REPORT_PAYMENT_HOLD === 'true',
+
   // Prepaid Invoice Receipt — when an operator marks a single visit prepaid
   // (cash / check / Zelle / card-over-phone) with "Email a paid receipt"
   // checked, mint the visit's invoice, apply the prepaid amount as payment, and

@@ -406,6 +406,52 @@ async function findProjectByReportSegment(segment) {
   return rows.length === 1 ? rows[0] : null;
 }
 
+// WDO report payment hold: while a report is held ('held'/'releasing'), its
+// public token serves a 402 payment-required payload instead of any report
+// content. The token itself is not proof of entitlement here — the hold flow
+// never emails the report link, but admin previews, the portal, or a
+// forwarded pay page could surface the URL early. payUrl rides along so the
+// viewer can render a "pay to receive your report" card; exposing it to a
+// token holder is intended — they are the party the pay link was sent to.
+async function heldReportPaymentContext(project) {
+  if (!['held', 'releasing'].includes(String(project?.report_hold_status || ''))) return null;
+  let payUrl = null;
+  let invoiceNumber = null;
+  let paymentProcessing = false;
+  let payerBilled = false;
+  if (project.invoice_id) {
+    const invoice = await db('invoices')
+      .where({ id: project.invoice_id })
+      .first('id', 'token', 'invoice_number', 'status', 'payer_id')
+      .catch(() => null);
+    const invoiceStatus = String(invoice?.status || '').toLowerCase();
+    // Third-party Bill-To isolation (Codex P1 on #2753): a payer-billed
+    // invoice's pay link belongs to the payer's AP inbox ONLY — the send
+    // paths never hand it to the homeowner, and this token page is opened by
+    // homeowners AND the third parties a WDO link is forwarded to. No pay
+    // CTA, no billing metadata; just "billed to the requesting party".
+    payerBilled = Boolean(invoice?.payer_id);
+    // ACH clearing window: pay-v2 rejects 'processing' invoices (an in-flight
+    // bank payment), so a pay CTA here would dead-end — tell the customer the
+    // payment is processing instead of asking them to pay again.
+    paymentProcessing = !payerBilled && invoiceStatus === 'processing';
+    // Only offer the pay CTA while the invoice is actually collectible:
+    // settled-but-not-yet-swept rows still 402 (the sweep delivers within a
+    // minute), and non-collectible statuses (void/refunded/cancelled — pay-v2
+    // rejects them all) must not render a button that errors on the pay page.
+    if (
+      !payerBilled
+      && invoice?.token
+      && !['paid', 'prepaid', 'processing', 'void', 'refunded', 'canceled', 'cancelled', 'sending'].includes(invoiceStatus)
+    ) {
+      const { publicPortalUrl } = require('../utils/portal-url');
+      payUrl = `${publicPortalUrl()}/pay/${invoice.token}`;
+    }
+    invoiceNumber = payerBilled ? null : (invoice?.invoice_number || null);
+  }
+  return { payUrl, invoiceNumber, paymentProcessing, payerBilled };
+}
+
 // GET /api/reports/project/:token/data — project report JSON for the viewer page
 router.get('/project/:token/data', async (req, res, next) => {
   if (!extractProjectReportTokenLookup(req.params.token || '')) {
@@ -414,6 +460,21 @@ router.get('/project/:token/data', async (req, res, next) => {
   try {
     const project = await findProjectByReportSegment(req.params.token);
     if (!project) return res.status(404).json({ error: 'Report not found' });
+
+    const heldContext = await heldReportPaymentContext(project);
+    if (heldContext) {
+      const typeCfg = require('../services/project-types').getProjectType(project.project_type);
+      return res.status(402).json({
+        error: 'Report pending payment',
+        code: 'report_payment_required',
+        projectType: project.project_type,
+        reportTypeLabel: typeCfg?.label || 'Inspection',
+        payUrl: heldContext.payUrl,
+        invoiceNumber: heldContext.invoiceNumber,
+        paymentProcessing: heldContext.paymentProcessing,
+        payerBilled: heldContext.payerBilled,
+      });
+    }
 
     if (!project.report_viewed_at) {
       await db('projects').where({ id: project.id }).update({ report_viewed_at: db.fn.now() });
@@ -553,6 +614,12 @@ router.get('/project/:token/fdacs-pdf', async (req, res, next) => {
     const project = await findProjectByReportSegment(req.params.token);
     if (!project || project.project_type !== 'wdo_inspection') {
       return res.status(404).json({ error: 'Report not found' });
+    }
+    // Payment-held report: no filing has been emailed yet (the natural state
+    // is an empty filings index), but belt-and-braces 402 here too so a prior
+    // filing can never leak through a held resend edge case.
+    if (await heldReportPaymentContext(project)) {
+      return res.status(402).json({ error: 'Report pending payment', code: 'report_payment_required' });
     }
     let filings = project.wdo_sent_filings;
     if (typeof filings === 'string') { try { filings = JSON.parse(filings); } catch { filings = null; } }

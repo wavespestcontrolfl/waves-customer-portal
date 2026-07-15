@@ -386,6 +386,47 @@ async function sendProjectReportWithInvoice({
   });
 }
 
+/**
+ * Invoice-FIRST delivery for a payment-held report ("pay before you get the
+ * report"): ONE branded email carrying the invoice PDF + pay link and the
+ * promise that the report is emailed automatically once the invoice is paid.
+ * Deliberately no report_url and no report attachment — the report is the
+ * thing being held.
+ */
+async function sendProjectInvoiceBeforeReport({
+  project,
+  customer,
+  payUrl,
+  invoice,
+  attachments = [],
+  idempotencyKey,
+  // Explicit recipient override (payer AP inbox / billing-contact copy).
+  recipient = null,
+} = {}) {
+  const payload = {
+    ...buildProjectPayload({ project, customer, recipient }),
+    invoice_url: payUrl || '',
+    pay_url: payUrl || '',
+    invoice_number: clean(invoice?.invoice_number),
+    // Amount due (total − applied account credit), not gross — mirrors the
+    // combined report+invoice email.
+    amount_due: invoice ? `$${invoiceAmountDue(invoice).toFixed(2)}` : '',
+  };
+  return sendProjectTemplate({
+    project,
+    customer,
+    templateKey: 'project.invoice_before_report',
+    payload,
+    suppressionGroupKey: SERVICE_GROUP,
+    categories: ['project_invoice', 'project_invoice_before_report', `project_type_${safeKey(project?.project_type)}`],
+    triggerEventId: `project_invoice.before_report:${project?.id || 'unknown'}`,
+    idempotencyKey: idempotencyKey
+      || `project.invoice_before_report:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
+    attachments,
+    recipient,
+  });
+}
+
 async function sendPrepGuide({
   project,
   customer,
@@ -462,6 +503,7 @@ module.exports = {
   resolvePortalInviteRecipient,
   sendProjectReportReady,
   sendProjectReportWithInvoice,
+  sendProjectInvoiceBeforeReport,
   sendPrepGuide,
   sendPortalInvite,
   _private: {
