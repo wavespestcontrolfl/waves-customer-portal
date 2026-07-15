@@ -379,14 +379,18 @@ function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
  * it predates the fix, and grading old content with a stricter-than-publish
  * gate parks every fix on legacy posts, the PR #368 lesson).
  */
-function validateRewrittenMeta(metaDescription, fixedMd, factContext = null, deps = {}) {
+function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
   try {
-    let data = {};
-    try { data = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { data = {}; }
-    const title = data.title || (factContext && factContext.title) || '';
+    // The title is deliberately OMITTED from both checks below: the
+    // whitelist can never change it, and evaluateTitleMetaSpam hard-fails
+    // titles with pre-existing issues (near-me, >90 chars, term repeats) —
+    // passing the unchanged legacy title would park a clean meta rewrite
+    // over content this fix didn't touch. An empty title skips every
+    // title check (inspectTitle early-returns) while the meta inspection
+    // still runs in full.
     const spamGate = deps.titleMetaSpamGate || require('./title-meta-spam-gate');
     const spam = spamGate.evaluateTitleMetaSpam({
-      title,
+      title: '',
       meta_description: metaDescription,
       city: factContext ? factContext.city : undefined,
       service: factContext ? factContext.tag : undefined,
@@ -889,7 +893,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // this inside revalidateFix — validateAutonomousRunGates swaps the
   // rewritten metadata into the draft before its quality gate runs).
   if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
-    const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, fixed, factContext, deps);
+    const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, factContext, deps);
     if (!metaVerdict.ok) {
       return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
     }

@@ -1353,12 +1353,17 @@ describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
 
   test('validateRewrittenMeta passes clean copy through the REAL spam + PII gates', () => {
     const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
-    const fixedMd = `---\ntitle: 'Florida Spiders: Which Ones Matter'\nmeta_description: ${VALID_META}\n---\nBODY`;
-    const res = rem.validateRewrittenMeta(VALID_META, fixedMd, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
+    const res = rem.validateRewrittenMeta(VALID_META, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
     expect(res.ok).toBe(true);
+    // A legacy title with pre-existing spam issues must NOT park a clean
+    // meta rewrite — the whitelist can never change the title, so only the
+    // rewritten meta is graded (Codex r3 on #2757).
+    const spammyTitle = 'Best Pest Control Near Me Sarasota | Pest Control Sarasota | ' + 'Pest Control '.repeat(6);
+    const resLegacy = rem.validateRewrittenMeta(VALID_META, { title: spammyTitle, city: 'Sarasota', keyword: 'pest control', tag: 'pest-control' });
+    expect(resLegacy.ok).toBe(true);
     // And a meta carrying an obvious non-Waves email fails the real gate.
     const bad = 'Email john.doe@gmail.com for spider help across Sarasota, Bradenton and Venice — identification, prevention and treatment for Southwest Florida homes.';
-    const resBad = rem.validateRewrittenMeta(bad, fixedMd.replace(VALID_META, bad), { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
+    const resBad = rem.validateRewrittenMeta(bad, { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
     expect(resBad.ok).toBe(false);
   });
 });
