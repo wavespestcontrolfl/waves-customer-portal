@@ -92,6 +92,19 @@ describe('detectUnassessedVacantParcel', () => {
     expect(hit.subdivision).toBe('EXAMPLE LAKES');
   });
 
+  it('detects via _raw.landUse — the only surviving copy on pre-change cached rows', () => {
+    // preserveCountyGisLandUse parks the county text under _raw.landUse when
+    // a PAO record wins the merge; rows cached before _parcel carried
+    // landUseDescription have nothing else for the read-side TTL to key on.
+    const rec = vacantRecord();
+    rec._parcel = {};
+    rec._raw = { landUse: 'Vacant Residential' };
+    expect(detectUnassessedVacantParcel(rec)).toBeTruthy();
+    // The synthesized commercial landUse form must not read as vacant.
+    rec._raw = { landUse: 'DOR use code 10 — commercial/industrial' };
+    expect(detectUnassessedVacantParcel(rec)).toBeNull();
+  });
+
   it('never fires once any building fact exists (incl. a verified override)', () => {
     expect(detectUnassessedVacantParcel(vacantRecord({ squareFootage: 2400 }))).toBeNull();
     expect(detectUnassessedVacantParcel(vacantRecord({ yearBuilt: 2026 }))).toBeNull();

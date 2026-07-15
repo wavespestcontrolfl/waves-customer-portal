@@ -984,7 +984,17 @@ function detectUnassessedVacantParcel(record) {
   if (record.squareFootage || record.yearBuilt) return null;
   const parcel = record._parcel || {};
   const raw = record._raw || {};
-  const landUseDescription = parcel.landUseDescription || raw.landUseDescription || null;
+  // _raw.landUse joins the read: preserveCountyGisLandUse parks the county
+  // vacancy text THERE (not landUseDescription) when a PAO record wins the
+  // merge, and rows cached before _parcel carried landUseDescription have no
+  // other surviving copy — without it the read-side short TTL never evicts
+  // exactly those old 180-day vacant rows (codex P2 #2749). The synthesized
+  // commercial form ("DOR use code 10 — commercial/industrial") never
+  // contains "vacant", so it can't false-positive here.
+  const landUseDescription = parcel.landUseDescription
+    || raw.landUseDescription
+    || raw.landUse
+    || null;
   // FL DOR major 00 = vacant residential — '00' (Manatee), '000' (FDOR
   // statewide), '0000' (Sarasota county form). The description regex covers
   // parcels whose code didn't come back (Charlotte ownership layer).
