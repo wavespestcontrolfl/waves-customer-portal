@@ -211,6 +211,22 @@ describe('composeServiceInterest', () => {
     })).toBe('Bed Bug Treatment + Pest Control Service');
   });
 
+  test('negated services are not requests (codex P1)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control only, not lawn care',
+    })).toBe('Quarterly Pest Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'quarterly pest, no termite treatment',
+    })).toBe('Quarterly Pest Control Service');
+    // a positive mention in a later clause still wins
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: "don't want mosquito, just pest and lawn",
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

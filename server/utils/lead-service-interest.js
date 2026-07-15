@@ -73,6 +73,13 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat(?:ment)?s?\b|\b(
 const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:the|my|our|his|her|their)\s+(?:front\s+|back\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?)\b/gi;
 const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 
+// Declined services are not requests: "pest control only, not lawn care"
+// must not grow a lawn tail. Drop the negator plus the rest of ITS clause
+// (up to the next , ; . ! ?) so a positive mention in a LATER clause still
+// wins — "don't want mosquito, just pest and lawn" keeps pest + lawn.
+const NEGATED_CLAUSE_RE = /\b(?:no|not|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b[^.,;!?]{0,60}/gi;
+const stripNegatedClauses = (s) => s.replace(NEGATED_CLAUSE_RE, ' ');
+
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
 // bugs" / "mole crickets" with a lawn match must not invent a pest tail.
 // Normalize the compounds to the word "lawn" before the family scan.
@@ -102,7 +109,9 @@ function composeServiceInterest(extracted = {}) {
   }
 
   const requested = cleanText(extracted.requested_service);
-  const scanText = requested ? normalizeLawnPests(stripLocationPhrases(requested)) : null;
+  const scanText = requested
+    ? normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(requested)))
+    : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane
   // (the lender's "termite inspection" IS the WDO) — suppress it regardless
