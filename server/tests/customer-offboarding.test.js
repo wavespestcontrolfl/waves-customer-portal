@@ -255,19 +255,34 @@ describe('previewCancelSignup — eligibility fails closed', () => {
 });
 
 describe('cancelSignupAndRefundDeposit — order and side effects', () => {
-  function executeQueues({ ledgerRefunded = '49.00', stragglers = [] } = {}) {
+  // Execute's db-call order after the preview: recurrence flip → per visit
+  // (fresh status/track read, track normalize, unresolved-invoice re-query)
+  // → straggler re-query (+ the same trio per straggler) → fresh
+  // billing_mode read → tier/rate clear → ledger re-read → bell name read.
+  function executeQueues({ ledgerRefunded = '49.00', stragglers = [], unresolved = [] } = {}) {
     const q = previewQueues();
-    // step 2: recurrence flip, per-visit track_state normalize (×2), the
-    // straggler re-query, then a normalize per straggler; step 3 tier/rate
-    // clear; step 5 ledger re-read + notification name lookup.
     q.scheduled_services.push(
       chain({ update: 1 }), // recurring_ongoing flip
+      chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh read
       chain({ update: 1 }), // v-1 track normalize
+      chain({ first: { status: 'confirmed', track_state: 'scheduled' } }), // v-2 fresh read
       chain({ update: 1 }), // v-2 track normalize
       chain({ rows: stragglers }),
-      ...stragglers.map(() => chain({ update: 1 })),
+      ...stragglers.flatMap(() => [
+        chain({ first: { status: 'pending', track_state: null } }),
+        chain({ update: 1 }),
+      ]),
     );
-    q.customers.push(chain({ update: 1 }), chain({ first: { first_name: 'Taylor', last_name: 'Morgan' } }));
+    q.invoices.push(
+      chain({ rows: unresolved }), // v-1 unresolved-invoice re-query
+      chain({ rows: [] }), // v-2
+      ...stragglers.map(() => chain({ rows: [] })),
+    );
+    q.customers.push(
+      chain({ first: { billing_mode: null } }), // fresh read after voids
+      chain({ update: 1 }), // tier/rate clear
+      chain({ first: { first_name: 'Taylor', last_name: 'Morgan' } }),
+    );
     q.estimate_deposits.push(chain({ rows: [{ refunded_amount: ledgerRefunded }] }));
     return q;
   }
@@ -337,11 +352,13 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(result.email).toMatchObject({ skipped: true, reason: 'no_refund_recorded' });
   });
 
-  it('a per-application signup clears billing_mode and per_application_fee with the tier', async () => {
+  it('a per-application mode found AFTER the voids (term-cancel restore) clears billing_mode and fee with the tier', async () => {
     const q = executeQueues();
-    q.customers[0] = chain({ first: { ...CUSTOMER, billing_mode: 'per_application' } });
+    // The FRESH post-void read is authoritative — a term cancel can restore
+    // billing_mode='per_application' that the preview snapshot never saw.
+    q.customers[1] = chain({ first: { billing_mode: 'per_application' } });
     // Capture before the run — setDbQueues consumes the arrays.
-    const tierChain = q.customers[1];
+    const tierChain = q.customers[2];
     setDbQueues(q);
     await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
     const tierUpdate = tierChain.update.mock.calls[0][0];
@@ -353,13 +370,59 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     });
   });
 
-  it('one stuck visit does not strand the refund — failure isolated and reported', async () => {
+  it('one stuck visit GATES the refund — reported, deposits left received for a re-run', async () => {
     mockTransition.mockImplementationOnce(async () => { throw new Error('invalid transition'); });
-    setDbQueues(executeQueues());
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh (transition throws next)
+      chain({ first: { status: 'confirmed', track_state: 'scheduled' } }), // v-2 fresh
+      chain({ update: 1 }), // v-2 normalize
+      chain({ rows: [] }), // stragglers
+    );
+    q.invoices.push(chain({ rows: [] })); // v-2 unresolved re-query only
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    setDbQueues(q);
+
     const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
     expect(result.visitsCancelled).toBe(1);
     expect(result.visitFailures).toEqual([{ id: 'v-1', reason: 'invalid transition' }]);
-    expect(result.refunded).toBe(49);
+    expect(result.refundSkipped).toMatch(/run this again/);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  it('a LIVE tracker discovered at cancel time fails that visit and gates the refund', async () => {
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: { status: 'pending', track_state: 'en_route' } }), // v-1 went live post-preview
+      chain({ first: { status: 'confirmed', track_state: 'scheduled' } }), // v-2 fresh
+      chain({ update: 1 }), // v-2 normalize
+      chain({ rows: [] }), // stragglers
+    );
+    q.invoices.push(chain({ rows: [] })); // v-2 unresolved re-query only
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/live \(en_route\)/) }]);
+    // The live visit was never transitioned.
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('an invoice the void sweep could not resolve gates the refund', async () => {
+    setDbQueues(executeQueues({
+      unresolved: [{ id: 'vinv-1', invoice_number: 'WPC-2026-0011', status: 'sent' }],
+    }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(2);
+    expect(result.unresolvedInvoices).toEqual(['WPC-2026-0011']);
+    expect(result.refundSkipped).toMatch(/run this again/);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+    expect(mockSendEmail).not.toHaveBeenCalled();
   });
 
   it('sweeps stragglers minted by a racing auto-extension after the recurrence flip', async () => {

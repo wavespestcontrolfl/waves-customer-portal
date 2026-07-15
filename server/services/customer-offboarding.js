@@ -184,19 +184,19 @@ async function previewCancelSignup(customerId) {
     blockers.push(`a visit is in progress (${liveStates.join(', ')}) — resolve it on the dispatch board first`);
   }
 
-  // Money collected on a visit (paid/processing invoice or recorded
-  // payment) is beyond the deposit stage — the mid-term/proration decision
-  // is the owner's, not this flow's.
-  if (visits.length > 0) {
-    const paidVisitInvoices = await db('invoices')
-      .whereIn('scheduled_service_id', visits.map((v) => v.id))
-      .where((qb) => {
-        qb.whereIn('status', ['paid', 'processing']).orWhereNotNull('payment_recorded_at');
-      })
-      .select('id', 'invoice_number', 'status');
-    if (paidVisitInvoices.length > 0) {
-      blockers.push(`a visit invoice is ${paidVisitInvoices[0].status} (${paidVisitInvoices[0].invoice_number || paidVisitInvoices[0].id}) — money collected beyond the deposit; out of scope`);
-    }
+  // Money collected on ANY visit (paid/processing invoice or recorded
+  // payment) is beyond the deposit stage — including already-completed
+  // visits this flow won't touch. The mid-term/proration decision is the
+  // owner's, not this flow's.
+  const paidVisitInvoices = await db('invoices')
+    .where({ customer_id: customerId })
+    .whereNotNull('scheduled_service_id')
+    .where((qb) => {
+      qb.whereIn('status', ['paid', 'processing']).orWhereNotNull('payment_recorded_at');
+    })
+    .select('id', 'invoice_number', 'status');
+  if (paidVisitInvoices.length > 0) {
+    blockers.push(`a visit invoice is ${paidVisitInvoices[0].status} (${paidVisitInvoices[0].invoice_number || paidVisitInvoices[0].id}) — money collected beyond the deposit; out of scope`);
   }
 
   return {
@@ -239,13 +239,31 @@ async function previewCancelSignup(customerId) {
 
 // Cancel one visit with the exact side-effect set the schedule bulk-cancel
 // runs (business-initiated: hold fees waived). Idempotent — an already-
-// cancelled row reruns the handlers harmlessly.
+// cancelled row reruns the handlers harmlessly. Returns the visit's open
+// invoices the best-effort void sweep could NOT resolve (in-flight PI,
+// frozen statement, money racing in) so the caller can refuse to refund
+// past them.
 async function cancelVisitForOffboarding(visit, { actorId }) {
+  // Re-read at cancel time: the preview's live-tracker guard is a snapshot,
+  // and a tech can flip en_route between the preview and this write (the
+  // tracker also LEADS the legacy status, so the row can still read
+  // confirmed). Same fresh-read discipline as cancellation-processor —
+  // active work is dispatch's call, never this button's.
+  const fresh = await db('scheduled_services')
+    .where({ id: visit.id })
+    .first('status', 'track_state');
+  if (!fresh) throw new Error('visit no longer exists');
+  if (LIVE_TRACK_STATES.includes(String(fresh.track_state))) {
+    throw new Error(`visit is live (${fresh.track_state}) — left for dispatch`);
+  }
+  if (![...CANCELLABLE_VISIT_STATUSES, 'cancelled'].includes(String(fresh.status))) {
+    throw new Error(`visit is ${fresh.status} — left for dispatch`);
+  }
   const { transitionJobStatus } = require('./job-status');
   await db.transaction(async (trx) => {
     await transitionJobStatus({
       jobId: visit.id,
-      fromStatus: visit.status,
+      fromStatus: fresh.status,
       toStatus: 'cancelled',
       transitionedBy: actorId || null,
       notes: 'Signup cancellation',
@@ -280,13 +298,22 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   } catch (e) {
     logger.error(`[customer-offboarding] track-layer cancel failed for ${visit.id}: ${e.message}`);
   }
-  await require('./invoice').voidOpenInvoicesForCancelledService(visit.id);
+  const InvoiceService = require('./invoice');
+  await InvoiceService.voidOpenInvoicesForCancelledService(visit.id);
+  // The sweep is best-effort by design (unverifiable PI, frozen statement,
+  // money racing in all log-and-skip) — re-query so a skipped invoice is a
+  // reported fact, not a silent one.
+  const unresolvedInvoices = await db('invoices')
+    .where({ scheduled_service_id: visit.id })
+    .whereIn('status', InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES)
+    .select('id', 'invoice_number', 'status');
   try {
     const CardHolds = require('./estimate-card-holds');
     await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true });
   } catch (e) {
     logger.error(`[customer-offboarding] card-hold handling failed for ${visit.id}: ${e.message}`);
   }
+  return { unresolvedInvoices };
 }
 
 async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {}) {
@@ -325,16 +352,19 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .update({ recurring_ongoing: false, updated_at: db.fn.now() });
 
   // Cancel every cancellable visit. Per-visit failure isolation (mirrors
-  // schedule bulk-cancel): one stuck row must not strand the refund;
-  // failures are reported, not swallowed.
-  for (const visit of preview.visits) {
+  // schedule bulk-cancel); failures and invoices the void sweep could not
+  // resolve are collected — either one gates the refund below.
+  const unresolvedInvoices = [];
+  const cancelOne = async (visit) => {
     try {
-      await cancelVisitForOffboarding(visit, { actorId });
+      const { unresolvedInvoices: leftover } = await cancelVisitForOffboarding(visit, { actorId });
       result.visitsCancelled += 1;
+      unresolvedInvoices.push(...leftover);
     } catch (e) {
       result.visitFailures.push({ id: visit.id, reason: e.message });
     }
-  }
+  };
+  for (const visit of preview.visits) await cancelOne(visit);
   // Straggler re-sweep: an auto-extension already in flight past the flag
   // flip can land after the preview read — catch anything cancellable that
   // appeared since.
@@ -343,14 +373,8 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .whereIn('status', CANCELLABLE_VISIT_STATUSES)
     .whereNotIn('id', preview.visits.map((v) => v.id))
     .select('id', 'status');
-  for (const visit of stragglers) {
-    try {
-      await cancelVisitForOffboarding(visit, { actorId });
-      result.visitsCancelled += 1;
-    } catch (e) {
-      result.visitFailures.push({ id: visit.id, reason: e.message });
-    }
-  }
+  for (const visit of stragglers) await cancelOne(visit);
+  result.unresolvedInvoices = unresolvedInvoices.map((inv) => inv.invoice_number || inv.id);
 
   // 3. No Plan: clear the tier AND the monthly rate, keep the record ACTIVE
   // (win-back visible; owner ruling 2026-07-15). monthly_rate must go too —
@@ -362,9 +386,14 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // Per-application signups stamp billing_mode='per_application' +
   // per_application_fee at acceptance, and no term sync resets them — a
   // stale fee would let a straggler completion still price per-visit.
-  // (annual_prepay mode is reset by the term cancel riding the void; NULL
-  // mode + NULL rate = the monthly cron has nothing to charge.)
-  const perApplication = preview.customer.billingMode === 'per_application';
+  // Re-read AFTER the voids: an annual-prepay term cancel restores the
+  // customer's PRIOR mode, which can itself be 'per_application' — the
+  // preview snapshot predates that restore. (NULL mode + NULL rate = the
+  // monthly cron has nothing to charge.)
+  const freshCustomer = await db('customers')
+    .where({ id: customerId })
+    .first('billing_mode');
+  const perApplication = freshCustomer?.billing_mode === 'per_application';
   const tierCleared = await db('customers')
     .where({ id: customerId })
     .where((qb) => {
@@ -379,9 +408,26 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     });
   result.tierCleared = tierCleared > 0;
 
-  // 4. Refund the deposit remainder — face value only, Stripe last. The
-  // sweep owns the claim discipline; a Stripe failure reverts the claim,
-  // raises the reconcile alert, and this run still reports what happened.
+  // 4. Refund the deposit remainder — but only past a CLEAN sweep. A visit
+  // left uncancelled or an invoice the best-effort void skipped (in-flight
+  // PI, frozen statement) means this account isn't cleanly at the deposit
+  // stage: refunding past it could hand money back while a live pay
+  // session or dunning still collects. Deposits stay 'received', so a
+  // re-run after the human resolves the leftover picks the refund up.
+  if (result.visitFailures.length > 0 || unresolvedInvoices.length > 0) {
+    result.refundSkipped = 'unresolved visits/invoices — resolve them, then run this again to issue the refund';
+    result.email = { ok: false, skipped: true, reason: 'refund_skipped' };
+    logger.warn('[customer-offboarding] refund skipped — unresolved visits/invoices', {
+      customerId,
+      visitFailures: result.visitFailures,
+      unresolvedInvoices: result.unresolvedInvoices,
+    });
+    return result;
+  }
+
+  // Face value only, Stripe last. The sweep owns the claim discipline; a
+  // Stripe failure reverts the claim, raises the reconcile alert, and this
+  // run still reports what happened.
   const { refundUnconsumedDeposits } = require('./estimate-deposits');
   const estimateIds = [...new Set(preview.deposits.map((d) => d.estimateId).filter(Boolean))];
   for (const estimateId of estimateIds) {

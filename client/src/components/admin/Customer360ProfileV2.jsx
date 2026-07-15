@@ -4236,7 +4236,9 @@ function CancelSignupModal({ customer, onClose, onDone }) {
           )}
           {result && (
             <div>
-              <div className="mb-2 font-medium">Done.</div>
+              <div className="mb-2 font-medium">
+                {result.refundSkipped ? "Partially done — refund NOT issued." : "Done."}
+              </div>
               <ul className="list-disc pl-5">
                 <li>Invoices voided: {result.invoicesVoided.length ? result.invoicesVoided.join(", ") : "none"}</li>
                 <li>Visits cancelled: {result.visitsCancelled}</li>
@@ -4247,9 +4249,19 @@ function CancelSignupModal({ customer, onClose, onDone }) {
                     : `not sent (${result.email?.reason || result.email?.error || "see logs"})`}
                 </li>
               </ul>
+              {result.refundSkipped && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundSkipped}
+                </div>
+              )}
               {result.visitFailures?.length > 0 && (
                 <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
                   {result.visitFailures.length} visit(s) could not be cancelled — handle them on the Schedule page.
+                </div>
+              )}
+              {result.unresolvedInvoices?.length > 0 && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  Open visit invoice(s) could not be voided: {result.unresolvedInvoices.join(", ")} — resolve on the Invoices page.
                 </div>
               )}
             </div>

@@ -3742,5 +3742,6 @@ module.exports = InvoiceService;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
