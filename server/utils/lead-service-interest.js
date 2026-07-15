@@ -58,7 +58,7 @@ const SERVICE_FAMILIES = [
   { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+rats?)/i },
   // midges / no-see-ums are treated by the mosquito program in this repo
   { key: 'mosquito', label: 'Mosquito Control Service', re: /\bmosquito(?:es|s)?\b|\bmidges?\b|\bno[-\s]?see[-\s]?ums?\b/i },
-  { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b/i },
+  { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
   { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|\bbait\s+stations?\b/i },
   { key: 'wildlife', label: 'Wildlife Control Service', re: /\bwildlife\b|\braccoons?\b|\bsquirrels?\b|\bo?possums?\b|\barmadillos?\b/i },
   { key: 'wdo', label: 'WDO Inspection Service', re: /\bwdo\b|\bwood[\s-]?destroying\b/i },
@@ -70,7 +70,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing)?|kill(?:ing)?|get\s+rid\s+of)\s+(?:the\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -80,7 +80,10 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid
 // lawn" is an ant call, not a lawn-care request. Strip preposition + article/
 // possessive + place before scanning (the article is REQUIRED so "interested
 // in lawn care" — no article — survives untouched).
-const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:the|my|our|his|her|their|a|an|some)\s+(?:front\s+|back\s+)?(?:palm\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)\b/gi;
+// Article optional (codex P2: "around palm trees", "in lawn"), but a place
+// noun followed by care/service/etc is a REQUEST, not a location — the
+// lookahead keeps "interested in lawn care" intact.
+const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:(?:the|my|our|his|her|their|a|an|some)\s+)?(?:front\s+|back\s+)?(?:palm\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)\b(?!\s+(?:care|service|program|treatment|maintenance))/gi;
 const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 
 // Declined services are not requests: "pest control only, not lawn care"
@@ -92,8 +95,8 @@ const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+only\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only): "not only X but also Y" requests BOTH
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then))\b)/gi;
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|i\s+(?:need|want|do)|we\s+(?:need|want))\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)
@@ -103,6 +106,13 @@ function stripNegatedClauses(s) {
     })
     .join(' ');
 }
+
+// "termite extermination" is ONE service — drop the exterminat token when it
+// is bound to a specific family word so it can't add a generic pest tail
+// (codex P2); a standalone "exterminator" still counts as pest.
+const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed\s*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
+const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed\s*bugs?\b|bedbugs?\b|mosquito)/gi;
+const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1').replace(EXTERMINATE_FOR_RE, '');
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
 // bugs" / "mole crickets" with a lawn match must not invent a pest tail.
@@ -129,12 +139,15 @@ function composeServiceInterest(extracted = {}) {
   // which outranks it) already represents is covered — never re-append it.
   const covered = new Set();
   for (const source of [matched, cleanText(extracted.specific_service_name)]) {
-    for (const fam of familiesIn(source)) covered.add(fam.key);
+    // Normalize turf-pest catalog names first: a "Chinch Bug Treatment" /
+    // "Lawn Pest Control" match covers LAWN, not the generic pest family —
+    // else "lawn pests and roaches inside" never gets its pest tail (codex P2).
+    for (const fam of familiesIn(normalizeLawnPests(source || ''))) covered.add(fam.key);
   }
 
   const requested = cleanText(extracted.requested_service);
   const scanText = requested
-    ? normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(requested)))
+    ? normalizeExterminator(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(requested))))
     : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane

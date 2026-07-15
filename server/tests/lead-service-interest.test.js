@@ -283,6 +283,57 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Lawn Care Service + Mosquito Control Service');
   });
 
+  test('"X extermination" is one service, standalone exterminator is pest (codex P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Termite Inspection',
+      requested_service: 'termite extermination',
+    })).toBe('Termite Inspection');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and an exterminator',
+    })).toBe('Quarterly Lawn Care Service + Pest Control Service');
+  });
+
+  test('"not just" and ", I need" contrast phrasings keep the positive (codex P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not just pest control but also lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not termite, I need lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('article-less locations still strip, service phrases survive (codex P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mosquitoes around palm trees',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Fire Ant Treatment',
+      requested_service: 'fire ants in lawn',
+    })).toBe('Fire Ant Treatment');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and interested in lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('turf-pest catalog match does not cover household pest (codex P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Chinch Bug Treatment',
+      requested_service: 'lawn pests and roaches inside',
+    })).toBe('Chinch Bug Treatment + Pest Control Service');
+  });
+
+  test('Bora-Care / borate / wood treatment is a termite request (codex P2)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and Bora-Care wood treatment',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
