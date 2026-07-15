@@ -325,6 +325,37 @@ describe('processDueJobs', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('shadow: would send viewed_gone_quiet_72h'));
   });
 
+  test('gate off: a spacing defer CONSUMES the job as shadow — nothing pending survives to a flip', async () => {
+    isEnabled.mockReturnValue(false);
+    enqueueProcessorHappyPath({
+      est: baseEstimate({ follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 1 * H) }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 1 });
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    // Shadow, not a defer: a pending job due while dark must never send
+    // after a mid-window gate flip (codex 2736 r8).
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'shadow', outcome_reason: 'gate-off:spacing' }));
+  });
+
+  test('gate off: an unexpected error consumes as shadow too, never a pending retry', async () => {
+    isEnabled.mockReturnValue(false);
+    customerConvertedSince.mockRejectedValue(new Error('db hiccup'));
+    enqueueProcessorHappyPath();
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result).toEqual({ sent: 0, shadow: 1 });
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({
+      status: 'shadow',
+      outcome_reason: expect.stringContaining('gate-off:error'),
+    }));
+  });
+
   test('v1 category scope: a termite estimate is skipped', async () => {
     inferEstimateServiceLines.mockReturnValue([{ key: 'termite' }]);
     enqueueProcessorHappyPath();

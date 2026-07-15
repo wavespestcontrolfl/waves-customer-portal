@@ -387,6 +387,23 @@ async function processDueJobs(now = new Date()) {
   let sent = 0;
   let shadow = 0;
 
+  // One gate read per batch (codex 2736 r8): defers must be gate-aware — a
+  // spacing/hold/retry defer taken while the gate is OFF leaves the job
+  // pending across a mid-window flip, so a candidate that became due while
+  // dark would send after rollout (exactly the backlog burst shadow mode
+  // promises away). Gate off ⇒ every defer point CONSUMES the job as shadow
+  // instead, keeping the would-defer reason for volume judgment.
+  const gateOn = isEnabled('estimateEngagementFollowup');
+  const deferOrShadow = async (job, dueAt, reason, opts) => {
+    if (gateOn) {
+      await deferJob(job.id, dueAt, opts);
+    } else {
+      logger.info(`[est-engage] shadow: would defer ${job.rule_key} for estimate ${job.estimate_id} (${reason})`);
+      await markJob(job.id, 'shadow', `gate-off:${reason}`);
+      shadow++;
+    }
+  };
+
   for (const job of jobs) {
     let claimed = false;
     try {
@@ -424,7 +441,7 @@ async function processDueJobs(now = new Date()) {
         && est.status === 'sent' && !est.viewed_at && !est.followup_unviewed_sent) {
         const sentAtMs = est.sent_at ? new Date(est.sent_at).getTime() : 0;
         if (sentAtMs && nowMs - sentAtMs < rule.params.minAgeHours * 3600000) {
-          await deferJob(job.id, new Date(sentAtMs + rule.params.minAgeHours * 3600000));
+          await deferOrShadow(job, new Date(sentAtMs + rule.params.minAgeHours * 3600000), 'resend-restart');
           continue;
         }
       }
@@ -435,7 +452,7 @@ async function processDueJobs(now = new Date()) {
       // Mid-read hold: they're literally on the page — try again shortly.
       const lastView = est.last_viewed_at ? new Date(est.last_viewed_at).getTime() : 0;
       if (lastView && nowMs - lastView < ENGINE_LIMITS.activeViewHoldMinutes * 60000) {
-        await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
+        await deferOrShadow(job, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000), 'active-view-hold');
         continue;
       }
       const conv = await customerConvertedSince(est);
@@ -480,7 +497,7 @@ async function processDueJobs(now = new Date()) {
       const lastSendMs = est.last_follow_up_at ? new Date(est.last_follow_up_at).getTime() : 0;
       const spacingMs = ENGINE_LIMITS.minSpacingHours * 3600000;
       if (lastSendMs && !rule.params.spacingExempt && nowMs - lastSendMs < spacingMs) {
-        await deferJob(job.id, new Date(lastSendMs + spacingMs));
+        await deferOrShadow(job, new Date(lastSendMs + spacingMs), 'spacing');
         continue;
       }
       // Portal-wide email opt-out — same gate the stage engine applies.
@@ -495,11 +512,11 @@ async function processDueJobs(now = new Date()) {
             continue;
           }
         } catch {
-          await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), { countAttempt: true });
+          await deferOrShadow(job, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), 'prefs-unverifiable', { countAttempt: true });
           continue;
         }
       }
-      if (!isEnabled('estimateEngagementFollowup')) {
+      if (!gateOn) {
         logger.info(`[est-engage] shadow: would send ${rule.rule_key} for estimate ${est.id}`);
         await markJob(job.id, 'shadow', 'gate-off');
         shadow++;
@@ -556,8 +573,13 @@ async function processDueJobs(now = new Date()) {
       // the row pending with an elapsed due_at — it would head the
       // due_at-ordered batch every tick and eventually starve valid jobs.
       // Count the attempt and defer; give up after the bounded retries.
+      // Gate-aware like the defers (r8): an error retry can outlive the
+      // gate state too — while dark, consume instead of leaving pending.
       try {
-        if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
+        if (!gateOn) {
+          await markJob(job.id, 'shadow', `gate-off:error:${err.message}`.slice(0, 128));
+          shadow++;
+        } else if ((job.attempts || 0) + 1 >= ENGINE_LIMITS.maxSendAttempts) {
           await markJob(job.id, 'failed', `error:${err.message}`.slice(0, 128), { attempts: db.raw('attempts + 1') });
         } else {
           await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.retryDelayMinutes * 60000), { countAttempt: true });
