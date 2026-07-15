@@ -565,6 +565,13 @@ describe('processDueJobs', () => {
         email: expect.objectContaining({ idempotencySuffix: expires.toISOString() }),
       }),
     );
+    // codex 2736 r12: the claim is PINNED to the deadline the copy was
+    // validated against — a concurrent extension makes it a lost-claim skip
+    // instead of a wrong-deadline email.
+    expect(followupShared.claimFollowupSend).toHaveBeenCalledWith(
+      'est-1', 'expiring_engaged', 'estimate.engage_expiring', expect.any(Object),
+      expect.objectContaining({ requireExpiresAt: expires }),
+    );
   });
 
   test('a sibling expiring send suppresses the other variant', async () => {

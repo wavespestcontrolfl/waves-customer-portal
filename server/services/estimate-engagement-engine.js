@@ -573,12 +573,23 @@ async function processDueBatch(now = new Date()) {
         shadow++;
         continue;
       }
+      // Expiring reminders are ONE lifecycle per deadline: pin the claim to
+      // the deadline this job was validated against (codex 2736 r12 — an
+      // extension moving expires_at mid-flight makes this a lost-claim skip
+      // instead of a wrong-deadline email) and scope the email idempotency
+      // key to it (codex 2736 r10 — a re-armed deadline must not dedupe
+      // against the OLD deadline's email; mirrors estimate-extension's
+      // per-grant key).
+      const expiringLifecycle = dedupeGroup(rule.rule_key).length > 1 && est.expires_at
+        ? new Date(est.expires_at)
+        : null;
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
       }, {
         blockLegacyFlags: legacyFlagsFor(rule.rule_key),
         blockRuleKeys: siblings,
+        ...(expiringLifecycle ? { requireExpiresAt: expiringLifecycle } : {}),
       }))) {
         await markJob(job.id, 'skipped', 'lost-claim');
         continue;
@@ -586,19 +597,11 @@ async function processDueBatch(now = new Date()) {
       claimed = true;
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
-      // Expiring reminders are ONE lifecycle per deadline (codex 2736 r10):
-      // an extension re-arms them by deleting the old job/ledger rows, so
-      // the email idempotency key must scope to the CURRENT deadline or the
-      // re-armed send dedupes against the old deadline's email_messages row
-      // (mirrors estimate-extension's per-grant key).
-      const expiringLifecycle = dedupeGroup(rule.rule_key).length > 1 && est.expires_at
-        ? new Date(est.expires_at).toISOString()
-        : null;
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
           stage: `engage_${rule.rule_key}`,
-          ...(expiringLifecycle ? { idempotencySuffix: expiringLifecycle } : {}),
+          ...(expiringLifecycle ? { idempotencySuffix: expiringLifecycle.toISOString() } : {}),
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl),
         },
       });

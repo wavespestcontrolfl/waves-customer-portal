@@ -556,6 +556,20 @@ async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, opti
   const legacyFlags = (options.blockLegacyFlags || []).filter((col) => CLAIM_LEGACY_FLAG_COLUMNS.has(col));
   const siblingKeys = options.blockRuleKeys || [];
   const bindings = [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId];
+  // Deadline pin (codex 2736 r12): an extension can move expires_at (and
+  // delete the expiring job/ledger rows for the re-arm) between the
+  // processor's fresh read and this claim — pinning the claim to the
+  // deadline the copy was validated against makes that race a lost-claim
+  // skip instead of an email describing a deadline that no longer exists.
+  // Millisecond-truncated comparison: the pin value round-tripped through a
+  // JS Date (ms precision) while timestamptz stores microseconds — a raw
+  // equality would silently never match rows whose expiry carries sub-ms
+  // digits (pg-verified).
+  let expiryPinClause = "";
+  if (options.requireExpiresAt) {
+    expiryPinClause = "AND date_trunc('milliseconds', expires_at) = date_trunc('milliseconds', ?::timestamptz)";
+    bindings.push(new Date(options.requireExpiresAt));
+  }
   const flagClause = legacyFlags.map((col) => `AND estimates.${col} IS NOT TRUE`).join("\n     ");
   let siblingClause = "";
   if (siblingKeys.length) {
@@ -572,6 +586,7 @@ async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, opti
      WHERE id = ? AND archived_at IS NULL
      AND status IN ('sent', 'viewed')
      AND (expires_at IS NULL OR expires_at > now())
+     ${expiryPinClause}
      ${flagClause}
      ${siblingClause}
      ON CONFLICT (estimate_id, rule_key) DO NOTHING
