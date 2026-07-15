@@ -6979,6 +6979,15 @@ const SERVICE_CATALOG = [
     basePrice: 35, description: 'Bait station installation, quarterly monitoring, damage warranty (Premier)',
     products: ['Sentricon Always Active', 'Trelona ATBS'],
   },
+  // Rodent bait is billed separately and excluded from WaveGuard plan
+  // coverage (PLAN_NON_QUALIFIER_RE mirrors the server classifier), so this
+  // entry exists for the My Plan added-service row and ?service= deep-links
+  // only. Tier slices (max 4) and entitlement padding never reach it.
+  {
+    id: 'rodent_bait', name: 'Rodent Bait Stations', icon: 'shield',
+    frequencies: ['Monthly monitoring'],
+    basePrice: 49, description: 'Exterior bait station inspection, bait replenishment and rotation, exclusion check around entry points',
+  },
 ];
 
 const TIER_ORDER = ['Bronze', 'Silver', 'Gold', 'Platinum'];
@@ -7022,6 +7031,7 @@ const SERVICE_COVERAGE = {
   mosquito: { summary: 'Barrier treatments Apr-Oct. Re-spray within 14 days of heavy rain.', details: ['Monthly perimeter barrier spray (Apr-Oct)', 'Standing water treatment with larvicide', 'Foliage and shrub line application', 'Free re-spray within 14 days of heavy rain', 'Event spray available on request'] },
   tree_shrub: { summary: 'Deep root feeding, insect & disease treatment, palm injections.', details: ['Deep root fertilization', 'Insect and disease treatment', 'Palm trunk injections (Arborjet)', 'Seasonal monitoring and reporting'] },
   termite: { summary: 'Bait station installation and monitoring with damage warranty.', details: ['Bait station installation around perimeter', 'Quarterly monitoring inspections', 'Damage warranty (Premier tier)', 'Annual re-certification report'] },
+  rodent_bait: { summary: 'Exterior bait stations inspected and replenished on every visit.', details: ['Exterior rodent bait station inspection', 'Bait replenishment and rotation', 'Exclusion check around entry points'] },
 };
 
 // Service schedule months for calendar view
@@ -7754,7 +7764,11 @@ function MyPlanTab({ customer, focusService }) {
       (svcId === 'lawn_care' && (svcType.includes('lawn') || svcType.includes('fertiliz') || svcType.includes('turf'))) ||
       (svcId === 'mosquito' && svcType.includes('mosquito')) ||
       (svcId === 'tree_shrub' && (svcType.includes('tree') || svcType.includes('shrub') || svcType.includes('palm'))) ||
-      (svcId === 'termite' && svcType.includes('termite'))
+      (svcId === 'termite' && svcType.includes('termite')) ||
+      // Powers the schedule/calendar helpers for the standalone rodent row.
+      // Plan-coverage detection still never sees rodent rows — the
+      // PLAN_NON_QUALIFIER_RE filter runs upstream of detection.
+      (svcId === 'rodent_bait' && svcType.includes('rodent'))
     );
   };
 
@@ -7819,6 +7833,19 @@ function MyPlanTab({ customer, focusService }) {
     .map(id => SERVICE_CATALOG.find(svc => svc.id === id))
     .filter(Boolean);
   const numServices = includedServices.length;
+
+  // Rodent bait is billed separately from WaveGuard and deliberately excluded
+  // from plan-coverage detection, so it never counts toward the tier, its
+  // padding, numServices, or the savings copy. A live recurring rodent row on
+  // the visible schedule still earns a service row — appended after the tier
+  // services so rodent customers can see cadence, progress, and coverage.
+  const hasRodentBait = [nextService, ...upcomingServices].some(s =>
+    s && s.isRecurring === true && s.isCallback !== true &&
+    !PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase()) &&
+    serviceMatches('rodent_bait', s));
+  const displayedServices = hasRodentBait
+    ? [...includedServices, SERVICE_CATALOG.find(svc => svc.id === 'rodent_bait')].filter(Boolean)
+    : includedServices;
 
   const monthlyRate = customer.monthlyRate || 0;
   const annualPrepay = customer.annualPrepay || null;
@@ -8139,7 +8166,7 @@ function MyPlanTab({ customer, focusService }) {
             </div>
 
             <div>
-              {includedServices.map((svc, index) => {
+              {displayedServices.map((svc, index) => {
                 const completedMonths = getCompletedMonths(svc.id);
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const totalVisits = scheduleMonths.length;
@@ -8203,8 +8230,10 @@ function MyPlanTab({ customer, focusService }) {
                           <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} applications</div>
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
-                              (owner 2026-07-11: no per-year totals). */}
-                          {discount > 0 ? (
+                              (owner 2026-07-11: no per-year totals). Rodent bait
+                              is billed separately from the plan, so the member
+                              rate must not be claimed on its row. */}
+                          {discount > 0 && svc.id !== 'rodent_bait' ? (
                             <div style={{ marginTop: 4, fontSize: 14, color: B.green, fontWeight: 850 }}>
                               {Math.round(discount * 100)}% member rate
                             </div>
@@ -8338,7 +8367,7 @@ function MyPlanTab({ customer, focusService }) {
             <div style={sectionTitle}>Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
             <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
-              {includedServices.map((svc) => {
+              {displayedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
                 const completedMonths = getCompletedMonths(svc.id);
                 return (
