@@ -30,9 +30,12 @@ const TERMINAL_VISIT_STATUSES = ['completed', 'skipped', 'no_show', 'cancelled']
 // Live in-progress work (en_route / on_site) blocks the flow — a tech
 // rolling or on property is a dispatch decision, not a button's.
 const CANCELLABLE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
-// track_state values that mean a tech is actively working the visit right
-// now (same list as cancellation-processor).
-const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+// track_state values that disqualify a visit from this flow: a tech is
+// actively working it (en_route/on_property, same list as
+// cancellation-processor) or the tracker already reached 'complete' while
+// the legacy status column lags — a delivered service means money is owed,
+// not refundable.
+const BLOCKED_TRACK_STATES = ['en_route', 'on_property', 'complete'];
 // Statuses voidInvoice would refuse; preview mirrors them so the modal can
 // explain the block instead of the void throwing mid-run. 'prepaid' is NOT
 // listed: a credit-covered prepaid invoice (no payment_recorded_at, no
@@ -65,10 +68,10 @@ function parseLineItems(invoice) {
 // row — when the credit split across invoices, the earlier partial ones
 // are identifiable only by their deposit_credit line, and all of them must
 // void for the full face value to become refundable.
-async function invoicesCarryingDepositCredit(row) {
+async function invoicesCarryingDepositCredit(row, customerId) {
   const found = new Map();
   const candidates = await db('invoices')
-    .where({ customer_id: row.customer_id })
+    .where({ customer_id: customerId })
     .whereNot({ status: 'void' })
     .select('*');
   for (const inv of candidates) {
@@ -100,10 +103,17 @@ async function previewCancelSignup(customerId) {
 
   const blockers = [];
 
-  const deposits = await db('estimate_deposits')
-    .where({ customer_id: customerId })
-    .whereIn('status', ['received', 'credited', 'refunding'])
-    .select('id', 'estimate_id', 'status', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge', 'credited_invoice_id', 'customer_id');
+  // New-customer accepts mint the deposit intent BEFORE a customer row
+  // exists, so estimate_deposits.customer_id is often NULL and only the
+  // estimate gets linked to the customer at accept time — the main
+  // deposit-stage cancellation case must be found through the estimate.
+  const deposits = await db('estimate_deposits as ed')
+    .leftJoin('estimates as e', 'e.id', 'ed.estimate_id')
+    .where((qb) => {
+      qb.where('ed.customer_id', customerId).orWhere('e.customer_id', customerId);
+    })
+    .whereIn('ed.status', ['received', 'credited', 'refunding'])
+    .select('ed.id', 'ed.estimate_id', 'ed.status', 'ed.amount', 'ed.credited_amount', 'ed.refunded_amount', 'ed.card_surcharge', 'ed.credited_invoice_id');
 
   if (deposits.some((d) => d.status === 'refunding')) {
     blockers.push('a deposit refund is already in flight — retry after it settles');
@@ -118,7 +128,7 @@ async function previewCancelSignup(customerId) {
     if (remainderCents <= 0) continue;
     refundTotalCents += remainderCents;
     if (toCents(row.credited_amount) > 0) {
-      const carrying = await invoicesCarryingDepositCredit(row);
+      const carrying = await invoicesCarryingDepositCredit(row, customerId);
       if (carrying.length === 0) {
         blockers.push('a deposit credit could not be traced to its invoice — manual reconciliation required');
         continue;
@@ -163,14 +173,14 @@ async function previewCancelSignup(customerId) {
   // Live tracker states lead the legacy status column (track-transitions
   // flips track_state first, status sync is best-effort) — a visit with a
   // tech en route can still read status=confirmed. Same guard as
-  // cancellation-processor's LIVE_TRACK_STATES.
+  // cancellation-processor's BLOCKED_TRACK_STATES.
   const candidateVisits = await db('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', CANCELLABLE_VISIT_STATUSES)
     .select('id', 'status', 'scheduled_date', 'service_type', 'track_state')
     .orderBy('scheduled_date', 'asc');
-  const liveTracked = candidateVisits.filter((v) => LIVE_TRACK_STATES.includes(String(v.track_state)));
-  const visits = candidateVisits.filter((v) => !LIVE_TRACK_STATES.includes(String(v.track_state)));
+  const liveTracked = candidateVisits.filter((v) => BLOCKED_TRACK_STATES.includes(String(v.track_state)));
+  const visits = candidateVisits.filter((v) => !BLOCKED_TRACK_STATES.includes(String(v.track_state)));
 
   const inProgress = await db('scheduled_services')
     .where({ customer_id: customerId })
@@ -253,7 +263,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     .where({ id: visit.id })
     .first('status', 'track_state');
   if (!fresh) throw new Error('visit no longer exists');
-  if (LIVE_TRACK_STATES.includes(String(fresh.track_state))) {
+  if (BLOCKED_TRACK_STATES.includes(String(fresh.track_state))) {
     throw new Error(`visit is live (${fresh.track_state}) — left for dispatch`);
   }
   if (![...CANCELLABLE_VISIT_STATUSES, 'cancelled'].includes(String(fresh.status))) {
@@ -270,9 +280,36 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
       trx,
     });
   });
+  // The flip's atomic guard covers only `status` — a tech can tap En route
+  // between the fresh read above and the flip while the tracker's
+  // best-effort status sync fails. Re-read and COMPENSATE (mirrors
+  // cancellation-processor): revert the flip with its own audit row and
+  // leave the visit for dispatch.
+  let wentLive = null;
+  try {
+    const postFlip = await db('scheduled_services').where({ id: visit.id }).first('track_state');
+    if (postFlip && BLOCKED_TRACK_STATES.includes(String(postFlip.track_state))) {
+      wentLive = postFlip.track_state;
+    }
+  } catch (trackCheckErr) {
+    logger.error(`[customer-offboarding] post-flip track re-check failed for ${visit.id}: ${trackCheckErr.message}`);
+  }
+  if (wentLive) {
+    await transitionJobStatus({
+      jobId: visit.id,
+      fromStatus: 'cancelled',
+      toStatus: fresh.status,
+      transitionedBy: actorId || null,
+      notes: 'Signup-cancel reverted — tracker went live mid-request',
+    });
+    throw new Error(`visit went ${wentLive} mid-cancel — reverted, left for dispatch`);
+  }
   try {
     const AppointmentReminders = require('./appointment-reminders');
-    await AppointmentReminders.handleCancellation(visit.id);
+    // No per-visit customer notice — the flow sends ONE combined
+    // cancellation + refund email (owner ruling 2026-07-15); this also
+    // keeps refund-skipped runs silent toward the customer.
+    await AppointmentReminders.handleCancellation(visit.id, { sendNotification: false });
   } catch {}
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
@@ -307,11 +344,16 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     .where({ scheduled_service_id: visit.id })
     .whereIn('status', InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES)
     .select('id', 'invoice_number', 'status');
-  try {
-    const CardHolds = require('./estimate-card-holds');
-    await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true });
-  } catch (e) {
-    logger.error(`[customer-offboarding] card-hold handling failed for ${visit.id}: ${e.message}`);
+  // One-time card holds: the waived release is the ONLY step that frees the
+  // no-show hold — an exception or a lost race (held → charging) must gate
+  // the refund, not just log. {handled:false, reason:'no_hold'} is the
+  // normal non-card-hold case; a waived release reports {released:true}.
+  const CardHolds = require('./estimate-card-holds');
+  const holdOutcome = await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true });
+  const holdClear = holdOutcome
+    && (holdOutcome.reason === 'no_hold' || holdOutcome.released === true);
+  if (!holdClear) {
+    throw new Error('card hold could not be released — resolve it on the customer\'s billing tab');
   }
   return { unresolvedInvoices };
 }
@@ -374,7 +416,31 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .whereNotIn('id', preview.visits.map((v) => v.id))
     .select('id', 'status');
   for (const visit of stragglers) await cancelOne(visit);
+
+  // Durable pre-refund re-scan — NOT just this run's findings: a prior
+  // partial run can leave an open invoice on an already-cancelled visit
+  // (which no re-run will sweep again), and a visit invoice can race into
+  // paid/processing after the execute-time preview. Same for holds: a hold
+  // this run failed to release stays a blocker on the NEXT run even though
+  // its visit is already cancelled.
+  const lingering = await db('invoices')
+    .where({ customer_id: customerId })
+    .whereNotNull('scheduled_service_id')
+    .where((qb) => {
+      qb.whereIn('status', [...InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES, 'paid', 'processing'])
+        .orWhereNotNull('payment_recorded_at');
+    })
+    .select('id', 'invoice_number', 'status');
+  for (const inv of lingering) {
+    if (!unresolvedInvoices.some((u) => u.id === inv.id)) unresolvedInvoices.push(inv);
+  }
+  const openHolds = await db('estimate_card_holds as h')
+    .join('scheduled_services as s', 's.id', 'h.scheduled_service_id')
+    .where('s.customer_id', customerId)
+    .whereIn('h.status', ['held', 'charging'])
+    .select('h.scheduled_service_id', 'h.status');
   result.unresolvedInvoices = unresolvedInvoices.map((inv) => inv.invoice_number || inv.id);
+  result.openCardHolds = openHolds.length;
 
   // 3. No Plan: clear the tier AND the monthly rate, keep the record ACTIVE
   // (win-back visible; owner ruling 2026-07-15). monthly_rate must go too —
@@ -414,8 +480,8 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // stage: refunding past it could hand money back while a live pay
   // session or dunning still collects. Deposits stay 'received', so a
   // re-run after the human resolves the leftover picks the refund up.
-  if (result.visitFailures.length > 0 || unresolvedInvoices.length > 0) {
-    result.refundSkipped = 'unresolved visits/invoices — resolve them, then run this again to issue the refund';
+  if (result.visitFailures.length > 0 || unresolvedInvoices.length > 0 || openHolds.length > 0) {
+    result.refundSkipped = 'unresolved visits/invoices/card holds — resolve them, then run this again to issue the refund';
     result.email = { ok: false, skipped: true, reason: 'refund_skipped' };
     logger.warn('[customer-offboarding] refund skipped — unresolved visits/invoices', {
       customerId,
