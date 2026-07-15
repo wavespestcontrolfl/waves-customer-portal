@@ -472,6 +472,54 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Tree & Shrub Care Service');
   });
 
+  test('termite-qualified bait stations after the noun are termite (codex r7)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus bait stations for termites',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
+  test('palm-injection target nouns never add tree & shrub (codex r7)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and trunk injection for palms',
+    })).toBe('Quarterly Pest Control Service + Palm Injection');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'palm injection for my palms',
+    })).toBe('Quarterly Pest Control Service + Palm Injection');
+  });
+
+  test('inspection-only termite wording labels as Termite Inspection (codex r7)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and termite inspection for VA loan',
+    })).toBe('Quarterly Pest Control Service + Termite Inspection');
+    // treatment wording still labels as work
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and liquid termite treatment',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
+  test('"interested in lawn" with no service word is a request (codex r7)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and interested in lawn',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('a positive "too" clause survives a negation comma (codex r7)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'no lawn, mosquito service too',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not termite, WDO report as well',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

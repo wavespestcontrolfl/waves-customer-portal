@@ -63,7 +63,7 @@ const SERVICE_FAMILIES = [
   { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
   // bait station is rodent wording ONLY when not termite-qualified —
   // "termite bait stations" is a termite deliverable in this repo.
-  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|(?<!termite\s)\bbait\s+stations?\b/i },
+  { key: 'rodent', label: 'Rodent Control Service', re: /\brodents?\b|\brats?\b|\bmouse\b|\bmice\b|(?<!termite\s)\bbait\s+stations?\b(?!\s+for\s+(?:the\s+)?termites?\b)/i },
   { key: 'wildlife', label: 'Wildlife Control Service', re: /\bwildlife\b|\braccoons?\b|\bsquirrels?\b|\bo?possums?\b|\barmadillos?\b/i },
   { key: 'wdo', label: 'WDO Inspection Service', re: /\bwdo\b|\bwood[\s-]?destroying\b/i },
 ];
@@ -74,7 +74,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?termites?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -111,8 +111,12 @@ const LOCATION_PHRASE_RE = new RegExp(
 const IMMEDIATE_SERVICE_WORD_RE = /^\s+(?:care|service|program|treatment|maintenance)s?\b/i;
 const COORDINATED_SERVICE_TAIL_RE = /^\s+(?:and|or|&)\b[^.;,]{0,40}?\b(?:care|service|program|treatment|maintenance)s?\b/i;
 const LOCATION_HAS_ARTICLE_RE = /^\s*\w+\s+(?:the|my|our|his|her|their|a|an|some)\b/i;
+// "interested in lawn" / "asking about the yard" — an interest verb right
+// before the preposition marks a REQUEST, never a pest location (codex r7).
+const INTEREST_BEFORE_RE = /\b(?:interested|interest|looking|inquir\w*|asking|quote[ds]?)\s*$/i;
 function stripLocationPhrases(s) {
   return s.replace(LOCATION_PHRASE_RE, (match, offset, whole) => {
+    if (INTEREST_BEFORE_RE.test(whole.slice(0, offset))) return match;
     const after = whole.slice(offset + match.length);
     if (IMMEDIATE_SERVICE_WORD_RE.test(after)) {
       // Article-marked AND coordinated: only the FINAL noun is bound to the
@@ -147,7 +151,7 @@ const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never
 // mosquito request (codex r6). Stripped BEFORE segment-based negation.
 const COMPARED_AWAY_RE = /\b(?:instead\s+of|rather\s+than|in\s+lieu\s+of)\b[^,.;!?]*/gi;
 const stripComparedAway = (s) => s.replace(COMPARED_AWAY_RE, ' ');
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)/gi;
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)
@@ -167,6 +171,12 @@ function stripNegatedClauses(s) {
 const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
 const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
+
+// "palm injection for my palms" / "trunk injection into the palms" — the
+// trailing target noun is part of the SAME injection request, not a second
+// tree & shrub service (codex r7). Collapse the target phrase before scanning.
+const PALM_INJECTION_TARGET_RE = /\b((?:palm|trunk)\s+injections?)\s+(?:for|on|in|into)\s+(?:the\s+|my\s+|our\s+)?palms?\b/gi;
+const normalizePalmInjection = (s) => s.replace(PALM_INJECTION_TARGET_RE, '$1');
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
 // bugs" / "mole crickets" with a lawn match must not invent a pest tail.
@@ -201,7 +211,7 @@ function composeServiceInterest(extracted = {}) {
 
   const requested = cleanText(extracted.requested_service);
   const scanText = requested
-    ? normalizeExterminator(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested)))))
+    ? normalizeExterminator(normalizePalmInjection(normalizeLawnPests(stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))))))
     : null;
   // Order-independent wdo↔termite: whether the WDO shows up in the match OR
   // anywhere in the request, non-treatment termite wording is the same lane
@@ -215,7 +225,13 @@ function composeServiceInterest(extracted = {}) {
     if (covered.has(fam.key)) continue;
     if (fam.key === 'termite' && wdoPresent && !TERMITE_TREATMENT_RE.test(scanText)) continue;
     covered.add(fam.key);
-    const next = `${label} + ${fam.label}`;
+    // Inspection-only termite wording ("pest control and termite inspection
+    // for VA loan") is the inspection deliverable, not treatment work —
+    // label it as such so the office doesn't price a treatment (codex r7).
+    const famLabel = fam.key === 'termite' && !TERMITE_TREATMENT_RE.test(scanText)
+      ? 'Termite Inspection'
+      : fam.label;
+    const next = `${label} + ${famLabel}`;
     if (next.length > 255) break; // leads.service_interest is varchar(255)
     label = next;
   }
