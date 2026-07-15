@@ -121,12 +121,39 @@ async function renderTemplate(templateKey, vars, context = {}) {
 // SMS/email to the customer. Re-checks archived_at at claim time: the
 // candidate queries filter on it, but a manual/sweep archive landing between
 // the read and this UPDATE must still block the send.
-async function claimStage(estId, flag) {
-  const affected = await db("estimates")
+// Shared-lane minimum spacing, mirroring the engine's knob (both lanes bump
+// last_follow_up_at, so this is ONE inbox budget).
+const LANE_MIN_SPACING_HOURS = parseFloat(process.env.ESTIMATE_ENGAGEMENT_MIN_SPACING_HOURS) || 12;
+
+async function claimStage(estId, flag, { excludeEngineRuleKeys = [] } = {}) {
+  const q = db("estimates")
     .where({ id: estId })
     .whereNull("archived_at")
-    .where((q) => q.where(flag, false).orWhereNull(flag))
-    .update({ [flag]: true });
+    .where((qq) => qq.where(flag, false).orWhereNull(flag))
+    // Shared-lane spacing INSIDE the atomic claim (codex 2736 r13): the
+    // engine's 5-min processor bumps last_follow_up_at on its sends, but
+    // the legacy stages only checked their own booleans — a
+    // return_visit_hot email could be chased by the viewed/final nudge a
+    // couple of hours later. Legacy stages sit ≥24h apart by their own
+    // windows, so this only blocks CROSS-lane stacking; a blocked claim
+    // leaves the flag unset and the next 2h tick retries.
+    .where((qq) => qq.whereNull("last_follow_up_at")
+      .orWhere("last_follow_up_at", "<", new Date(Date.now() - LANE_MIN_SPACING_HOURS * 3600000)));
+  // Cross-lane dedupe INSIDE the atomic claim (codex 2736 r3): the legacy
+  // cron and the engagement engine run under different advisory locks, so
+  // the candidate-query whereNotExists alone leaves a read-then-claim race
+  // at the 2h boundary. Re-checking the engine ledger in the same UPDATE
+  // closes it — if the engine's send landed after our candidate read, this
+  // claim affects 0 rows and the stage skips.
+  if (excludeEngineRuleKeys.length) {
+    q.whereNotExists(function excludeEngineSends() {
+      this.select(db.raw("1"))
+        .from("estimate_followup_sends")
+        .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+        .whereIn("estimate_followup_sends.rule_key", excludeEngineRuleKeys);
+    });
+  }
+  const affected = await q.update({ [flag]: true });
   return affected === 1;
 }
 
@@ -270,6 +297,15 @@ async function sendDualChannel(est, { sms, email }) {
     }
   }
   if (est.customer_email && email?.templateKey) {
+    // Optional lifecycle suffix (codex 2736 r10): a stage that can
+    // legitimately re-fire for the same estimate (an expiring reminder
+    // re-armed by an extension's new deadline) scopes its key per lifecycle
+    // so the re-send isn't deduped against the old lifecycle's email —
+    // while double-fires within ONE lifecycle still dedupe. Categories and
+    // stage stay stable (unbounded per-deadline category values would
+    // pollute analytics).
+    const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
+      + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
@@ -277,8 +313,8 @@ async function sendDualChannel(est, { sms, email }) {
         payload: email.payload || {},
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
-        triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
-        idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
+        triggerEventId: idempotencyKey,
+        idempotencyKey,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.
@@ -513,14 +549,62 @@ const PAYMENT_STEP_TEMPLATE_KEY = "estimate.payment_step_abandoned";
 // claimStage path does (codex 2729 r2). A send failure deletes the row so
 // the next tick retries — the ledger row is the claim AND the attribution
 // record.
-async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger) {
+// Optional atomic guards (codex 2736 r3): blockLegacyFlags re-checks the
+// legacy cron's boolean claim columns inside the same statement (closes the
+// cross-lane race at the 2h boundary — column names are allowlisted, never
+// caller-interpolated), and blockRuleKeys blocks sibling rules that share a
+// send budget (e.g. the two expiring variants = one expiry reminder).
+// The claim also re-checks active status + a live link (codex 2736 r7):
+// accepting an estimate flips status WITHOUT archiving the row, so a
+// customer accepting between the caller's current-state checks and this
+// claim would otherwise still get followed up. Every caller (engine rules
+// AND the payment-step stage) only ever emails sent/viewed estimates with
+// an unexpired link, so the guard lives here as the final race-closer.
+const CLAIM_LEGACY_FLAG_COLUMNS = new Set([
+  "followup_unviewed_sent",
+  "followup_expiring_sent",
+]);
+
+async function claimFollowupSend(estimateId, ruleKey, templateKey, trigger, options = {}) {
+  const legacyFlags = (options.blockLegacyFlags || []).filter((col) => CLAIM_LEGACY_FLAG_COLUMNS.has(col));
+  const siblingKeys = options.blockRuleKeys || [];
+  const bindings = [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId];
+  // Deadline pin (codex 2736 r12): an extension can move expires_at (and
+  // delete the expiring job/ledger rows for the re-arm) between the
+  // processor's fresh read and this claim — pinning the claim to the
+  // deadline the copy was validated against makes that race a lost-claim
+  // skip instead of an email describing a deadline that no longer exists.
+  // Millisecond-truncated comparison: the pin value round-tripped through a
+  // JS Date (ms precision) while timestamptz stores microseconds — a raw
+  // equality would silently never match rows whose expiry carries sub-ms
+  // digits (pg-verified).
+  let expiryPinClause = "";
+  if (options.requireExpiresAt) {
+    expiryPinClause = "AND date_trunc('milliseconds', expires_at) = date_trunc('milliseconds', ?::timestamptz)";
+    bindings.push(new Date(options.requireExpiresAt));
+  }
+  const flagClause = legacyFlags.map((col) => `AND estimates.${col} IS NOT TRUE`).join("\n     ");
+  let siblingClause = "";
+  if (siblingKeys.length) {
+    siblingClause = `AND NOT EXISTS (
+       SELECT 1 FROM estimate_followup_sends s2
+       WHERE s2.estimate_id = estimates.id
+         AND s2.rule_key IN (${siblingKeys.map(() => "?").join(", ")})
+     )`;
+    bindings.push(...siblingKeys);
+  }
   const result = await db.raw(
     `INSERT INTO estimate_followup_sends (estimate_id, rule_key, template_key, trigger)
      SELECT id, ?, ?, ?::jsonb FROM estimates
      WHERE id = ? AND archived_at IS NULL
+     AND status IN ('sent', 'viewed')
+     AND (expires_at IS NULL OR expires_at > now())
+     ${expiryPinClause}
+     ${flagClause}
+     ${siblingClause}
      ON CONFLICT (estimate_id, rule_key) DO NOTHING
      RETURNING id`,
-    [ruleKey, templateKey, JSON.stringify(trigger || {}), estimateId],
+    bindings,
   );
   return (result?.rows?.length || 0) === 1;
 }
@@ -529,6 +613,81 @@ async function releaseFollowupSend(estimateId, ruleKey) {
   await db("estimate_followup_sends")
     .where({ estimate_id: estimateId, rule_key: ruleKey })
     .del();
+}
+
+// Atomic post-send bookkeeping (codex 2736 r6): stamping the ledger row's
+// counted_at and bumping the estimate's counters happen in ONE statement,
+// so a transient failure leaves a clean uncounted row (healable by
+// repairFollowupCounters) instead of a half-applied state. Idempotent: an
+// already-counted row makes the whole statement a no-op.
+async function bumpFollowupCounters(estimateId, ruleKey) {
+  await db.raw(
+    `WITH counted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND rule_key = ? AND counted_at IS NULL
+       RETURNING 1
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + 1,
+       last_follow_up_at = now()
+     WHERE id = ? AND EXISTS (SELECT 1 FROM counted)`,
+    [estimateId, ruleKey, estimateId],
+  );
+}
+
+// Estimate-wide counter heal: applies every uncounted ledger row (any rule,
+// payment_step_abandoned included) to follow_up_count/last_follow_up_at in
+// one atomic statement. Exact — counts rows rather than guessing from
+// timestamps, so a newer successful send can't mask an older lost bump.
+// Returns the healed counters (null when nothing was uncounted) so callers
+// can overlay a stale in-memory row before judging caps/spacing.
+// olderThanMinutes (codex 2736 r14): callers OUTSIDE the follow-up advisory
+// lock (the extension re-arm) must not count a seconds-old claim a live
+// processor inserted pre-send — a deadline-moved abort would release it,
+// leaving a phantom touch on the counters. Cron-side callers run under the
+// shared lock, where an uncounted row is always a genuinely lost bump.
+async function repairFollowupCounters(estimateId, { olderThanMinutes = 0 } = {}) {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE estimate_id = ? AND counted_at IS NULL
+       AND sent_at <= now() - (? * interval '1 minute')
+       RETURNING sent_at
+     )
+     UPDATE estimates SET
+       follow_up_count = COALESCE(follow_up_count, 0) + (SELECT count(*) FROM uncounted),
+       last_follow_up_at = GREATEST(COALESCE(last_follow_up_at, '-infinity'::timestamptz), (SELECT max(sent_at) FROM uncounted))
+     WHERE id = ? AND EXISTS (SELECT 1 FROM uncounted)
+     RETURNING follow_up_count, last_follow_up_at`,
+    [estimateId, olderThanMinutes, estimateId],
+  );
+  return result?.rows?.[0] || null;
+}
+
+// Global heal for lost bumps (codex 2736 r15): a delivered email whose
+// counter bump failed leaves counted_at NULL, and the per-estimate repairs
+// only run when the engagement engine or an extension later touches that
+// estimate — a payment-step-only estimate could stay stale forever, letting
+// later follow-ups ignore a real touch. Runs at the START of the legacy 2h
+// cron, under the shared advisory lock, where any uncounted row is a
+// genuinely lost bump (both sending lanes claim under this lock, and a
+// claim released on failure deletes its row).
+async function repairAllFollowupCounters() {
+  const result = await db.raw(
+    `WITH uncounted AS (
+       UPDATE estimate_followup_sends SET counted_at = now()
+       WHERE counted_at IS NULL
+       RETURNING estimate_id, sent_at
+     ), agg AS (
+       SELECT estimate_id, count(*) AS cnt, max(sent_at) AS max_sent
+       FROM uncounted GROUP BY estimate_id
+     )
+     UPDATE estimates e SET
+       follow_up_count = COALESCE(e.follow_up_count, 0) + agg.cnt,
+       last_follow_up_at = GREATEST(COALESCE(e.last_follow_up_at, '-infinity'::timestamptz), agg.max_sent)
+     FROM agg WHERE e.id = agg.estimate_id`,
+  );
+  return result?.rowCount || 0;
 }
 
 // Fail-CLOSED re-check that the abandoned payment step is still the thing
@@ -750,14 +909,14 @@ async function checkPaymentStepAbandoned(now = new Date()) {
         },
       });
       if (ok) {
-        await db("estimates")
-          .where({ id: est.id })
-          .update({
-            follow_up_count: db.raw("COALESCE(follow_up_count, 0) + 1"),
-            last_follow_up_at: db.fn.now(),
-          });
-        sent++;
+        // The email is SENT — the ledger row must survive a bookkeeping
+        // failure (releasing it would re-email on the next tick). The bump
+        // is atomic with the ledger's counted_at stamp; if it fails, the
+        // row stays uncounted and repairFollowupCounters heals it before
+        // the engine next judges this estimate's caps.
         claimed = false;
+        await bumpFollowupCounters(est.id, PAYMENT_STEP_RULE_KEY);
+        sent++;
       }
     } catch (e) {
       logger.error(`[est-followup] Payment-step send failed: ${e.message}`);
@@ -780,6 +939,16 @@ const EstimateFollowUp = {
   async checkAll() {
     let sent = 0;
 
+    // Heal lost counter bumps BEFORE any stage judges spacing/caps
+    // (codex 2736 r15) — non-fatal: a failed heal just means this tick
+    // judges the same slightly-stale counters the previous one did.
+    try {
+      const healed = await repairAllFollowupCounters();
+      if (healed > 0) logger.info(`[est-followup] healed lost counter bumps on ${healed} estimate(s)`);
+    } catch (e) {
+      logger.warn(`[est-followup] global counter heal failed (continuing): ${e.message}`);
+    }
+
     // 1. Sent but NOT viewed after 24 hours
     try {
       const unviewed = await db("estimates")
@@ -795,7 +964,17 @@ const EstimateFollowUp = {
           q
             .where("followup_unviewed_sent", false)
             .orWhereNull("followup_unviewed_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's
+        // delivery_unopened_24h rule targets the same non-view — one
+        // unopened nudge per estimate across both lanes. (The engine's
+        // sweep/predicate mirror this via followup_unviewed_sent.)
+        .whereNotExists(function excludeEngineUnopened() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .where("estimate_followup_sends.rule_key", "delivery_unopened_24h");
+        });
 
       for (const est of unviewed) {
         let claimed = false;
@@ -807,7 +986,9 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_unviewed_sent"))) {
+          if (!(await claimStage(est.id, "followup_unviewed_sent", {
+            excludeEngineRuleKeys: ["delivery_unopened_24h"],
+          }))) {
             logger.info(`[est-followup] Unviewed skip ${est.id}: lost-claim`);
             continue;
           }
@@ -1043,7 +1224,19 @@ const EstimateFollowUp = {
           q
             .where("followup_expiring_sent", false)
             .orWhereNull("followup_expiring_sent"),
-        );
+        )
+        // Engagement-engine dedupe (codex 2736 r2): the engine's expiring_*
+        // rules target the same deadline — one expiry reminder per estimate
+        // across both lanes. (The engine mirrors via followup_expiring_sent.)
+        .whereNotExists(function excludeEngineExpiring() {
+          this.select(db.raw("1"))
+            .from("estimate_followup_sends")
+            .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
+            .whereIn("estimate_followup_sends.rule_key", [
+              "expiring_engaged",
+              "expiring_never_viewed",
+            ]);
+        });
 
       for (const est of expiring) {
         let claimed = false;
@@ -1055,7 +1248,9 @@ const EstimateFollowUp = {
             );
             continue;
           }
-          if (!(await claimStage(est.id, "followup_expiring_sent"))) {
+          if (!(await claimStage(est.id, "followup_expiring_sent", {
+            excludeEngineRuleKeys: ["expiring_engaged", "expiring_never_viewed"],
+          }))) {
             logger.info(`[est-followup] Expiring skip ${est.id}: lost-claim`);
             continue;
           }
@@ -1151,7 +1346,12 @@ module.exports._private = {
   paymentStepStillRequiresCard,
   claimFollowupSend,
   releaseFollowupSend,
+  bumpFollowupCounters,
+  repairFollowupCounters,
   safetyGate,
   claimStage,
+  repairAllFollowupCounters,
   mintStageLinks,
+  hasRepliedRecently,
+  wasRecentlyOpened,
 };

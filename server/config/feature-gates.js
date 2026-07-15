@@ -335,6 +335,15 @@ const gates = {
   // and never claims or sends.
   paymentStepFollowup: process.env.GATE_PAYMENT_STEP_FOLLOWUP === 'true',
 
+  // Estimate engagement engine — behavior-triggered follow-up EMAILS keyed
+  // to estimate view sessions (return visit, dark-then-return, high intent,
+  // unopened, gone-quiet, expiring). V1 scope: pest + lawn estimates only.
+  // Customer-facing auto-send: explicit opt-in in EVERY environment. Until
+  // the gate is on, the engine still schedules and consumes jobs but marks
+  // them 'shadow' and logs the would-send — volume is judgeable with zero
+  // send risk and no post-flip backlog burst.
+  estimateEngagementFollowup: process.env.GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP === 'true',
+
   // Nightly critical-churn "CHURN ALERT" SMS to the owner's phone
   // (retention-engine, 3AM Customer Intelligence Pipeline). Internal-only —
   // it texts ADAM_PHONE, never a customer — but the owner paused health

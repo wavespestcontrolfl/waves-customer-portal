@@ -1,3 +1,32 @@
+// db is mocked so the write-path describe below can drive extendEstimate
+// end-to-end; every other describe here exercises pure/pre-write paths that
+// never touch it.
+jest.mock('../models/db', () => {
+  const mockDeletes = [];
+  const dbFn = jest.fn((table) => {
+    const b = { _table: table, _whereIn: null };
+    for (const m of ['where', 'whereNull', 'whereNotNull']) b[m] = jest.fn(() => b);
+    b.whereIn = jest.fn((...args) => { b._whereIn = args; return b; });
+    b.update = jest.fn(() => Promise.resolve(1));
+    b.del = jest.fn(() => {
+      mockDeletes.push({ table: b._table, whereIn: b._whereIn });
+      return Promise.resolve(1);
+    });
+    return b;
+  });
+  dbFn.fn = { now: jest.fn(() => 'NOW()') };
+  dbFn._deletes = mockDeletes;
+  return dbFn;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The re-arm heals uncounted sends before deleting their rows — pin the
+// boundary; repair behavior itself is pinned in the follow-up suites.
+jest.mock('../services/estimate-follow-up', () => ({
+  _private: { repairFollowupCounters: jest.fn(async () => null) },
+}));
+
+const db = require('../models/db');
+const { repairFollowupCounters } = require('../services/estimate-follow-up')._private;
 const {
   extendEstimate,
   computeExtensionExpiry,
@@ -88,6 +117,32 @@ describe('extendEstimate validation (pre-write throws)', () => {
       entryPoint: 'test',
       workflow: 'test',
     })).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe('extendEstimate post-write: engine expiring re-arm (codex 2736 r9)', () => {
+  it('deletes the engine expiring jobs + ledger rows after the guarded update (silent extension)', async () => {
+    db._deletes.length = 0;
+    const res = await extendEstimate({
+      estimate: { id: 'est-9', status: 'viewed', archived_at: null, expires_at: FUTURE, viewed_at: PAST },
+      days: 7,
+      silent: true,
+      entryPoint: 'test',
+      workflow: 'test',
+    });
+    expect(res.newExpiry).toBeInstanceOf(Date);
+    // Uncounted sends are healed into the estimate's counters BEFORE their
+    // rows are deleted (codex 2736 r11) — never destroy uncounted evidence.
+    // Age-thresholded (r14): a seconds-old row can be a live processor's
+    // pre-send claim — counting it would leave a phantom touch.
+    expect(repairFollowupCounters).toHaveBeenCalledWith('est-9', { olderThanMinutes: 10 });
+    // The one-lifecycle enqueue guard + sends-group budget key on these rows;
+    // deleting them IS the re-arm for the new deadline (mirrors the
+    // followup_expiring_sent reset).
+    expect(db._deletes).toEqual([
+      { table: 'estimate_followup_jobs', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
+      { table: 'estimate_followup_sends', whereIn: ['rule_key', ['expiring_engaged', 'expiring_never_viewed']] },
+    ]);
   });
 });
 

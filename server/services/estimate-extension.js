@@ -154,6 +154,51 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     throw err;
   }
 
+  // Re-arm the ENGAGEMENT ENGINE's expiring lifecycle for the new deadline
+  // too (codex 2736 r9): the engine's one-lifecycle enqueue guard and the
+  // expiring sends-group budget would otherwise suppress expiring_* forever
+  // — job and ledger rows from the OLD deadline don't describe this one,
+  // and a lingering ledger row also blocks the legacy cron's cross-lane
+  // claim. Deletion IS the re-arm, mirroring the followup_expiring_sent
+  // reset above (the extension itself is the audit trail; the estimate's
+  // follow_up_count keeps counting the old send toward the inbox cap).
+  // Post-write invariant applies (see below): never throws.
+  try {
+    // Count any uncounted sends BEFORE deleting their rows (codex 2736
+    // r11): a sent-but-unbumped expiring email leaves counted_at NULL as
+    // the heal marker — deleting it first would erase the only evidence
+    // and quietly loosen the inbox cap/spacing for an email the customer
+    // really received. Repair failure skips the deletes too (same catch):
+    // never destroy evidence that hasn't been counted. Lazy require avoids
+    // loading the follow-up module graph on every extension.
+    const { repairFollowupCounters } = require('./estimate-follow-up')._private;
+    // olderThanMinutes (codex 2736 r14): this runs OUTSIDE the follow-up
+    // advisory lock, so a seconds-old uncounted row can be a live
+    // processor's pre-send claim (which the deadline-moved abort will
+    // release) — counting it would leave a phantom touch. Ten minutes is
+    // far beyond any in-flight send; genuinely lost bumps are older.
+    await repairFollowupCounters(estimate.id, { olderThanMinutes: 10 });
+    const EXPIRING_RULE_KEYS = ['expiring_engaged', 'expiring_never_viewed'];
+    await db('estimate_followup_jobs')
+      .where({ estimate_id: estimate.id })
+      .whereIn('rule_key', EXPIRING_RULE_KEYS)
+      .del();
+    // Only COUNTED rows are deleted (codex 2736 r15): the age-thresholded
+    // repair above deliberately leaves sub-10-min uncounted rows (possible
+    // in-flight claims), and deleting one would erase the only marker that
+    // can later heal the counters for a real send. A surviving row is
+    // either an in-flight claim (the deadline-moved abort releases it) or
+    // a fresh lost bump — the cron-side heal counts it later, and its
+    // group-guard suppression of the re-arm errs toward fewer emails.
+    await db('estimate_followup_sends')
+      .where({ estimate_id: estimate.id })
+      .whereIn('rule_key', EXPIRING_RULE_KEYS)
+      .whereNotNull('counted_at')
+      .del();
+  } catch (e) {
+    logger.warn(`[estimate-extension] engine expiring re-arm failed (non-fatal): ${e.message}`);
+  }
+
   // Customer notification — Waves voice. Skipped if no phone or the caller
   // asked for silence; consent/opt-out/gate enforcement lives inside
   // sendCustomerMessage.

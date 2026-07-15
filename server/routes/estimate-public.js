@@ -7083,6 +7083,17 @@ async function handleEstimateView(req, res, next) {
           user_agent: ua || null,
         });
       } catch (e) { logger.warn(`[estimate-view] estimate_views insert skipped: ${e.message}`); }
+
+      // Engagement-engine hook: a real customer open may complete a
+      // qualifying session boundary (return visit / dark-then-return /
+      // high intent). Fire-and-forget — the engine sessionizes from
+      // estimate_views and enqueues a durable job; it must never slow or
+      // break the public estimate page. Lazy require: the engine pulls the
+      // follow-up stack, which this route never needs on its own.
+      try {
+        const EngagementEngine = require('../services/estimate-engagement-engine');
+        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-view] engagement hook failed: ${err.message}`));
+      } catch (e) { logger.warn(`[estimate-view] engagement hook unavailable: ${e.message}`); }
     }
 
     // First-view actions: set viewed_at/status and notify admin in-app.
@@ -15752,6 +15763,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           user_agent: ua || null,
         });
       } catch (e) { logger.warn(`[estimate-data] estimate_views insert skipped: ${e.message}`); }
+
+      // Engagement-engine hook — same contract as the legacy HTML view
+      // site: fire-and-forget, never blocks the response.
+      try {
+        const EngagementEngine = require('../services/estimate-engagement-engine');
+        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-data] engagement hook failed: ${err.message}`));
+      } catch (e) { logger.warn(`[estimate-data] engagement hook unavailable: ${e.message}`); }
     }
 
     // First-view transition — keep admin preview clicks from making the

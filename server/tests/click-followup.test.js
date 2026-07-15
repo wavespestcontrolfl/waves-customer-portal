@@ -39,6 +39,19 @@ jest.mock('../services/estimate-lead-linkage', () => ({
 jest.mock('../services/estimate-deposits', () => ({
   DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
 }));
+// The gate re-runs the engine's category scope on live jobs — pin the
+// engine boundary here; its own behavior is pinned in its own suite.
+jest.mock('../services/estimate-engagement-engine', () => ({
+  _private: {
+    loadRules: jest.fn(async () => [
+      { rule_key: 'viewed_gone_quiet_72h', enabled: true, trigger_type: 'time_sweep', params: { eligibleCategories: ['pest', 'lawn'] } },
+    ]),
+    categoryEligible: jest.fn(() => true),
+    rulePredicateStillHolds: jest.fn(() => true),
+    dedupeGroup: jest.fn((key) => [key]),
+    ENGINE_LIMITS: { maxSendsPerEstimate: 4 },
+  },
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -94,6 +107,7 @@ function makeEstimate(overrides = {}) {
     customer_id: 'cust-1',
     customer_name: 'Dana Reyes',
     customer_phone: '+19415550101',
+    customer_email: 'dana@example.com',
     created_at: new Date(NOW.getTime() - 10 * 24 * H),
     sent_at: new Date(NOW.getTime() - 10 * 24 * H),
     viewed_at: new Date(NOW.getTime() - 9 * 24 * H),
@@ -889,6 +903,106 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
       ...baseInput(),
       estimate: makeEstimate({ viewed_at: new Date(NOW.getTime() - 49 * H), followup_viewed_sent: false }),
     });
+    expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
+  });
+
+  const pendingEngineJob = (over = {}) => ({
+    rule_key: 'viewed_gone_quiet_72h',
+    status: 'pending',
+    due_at: new Date(NOW.getTime() + 60000),
+    trigger: '{}',
+    ...over,
+  });
+
+  test('cadence_due: a pending ENGAGEMENT ENGINE job due within 24h (codex 2736 r9)', async () => {
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
+  });
+
+  test('engine jobs are invisible while the engagement gate is off (shadow = no customer touch)', async () => {
+    isEnabled.mockImplementation((key) => key !== 'estimateEngagementFollowup');
+    // A pending job exists, but the engine can only shadow-consume it.
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('a job stamped enqueued_dark is shadow-destined — never suppresses the click (codex 2736 r10)', async () => {
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob({ trigger: '{"enqueued_dark":true}' })] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('a category-ineligible job never suppresses the click — the processor will skip it (codex 2736 r10)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.categoryEligible.mockReturnValueOnce(false);
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('a STALE time-sweep job never suppresses the click — the processor will skip it too (codex 2736 r11)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.rulePredicateStillHolds.mockReturnValueOnce(false);
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('email-prefs-off customers: engine jobs are never touches (codex 2736 r12)', async () => {
+    enqueue('notification_prefs', { first: { email_enabled: false } });
+    expect(await gate.engagementJobDueSoon(makeEstimate(), NOW)).toBe(false);
+  });
+
+  test('no customer_email: the email-only engine can never touch this contact', async () => {
+    expect(await gate.engagementJobDueSoon(makeEstimate({ customer_email: null }), NOW)).toBe(false);
+  });
+
+  test('accepted estimates: a stale pre-acceptance job never costs the booking nudge (codex 2736 r14)', async () => {
+    // The processor will skip this job as estimate-inactive — not a touch.
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    expect(await gate.engagementJobDueSoon(makeEstimate({ status: 'accepted' }), NOW)).toBe(false);
+  });
+
+  test('a capped estimate (follow_up_count ≥ 4) gets no engine email — never suppresses the click (codex 2736 r15)', async () => {
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    expect(await gate.engagementJobDueSoon(makeEstimate({ follow_up_count: 4 }), NOW)).toBe(false);
+  });
+
+  test('an UPCOMING sweep window counts as due-soon — unopened window opens in 6h (codex 2736 r12)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.loadRules.mockResolvedValueOnce([
+      { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', params: { minAgeHours: 24, maxAgeHours: 48, eligibleCategories: ['pest'] } },
+    ]);
+    enqueue('estimate_followup_jobs', { rows: [] });
+    enqueue('estimate_followup_sends', { rows: [] });
+    const est = makeEstimate({
+      status: 'sent', viewed_at: null, followup_unviewed_sent: false,
+      sent_at: new Date(NOW.getTime() - 18 * H),
+    });
+    expect(await gate.engagementJobDueSoon(est, NOW)).toBe(true);
+  });
+
+  test('an upcoming window already consumed by a prior lifecycle/send does NOT count (codex 2736 r12)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.loadRules.mockResolvedValueOnce([
+      { rule_key: 'delivery_unopened_24h', enabled: true, trigger_type: 'time_sweep', params: { minAgeHours: 24, maxAgeHours: 48, eligibleCategories: ['pest'] } },
+    ]);
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'delivery_unopened_24h', status: 'shadow', due_at: new Date(NOW.getTime() - 60000), trigger: '{}' }] });
+    enqueue('estimate_followup_sends', { rows: [] });
+    const est = makeEstimate({
+      status: 'sent', viewed_at: null, followup_unviewed_sent: false,
+      sent_at: new Date(NOW.getTime() - 18 * H),
+    });
+    expect(await gate.engagementJobDueSoon(est, NOW)).toBe(false);
+  });
+
+  test('engagement-job check failure fails toward suppression (cadence_due)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.loadRules.mockRejectedValueOnce(new Error('db down'));
+    enqueue('estimate_followup_jobs', { rows: [pendingEngineJob()] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
     expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
   });
 

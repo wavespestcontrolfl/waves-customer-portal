@@ -2261,13 +2261,60 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 */2 * * *', async () => {
     try {
-      await runExclusive('estimate-follow-up', async () => {
-        const EstimateFollowUp = require('./estimate-follow-up');
-        const result = await EstimateFollowUp.checkAll();
-        if (result.sent > 0) logger.info(`Estimate follow-ups: ${result.sent} sent`);
-      });
+      // The 5-min engine tick shares this lock (codex 2736 r6), fires on
+      // the same :00 boundary, and its dark-mode backlog drain can hold it
+      // for minutes — a plain non-blocking skip would cost this job a whole
+      // 2h tick and age estimates out of the legacy stages' bounded windows
+      // (codex 2736 r11: sent_at 24–48h etc.). Retry the lease a few times;
+      // sweep-style queries make a slightly-late run equivalent to an
+      // on-time one, and the atomic claims keep a duplicate-adjacent run
+      // safe. The ENGINE stays the only lane allowed to skip outright.
+      const LEASE_RETRIES = 5;
+      const LEASE_RETRY_MS = 60000;
+      for (let attempt = 0; attempt <= LEASE_RETRIES; attempt++) {
+        const result = await runExclusive('estimate-follow-up', async () => {
+          const EstimateFollowUp = require('./estimate-follow-up');
+          const res = await EstimateFollowUp.checkAll();
+          if (res.sent > 0) logger.info(`Estimate follow-ups: ${res.sent} sent`);
+          return res;
+        });
+        if (!result?.skipped) break;
+        if (attempt < LEASE_RETRIES) {
+          logger.info(`[est-followup] lease held (attempt ${attempt + 1}/${LEASE_RETRIES + 1}) — retrying in ${LEASE_RETRY_MS / 1000}s`);
+          await new Promise((resolve) => setTimeout(resolve, LEASE_RETRY_MS));
+        } else {
+          logger.warn('[est-followup] lease still held after retries — skipping this 2h tick');
+        }
+      }
     } catch (err) {
       logger.error(`Estimate follow-up job failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MIN — Estimate engagement engine (behavior-triggered follow-ups)
+  //
+  // Sweeps the time-based rules into the job queue, then processes due jobs
+  // (view-event rules enqueue from the estimate view hook). 5-min cadence is
+  // what makes the 15-minute return-visit trigger real. Dark behind
+  // GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP: off = jobs are consumed as 'shadow'
+  // and would-sends logged, nothing customer-facing.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      // SAME advisory lock as the legacy follow-up cron (codex 2736 r6):
+      // both lanes read/bump the shared follow_up_count / last_follow_up_at
+      // counters, so a same-minute overlap could let each pass a stale
+      // spacing/cap check and double-touch the customer. One lock
+      // serializes them; the engine just skips a 5-min tick when the 2h
+      // job holds it.
+      await runExclusive('estimate-follow-up', async () => {
+        const EngagementEngine = require('./estimate-engagement-engine');
+        await EngagementEngine.sweepTimeRules();
+        await EngagementEngine.processDueJobs();
+      });
+    } catch (err) {
+      logger.error(`[est-engage] cron failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

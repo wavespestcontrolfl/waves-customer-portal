@@ -216,6 +216,129 @@ async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
   }
 }
 
+// Engagement-engine job due soon (codex 2736 r9): the behavior engine
+// (estimate-engagement-engine.js) queues durable EMAIL jobs in
+// estimate_followup_jobs — a pending job due inside the lookahead is an
+// imminent touch exactly like a legacy cadence stage, and a click-followup
+// SMS on top of it would stack two nudges. Only live while the engine's
+// gate is on (off = jobs are shadow-consumed, no customer touch). Only
+// jobs that can actually SEND count (codex 2736 r10): a job stamped
+// enqueued_dark or one the processor will skip as category-ineligible is
+// shadow-destined — suppressing the click for it would starve the contact
+// of ANY follow-up. Fails toward suppression like depositStageDueSoon.
+async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
+  if (!isEnabled('estimateEngagementFollowup')) return false;
+  if (!est || !est.id) return false;
+  // Email is the engine's only channel — no address means it can never
+  // touch this contact, queued or upcoming.
+  if (!est.customer_email) return false;
+  // The engine only ever emails 'sent'/'viewed' estimates (processor skips
+  // everything else as estimate-inactive) — an accepted booking-kind click
+  // with a stale pre-acceptance job pending must not lose its booking
+  // nudge to an email that can never send (codex 2736 r14).
+  if (!['sent', 'viewed'].includes(est.status)) return false;
+  try {
+    const nowMs = now.getTime();
+    const soonMs = nowMs + soonHours * 3600000;
+    // Prefs mirror (codex 2736 r12): the processor skips email-prefs-off
+    // jobs (`email-prefs-off`) — an opted-out customer gets NO engine email,
+    // so their jobs/windows must not suppress the click SMS either. An
+    // unreadable prefs row falls to the catch (suppress), matching the
+    // engine's own fail-closed defer.
+    if (est.customer_id) {
+      const prefs = await db('notification_prefs')
+        .where({ customer_id: est.customer_id })
+        .first('email_enabled');
+      if (prefs?.email_enabled === false) return false;
+    }
+    // ALL lifecycles, not just pending: terminal rows block re-enqueue, so
+    // the upcoming-window branch below needs them too.
+    const jobs = await db('estimate_followup_jobs')
+      .where({ estimate_id: est.id })
+      .select('rule_key', 'status', 'due_at', 'trigger');
+    // Lazy require: the engine pulls the whole follow-up module graph.
+    const engine = require('./estimate-engagement-engine')._private;
+    // Max-send cap mirror (codex 2736 r15): a capped estimate gets NO
+    // engine email — the processor skips its jobs as max-sends-cap — so
+    // neither its jobs nor its upcoming windows are touches. A stale-low
+    // counter (lost bump) errs toward suppressing the SMS, never stacking.
+    if (Number(est.follow_up_count || 0) >= engine.ENGINE_LIMITS.maxSendsPerEstimate) return false;
+    const rules = await engine.loadRules();
+    const byKey = new Map(rules.map((r) => [r.rule_key, r]));
+
+    // 1. A QUEUED job due inside the lookahead — live-sendable only: not
+    //    enqueued_dark (shadow-destined), category-eligible, and its
+    //    time-sweep predicate still holds (codex 2736 r10/r11 — a job the
+    //    processor will shadow or skip is not an imminent touch).
+    const pendingSoon = jobs.filter((j) => {
+      if (j.status !== 'pending') return false;
+      if (new Date(j.due_at).getTime() > soonMs) return false;
+      let trig = {};
+      try {
+        trig = typeof j.trigger === 'string' ? JSON.parse(j.trigger) : (j.trigger || {});
+      } catch {
+        trig = {};
+      }
+      return !trig.enqueued_dark;
+    });
+    if (pendingSoon.some((j) => {
+      const rule = byKey.get(j.rule_key);
+      return !!rule
+        && engine.categoryEligible(est, rule)
+        && engine.rulePredicateStillHolds(est, rule, nowMs);
+    })) return true;
+
+    // 2. An UPCOMING time-sweep window (codex 2736 r12): sweep rules only
+    //    create their job when the window opens (due_at = now), so an
+    //    engagement email 6–24h out has no row yet — model the windows the
+    //    way cadenceStageDueSoon models the legacy stages. Enqueue-guard
+    //    mirror: any prior job lifecycle for the rule, or a send anywhere
+    //    in the rule's dedupe group, means the sweep will never re-enqueue.
+    const sends = await db('estimate_followup_sends')
+      .where({ estimate_id: est.id })
+      .select('rule_key');
+    const sentKeys = new Set(sends.map((s) => s.rule_key));
+    const jobKeys = new Set(jobs.map((j) => j.rule_key));
+    const H = 3600000;
+    const overlapsSoon = (startMs, endMs) => startMs <= soonMs && endMs >= nowMs;
+    const flagUnset = (flag) => est[flag] === false || est[flag] == null;
+    const ts = (v) => {
+      if (!v) return null;
+      const t = new Date(v).getTime();
+      return Number.isNaN(t) ? null : t;
+    };
+    const sentAt = ts(est.sent_at);
+    const lastViewed = ts(est.last_viewed_at);
+    const expiresAt = ts(est.expires_at);
+    return rules.some((rule) => {
+      if (rule.trigger_type !== 'time_sweep') return false;
+      if (jobKeys.has(rule.rule_key)) return false;
+      if (engine.dedupeGroup(rule.rule_key).some((k) => sentKeys.has(k))) return false;
+      if (!engine.categoryEligible(est, rule)) return false;
+      const p = rule.params;
+      if (rule.rule_key === 'delivery_unopened_24h') {
+        return est.status === 'sent' && !est.viewed_at && flagUnset('followup_unviewed_sent')
+          && !!sentAt && overlapsSoon(sentAt + p.minAgeHours * H, sentAt + p.maxAgeHours * H);
+      }
+      if (rule.rule_key === 'viewed_gone_quiet_72h') {
+        const lastTouch = Math.max(lastViewed || 0, sentAt || 0);
+        return est.status === 'viewed' && !!lastViewed && !!lastTouch
+          && overlapsSoon(lastTouch + p.minQuietHours * H, lastTouch + p.maxQuietHours * H);
+      }
+      if (rule.rule_key === 'expiring_engaged' || rule.rule_key === 'expiring_never_viewed') {
+        if (!['sent', 'viewed'].includes(est.status)) return false;
+        if (!flagUnset('followup_expiring_sent') || !expiresAt || expiresAt <= nowMs) return false;
+        if (!overlapsSoon(expiresAt - p.expiresWithinDays * 24 * H, expiresAt)) return false;
+        return rule.rule_key === 'expiring_engaged' ? !!est.viewed_at : !est.viewed_at;
+      }
+      return false;
+    });
+  } catch (e) {
+    logger.warn(`[click-followup-gate] engagement-job check failed — suppressing: ${e.message}`);
+    return true;
+  }
+}
+
 // Lead-side conversion for lead-only estimates. customerConvertedSince(est)
 // short-circuits to false when the estimate carries no customer_id, but
 // conversion CREATES the customer without backfilling the estimate (e.g. the
@@ -390,8 +513,10 @@ async function evaluateClickFollowupGate({ estimate, kind, customerId, leadId, p
     return { ok: false, code: 'suppressed' };
   }
 
-  // 4. Cadence stages, incl. the gated deposit-abandonment stage.
-  if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)) {
+  // 4. Cadence stages: the legacy timestamp stages, the gated
+  //    deposit-abandonment stage, and the engagement engine's queued jobs.
+  if (cadenceStageDueSoon(estimate, now) || await depositStageDueSoon(estimate, now)
+      || await engagementJobDueSoon(estimate, now)) {
     return { ok: false, code: 'cadence_due' };
   }
 
@@ -411,6 +536,7 @@ module.exports = {
   evaluateClickFollowupGate,
   cadenceStageDueSoon,
   depositStageDueSoon,
+  engagementJobDueSoon,
   leadConvertedSince,
   acceptedBookingConvertedSince,
   phoneConvertedSince,

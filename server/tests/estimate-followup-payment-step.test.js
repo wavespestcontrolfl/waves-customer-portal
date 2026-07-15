@@ -148,6 +148,8 @@ function enqueue(table, cfg) {
 // expressions, EXISTS probes) stay pass-through and are never awaited.
 const rawClaims = [];
 let claimResults;
+// Atomic post-send counter bumps (WITH counted AS ... UPDATE estimates).
+const rawBumps = [];
 
 const NOW = new Date('2026-06-10T15:00:00Z');
 
@@ -185,6 +187,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   writes.length = 0;
   rawClaims.length = 0;
+  rawBumps.length = 0;
   claimResults = [];
   queues = {};
   db.mockImplementation((table) =>
@@ -194,6 +197,10 @@ beforeEach(() => {
     if (typeof sql === 'string' && sql.includes('INSERT INTO estimate_followup_sends')) {
       rawClaims.push({ sql, bindings });
       return Promise.resolve({ rows: claimResults.shift() ?? [{ id: 'send-1' }] });
+    }
+    if (typeof sql === 'string' && sql.includes('WITH counted AS')) {
+      rawBumps.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
     }
     return sql;
   });
@@ -241,6 +248,11 @@ describe('checkPaymentStepAbandoned', () => {
     // (no delete).
     expect(rawClaims).toHaveLength(1);
     expect(rawClaims[0].sql).toContain('archived_at IS NULL');
+    // The claim is the final race-closer (codex 2736 r7): an accept flips
+    // status without archiving, and expiry can lapse mid-tick — both must
+    // block the insert in the same statement.
+    expect(rawClaims[0].sql).toContain("status IN ('sent', 'viewed')");
+    expect(rawClaims[0].sql).toContain('expires_at IS NULL OR expires_at > now()');
     expect(rawClaims[0].sql).toContain('ON CONFLICT (estimate_id, rule_key) DO NOTHING');
     const [ruleKey, templateKey, triggerJson, estimateId] = rawClaims[0].bindings;
     expect(ruleKey).toBe('payment_step_abandoned');
@@ -250,7 +262,8 @@ describe('checkPaymentStepAbandoned', () => {
       expect.objectContaining({ kind: 'recurring_card' }),
     );
     expect(writes.some((w) => w.table === 'estimate_followup_sends' && w.op === 'del')).toBe(false);
-    expect(writes.some((w) => w.table === 'estimates' && w.op === 'update')).toBe(true);
+    expect(rawBumps).toHaveLength(1);
+    expect(rawBumps[0].bindings).toEqual(['est-1', 'payment_step_abandoned', 'est-1']);
   });
 
   test('gate off = shadow: counts candidates, never claims or sends', async () => {
@@ -449,7 +462,7 @@ describe('checkPaymentStepAbandoned', () => {
     expect(rawClaims).toHaveLength(1);
     expect(writes.some((w) => w.table === 'estimate_followup_sends' && w.op === 'del')).toBe(true);
     // No success bump.
-    expect(writes.some((w) => w.table === 'estimates' && w.op === 'update')).toBe(false);
+    expect(rawBumps).toHaveLength(0);
   });
 
   test('portal email opt-out skips without claiming (email is the only leg)', async () => {
