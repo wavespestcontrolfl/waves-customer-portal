@@ -377,10 +377,10 @@ describe('round-4 hardening', () => {
     expect(captured.factContext.title).toBe('Roof Rats');
   });
 
-  test('immutableFrontmatterChanged detects slug/canonical/domains edits', () => {
+  test('frontmatterFixViolation detects slug/canonical/domains edits', () => {
     const orig = '---\nslug: /a/\ncanonical: https://x/a/\ndomains:\n  - hub\n---\nbody';
-    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/a/', '/b/'))).toBe(true);
+    expect(rem.frontmatterFixViolation(orig, orig).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/a/', '/b/')).violation).toMatch(/"slug"/);
   });
 
   test('fix that changes routing frontmatter -> park', async () => {
@@ -424,17 +424,49 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
-  // P2: the ENTIRE frontmatter is immutable — not just slug/canonical/domains.
-  test('immutableFrontmatterChanged flags any key change (title/hero/author/date/added key)', () => {
+  // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
+  test('frontmatterFixViolation flags any non-whitelisted key change (title/hero path/author/date/added key)', () => {
     const orig = '---\ntitle: Roof Rats\nhero_image: /images/blog/x/hero.webp\nauthor: Adam\npublished: "2026-07-01"\n---\nbody text';
-    expect(rem.immutableFrontmatterChanged(orig, orig)).toBe(false);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Roof Rats', 'Rats'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/other.webp'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('Adam', 'Ghost Writer'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('"2026-07-01"', '"2026-07-05"'))).toBe(true);
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('---\nbody', 'og_image: /og.png\n---\nbody'))).toBe(true);
+    expect(rem.frontmatterFixViolation(orig, orig).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Roof Rats', 'Rats')).violation).toMatch(/"title"/);
+    // a STRING hero_image (bare path) counts as a path change, never an alt fix
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/other.webp')).violation).toMatch(/hero_image/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Adam', 'Ghost Writer')).violation).toMatch(/"author"/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('"2026-07-01"', '"2026-07-05"')).violation).toMatch(/"published"/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('---\nbody', 'og_image: /og.png\n---\nbody')).violation).toMatch(/"og_image"/);
     // body-only edit with identical frontmatter is allowed
-    expect(rem.immutableFrontmatterChanged(orig, orig.replace('body text', 'fixed body text'))).toBe(false);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('body text', 'fixed body text')).violation).toBeNull();
+  });
+
+  test('whitelist: a valid meta_description rewrite passes and is surfaced in `changed`', () => {
+    const orig = '---\nslug: /pest-control/x/\nmeta_description: Too short and it ends with and\n---\nbody';
+    const fixedMeta = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const fixed = orig.replace('Too short and it ends with and', fixedMeta);
+    const res = rem.frontmatterFixViolation(orig, fixed, [{ body: 'Complete the truncated meta description' }]);
+    expect(res.violation).toBeNull();
+    expect(res.changed.meta_description).toBe(fixedMeta);
+    // The same delta WITHOUT a finding targeting the field is rejected —
+    // an LLM must not smuggle SERP copy changes past a body-only round.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Fix the broken link.' }]).violation).toMatch(/no finding in this round targets it/);
+  });
+
+  test('whitelist: a meta_description rewrite outside the 115–160 schema bound parks', () => {
+    const orig = '---\nslug: /pest-control/x/\nmeta_description: Old value that is being replaced entirely by the fix\n---\nbody';
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Old value that is being replaced entirely by the fix', 'Way too short'), [{ body: 'Complete the truncated meta description' }]).violation)
+      .toMatch(/115–160/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Old value that is being replaced entirely by the fix', 'x'.repeat(200)), [{ body: 'Complete the truncated meta description' }]).violation)
+      .toMatch(/115–160/);
+  });
+
+  test('whitelist: hero_image.alt rewrite passes; hero_image.src change parks; empty alt parks', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Wrong species described here\n---\nbody';
+    const altFix = rem.frontmatterFixViolation(orig, orig.replace('Wrong species described here', 'Large glossy dark-mahogany cockroach on a driveway'), [{ body: 'Hero alt does not match the image' }]);
+    expect(altFix.violation).toBeNull();
+    expect(altFix.changed.hero_alt).toBe('Large glossy dark-mahogany cockroach on a driveway');
+    expect(rem.frontmatterFixViolation(orig, orig.replace('/images/blog/x/hero.webp', '/images/blog/x/new.webp')).violation)
+      .toMatch(/hero_image\.src/);
+    expect(rem.frontmatterFixViolation(orig, orig.replace('Wrong species described here', '""'), [{ body: 'Hero alt does not match the image' }]).violation)
+      .toMatch(/alt rewrite invalid/);
   });
 
   test('fix that changes non-routing frontmatter (title) -> park', async () => {
@@ -1119,5 +1151,219 @@ describe('deterministic date-restamp carve-out', () => {
     } finally {
       delete process.env.AUTONOMOUS_CODEX_REMEDIATION;
     }
+  });
+});
+
+describe('frontmatter whitelist round trip (meta_description + hero_image.alt)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+
+  test('a fix that completes meta_description + hero alt PUSHES instead of parking (scheduler lane) and mirrors the row columns', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META).replace('Old alt', 'Accurate new alt text');
+    const db = makeDb({
+      blog_posts: [{ id: 1, publish_status: 'publishing', astro_pr_number: 5, astro_branch_name: 'content/blog-x', slug: 'pest-control/roaches', category: 'pest-control', tag: 'Rodents', title: 'T', city: 'Sarasota', keyword: 'k', content: 'BODY', meta_description: 'Truncated ending with and', hero_image_alt: 'Old alt' }],
+    });
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' }), finding({ body: 'Hero image alt is inaccurate' })] });
+    const r = await maybeRemediateBlogPost({ id: 1 }, { db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(1);
+    // Mirrored so a later republish (which rebuilds frontmatter from the
+    // row) can't resurrect the flagged values.
+    expect(db._tables.blog_posts[0].meta_description).toBe(VALID_META);
+    expect(db._tables.blog_posts[0].hero_image_alt).toBe('Accurate new alt text');
+  });
+
+  test('autonomous lane mirrors the whitelisted fix into draft_payload (social caption source), other keys untouched', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.remediated).toBe(true);
+    const payload = JSON.parse(db._tables.autonomous_runs[0].draft_payload);
+    expect(payload.frontmatter.meta_description).toBe(VALID_META);
+    expect(payload.frontmatter.canonical).toBe('https://x/a/');
+  });
+
+  test('autonomous lane draft_payload mirror failure is fail-SOFT — the pushed fix still counts', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    // Unparseable payload → JSON.parse throws inside the mirror → warn only.
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: 'not json {' }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(1);
+    expect(db._tables.autonomous_runs[0].draft_payload).toBe('not json {'); // untouched
+  });
+
+  test('an out-of-bound meta_description rewrite still parks end-to-end', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', 'Too short.');
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(CTX, { db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/beyond the whitelist/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+});
+
+describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1 on #2757)', () => {
+  test('gates receive the fixed meta_description + hero alt, not the stale stored payload values', async () => {
+    const db = makeDb({
+      autonomous_runs: [{
+        id: 'run-1',
+        action_type: 'new_supporting_blog',
+        opportunity_id: 'opp-1',
+        facts_sufficiency: null,
+        draft_payload: JSON.stringify({
+          type: 'draft',
+          body: 'OLD',
+          meta_description: 'Truncated ending with and',
+          frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and', hero_image: { src: '/images/blog/x/hero.webp', alt: 'Old alt' } },
+        }),
+      }],
+      opportunity_queue: [{ id: 'opp-1' }],
+    });
+    const seen = {};
+    const capture = (name) => (arg) => {
+      seen[name] = arg && arg.draft ? arg.draft : arg;
+      return name === 'seo'
+        ? { passed: true, skipped: false, findings: [] }
+        : { pass: true, ok: true, findings: [] };
+    };
+    const fixedMd = [
+      '---',
+      "title: T",
+      "meta_description: A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.",
+      'hero_image:',
+      '  src: /images/blog/x/hero.webp',
+      '  alt: Accurate new alt',
+      '---',
+      'FIXED BODY',
+    ].join('\n');
+    const res = await rem.validateAutonomousRunGates(fixedMd, { id: 'run-1' }, {
+      db,
+      autonomousRunner: {
+        _loadReviewedBrief: async () => ({ page_type: 'supporting-blog' }),
+        _deriveGuardrailOptions: async () => ({}),
+        _loadBlogCorpus: async () => [],
+      },
+      contentGuardrails: { evaluate: capture('guardrails') },
+      comparisonTableGate: { evaluate: capture('comparison') },
+      uniquenessGate: { evaluateBlog: (draft) => { seen.uniq = draft; return { ok: true }; } },
+      qualityGate: { evaluate: (draft) => { seen.quality = draft; return { ok: true }; } },
+      seoCompletionGate: { evaluate: capture('seo') },
+      aiVisibilityGate: { evaluateStatic: () => ({ passed: true, findings: [] }) },
+    });
+    expect(res.ok).toBe(true);
+    // Every gate sees the REWRITTEN metadata.
+    for (const d of [seen.guardrails, seen.uniq, seen.quality, seen.seo]) {
+      expect(d.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
+      expect(d.frontmatter.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
+      expect(d.frontmatter.hero_image.alt).toBe('Accurate new alt');
+      expect(d.frontmatter.hero_image.src).toBe('/images/blog/x/hero.webp');
+      expect(d.body).toBe('FIXED BODY');
+    }
+  });
+});
+
+describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
+  const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+  afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
+
+  test('an image/path finding does NOT authorize an alt rewrite (alt-specific wording required)', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'New alt text');
+    // "hero image"/"hero art" findings are about the asset, not the alt.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Replace the misleading roach hero image' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'Use accurate smokybrown hero art' }]).violation)
+      .toMatch(/no finding in this round targets it/);
+    // Alt-specific wording still authorizes.
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'The hero alt describes the wrong species' }]).violation).toBeNull();
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'heroAlt claims a red spider' }]).violation).toBeNull();
+  });
+
+  test('hero_image.alt over 255 chars parks (mirror column is varchar(255))', () => {
+    const orig = '---\nslug: /x/\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: Old alt\n---\nbody';
+    const fixed = orig.replace('Old alt', 'A'.repeat(260));
+    expect(rem.frontmatterFixViolation(orig, fixed, [{ body: 'hero alt is wrong' }]).violation)
+      .toMatch(/>255 chars/);
+  });
+
+  test('scheduler lane: rewritten meta failing the title/meta spam check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: false, hard_failures: [{ code: 'near_me_stuffing' }] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: true }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/metadata quality checks: title\/meta spam: near_me_stuffing/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('scheduler lane: rewritten meta failing the PII check parks before push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
+    const fixedMd = orig.replace('Truncated ending with and', VALID_META);
+    const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
+    const r = await runRemediationForPr(
+      { ...CTX, factContext: { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'Rodents' } },
+      {
+        db: makeDb(), gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
+        titleMetaSpamGate: { evaluateTitleMetaSpam: () => ({ ok: true, hard_failures: [], soft_failures: [] }) },
+        contentQualityGate: { _internals: { checkRedactionPassed: () => ({ ok: false, reason: 'email_in_meta_description' }) } },
+      },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/pii: email_in_meta_description/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('validateRewrittenMeta passes clean copy through the REAL spam + PII gates', () => {
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const res = rem.validateRewrittenMeta(VALID_META, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
+    expect(res.ok).toBe(true);
+    // A legacy title with pre-existing spam issues must NOT park a clean
+    // meta rewrite — the whitelist can never change the title, so only the
+    // rewritten meta is graded (Codex r3 on #2757).
+    const spammyTitle = 'Best Pest Control Near Me Sarasota | Pest Control Sarasota | ' + 'Pest Control '.repeat(6);
+    const resLegacy = rem.validateRewrittenMeta(VALID_META, { title: spammyTitle, city: 'Sarasota', keyword: 'pest control', tag: 'pest-control' });
+    expect(resLegacy.ok).toBe(true);
+    // And a meta carrying an obvious non-Waves email fails the real gate.
+    const bad = 'Email john.doe@gmail.com for spider help across Sarasota, Bradenton and Venice — identification, prevention and treatment for Southwest Florida homes.';
+    const resBad = rem.validateRewrittenMeta(bad, { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
+    expect(resBad.ok).toBe(false);
   });
 });

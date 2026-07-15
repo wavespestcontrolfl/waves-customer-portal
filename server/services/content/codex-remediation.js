@@ -132,7 +132,7 @@ const FIX_SYSTEM = [
   'You fix Waves Pest Control blog post markdown files in response to automated code-review (Codex) findings.',
   'Rules:',
   '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
-  '- NEVER change the YAML frontmatter — reproduce every key and value byte-for-byte. All fixes go in the Markdown body. If a finding can only be resolved by changing frontmatter, leave that part unchanged (it will be routed to a human).',
+  '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 255 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -273,21 +273,153 @@ function canonValue(v) {
 }
 
 /**
- * The ENTIRE frontmatter is immutable during remediation — fixes are body-only.
- * slug/canonical/domains would mark a different Astro route published than the
- * portal recorded, and everything else (title, description, hero/og images,
- * author/reviewer, dates) feeds merge stamps and portal columns that were
- * written BEFORE the fix and are never restamped — a frontmatter delta both
- * diverges from that source of truth and can smuggle changes past gates that
- * only scanned the original. Returns true if ANY key was added, removed, or
- * altered (parse failure counts as changed — fail closed).
+ * Frontmatter is immutable during remediation — with a narrow, validated
+ * whitelist. slug/canonical/domains would mark a different Astro route
+ * published than the portal recorded, and most other keys (title, hero/og
+ * image PATHS, author/reviewer, dates) feed merge stamps and portal columns
+ * that were written BEFORE the fix and are never restamped — a frontmatter
+ * delta there both diverges from that source of truth and can smuggle
+ * changes past gates that only scanned the original.
+ *
+ * Two fields are exempt because Codex keeps flagging them, they key NOTHING
+ * (no routing, no merge-target resolution), and every park they caused
+ * needed a trivial human push (4th occurrence 2026-07-15, astro PR #376;
+ * heroAlt class on #372/#377 before it):
+ *   - `meta_description` — must stay inside the blog schema's hard
+ *     115–160-char bound (it feeds the page meta/OG description and the
+ *     visible hero intro).
+ *   - `hero_image.alt` — non-empty, ≤255 chars (the scheduler-lane mirror
+ *     column blog_posts.hero_image_alt is varchar(255) — a longer value
+ *     would push the branch and then park on the row sync); the hero PATH
+ *     (src) and og_image stay frozen (they reference committed bytes).
+ * A whitelisted delta is additionally accepted ONLY when one of the round's
+ * Codex findings actually targets that field — otherwise an LLM that
+ * spontaneously rewrote SERP/hero copy while fixing a body-only finding
+ * would smuggle the change past the frontmatter freeze.
+ * Callers mirror both into the portal row / draft payload after the push so
+ * a later republish or social share can't resurrect the flagged value, and
+ * the autonomous lane re-runs its SEO/quality gates on the REWRITTEN
+ * metadata (validateAutonomousRunGates swaps the fixed values into the
+ * draft before evaluating).
+ *
+ * Returns { violation: string|null, changed: { meta_description?, hero_alt? } }.
+ * Any other added/removed/altered key — or an invalid or un-targeted
+ * whitelisted value — is a violation (parse failure fails closed).
  */
-function immutableFrontmatterChanged(originalMd, fixedMd) {
+const META_DESCRIPTION_MIN = 115;
+const META_DESCRIPTION_MAX = 160;
+// blog_posts.hero_image_alt is a Knex string() → varchar(255); the whitelist
+// bound must not exceed what the mirror column can store.
+const HERO_ALT_MAX = 255;
+const META_FINDING_RE = /meta[\s_-]?description/i;
+// Alt-SPECIFIC wording only: a finding about the hero IMAGE or its path
+// ("replace the misleading hero image", "use accurate hero art") must NOT
+// authorize an alt rewrite — the image problem stays for a human while the
+// LLM would happily "fix" the alt and mirror it. `\balt\b` covers "alt",
+// "alt text", "hero alt"; `hero_?alt` covers heroAlt / hero_alt casings.
+const HERO_ALT_FINDING_RE = /\balt\b|hero_?alt/i;
+
+function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
-  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) { return true; }
+  try { a = (fm.parse(originalMd) || {}).data || {}; b = (fm.parse(fixedMd) || {}).data || {}; } catch (_) {
+    return { violation: 'frontmatter unparseable after fix', changed: {} };
+  }
+  const findingBodies = (Array.isArray(findings) ? findings : []).map((f) => String((f && f.body) || ''));
+  const metaTargeted = findingBodies.some((t) => META_FINDING_RE.test(t));
+  const altTargeted = findingBodies.some((t) => HERO_ALT_FINDING_RE.test(t));
+  const changed = {};
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  for (const k of keys) { if (canonValue(a[k]) !== canonValue(b[k])) return true; }
-  return false;
+  for (const k of keys) {
+    if (canonValue(a[k]) === canonValue(b[k])) continue;
+    if (k === 'meta_description') {
+      if (!metaTargeted) {
+        return { violation: 'meta_description changed but no finding in this round targets it', changed: {} };
+      }
+      const v = b.meta_description;
+      const len = typeof v === 'string' ? v.trim().length : 0;
+      if (len < META_DESCRIPTION_MIN || len > META_DESCRIPTION_MAX) {
+        return { violation: `meta_description rewrite is ${len} chars (schema bound ${META_DESCRIPTION_MIN}–${META_DESCRIPTION_MAX})`, changed: {} };
+      }
+      changed.meta_description = v;
+      continue;
+    }
+    if (k === 'hero_image') {
+      const av = (a.hero_image && typeof a.hero_image === 'object') ? a.hero_image : {};
+      const bv = (b.hero_image && typeof b.hero_image === 'object') ? b.hero_image : {};
+      const subKeys = new Set([...Object.keys(av), ...Object.keys(bv)]);
+      for (const sk of subKeys) {
+        if (sk !== 'alt' && canonValue(av[sk]) !== canonValue(bv[sk])) {
+          return { violation: `hero_image.${sk} changed (only hero_image.alt is fixable — the path references committed bytes)`, changed: {} };
+        }
+      }
+      if (!altTargeted) {
+        return { violation: 'hero_image.alt changed but no finding in this round targets it', changed: {} };
+      }
+      const alt = bv.alt;
+      if (typeof alt !== 'string' || !alt.trim() || alt.trim().length > HERO_ALT_MAX) {
+        return { violation: `hero_image.alt rewrite invalid (empty or >${HERO_ALT_MAX} chars)`, changed: {} };
+      }
+      changed.hero_alt = alt;
+      continue;
+    }
+    return { violation: `frontmatter key "${k}" changed (immutable during remediation; fixable: meta_description, hero_image.alt)`, changed: {} };
+  }
+  return { violation: null, changed };
+}
+
+/**
+ * Metadata quality re-check for a rewritten meta_description on the
+ * SCHEDULER lane. The autonomous lane re-runs the full quality gate on the
+ * rewritten metadata (validateAutonomousRunGates swaps it into the draft),
+ * but the scheduler lane's only gate is validateFixedBlogFile, which never
+ * invokes content-quality-gate — so a 115–160-char rewrite carrying PII or
+ * title/meta spam would ship and mirror into blog_posts unchecked. Re-run
+ * exactly the two checks the publish-time gate applies to SEO fields, on
+ * the REWRITTEN text only (the legacy body is deliberately NOT re-scanned —
+ * it predates the fix, and grading old content with a stricter-than-publish
+ * gate parks every fix on legacy posts, the PR #368 lesson).
+ */
+function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
+  try {
+    // The title is deliberately OMITTED from both checks below: the
+    // whitelist can never change it, and evaluateTitleMetaSpam hard-fails
+    // titles with pre-existing issues (near-me, >90 chars, term repeats) —
+    // passing the unchanged legacy title would park a clean meta rewrite
+    // over content this fix didn't touch. An empty title skips every
+    // title check (inspectTitle early-returns) while the meta inspection
+    // still runs in full.
+    const spamGate = deps.titleMetaSpamGate || require('./title-meta-spam-gate');
+    const spam = spamGate.evaluateTitleMetaSpam({
+      title: '',
+      meta_description: metaDescription,
+      city: factContext ? factContext.city : undefined,
+      service: factContext ? factContext.tag : undefined,
+      target_keyword: factContext ? factContext.keyword : undefined,
+    });
+    if (!spam || spam.ok !== true) {
+      const reasons = ((spam && spam.hard_failures) || []).map((f) => f.reason || f.code).join(',');
+      return { ok: false, reason: `title/meta spam: ${reasons || 'no result'}` };
+    }
+    // PII: reuse the quality gate's own redaction evaluator, scoped to the
+    // REWRITTEN text only (body = the meta gets the same prose-style scan
+    // the gate applies to meta fields). The unchanged title is deliberately
+    // NOT passed: it predates the fix, and the gate's Title-Case
+    // heading-pair heuristic would park legitimate meta fixes on legacy
+    // posts whose titles were never graded by this gate at publish time.
+    const qualityGate = deps.contentQualityGate || require('./content-quality-gate');
+    const pii = qualityGate._internals.checkRedactionPassed({
+      body: metaDescription,
+      title: '',
+      meta_description: metaDescription,
+      frontmatter: {},
+    });
+    if (!pii || pii.ok !== true) {
+      return { ok: false, reason: `pii: ${(pii && pii.reason) || 'no result'}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `metadata quality re-check threw: ${e.message}` };
+  }
 }
 
 // ── Deterministic date-restamp carve-out ──────────────────────────────────
@@ -431,6 +563,28 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
+    // The fix may carry whitelisted frontmatter rewrites (meta_description /
+    // hero alt). The stored payload predates them, so swap the FIXED values
+    // into the draft before evaluating — otherwise the SEO/quality gates
+    // below re-validate the STALE metadata and a rewritten meta_description
+    // reaches the branch (and the draft_payload mirror) ungated.
+    const fixedData = (parsed && parsed.data) || {};
+    if (typeof fixedData.meta_description === 'string' && fixedData.meta_description.trim()) {
+      draft.meta_description = fixedData.meta_description;
+      if (draft.frontmatter && typeof draft.frontmatter === 'object') {
+        draft.frontmatter = { ...draft.frontmatter, meta_description: fixedData.meta_description };
+      }
+    }
+    const fixedAlt = (fixedData.hero_image && typeof fixedData.hero_image === 'object') ? fixedData.hero_image.alt : undefined;
+    if (typeof fixedAlt === 'string' && fixedAlt.trim() && draft.frontmatter && typeof draft.frontmatter === 'object') {
+      draft.frontmatter = {
+        ...draft.frontmatter,
+        hero_image: {
+          ...(draft.frontmatter.hero_image && typeof draft.frontmatter.hero_image === 'object' ? draft.frontmatter.hero_image : {}),
+          alt: fixedAlt,
+        },
+      };
+    }
 
     // 0a. Claims-ledger validation for facts-gated runs (runner step 3b): the
     //     run's claims_ledger_result was rendered against the ORIGINAL body,
@@ -724,15 +878,25 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
   }
-  // Frontmatter is immutable during remediation (fixes are body-only) — any
-  // added/removed/altered key parks: routing keys would mark a different URL
-  // published than the portal recorded, and the rest feed merge stamps and
-  // portal columns written before the fix that nothing restamps. Compared
-  // against the restamped baseline, so the deterministic date restamp above is
-  // the ONLY frontmatter delta that can ever pass — the LLM still can't touch
-  // frontmatter at all.
-  if (immutableFrontmatterChanged(baseline, fixed)) {
-    return park(db, prNumber, 'fix changed frontmatter (immutable during remediation — fixes are body-only)', onPark, headSha);
+  // Frontmatter is immutable during remediation outside the validated
+  // meta_description / hero_image.alt whitelist — any other added/removed/
+  // altered key parks: routing keys would mark a different URL published
+  // than the portal recorded, and the rest feed merge stamps and portal
+  // columns written before the fix that nothing restamps. Compared against
+  // the restamped baseline, so the deterministic date restamp above plus the
+  // whitelist are the ONLY frontmatter deltas that can ever pass.
+  const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
+  if (fmDelta.violation) {
+    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
+  }
+  // Scheduler-lane metadata quality re-check (the autonomous lane covers
+  // this inside revalidateFix — validateAutonomousRunGates swaps the
+  // rewritten metadata into the draft before its quality gate runs).
+  if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
+    const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, factContext, deps);
+    if (!metaVerdict.ok) {
+      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
+    }
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
   // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
@@ -815,7 +979,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof onRemediated === 'function') {
     try {
       const body = String((fm.parse(fixed) || {}).content || '').trim();
-      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped });
+      await onRemediated({ markdown: fixed, body, newHead, round, datesRestamped: restamped, frontmatterChanges: fmDelta.changed });
     } catch (e) {
       // Stamp the park with newHead, NOT the pre-push headSha: the fix commit
       // is already on the branch, so a headSha stamp would make the re-arm
@@ -873,8 +1037,18 @@ async function maybeRemediateBlogPost(post, deps = {}) {
     // publishing sweep or an admin republish can move the row (or repoint it
     // at a NEW PR) mid-flight — an id-only update would overwrite the current
     // row with the OLD PR's fixed body. A CAS miss throws → the caller parks.
-    onRemediated: async ({ markdown, body, datesRestamped }) => {
+    onRemediated: async ({ markdown, body, datesRestamped, frontmatterChanges }) => {
       const patch = { content: body, updated_at: new Date() };
+      // Whitelisted frontmatter fixes mirror into their row columns for the
+      // same reason the body does: publishAstro rebuilds frontmatter from
+      // blog_posts on a republish, so an unmirrored meta_description /
+      // hero alt would resurrect the exact value Codex flagged.
+      if (frontmatterChanges && frontmatterChanges.meta_description !== undefined) {
+        patch.meta_description = frontmatterChanges.meta_description;
+      }
+      if (frontmatterChanges && frontmatterChanges.hero_alt !== undefined) {
+        patch.hero_image_alt = frontmatterChanges.hero_alt;
+      }
       // When the deterministic date restamp is part of the committed fix,
       // mirror the corrected dates into the row's DATE columns too —
       // otherwise the PR merges with healed frontmatter while blog_posts
@@ -976,6 +1150,39 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         updated_at: new Date(),
       });
     } : null,
+    // Mirror whitelisted frontmatter fixes into the run's draft payload: the
+    // poller's finalize path builds the social-share caption from
+    // draft_payload's meta_description, so an unmirrored fix would post the
+    // exact truncated snippet Codex flagged. Fail-SOFT, unlike the scheduler
+    // lane's row sync (runRemediationForPr parks when onRemediated throws):
+    // a stale caption degrades to the title-only fallback, never a wrong
+    // route — not worth parking a pushed fix over, so failures only warn.
+    onRemediated: run && run.id ? async ({ frontmatterChanges }) => {
+      if (!frontmatterChanges
+        || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
+      try {
+        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+        if (!fresh || !fresh.draft_payload) return;
+        const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
+        if (!payload || typeof payload !== 'object') return;
+        payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
+        if (frontmatterChanges.meta_description !== undefined) {
+          payload.frontmatter.meta_description = frontmatterChanges.meta_description;
+        }
+        if (frontmatterChanges.hero_alt !== undefined) {
+          payload.frontmatter.hero_image = {
+            ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
+            alt: frontmatterChanges.hero_alt,
+          };
+        }
+        await db('autonomous_runs').where({ id: run.id }).update({
+          draft_payload: JSON.stringify(payload),
+          updated_at: new Date(),
+        });
+      } catch (e) {
+        logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${pr && pr.number}: ${e.message} — social caption may use the pre-fix value`);
+      }
+    } : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
@@ -997,7 +1204,8 @@ module.exports = {
   reviewRequestedForHead,
   validateFixedBlogFile,
   validateAutonomousRunGates,
-  immutableFrontmatterChanged,
+  frontmatterFixViolation,
+  validateRewrittenMeta,
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
