@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -397,6 +397,49 @@ describe('oneTimePriceCopy', () => {
   it('keeps the default pest callback copy for a generic one-time pest visit', () => {
     const copy = oneTimePriceCopy({ total: 250, items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 250 }] });
     expect(copy).toMatch(/30-day callback period if pests return/);
+  });
+
+  it('lawn-only one-time gets turf copy without the pest callback line', () => {
+    const copy = oneTimePriceCopy({ total: 174, items: [{ service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174 }] });
+    expect(copy).toMatch(/lawn treatment for the measured turf/i);
+    expect(copy).not.toMatch(/if pests return/);
+  });
+
+  it('lawn specialty rows (top-dressing / dethatching) classify as lawn', () => {
+    const copy = oneTimePriceCopy({ total: 420, items: [{ service: 'top_dressing', label: 'Top Dressing', amount: 420 }] });
+    expect(copy).toMatch(/lawn treatment for the measured turf/i);
+  });
+
+  it('a mixed lawn + pest one-time set keeps the default pest callback copy', () => {
+    const copy = oneTimePriceCopy({
+      total: 458,
+      items: [
+        { service: 'one_time_lawn', label: 'One-Time Lawn', amount: 174 },
+        { service: 'one_time_pest', label: 'One-Time Pest Control', amount: 284 },
+      ],
+    });
+    expect(copy).toMatch(/30-day callback period if pests return/);
+  });
+});
+
+describe('OneTimeModeToggle labels', () => {
+  it('lawn_care estimates get lawn wording, never pest', () => {
+    render(<OneTimeModeToggle mode="recurring" oneTimePrice={174} onChange={() => {}} serviceCategory="lawn_care" />);
+    expect(screen.getByRole('button', { name: 'Recurring Lawn Program' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'One-Time Lawn Treatment' })).toBeInTheDocument();
+  });
+
+  it('pest / bundle / unknown categories keep the legacy pest wording', () => {
+    expect(oneTimeToggleLabels('pest_control')).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    expect(oneTimeToggleLabels('bundle')).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    expect(oneTimeToggleLabels(undefined)).toEqual({ recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' });
+    render(<OneTimeModeToggle mode="recurring" oneTimePrice={284} onChange={() => {}} />);
+    expect(screen.getByRole('button', { name: 'One-Time Pest Control' })).toBeInTheDocument();
+  });
+
+  it('mosquito and tree & shrub map to their own wording', () => {
+    expect(oneTimeToggleLabels('mosquito').oneTime).toBe('One-Time Mosquito Treatment');
+    expect(oneTimeToggleLabels('tree_shrub').oneTime).toBe('One-Time Tree & Shrub Visit');
   });
 
   it('keeps Bora-Care-only copy when the only other row is a non-billable discount', () => {

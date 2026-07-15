@@ -1448,6 +1448,18 @@ function isNonBillableBreakdownRow(item = {}) {
   return Number.isFinite(amount) && amount <= 0;
 }
 
+// One-time lawn work: the one_time_lawn engine row plus the lawn specialty
+// rows whose keys carry no 'lawn' substring (top-dressing / dethatching /
+// plugging) — mirrors serviceCategoryForOneTimeItem's lawn heuristics.
+function isLawnOneTimeBreakdownItem(item = {}) {
+  const raw = [item.service, item.label, item.name]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ');
+  return /\blawn\b|top ?dress|dethatch|\bplugging\b/.test(raw);
+}
+
 function germanRoachVisitPhrase(visits) {
   const n = Number(visits) || 0;
   const words = { 1: 'One visit', 2: 'Two visits', 3: 'Three visits', 4: 'Four visits' };
@@ -1494,6 +1506,16 @@ export function oneTimePriceCopy(breakdown = {}) {
   // needed" acceptance card below it. Gated on guarantee-ONLY (mirrors the
   // server's isRodentGuaranteeOnlyEstimate shape) so a bundled rodent job
   // keeps the visit copy.
+  // One-time lawn (e.g. a chinch-bug curative quoted beside the program) is a
+  // turf treatment, not a pest-control visit — the default copy's "30-day
+  // callback if pests return" is a pest-service term never ratified for lawn
+  // work, so the lawn branch states the visit terms without it. Gated
+  // lawn-ONLY (like the Bora-Care branch) so mixed quotes keep default copy.
+  const lawnOnly = items.some(isLawnOneTimeBreakdownItem)
+    && items.every((it) => isLawnOneTimeBreakdownItem(it) || isNonBillableBreakdownRow(it));
+  if (lawnOnly) {
+    return 'One lawn treatment for the measured turf, pay on service day. No recurring schedule, no tier discount.';
+  }
   const rodentGuaranteeOnly = items.some((item) => item?.service === 'rodent_guarantee')
     && items.every((item) => item?.service === 'rodent_guarantee' || isNonBillableBreakdownRow(item));
   if (rodentGuaranteeOnly) {
@@ -1539,7 +1561,23 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
 // Tap either to switch mode — slider, add-ons, and price card respond
 // to the mode change (one-time hides slider + add-ons, shows one-time
 // price card content).
-function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false }) {
+// Labels follow the estimate's service category — a lawn-only estimate must
+// not offer "One-Time Pest Control" (the 07-15 chinch-bug lawn quote rendered
+// pest labels on a lawn program). Bundles and unknown categories keep the
+// legacy pest wording: pest is the anchor service there, and unchanged-by-
+// default keeps every existing pest estimate rendering byte-identical.
+const ONE_TIME_TOGGLE_LABELS = {
+  lawn_care: { recurring: 'Recurring Lawn Program', oneTime: 'One-Time Lawn Treatment' },
+  mosquito: { recurring: 'Recurring Mosquito Program', oneTime: 'One-Time Mosquito Treatment' },
+  tree_shrub: { recurring: 'Recurring Tree & Shrub Care', oneTime: 'One-Time Tree & Shrub Visit' },
+};
+export function oneTimeToggleLabels(serviceCategory) {
+  return ONE_TIME_TOGGLE_LABELS[serviceCategory]
+    || { recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' };
+}
+
+export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false, serviceCategory = null }) {
+  const labels = oneTimeToggleLabels(serviceCategory);
   const pillBase = {
     padding: '12px 16px', borderRadius: 999, fontSize: 14, fontWeight: 600,
     cursor: disabled ? 'wait' : 'pointer', border: 'none', textAlign: 'center', flex: 1,
@@ -1562,7 +1600,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false }) {
           background: mode === 'recurring' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'recurring' ? COLORS.white : ESTIMATE_BODY,
         }}
-      >Recurring Pest Control</button>
+      >{labels.recurring}</button>
       <button
         type="button"
         disabled={disabled}
@@ -1572,7 +1610,7 @@ function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false }) {
           background: mode === 'one_time' ? ESTIMATE_BUTTON_BG : 'transparent',
           color: mode === 'one_time' ? COLORS.white : ESTIMATE_BODY,
         }}
-      >One-Time Pest Control</button>
+      >{labels.oneTime}</button>
     </div>
   );
 }
@@ -5197,6 +5235,7 @@ export default function EstimateViewPage() {
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
+              serviceCategory={estimate.serviceCategory}
               // The configure layout is what renders while ctaPhase is
               // 'submitting' (reserve/accept in flight) — a mode flip
               // mid-submit would clear the slot the request is committing.
