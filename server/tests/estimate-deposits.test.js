@@ -1620,6 +1620,30 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     expect(claimUpdate.payload.refunded_amount).toBe(49);
   });
 
+  it('never rolls back after Stripe succeeds — a failed terminal stamp keeps the refunding claim + pre-stamp', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = (table) => {
+      const c = handler(table);
+      const origUpdate = c.update;
+      c.update = async (payload) => {
+        if (payload.status === 'refunded' || payload.status === 'credited') throw new Error('db blip');
+        return origUpdate(payload);
+      };
+      return c;
+    };
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'cancel_signup', includeSurchargeShare: false });
+    // Money moved and is counted; the row stays CLAIMED (sweeps exclude
+    // 'refunding', so nothing can double-refund it) with the face
+    // pre-stamp intact, and a human is paged.
+    expect(result.refunded).toBe(49);
+    expect(state.rows[0]).toMatchObject({ status: 'refunding', refunded_amount: 49 });
+    expect(mockTriggerNotification).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+  });
+
   it('face-only Stripe failure reverts the pre-stamp with the claim — the ledger never says money moved', async () => {
     mockRefundPaymentIntent.mockRejectedValue(new Error('stripe down'));
     const { handler, state } = sweepDb({

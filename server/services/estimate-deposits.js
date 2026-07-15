@@ -1212,6 +1212,37 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
       await StripeService.refundPaymentIntent(row.stripe_payment_intent_id, {
         amountCents: remainderCents + surchargeRefundCents,
       });
+    } catch (err) {
+      // The refund call itself failed — the money never left Stripe, so the
+      // claim (and the face-only pre-stamp) rolls back and the row returns
+      // to sweepable truth.
+      await db('estimate_deposits')
+        .where({ id: row.id, status: 'refunding' })
+        .update({
+          status: 'received',
+          ...(includeSurchargeShare ? {} : { refunded_amount: row.refunded_amount }),
+          updated_at: db.fn.now(),
+        })
+        .catch(() => {});
+      logger.error('[estimate-deposits] unconsumed-deposit refund FAILED — row reverted to received', {
+        estimateId,
+        reason,
+        error: err.message,
+      });
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('estimate_deposit_reconcile_needed', { estimateId });
+      } catch (notifyErr) {
+        logger.error('[estimate-deposits] failed to raise deposit reconcile alert', { error: notifyErr.message });
+      }
+      continue;
+    }
+    // Stripe has returned the money — NEVER roll back past this point
+    // (Codex #2752 r2 P1: with the face-only pre-stamp, a mid-'refunding'
+    // echo hits the replay guard and stamps nothing, so a revert here would
+    // make already-refunded money look sweepable again = double refund).
+    refunded += remainderCents / 100;
+    try {
       await db('estimate_deposits')
         .where({ id: row.id, status: 'refunding' })
         .update({
@@ -1221,19 +1252,12 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
           refunded_amount: (priorRefundedCents + remainderCents) / 100,
           updated_at: db.fn.now(),
         });
-      refunded += remainderCents / 100;
     } catch (err) {
-      await db('estimate_deposits')
-        .where({ id: row.id, status: 'refunding' })
-        .update({
-          status: 'received',
-          // Roll back the face-only pre-stamp with the claim — the money
-          // never left Stripe, so the ledger must not say it did.
-          ...(includeSurchargeShare ? {} : { refunded_amount: row.refunded_amount }),
-          updated_at: db.fn.now(),
-        })
-        .catch(() => {});
-      logger.error('[estimate-deposits] unconsumed-deposit refund FAILED — row reverted to received', {
+      // Terminal stamp failed AFTER a successful refund. The 'refunding'
+      // claim stays (excluded from every sweep, can't satisfy acceptance or
+      // credit) so nothing can double-spend the row; a human or the webhook
+      // echo finishes the stamp. Loud, never silent.
+      logger.error('[estimate-deposits] refund SUCCEEDED but terminal stamp failed — row left claimed as refunding for manual reconcile', {
         estimateId,
         reason,
         error: err.message,

@@ -30,6 +30,9 @@ const TERMINAL_VISIT_STATUSES = ['completed', 'skipped', 'no_show', 'cancelled']
 // Live in-progress work (en_route / on_site) blocks the flow — a tech
 // rolling or on property is a dispatch decision, not a button's.
 const CANCELLABLE_VISIT_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+// track_state values that mean a tech is actively working the visit right
+// now (same list as cancellation-processor).
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
 // Statuses voidInvoice would refuse; preview mirrors them so the modal can
 // explain the block instead of the void throwing mid-run. 'prepaid' is NOT
 // listed: a credit-covered prepaid invoice (no payment_recorded_at, no
@@ -57,20 +60,29 @@ function parseLineItems(invoice) {
   }
 }
 
-// Resolve the invoice carrying a deposit's credit: the stamped
-// credited_invoice_id when present, else the non-void invoice whose
-// deposit_credit line references the deposit's estimate (pre-stamp rows).
-async function invoiceCarryingDepositCredit(row) {
-  if (row.credited_invoice_id) {
-    return db('invoices').where({ id: row.credited_invoice_id }).first();
-  }
+// Resolve EVERY invoice carrying a deposit's credit. consumeDepositCredit
+// stamps credited_invoice_id only on the invoice that fully consumed the
+// row — when the credit split across invoices, the earlier partial ones
+// are identifiable only by their deposit_credit line, and all of them must
+// void for the full face value to become refundable.
+async function invoicesCarryingDepositCredit(row) {
+  const found = new Map();
   const candidates = await db('invoices')
     .where({ customer_id: row.customer_id })
     .whereNot({ status: 'void' })
     .select('*');
-  return candidates.find((inv) => parseLineItems(inv).some(
-    (item) => item?.category === 'deposit_credit' && item?.estimate_id === row.estimate_id,
-  )) || null;
+  for (const inv of candidates) {
+    if (parseLineItems(inv).some(
+      (item) => item?.category === 'deposit_credit' && item?.estimate_id === row.estimate_id,
+    )) {
+      found.set(inv.id, inv);
+    }
+  }
+  if (row.credited_invoice_id && !found.has(row.credited_invoice_id)) {
+    const stamped = await db('invoices').where({ id: row.credited_invoice_id }).first();
+    if (stamped && String(stamped.status) !== 'void') found.set(stamped.id, stamped);
+  }
+  return [...found.values()];
 }
 
 // Everything the confirm modal shows, and every reason the run would be
@@ -106,16 +118,18 @@ async function previewCancelSignup(customerId) {
     if (remainderCents <= 0) continue;
     refundTotalCents += remainderCents;
     if (toCents(row.credited_amount) > 0) {
-      const invoice = await invoiceCarryingDepositCredit(row);
-      if (!invoice) {
+      const carrying = await invoicesCarryingDepositCredit(row);
+      if (carrying.length === 0) {
         blockers.push('a deposit credit could not be traced to its invoice — manual reconciliation required');
         continue;
       }
-      if (NON_VOIDABLE_INVOICE_STATUSES.includes(String(invoice.status)) || invoice.payment_recorded_at) {
-        blockers.push(`deposit credit sits on ${invoice.invoice_number || 'an invoice'} which is ${invoice.status} — refund that payment instead`);
-        continue;
+      for (const invoice of carrying) {
+        if (NON_VOIDABLE_INVOICE_STATUSES.includes(String(invoice.status)) || invoice.payment_recorded_at) {
+          blockers.push(`deposit credit sits on ${invoice.invoice_number || 'an invoice'} which is ${invoice.status} — refund that payment instead`);
+          continue;
+        }
+        invoicesToVoid.set(invoice.id, invoice);
       }
-      invoicesToVoid.set(invoice.id, invoice);
     }
   }
 
@@ -146,18 +160,43 @@ async function previewCancelSignup(customerId) {
     }
   }
 
-  const visits = await db('scheduled_services')
+  // Live tracker states lead the legacy status column (track-transitions
+  // flips track_state first, status sync is best-effort) — a visit with a
+  // tech en route can still read status=confirmed. Same guard as
+  // cancellation-processor's LIVE_TRACK_STATES.
+  const candidateVisits = await db('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', CANCELLABLE_VISIT_STATUSES)
-    .select('id', 'status', 'scheduled_date', 'service_type')
+    .select('id', 'status', 'scheduled_date', 'service_type', 'track_state')
     .orderBy('scheduled_date', 'asc');
+  const liveTracked = candidateVisits.filter((v) => LIVE_TRACK_STATES.includes(String(v.track_state)));
+  const visits = candidateVisits.filter((v) => !LIVE_TRACK_STATES.includes(String(v.track_state)));
 
   const inProgress = await db('scheduled_services')
     .where({ customer_id: customerId })
     .whereNotIn('status', [...TERMINAL_VISIT_STATUSES, ...CANCELLABLE_VISIT_STATUSES])
     .select('id', 'status');
-  if (inProgress.length > 0) {
-    blockers.push(`a visit is in progress (${inProgress.map((v) => v.status).join(', ')}) — resolve it on the dispatch board first`);
+  const liveStates = [
+    ...inProgress.map((v) => v.status),
+    ...liveTracked.map((v) => v.track_state),
+  ];
+  if (liveStates.length > 0) {
+    blockers.push(`a visit is in progress (${liveStates.join(', ')}) — resolve it on the dispatch board first`);
+  }
+
+  // Money collected on a visit (paid/processing invoice or recorded
+  // payment) is beyond the deposit stage — the mid-term/proration decision
+  // is the owner's, not this flow's.
+  if (visits.length > 0) {
+    const paidVisitInvoices = await db('invoices')
+      .whereIn('scheduled_service_id', visits.map((v) => v.id))
+      .where((qb) => {
+        qb.whereIn('status', ['paid', 'processing']).orWhereNotNull('payment_recorded_at');
+      })
+      .select('id', 'invoice_number', 'status');
+    if (paidVisitInvoices.length > 0) {
+      blockers.push(`a visit invoice is ${paidVisitInvoices[0].status} (${paidVisitInvoices[0].invoice_number || paidVisitInvoices[0].id}) — money collected beyond the deposit; out of scope`);
+    }
   }
 
   return {
@@ -222,6 +261,24 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
   } catch (e) {
     logger.error(`[customer-offboarding] call follow-up cascade failed for ${visit.id}: ${e.message}`);
+  }
+  // Customer-visible track layer (mirrors cancellation-processor): the
+  // public tracking payload derives cancelled state from track_state, so a
+  // live track_view_token would keep showing the visit as scheduled after
+  // the status flip. Normalize legacy NULL rows to 'scheduled' first so the
+  // helper's guarded update matches and stamps cancelled_at.
+  try {
+    await db('scheduled_services')
+      .where({ id: visit.id })
+      .whereNull('track_state')
+      .update({ track_state: 'scheduled' });
+    const trackTransitions = require('./track-transitions');
+    const trackResult = await trackTransitions.cancel(visit.id, { reason: 'Signup cancellation', actorId: actorId || null });
+    if (!trackResult || trackResult.ok !== true) {
+      logger.error(`[customer-offboarding] track-layer cancel not ok for ${visit.id}: ${(trackResult && trackResult.reason) || 'unknown'}`);
+    }
+  } catch (e) {
+    logger.error(`[customer-offboarding] track-layer cancel failed for ${visit.id}: ${e.message}`);
   }
   await require('./invoice').voidOpenInvoicesForCancelledService(visit.id);
   try {
@@ -302,12 +359,24 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // 0 (repo rule: 0 means "charge nothing", NULL means "no rate").
   // billing_mode was already reset by the term cancellation riding the
   // invoice void.
+  // Per-application signups stamp billing_mode='per_application' +
+  // per_application_fee at acceptance, and no term sync resets them — a
+  // stale fee would let a straggler completion still price per-visit.
+  // (annual_prepay mode is reset by the term cancel riding the void; NULL
+  // mode + NULL rate = the monthly cron has nothing to charge.)
+  const perApplication = preview.customer.billingMode === 'per_application';
   const tierCleared = await db('customers')
     .where({ id: customerId })
     .where((qb) => {
       qb.whereNotNull('waveguard_tier').orWhere('monthly_rate', '>', 0);
+      if (perApplication) qb.orWhere('billing_mode', 'per_application');
     })
-    .update({ waveguard_tier: null, monthly_rate: null, updated_at: db.fn.now() });
+    .update({
+      waveguard_tier: null,
+      monthly_rate: null,
+      ...(perApplication ? { billing_mode: null, per_application_fee: null } : {}),
+      updated_at: db.fn.now(),
+    });
   result.tierCleared = tierCleared > 0;
 
   // 4. Refund the deposit remainder — face value only, Stripe last. The
@@ -350,16 +419,20 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     result.email = { ok: false, skipped: true, reason: 'no_refund_recorded' };
   }
 
-  try {
-    const { triggerNotification } = require('./notification-triggers');
-    const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
-    await triggerNotification('payment_refunded', {
-      amount: refundedTotal,
-      customerName: [customer?.first_name, customer?.last_name].filter(Boolean).join(' '),
-      isFullRefund: true,
-    });
-  } catch (e) {
-    logger.warn(`[customer-offboarding] admin refund notification failed: ${e.message}`);
+  // Admin bell only when money actually moved — a failed/no-op run must
+  // not look like a successful $0.00 refund.
+  if (refundedTotal > 0) {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
+      await triggerNotification('payment_refunded', {
+        amount: refundedTotal,
+        customerName: [customer?.first_name, customer?.last_name].filter(Boolean).join(' '),
+        isFullRefund: true,
+      });
+    } catch (e) {
+      logger.warn(`[customer-offboarding] admin refund notification failed: ${e.message}`);
+    }
   }
 
   logger.info('[customer-offboarding] signup cancelled', {
@@ -376,7 +449,7 @@ module.exports = {
   previewCancelSignup,
   cancelSignupAndRefundDeposit,
   _private: {
-    invoiceCarryingDepositCredit,
+    invoicesCarryingDepositCredit,
     cancelVisitForOffboarding,
   },
 };
