@@ -5591,6 +5591,11 @@ const CallRecordingProcessor = {
     // predicate must match THIS persisted value, not a label recomputed after
     // the V2 merge has overwritten matched/requested (codex P1 07-15).
     let persistedServiceInterestLabel = null;
+    // Just the "+ Family" tail of that label (never its primary): the backfill
+    // recompose may only carry SECONDARY families forward — reinjecting the
+    // whole label would resurrect a stale V1 primary the validated V2 merge
+    // corrected (codex P1 07-15).
+    let persistedServiceInterestExtras = null;
     let voicemailSmsResult = null;
     const leadCustomer = customerId
       ? await db('customers').where({ id: customerId }).select('id', 'pipeline_stage').first().catch(() => null)
@@ -5817,6 +5822,11 @@ const CallRecordingProcessor = {
           if (serviceInterestLabel && isEmpty(current?.service_interest)) {
             leadUpdates.service_interest = serviceInterestLabel;
             persistedServiceInterestLabel = serviceInterestLabel;
+            // composeServiceInterest always prefixes the label with the
+            // matched service verbatim, so the slice is exactly the extras.
+            persistedServiceInterestExtras = serviceInterestLabel === extracted.matched_service
+              ? null
+              : serviceInterestLabel.slice(String(extracted.matched_service).length);
           }
           // Urgency is a triage signal, not a hand-edited field — and the
           // leads schema defaults it to 'normal' at insert (migration
@@ -6156,14 +6166,15 @@ const CallRecordingProcessor = {
                 }
               })
               .update({
-                // Recompose over BOTH the post-merge request and the label
-                // enrichment already persisted: the V2 merge can narrow
-                // requested_service to the primary category only, and a
-                // primary-only recompose here would erase the secondary
-                // families enrichment captured (codex P1 07-15).
+                // Recompose over BOTH the post-merge request and the SECONDARY
+                // families enrichment already persisted: the V2 merge can
+                // narrow requested_service to the primary category only, and a
+                // primary-only recompose here would erase those tails. Only
+                // the extras carry forward — never the pre-merge primary,
+                // which the validated V2 merge may have corrected.
                 service_interest: composeServiceInterest({
                   ...extracted,
-                  requested_service: [persistedServiceInterestLabel, extracted.requested_service]
+                  requested_service: [persistedServiceInterestExtras, extracted.requested_service]
                     .filter(Boolean).join(' '),
                 }) || extracted.matched_service,
               });

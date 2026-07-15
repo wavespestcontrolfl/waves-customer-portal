@@ -103,13 +103,17 @@ function composeServiceInterest(extracted = {}) {
 
   const requested = cleanText(extracted.requested_service);
   const scanText = requested ? normalizeLawnPests(stripLocationPhrases(requested)) : null;
+  // Order-independent wdo↔termite: whether the WDO shows up in the match OR
+  // anywhere in the request, non-treatment termite wording is the same lane
+  // (the lender's "termite inspection" IS the WDO) — suppress it regardless
+  // of which one the caller said first. Explicit termite TREATMENT wording
+  // stays visible (distinct billable work).
+  const wdoPresent = covered.has('wdo')
+    || (scanText ? SERVICE_FAMILIES.find((f) => f.key === 'wdo').re.test(scanText) : false);
   let label = matched;
   for (const fam of familiesIn(scanText)) {
     if (covered.has(fam.key)) continue;
-    // Conditional wdo→termite: a WDO match IS the "termite inspection" a
-    // lender asks for — suppress that wording, but let explicit termite
-    // TREATMENT requests through (distinct billable work).
-    if (fam.key === 'termite' && covered.has('wdo') && !TERMITE_TREATMENT_RE.test(scanText)) continue;
+    if (fam.key === 'termite' && wdoPresent && !TERMITE_TREATMENT_RE.test(scanText)) continue;
     covered.add(fam.key);
     const next = `${label} + ${fam.label}`;
     if (next.length > 255) break; // leads.service_interest is varchar(255)

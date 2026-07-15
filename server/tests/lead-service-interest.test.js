@@ -87,11 +87,25 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
   });
 
-  test('recomposing over an already-composed label keeps its families (V2 backfill)', () => {
+  test('recomposing over persisted EXTRAS keeps secondary families (V2 backfill)', () => {
+    // the backfill feeds only the "+ Family" tail forward, never the old primary
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
-      requested_service: 'Quarterly Pest Control Service + Lawn Care Service pest control',
+      requested_service: ' + Lawn Care Service pest control',
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('wdo/termite same-lane suppression is order-independent (codex P1)', () => {
+    // termite wording BEFORE the WDO mention, non-treatment → one lane, WDO only
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and termite inspection / WDO report',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
+    // ...but treatment wording keeps both deliverables visible
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'WDO report and liquid termite treatment',
+    })).toBe('Quarterly Pest Control Service + WDO Inspection Service + Termite Service');
   });
 
   test('specific_service_name counts as covered even when matched is generic', () => {
