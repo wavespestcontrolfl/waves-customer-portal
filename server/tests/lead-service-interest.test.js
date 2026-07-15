@@ -250,6 +250,28 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
   });
 
+  test('"not only X but also Y" requests both (codex P1)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'not only pest control but also lawn care',
+    })).toBe('Quarterly Lawn Care Service + Pest Control Service');
+  });
+
+  test('vegetation as pest location is not a tree & shrub request (codex P1)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mosquitoes around the palm trees',
+    })).toBe('Quarterly Pest Control Service + Mosquito Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants on a palm tree',
+    })).toBe('Quarterly Pest Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Rodent Control',
+      requested_service: 'palm rats in the attic',
+    })).toBe('Rodent Control');
+  });
+
   test('midges and no-see-ums are the mosquito program (codex P1)', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',

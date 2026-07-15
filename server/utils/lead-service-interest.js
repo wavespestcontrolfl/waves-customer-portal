@@ -54,7 +54,8 @@ const SERVICE_FAMILIES = [
   { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed\s)\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
   { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed\s*bugs?\b|\bbedbugs?\b/i },
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
-  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b/i },
+  // palm(?!\s+rat): "palm rats" are roof rats — rodent, not tree & shrub
+  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+rats?)/i },
   // midges / no-see-ums are treated by the mosquito program in this repo
   { key: 'mosquito', label: 'Mosquito Control Service', re: /\bmosquito(?:es|s)?\b|\bmidges?\b|\bno[-\s]?see[-\s]?ums?\b/i },
   { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b/i },
@@ -79,7 +80,7 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid
 // lawn" is an ant call, not a lawn-care request. Strip preposition + article/
 // possessive + place before scanning (the article is REQUIRED so "interested
 // in lawn care" — no article — survives untouched).
-const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:the|my|our|his|her|their)\s+(?:front\s+|back\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?)\b/gi;
+const LOCATION_PHRASE_RE = /\b(?:in|on|around|near|under|inside|behind|throughout)\s+(?:the|my|our|his|her|their|a|an|some)\s+(?:front\s+|back\s+)?(?:palm\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)\b/gi;
 const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 
 // Declined services are not requests: "pest control only, not lawn care"
@@ -91,7 +92,7 @@ const stripLocationPhrases = (s) => s.replace(LOCATION_PHRASE_RE, ' ');
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest, not a negation
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+only\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only): "not only X but also Y" requests BOTH
 const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then))\b)/gi;
 function stripNegatedClauses(s) {
   return s
