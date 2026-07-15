@@ -39,7 +39,11 @@
  *     (blog lane only), but only when the Cloudflare preview build for the
  *     PR branch is green, the deployment was built from the PR's CURRENT
  *     head commit, AND assertCodexReviewClear passes for the PR head (fail
- *     closed, same gate as mergeAstro). Auto-merges are capped per tick
+ *     closed, same gate as mergeAstro). The Codex gate runs FIRST so its
+ *     remediation hook (push fixes + re-request review, never a merge) is
+ *     not blocked by preview-build state — a stale/red preview otherwise
+ *     deadlocks a findings-blocked PR, because the remediation push is what
+ *     triggers a fresh preview build. Auto-merges are capped per tick
  *     (default 1) because every merge rebuilds the Cloudflare Pages fleet.
  *   - Transient error (GitHub/Cloudflare blip) → log and leave the row
  *     for the next tick. A network error NEVER fails a run.
@@ -642,28 +646,19 @@ async function maybeAutoMerge(run, pr) {
   const branch = pr.head?.ref;
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
 
-  // 1. Cloudflare preview build for the PR branch must be green.
-  const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
-  const deploy = await latestDeploymentForBranch(branch);
-  if (!deploy) return { pending: true, reason: 'preview_build_pending' };
-  const { status } = extractStatus(deploy);
-  if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
-
-  // 1b. The green deployment must be a build of the PR's CURRENT head.
-  //     latestDeploymentForBranch returns the newest deployment for the
-  //     branch, which can still be an OLDER commit's build when a new push
-  //     hasn't registered a deployment yet — merging on that signal would
-  //     ship an unverified head. Fail closed when the deployment object
-  //     carries no usable commit hash (skip the merge this tick; merged/
-  //     closed reconciliation is unaffected).
-  const headSha = normalizeSha(pr.head?.sha);
-  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
-  if (!headSha) return { pending: true, reason: 'pr_head_sha_unknown' };
-  if (!deployedSha) return { pending: true, reason: 'preview_build_commit_unknown' };
-  if (deployedSha !== headSha) return { pending: true, reason: 'preview_build_stale_commit' };
-
-  // 2. Codex review must be clear for the current head (fail closed —
-  //    same gate mergeAstro applies on the scheduler path).
+  // 1. Codex review must be clear for the current head (fail closed —
+  //    same gate mergeAstro applies on the scheduler path). Checked BEFORE
+  //    the preview-build gates on purpose: the remediation hook in the catch
+  //    only pushes markdown fixes and re-requests review — it never merges —
+  //    so a missing/stale/red preview build must not block it. With the old
+  //    preview-first ordering a PR whose newest Cloudflare deployment was a
+  //    build of the head's PARENT (two publisher pushes land ~1s apart and
+  //    CF's build for the head push loses the race) returned
+  //    preview_build_stale_commit every tick, remediation never ran, and —
+  //    since the remediation push is exactly what triggers a fresh preview
+  //    build — the PR deadlocked with Codex findings forever (astro PR #374
+  //    sat a full day like this). The merge itself still requires every
+  //    preview gate below.
   const publisher = require('../content-astro/astro-publisher');
   try {
     await publisher.assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
@@ -710,7 +705,27 @@ async function maybeAutoMerge(run, pr) {
     throw err; // lookup outage etc. — transient, retry next tick
   }
 
-  // 2b. Hub-only kill switch (mirrors mergeAstro's assertOpenPublishPrIsHubOnly,
+  // 2. Cloudflare preview build for the PR branch must be green.
+  const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
+  const deploy = await latestDeploymentForBranch(branch);
+  if (!deploy) return { pending: true, reason: 'preview_build_pending' };
+  const { status } = extractStatus(deploy);
+  if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
+
+  // 2b. The green deployment must be a build of the PR's CURRENT head.
+  //     latestDeploymentForBranch returns the newest deployment for the
+  //     branch, which can still be an OLDER commit's build when a new push
+  //     hasn't registered a deployment yet — merging on that signal would
+  //     ship an unverified head. Fail closed when the deployment object
+  //     carries no usable commit hash (skip the merge this tick; merged/
+  //     closed reconciliation is unaffected).
+  const headSha = normalizeSha(pr.head?.sha);
+  const deployedSha = normalizeSha(deploymentCommitSha(deploy));
+  if (!headSha) return { pending: true, reason: 'pr_head_sha_unknown' };
+  if (!deployedSha) return { pending: true, reason: 'preview_build_commit_unknown' };
+  if (deployedSha !== headSha) return { pending: true, reason: 'preview_build_stale_commit' };
+
+  // 2c. Hub-only kill switch (mirrors mergeAstro's assertOpenPublishPrIsHubOnly,
   //     which THIS path bypasses). Never auto-merge a spoke-targeted PR while
   //     the spoke blog network is disabled — a stale spoke PR from before the
   //     lane was turned off would otherwise fan out to a spoke. Parks until the
@@ -720,7 +735,7 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'spoke_blog_network_disabled' };
   }
 
-  // 2c. Daily publish cap — same env the runner's canary guard enforces at
+  // 2d. Daily publish cap — same env the runner's canary guard enforces at
   //     PR-open time. The runner bounds how many PRs OPEN per ET day; this
   //     bounds how many go LIVE per ET day, so a backlog of parked PRs
   //     (older days, human-cleared Codex findings) can't all auto-merge on

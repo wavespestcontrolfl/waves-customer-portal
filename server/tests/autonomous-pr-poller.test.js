@@ -39,6 +39,12 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
   // exercise the genuine derivation rather than a hand-written copy.
   _internals: jest.requireActual('../services/content-astro/astro-publisher')._internals,
 }));
+jest.mock('../services/content/codex-remediation', () => ({
+  // Base implementations mirror the real module with the env gate unset
+  // (disabled); the deadlock-regression test overrides per call with *Once.
+  remediationEnabled: jest.fn(() => false),
+  maybeRemediateAutonomousPr: jest.fn(() => Promise.resolve({ skipped: true, reason: 'disabled' })),
+}));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
 }));
@@ -48,6 +54,7 @@ jest.mock('../services/social-media', () => ({
 }));
 
 const db = require('../models/db');
+const codexRemediation = require('../services/content/codex-remediation');
 const gh = require('../services/content-astro/github-client');
 const pagesPoll = require('../services/content-astro/pages-poll');
 const publisher = require('../services/content-astro/astro-publisher');
@@ -600,7 +607,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'preview_build_failure' });
-    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    // Codex gate runs BEFORE the preview gates (remediation must not be
+    // blocked by build state); the merge is still preview-blocked.
+    expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
   });
@@ -616,7 +625,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'preview_build_stale_commit' });
-    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
   });
@@ -632,7 +641,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'preview_build_commit_unknown' });
-    expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
+    expect(publisher.assertCodexReviewClear).toHaveBeenCalledWith(42, { headSha: 'headsha1' });
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
   });
@@ -668,6 +677,38 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     const res = await poller.pollPending();
 
+    expect(res.results[0].pending).toBe(true);
+    expect(res.results[0].reason).toMatch(/codex_review_pending/);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('Codex findings + STALE preview build: remediation still runs (deadlock regression, astro PR #374)', async () => {
+    // Cloudflare's newest deployment for the branch is a build of the head's
+    // PARENT (the publisher's two pushes land ~1s apart and the head push
+    // lost the build race). The old preview-first ordering returned
+    // preview_build_stale_commit before ever reaching the Codex gate, so
+    // findings were never remediated — and since the remediation push is what
+    // triggers a fresh preview build, the PR deadlocked permanently.
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('parentsha');
+    const codexErr = new Error('Codex review is required before merging this Astro PR');
+    codexErr.code = 'CODEX_REVIEW_REQUIRED';
+    publisher.assertCodexReviewClear.mockRejectedValueOnce(codexErr);
+    codexRemediation.remediationEnabled.mockReturnValueOnce(true);
+    codexRemediation.maybeRemediateAutonomousPr.mockResolvedValueOnce({ remediated: true, round: 1, findings: 2 });
+
+    const res = await poller.pollPending();
+
+    expect(codexRemediation.maybeRemediateAutonomousPr).toHaveBeenCalledWith(
+      expect.objectContaining({ number: 42 }),
+      expect.objectContaining({ id: 'run-1' }),
+      expect.objectContaining({ prePushCheck: expect.any(Function) }),
+    );
     expect(res.results[0].pending).toBe(true);
     expect(res.results[0].reason).toMatch(/codex_review_pending/);
     expect(gh.mergePr).not.toHaveBeenCalled();
