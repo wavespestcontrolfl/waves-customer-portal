@@ -284,6 +284,15 @@ async function sendDualChannel(est, { sms, email }) {
     }
   }
   if (est.customer_email && email?.templateKey) {
+    // Optional lifecycle suffix (codex 2736 r10): a stage that can
+    // legitimately re-fire for the same estimate (an expiring reminder
+    // re-armed by an extension's new deadline) scopes its key per lifecycle
+    // so the re-send isn't deduped against the old lifecycle's email —
+    // while double-fires within ONE lifecycle still dedupe. Categories and
+    // stage stay stable (unbounded per-deadline category values would
+    // pollute analytics).
+    const idempotencyKey = `estimate_followup_${email.stage}:${est.id}`
+      + (email.idempotencySuffix ? `:${email.idempotencySuffix}` : "");
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: email.templateKey,
@@ -291,8 +300,8 @@ async function sendDualChannel(est, { sms, email }) {
         payload: email.payload || {},
         recipientType: est.customer_id ? "customer" : "lead",
         recipientId: est.customer_id || null,
-        triggerEventId: `estimate_followup_${email.stage}:${est.id}`,
-        idempotencyKey: `estimate_followup_${email.stage}:${est.id}`,
+        triggerEventId: idempotencyKey,
+        idempotencyKey,
         categories: ["estimate_followup", `estimate_followup_${email.stage}`],
         // SendGrid rejection bodies can echo the recipient address — keep
         // them out of the provider log; the catch below redacts too.

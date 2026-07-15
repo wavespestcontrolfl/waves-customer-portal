@@ -221,17 +221,39 @@ async function depositStageDueSoon(est, now = new Date(), soonHours = 24) {
 // estimate_followup_jobs — a pending job due inside the lookahead is an
 // imminent touch exactly like a legacy cadence stage, and a click-followup
 // SMS on top of it would stack two nudges. Only live while the engine's
-// gate is on (off = jobs are shadow-consumed, no customer touch). Fails
-// toward suppression like depositStageDueSoon.
+// gate is on (off = jobs are shadow-consumed, no customer touch). Only
+// jobs that can actually SEND count (codex 2736 r10): a job stamped
+// enqueued_dark or one the processor will skip as category-ineligible is
+// shadow-destined — suppressing the click for it would starve the contact
+// of ANY follow-up. Fails toward suppression like depositStageDueSoon.
 async function engagementJobDueSoon(est, now = new Date(), soonHours = 24) {
   if (!isEnabled('estimateEngagementFollowup')) return false;
   if (!est || !est.id) return false;
   try {
-    const row = await db('estimate_followup_jobs')
+    const rows = await db('estimate_followup_jobs')
       .where({ estimate_id: est.id, status: 'pending' })
       .where('due_at', '<=', new Date(now.getTime() + soonHours * 3600000))
-      .first('id');
-    return !!row;
+      .select('rule_key', 'trigger');
+    const liveJobs = rows.filter((r) => {
+      let trig = {};
+      try {
+        trig = typeof r.trigger === 'string' ? JSON.parse(r.trigger) : (r.trigger || {});
+      } catch {
+        trig = {};
+      }
+      return !trig.enqueued_dark;
+    });
+    if (!liveJobs.length) return false;
+    // Same category scope the processor applies at send time. Lazy require:
+    // the engine pulls the whole follow-up module graph — only pay for it
+    // when a live job actually exists.
+    const engine = require('./estimate-engagement-engine')._private;
+    const rules = await engine.loadRules();
+    const byKey = new Map(rules.map((r) => [r.rule_key, r]));
+    return liveJobs.some((j) => {
+      const rule = byKey.get(j.rule_key);
+      return !!rule && engine.categoryEligible(est, rule);
+    });
   } catch (e) {
     logger.warn(`[click-followup-gate] engagement-job check failed — suppressing: ${e.message}`);
     return true;

@@ -39,6 +39,16 @@ jest.mock('../services/estimate-lead-linkage', () => ({
 jest.mock('../services/estimate-deposits', () => ({
   DEPOSIT_FOLLOWUP_WINDOW: { minAgeHours: 2, maxAgeHours: 72 },
 }));
+// The gate re-runs the engine's category scope on live jobs — pin the
+// engine boundary here; its own behavior is pinned in its own suite.
+jest.mock('../services/estimate-engagement-engine', () => ({
+  _private: {
+    loadRules: jest.fn(async () => [
+      { rule_key: 'viewed_gone_quiet_72h', enabled: true, params: { eligibleCategories: ['pest', 'lawn'] } },
+    ]),
+    categoryEligible: jest.fn(() => true),
+  },
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -893,7 +903,7 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
   });
 
   test('cadence_due: a pending ENGAGEMENT ENGINE job due within 24h (codex 2736 r9)', async () => {
-    enqueue('estimate_followup_jobs', { first: { id: 'job-1' } });
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
     const v = await gate.evaluateClickFollowupGate(baseInput());
     expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
   });
@@ -901,13 +911,29 @@ describe('evaluateClickFollowupGate — shared verdict codes', () => {
   test('engine jobs are invisible while the engagement gate is off (shadow = no customer touch)', async () => {
     isEnabled.mockImplementation((key) => key !== 'estimateEngagementFollowup');
     // A pending job exists, but the engine can only shadow-consume it.
-    enqueue('estimate_followup_jobs', { first: { id: 'job-1' } });
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
     const v = await gate.evaluateClickFollowupGate(baseInput());
     expect(v.ok).toBe(true);
   });
 
-  test('engagement-job lookup failure fails toward suppression (cadence_due)', async () => {
-    enqueue('estimate_followup_jobs', { firstError: new Error('db down') });
+  test('a job stamped enqueued_dark is shadow-destined — never suppresses the click (codex 2736 r10)', async () => {
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{"enqueued_dark":true}' }] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('a category-ineligible job never suppresses the click — the processor will skip it (codex 2736 r10)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.categoryEligible.mockReturnValueOnce(false);
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
+    const v = await gate.evaluateClickFollowupGate(baseInput());
+    expect(v.ok).toBe(true);
+  });
+
+  test('engagement-job check failure fails toward suppression (cadence_due)', async () => {
+    const engine = require('../services/estimate-engagement-engine')._private;
+    engine.loadRules.mockRejectedValueOnce(new Error('db down'));
+    enqueue('estimate_followup_jobs', { rows: [{ rule_key: 'viewed_gone_quiet_72h', trigger: '{}' }] });
     const v = await gate.evaluateClickFollowupGate(baseInput());
     expect(v).toMatchObject({ ok: false, code: 'cadence_due' });
   });

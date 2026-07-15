@@ -320,6 +320,8 @@ describe('processDueJobs', () => {
         email: expect.objectContaining({ templateKey: 'estimate.engage_gone_quiet' }),
       }),
     );
+    // Non-expiring stages keep the plain per-(stage, estimate) key.
+    expect(followupShared.sendDualChannel.mock.calls[0][1].email.idempotencySuffix).toBeUndefined();
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'done' }));
     expect(followupShared.bumpFollowupCounters).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
@@ -541,6 +543,28 @@ describe('processDueJobs', () => {
     const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(defer.payload.status).toBeUndefined(); // still pending — NOT a terminal skip
     expect(defer.payload.due_at.getTime()).toBe(freshSend.getTime() + 24 * H);
+  });
+
+  test('an expiring send scopes its email idempotency to the CURRENT deadline (extension re-arm)', async () => {
+    const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
+    const expires = new Date(NOW.getTime() + 1 * 86400000);
+    enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });
+    enqueue('estimate_followup_rules', { rows: [EXPIRING_RULE] });
+    enqueue('estimates', { first: baseEstimate({ expires_at: expires }) });
+    enqueue('estimate_followup_sends', { first: undefined }); // no sibling send
+    enqueue('notification_prefs', { first: { email_enabled: true } });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(1);
+    // codex 2736 r10: a re-armed deadline must not dedupe against the OLD
+    // deadline's email — the key carries the current expires_at lifecycle.
+    expect(followupShared.sendDualChannel).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        email: expect.objectContaining({ idempotencySuffix: expires.toISOString() }),
+      }),
+    );
   });
 
   test('a sibling expiring send suppresses the other variant', async () => {

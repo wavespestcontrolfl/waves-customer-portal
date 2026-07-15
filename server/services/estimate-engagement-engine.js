@@ -586,10 +586,19 @@ async function processDueBatch(now = new Date()) {
       claimed = true;
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
+      // Expiring reminders are ONE lifecycle per deadline (codex 2736 r10):
+      // an extension re-arms them by deleting the old job/ledger rows, so
+      // the email idempotency key must scope to the CURRENT deadline or the
+      // re-armed send dedupes against the old deadline's email_messages row
+      // (mirrors estimate-extension's per-grant key).
+      const expiringLifecycle = dedupeGroup(rule.rule_key).length > 1 && est.expires_at
+        ? new Date(est.expires_at).toISOString()
+        : null;
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
           stage: `engage_${rule.rule_key}`,
+          ...(expiringLifecycle ? { idempotencySuffix: expiringLifecycle } : {}),
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl),
         },
       });
