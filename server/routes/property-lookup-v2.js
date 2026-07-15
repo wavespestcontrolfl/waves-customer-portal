@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectPendingNewConstruction } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1460,6 +1460,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // ── DIMENSIONS ──
     homeSqFt: rc?.squareFootage || 0,
     lotSqFt: rc?.lotSize || 0,
+    // Machine-readable twin of the newConstruction verify flag (vacant roll
+    // parcel, no building record) — consumers that would otherwise trust the
+    // defaulted dimensions can see they're placeholders.
+    newConstructionPending: detectPendingNewConstruction(rc) ? true : undefined,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
@@ -2581,11 +2585,27 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     });
   }
 
-  // Footprint estimated from lot
+  // Pending new construction: the roll knows the (vacant) parcel but not the
+  // home, so every remote source is blind until the next roll posting — the
+  // customer's plan numbers are the only fix. One situation flag plus
+  // accurate per-field copy below.
+  const pendingNewConstruction = detectPendingNewConstruction(rc);
+  if (pendingNewConstruction) {
+    flags.push({
+      field: 'newConstruction',
+      reason: `New construction — county roll still shows ${pendingNewConstruction.landUseDescription || 'vacant land'} with no building record. Public sources won't have the home until it's assessed — ask the customer for plan sq ft and stories, then save as field-verified.`,
+      priority: 'HIGH',
+    });
+  }
+
+  // Home sq ft has no source (client + lead automation fall back to a flat
+  // 2,000 sq ft default — there is no lot-size estimator, so say so).
   if (rc && !rc.squareFootage && rc.lotSize) {
     flags.push({
       field: 'homeSqFt',
-      reason: 'Home sq ft missing from records — estimated from lot size',
+      reason: pendingNewConstruction
+        ? 'Home sq ft not on the county roll yet (new construction) — estimator defaults to 2,000 sq ft; replace with the customer\'s plan sq ft'
+        : 'Home sq ft missing from records — estimator defaults to 2,000 sq ft; verify before pricing',
       priority: 'HIGH'
     });
   }

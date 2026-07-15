@@ -943,6 +943,11 @@ function attachParcelMeta(merged, parcel) {
     polygonAreaSqft: parcel.polygonAreaSqft,
     lotSqft: parcel.lotSqft,
     dorUseCode: parcel.dorUseCode,
+    // County land-use description — mergePropertyRecords keeps _raw from the
+    // WINNING record only, so without this a PAO merge win drops the roll's
+    // "Vacant Residential Platted" wording and the pending-new-construction
+    // detection loses its strongest signal.
+    landUseDescription: parcel.landUseDescription ?? undefined,
     residentialUnits: parcel.residentialUnits,
     vintage: parcel.assessmentYear,
     // Stacked-parcel association aggregate extras (buildEnrichedProfile reads
@@ -957,6 +962,38 @@ function attachParcelMeta(merged, parcel) {
     situsLines: parcel.situsLines ?? undefined,
   };
   return merged;
+}
+
+// County roll knows the parcel but not the HOME: vacant land use with no
+// building facts = the new-construction window (plat filed → CO → next roll
+// posting) that Waves quotes constantly in Parrish / LWR / North River Ranch.
+// Every remote source inherits the same county lag, so the missing
+// sqft/stories/yearBuilt need the customer's plan numbers, not another
+// provider. Returns the vacant evidence (drives flag copy and the short
+// cache TTL in lookup-cache) or null.
+// Live probe 2026-07-15 against a just-platted Manatee parcel (2026 Parrish
+// subdivision): CUR_MAN_LUC_DESC "Vacant Residential Platted (1554)",
+// CUR_DOR_LUC_CODE '00', every BLDG_* field null, lot sqft on the roll.
+function detectPendingNewConstruction(record) {
+  if (!record) return null;
+  // Any building fact means the roll (or a stronger source, incl. a tech
+  // verified override) knows the home — not the pending-roll window.
+  if (record.squareFootage || record.yearBuilt) return null;
+  const parcel = record._parcel || {};
+  const raw = record._raw || {};
+  const landUseDescription = parcel.landUseDescription || raw.landUseDescription || null;
+  // FL DOR major 00 = vacant residential — '00' (Manatee), '000' (FDOR
+  // statewide), '0000' (Sarasota county form). The description regex covers
+  // parcels whose code didn't come back (Charlotte ownership layer).
+  const dorDigits = String(parcel.dorUseCode ?? raw.dorUseCode ?? '').replace(/\D/g, '');
+  const vacantByCode = dorDigits.length > 0 && Number(dorDigits) === 0;
+  const vacantByDesc = /\bvacant\b/i.test(String(landUseDescription || ''));
+  if (!vacantByCode && !vacantByDesc) return null;
+  return {
+    landUseDescription,
+    dorUseCode: parcel.dorUseCode ?? raw.dorUseCode ?? null,
+    subdivision: raw.subdivision || null,
+  };
 }
 
 // Non-detached residential types the county land-use description captures but
@@ -4046,6 +4083,7 @@ module.exports = {
   auditAddressHouseNumber,
   hasCountyEvidence,
   buildPropertyDataQuality,
+  detectPendingNewConstruction,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupPropertyFromAI,
