@@ -4237,7 +4237,9 @@ function CancelSignupModal({ customer, onClose, onDone }) {
           {result && (
             <div>
               <div className="mb-2 font-medium">
-                {result.refundSkipped ? "Partially done — refund NOT issued." : "Done."}
+                {result.refundSkipped || result.refundIncomplete
+                  ? "Partially done — check the notes below."
+                  : "Done."}
               </div>
               <ul className="list-disc pl-5">
                 <li>Invoices voided: {result.invoicesVoided.length ? result.invoicesVoided.join(", ") : "none"}</li>
@@ -4252,6 +4254,11 @@ function CancelSignupModal({ customer, onClose, onDone }) {
               {result.refundSkipped && (
                 <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
                   {result.refundSkipped}
+                </div>
+              )}
+              {result.refundIncomplete && (
+                <div className="mt-2 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+                  {result.refundIncomplete}
                 </div>
               )}
               {result.visitFailures?.length > 0 && (

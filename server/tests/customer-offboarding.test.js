@@ -70,7 +70,7 @@ const CustomerOffboarding = require('../services/customer-offboarding');
 
 function chain({ rows = [], first = undefined, update = 1 } = {}) {
   const c = {};
-  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'select', 'orderBy', 'leftJoin', 'join'].forEach((m) => {
+  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereRaw', 'select', 'orderBy', 'leftJoin', 'join'].forEach((m) => {
     c[m] = jest.fn(() => c);
   });
   c.first = jest.fn(async () => first);
@@ -288,7 +288,13 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
       ...visitChains('confirmed', 'scheduled'), // v-2
       chain({ rows: stragglers }),
       ...stragglers.flatMap(() => visitChains('pending', null)),
+      chain({ rows: [] }), // stale-tracker durable re-scan
     );
+    q.appointment_reminders = [
+      chain({ first: undefined }), // v-1 stale-reminder re-check: clean
+      chain({ first: undefined }), // v-2
+      ...stragglers.map(() => chain({ first: undefined })),
+    ];
     q.invoices.push(
       chain({ rows: unresolved }), // v-1 unresolved-invoice re-query
       chain({ rows: [] }), // v-2
@@ -370,7 +376,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
     expect(mockSendEmail).not.toHaveBeenCalled();
     expect(mockTriggerNotification).not.toHaveBeenCalled();
-    expect(result.email).toMatchObject({ skipped: true, reason: 'no_refund_recorded' });
+    // A zero-refund run is the degenerate partial: reported, email held.
+    expect(result.email).toMatchObject({ skipped: true, reason: 'partial_refund' });
+    expect(result.refundIncomplete).toMatch(/0\.00 of 49\.00/);
   });
 
   it('a per-application mode found AFTER the voids (term-cancel restore) clears billing_mode and fee with the tier', async () => {
@@ -401,7 +409,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
       chain({ first: v1Fresh }), // v-1 fresh (fails before further chains)
       ...visitChains('confirmed', 'scheduled'), // v-2
       chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
     );
+    q.appointment_reminders = [chain({ first: undefined })]; // v-2 only
     q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering re-scan
     q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
     return q;
@@ -438,7 +448,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
       chain({ first: { track_state: 'en_route' } }), // v-1 post-flip: went live
       ...visitChains('confirmed', 'scheduled'), // v-2
       chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
     );
+    q.appointment_reminders = [chain({ first: undefined })]; // v-2 only
     q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering
     q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
     setDbQueues(q);
@@ -474,6 +486,68 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(result.unresolvedInvoices).toEqual(['WPC-2026-0007']);
     expect(result.refundSkipped).toMatch(/run this again/);
     expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a mid-send invoice (transient sending claim) gates the refund — denylist, not allowlist', async () => {
+    setDbQueues(executeQueues({
+      lingering: [{ id: 'snd-1', invoice_number: 'WPC-2026-0012', status: 'sending' }],
+    }));
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.unresolvedInvoices).toEqual(['WPC-2026-0012']);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a reminder row still active after handleCancellation fails the visit and gates the refund', async () => {
+    // v-1 aborts at the reminder re-check (before its normalize/unresolved
+    // chains), so this run's queue is hand-built.
+    const q = previewQueues();
+    q.scheduled_services.push(
+      chain({ update: 1 }), // flip
+      chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh
+      chain({ first: { track_state: null } }), // v-1 post-flip
+      ...visitChains('confirmed', 'scheduled'), // v-2
+      chain({ rows: [] }), // stragglers
+      chain({ rows: [] }), // stale-tracker re-scan
+    );
+    q.appointment_reminders = [
+      chain({ first: { id: 'rem-1' } }), // v-1 reminder survived handleCancellation
+      chain({ first: undefined }), // v-2 clean
+    ];
+    q.invoices.push(chain({ rows: [] }), chain({ rows: [] })); // v-2 unresolved + lingering
+    q.customers.push(chain({ first: { billing_mode: null } }), chain({ update: 1 }));
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/reminder still active/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a tracker cancel that returns non-ok fails the visit and gates the refund', async () => {
+    mockTrackCancel.mockResolvedValueOnce({ ok: false, reason: 'guarded update missed' });
+    setDbQueues(executeQueues());
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/tracker cancel failed/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('a PARTIAL multi-deposit refund reports loudly and holds the email for the completing re-run', async () => {
+    const secondDeposit = {
+      ...DEPOSIT_CREDITED, id: 'dep-2', estimate_id: 'est-2', status: 'received', credited_amount: '0.00',
+    };
+    const q = executeQueues();
+    q['estimate_deposits as ed'] = [chain({ rows: [DEPOSIT_CREDITED, secondDeposit] })];
+    // est-2's refund fails inside the sweep (returns 0 without throwing).
+    mockRefundUnconsumed
+      .mockImplementationOnce(async () => { callOrder.push('refund'); return { refunded: 49 }; })
+      .mockImplementationOnce(async () => { callOrder.push('refund'); return { refunded: 0 }; });
+    q.estimate_deposits = [chain({ rows: [{ refunded_amount: '49.00' }, { refunded_amount: '0.00' }] })];
+    setDbQueues(q);
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.refundIncomplete).toMatch(/49\.00 of 98\.00/);
+    expect(result.email).toMatchObject({ skipped: true, reason: 'partial_refund' });
+    expect(mockSendEmail).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
   it('an invoice the void sweep could not resolve gates the refund', async () => {

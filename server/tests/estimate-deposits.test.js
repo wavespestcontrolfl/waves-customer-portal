@@ -1613,11 +1613,27 @@ describe('refundUnconsumedDeposits — exempt-path sweep', () => {
     expect(result.refunded).toBe(49);
     // Face cents only — no prorated fee share rides the refund.
     expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 4900 });
-    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49 });
+    // refunded_surcharge 0 = the explicit "fee stayed earned" marker the
+    // deposit revenue rollup reads (vs NULL = legacy proration fallback).
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 0 });
     // The CLAIM update pre-stamped the face total so a webhook echo landing
     // mid-'refunding' hits the replay guard instead of deflating the stamp.
     const claimUpdate = state.updates.find((u) => u.payload.status === 'refunding');
     expect(claimUpdate.payload.refunded_amount).toBe(49);
+  });
+
+  it('the prorated sweep stamps the fee share it returned in refunded_surcharge', async () => {
+    mockRefundPaymentIntent.mockResolvedValue({ id: 're_1' });
+    const { handler, state } = sweepDb({
+      rows: [{ id: 'd1', stripe_payment_intent_id: 'pi_a', status: 'received', amount: '49.00', credited_amount: '0.00', card_surcharge: '1.42' }],
+    });
+    mockDbHandler = handler;
+
+    const result = await refundUnconsumedDeposits({ estimateId: 'est-1', reason: 'exempt_accept:prepay_annual' });
+    expect(result.refunded).toBe(49);
+    // Full remainder + full fee share rides the refund; the stamp records it.
+    expect(mockRefundPaymentIntent).toHaveBeenCalledWith('pi_a', { amountCents: 5042 });
+    expect(state.rows[0]).toMatchObject({ status: 'refunded', refunded_amount: 49, refunded_surcharge: 1.42 });
   });
 
   it('never rolls back after Stripe succeeds — a failed terminal stamp keeps the refunding claim + pre-stamp', async () => {

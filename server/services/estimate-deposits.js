@@ -1151,7 +1151,7 @@ async function refundStaleDeposit(paymentIntent, estimateId, reason) {
 async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeShare = true }) {
   const rows = await db('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
-    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge');
+    .select('id', 'stripe_payment_intent_id', 'amount', 'credited_amount', 'refunded_amount', 'card_surcharge', 'refunded_surcharge');
 
   let refunded = 0;
   for (const row of rows) {
@@ -1193,13 +1193,18 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
     // so the reconstruction matches what was actually refunded before).
     const faceCents = Math.round(Number(row.amount || 0) * 100);
     const surchargeCents = Math.round(Number(row.card_surcharge || 0) * 100);
-    let surchargeRefundCents = 0;
-    if (includeSurchargeShare) {
-      const priorSurchargeRefundCents = computeRefundSurcharge({
+    // Prior fee-share: the stored cumulative wins when a refund already
+    // stamped it; legacy rows reconstruct via the same proration the sweep
+    // historically refunded with.
+    const priorSurchargeRefundCents = row.refunded_surcharge != null
+      ? Math.round(Number(row.refunded_surcharge) * 100)
+      : computeRefundSurcharge({
         refundBaseCents: priorRefundedCents,
         originalBaseCents: faceCents,
         originalSurchargeCents: surchargeCents,
       });
+    let surchargeRefundCents = 0;
+    if (includeSurchargeShare) {
       surchargeRefundCents = computeRefundSurcharge({
         refundBaseCents: remainderCents,
         originalBaseCents: faceCents,
@@ -1250,6 +1255,9 @@ async function refundUnconsumedDeposits({ estimateId, reason, includeSurchargeSh
           // Cumulative across partial refunds — this sweep returns only the
           // remainder on top of anything a dashboard refund already took.
           refunded_amount: (priorRefundedCents + remainderCents) / 100,
+          // Cumulative fee dollars RETURNED — face-only refunds add 0 here,
+          // which is what tells revenue stats the fee stayed earned.
+          refunded_surcharge: (priorSurchargeRefundCents + surchargeRefundCents) / 100,
           updated_at: db.fn.now(),
         });
     } catch (err) {

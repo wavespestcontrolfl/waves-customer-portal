@@ -304,13 +304,21 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     });
     throw new Error(`visit went ${wentLive} mid-cancel — reverted, left for dispatch`);
   }
-  try {
-    const AppointmentReminders = require('./appointment-reminders');
-    // No per-visit customer notice — the flow sends ONE combined
-    // cancellation + refund email (owner ruling 2026-07-15); this also
-    // keeps refund-skipped runs silent toward the customer.
-    await AppointmentReminders.handleCancellation(visit.id, { sendNotification: false });
-  } catch {}
+  // No per-visit customer notice — the flow sends ONE combined
+  // cancellation + refund email (owner ruling 2026-07-15); this also keeps
+  // refund-skipped runs silent toward the customer. handleCancellation
+  // swallows its own failures (returns null after logging), so re-check
+  // the reminder row like cancellation-processor does — one left active
+  // can still text about a visit this flow already cancelled and refunded.
+  const AppointmentReminders = require('./appointment-reminders');
+  await AppointmentReminders.handleCancellation(visit.id, { sendNotification: false });
+  const staleReminder = await db('appointment_reminders')
+    .where({ scheduled_service_id: visit.id })
+    .whereRaw('cancelled IS DISTINCT FROM true')
+    .first('id');
+  if (staleReminder) {
+    throw new Error('appointment reminder still active after cancellation — needs manual review');
+  }
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
     await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
@@ -322,27 +330,30 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   // live track_view_token would keep showing the visit as scheduled after
   // the status flip. Normalize legacy NULL rows to 'scheduled' first so the
   // helper's guarded update matches and stamps cancelled_at.
-  try {
-    await db('scheduled_services')
-      .where({ id: visit.id })
-      .whereNull('track_state')
-      .update({ track_state: 'scheduled' });
-    const trackTransitions = require('./track-transitions');
-    const trackResult = await trackTransitions.cancel(visit.id, { reason: 'Signup cancellation', actorId: actorId || null });
-    if (!trackResult || trackResult.ok !== true) {
-      logger.error(`[customer-offboarding] track-layer cancel not ok for ${visit.id}: ${(trackResult && trackResult.reason) || 'unknown'}`);
-    }
-  } catch (e) {
-    logger.error(`[customer-offboarding] track-layer cancel failed for ${visit.id}: ${e.message}`);
+  await db('scheduled_services')
+    .where({ id: visit.id })
+    .whereNull('track_state')
+    .update({ track_state: 'scheduled' });
+  const trackTransitions = require('./track-transitions');
+  const trackResult = await trackTransitions.cancel(visit.id, { reason: 'Signup cancellation', actorId: actorId || null });
+  if (!trackResult || trackResult.ok !== true) {
+    // The public tracking payload derives cancelled state from track_state —
+    // a failure here means the customer's link keeps showing the visit as
+    // scheduled. Fail the visit so the refund gate holds it for repair.
+    throw new Error(`tracker cancel failed (${(trackResult && trackResult.reason) || 'unknown'}) — repair on dispatch`);
   }
   const InvoiceService = require('./invoice');
   await InvoiceService.voidOpenInvoicesForCancelledService(visit.id);
   // The sweep is best-effort by design (unverifiable PI, frozen statement,
   // money racing in all log-and-skip) — re-query so a skipped invoice is a
   // reported fact, not a silent one.
+  // Resolved-status DENYLIST (not the voidable allowlist): transient claims
+  // like 'sending' and money states like 'paid'/'processing' must all read
+  // as unresolved — anything not void/refunded/cancelled still needs a
+  // human before money leaves.
   const unresolvedInvoices = await db('invoices')
     .where({ scheduled_service_id: visit.id })
-    .whereIn('status', InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES)
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .select('id', 'invoice_number', 'status');
   // One-time card holds: the waived release is the ONLY step that frees the
   // no-show hold — an exception or a lost race (held → charging) must gate
@@ -426,10 +437,7 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   const lingering = await db('invoices')
     .where({ customer_id: customerId })
     .whereNotNull('scheduled_service_id')
-    .where((qb) => {
-      qb.whereIn('status', [...InvoiceService.CANCELLED_SERVICE_VOIDABLE_STATUSES, 'paid', 'processing'])
-        .orWhereNotNull('payment_recorded_at');
-    })
+    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES)
     .select('id', 'invoice_number', 'status');
   for (const inv of lingering) {
     if (!unresolvedInvoices.some((u) => u.id === inv.id)) unresolvedInvoices.push(inv);
@@ -439,8 +447,17 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .where('s.customer_id', customerId)
     .whereIn('h.status', ['held', 'charging'])
     .select('h.scheduled_service_id', 'h.status');
+  // A cancelled visit whose tracker never got cancelled keeps showing the
+  // customer a scheduled visit — and re-runs won't re-sweep cancelled rows,
+  // so it must gate durably here (legacy pre-track rows are NULL and pass).
+  const staleTrackers = await db('scheduled_services')
+    .where({ customer_id: customerId, status: 'cancelled' })
+    .whereNotNull('track_state')
+    .whereNotIn('track_state', ['cancelled', 'complete'])
+    .select('id', 'track_state');
   result.unresolvedInvoices = unresolvedInvoices.map((inv) => inv.invoice_number || inv.id);
   result.openCardHolds = openHolds.length;
+  result.staleTrackers = staleTrackers.length;
 
   // 3. No Plan: clear the tier AND the monthly rate, keep the record ACTIVE
   // (win-back visible; owner ruling 2026-07-15). monthly_rate must go too —
@@ -480,8 +497,8 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // stage: refunding past it could hand money back while a live pay
   // session or dunning still collects. Deposits stay 'received', so a
   // re-run after the human resolves the leftover picks the refund up.
-  if (result.visitFailures.length > 0 || unresolvedInvoices.length > 0 || openHolds.length > 0) {
-    result.refundSkipped = 'unresolved visits/invoices/card holds — resolve them, then run this again to issue the refund';
+  if (result.visitFailures.length > 0 || unresolvedInvoices.length > 0 || openHolds.length > 0 || staleTrackers.length > 0) {
+    result.refundSkipped = 'unresolved visits/invoices/card holds/trackers — resolve them, then run this again to issue the refund';
     result.email = { ok: false, skipped: true, reason: 'refund_skipped' };
     logger.warn('[customer-offboarding] refund skipped — unresolved visits/invoices', {
       customerId,
@@ -514,7 +531,16 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .whereIn('id', depositIds)
     .select('refunded_amount');
   const refundedTotal = ledgerRows.reduce((sum, r) => sum + Number(r.refunded_amount || 0), 0);
-  if (refundedTotal > 0) {
+  // Multi-deposit accounts: one Stripe failure lowers the sweep's total
+  // WITHOUT throwing. The email promises ONE complete confirmation, so a
+  // partial refund reports loudly and holds the email — the re-run that
+  // recovers the remainder sends the full total (the amount-keyed dedupe
+  // never collides with a different sum).
+  const refundIncomplete = Math.round(refundedTotal * 100) < Math.round(preview.refundTotal * 100);
+  if (refundIncomplete) {
+    result.refundIncomplete = `refunded ${refundedTotal.toFixed(2)} of ${preview.refundTotal.toFixed(2)} — a deposit refund failed; re-run to retry the remainder`;
+    result.email = { ok: false, skipped: true, reason: 'partial_refund' };
+  } else if (refundedTotal > 0) {
     const PaymentLifecycleEmail = require('./payment-lifecycle-email');
     // The key carries the CUMULATIVE refunded cents: a retry that refunds a
     // deposit the first run couldn't must send a corrected email with the
@@ -531,9 +557,9 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     result.email = { ok: false, skipped: true, reason: 'no_refund_recorded' };
   }
 
-  // Admin bell only when money actually moved — a failed/no-op run must
-  // not look like a successful $0.00 refund.
-  if (refundedTotal > 0) {
+  // Admin bell only on a COMPLETE refund — a failed/partial run must not
+  // ring as a successful full refund.
+  if (refundedTotal > 0 && !refundIncomplete) {
     try {
       const { triggerNotification } = require('./notification-triggers');
       const customer = await db('customers').where({ id: customerId }).first('first_name', 'last_name');
