@@ -1911,6 +1911,9 @@ const StripeService = {
       } catch (e) {
         logger.warn(`[stripe] term sync after credit coverage failed for ${invoiceId}: ${e.message}`);
       }
+      // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
+      // payment-held WDO report — nudge the release sweep.
+      require('./project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
       return { covered_by_credit: true, status: 'prepaid', paymentId: null, paymentIntentId: null };
     }
 
@@ -1967,6 +1970,9 @@ const StripeService = {
       } catch (err) {
         logger.error(`[stripe] Card-on-file receipt queue failed for invoice ${invoice.invoice_number}: ${err.message}`);
       }
+      // Fire-and-forget: a card-on-file settle may release a payment-held
+      // WDO report (60s sweep interval is the fallback).
+      require('./project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
     }
 
     return {

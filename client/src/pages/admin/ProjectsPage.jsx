@@ -1467,6 +1467,9 @@ export function ProjectDetail({
   const [aiUseComms, setAiUseComms] = useState(true);
   const [aiUsePhotos, setAiUsePhotos] = useState(true);
   const [productCatalog, setProductCatalog] = useState([]);
+  // "Pay before you get the report" — default ON when the server offers the
+  // option (WDO + gate enabled + not yet delivered).
+  const [holdReportUntilPaid, setHoldReportUntilPaid] = useState(true);
 
   async function load(options = {}) {
     const { preserveEdits = false, background = false } = options;
@@ -1522,6 +1525,9 @@ export function ProjectDetail({
 
   useEffect(() => {
     load();
+    // The drawer instance survives across projects (dispatch overlay) — an
+    // unchecked hold must not silently carry over to the next WDO.
+    setHoldReportUntilPaid(true);
   }, [projectId]);
 
   // Host-driven data refresh (Codex r10 P2 on #2717): after an in-editor
@@ -1563,6 +1569,12 @@ export function ProjectDetail({
   // WDO reports can't be sent until the licensee signature is captured.
   const wdoNeedsSignature =
     project?.project_type === WDO_TYPE && !project?.wdo_signature?.signed;
+  // Payment hold: server-computed availability (WDO + gate on + not sent)
+  // and the live held state driving the banner + manual-release hint.
+  const reportHoldAvailable = !!project?.report_payment_hold_available;
+  const reportHeld = ["held", "releasing"].includes(
+    String(project?.report_hold_status || ""),
+  );
 
   useEffect(() => {
     if (!typeCfg?.findingsFields || !hasCatalogBackedProjectFields(typeCfg.findingsFields) || productCatalog.length) return;
@@ -1774,6 +1786,10 @@ export function ProjectDetail({
         )) || "";
       if (!overrideReason) return;
     }
+    // Resolved once per send: the toggle only renders when the server offers
+    // the hold (WDO + gate on + not delivered), so a hidden toggle never
+    // silently holds a non-eligible project.
+    const sendHold = reportHoldAvailable && holdReportUntilPaid && project.status !== "closed";
     setSaving(true);
     setError("");
     setNotice("");
@@ -1782,7 +1798,11 @@ export function ProjectDetail({
       // dry_run first so the operator can confirm the invoice amount.
       const preview = await adminFetch(`/admin/projects/${projectId}/send-with-invoice`, {
         method: "POST",
-        body: { dry_run: true, ...(overrideReason ? { override_reason: overrideReason } : {}) },
+        body: {
+          dry_run: true,
+          ...(sendHold ? { hold_report_until_paid: true } : {}),
+          ...(overrideReason ? { override_reason: overrideReason } : {}),
+        },
       });
       const pv = await readJsonResponse(preview, "Could not prepare invoice");
       const inv = pv.invoice || {};
@@ -1804,19 +1824,21 @@ export function ProjectDetail({
         routing.recipient ? `Email to: ${routing.recipient}` : null,
         routing.billing_copy ? `Billing copy (same email): ${routing.billing_copy}` : null,
         routing.report_copies?.length
-          ? `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
+          ? sendHold
+            ? `Report-only copy after payment, no invoice: ${routing.report_copies.join(", ")}`
+            : `Report-only copy, no invoice: ${routing.report_copies.join(", ")}`
           : null,
       ]
         .filter(Boolean)
         .join("\n");
-      if (
-        !(await confirmAsk(
-          `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
-            `The customer gets one email (${emailContents}) and one text (report + pay links).` +
-            (routingLines ? `\n\n${routingLines}` : ""),
-          { confirmLabel: verb },
-        ))
-      ) {
+      const confirmMessage = sendHold
+        ? `${verb} invoice${invoiceLabel} for ${amount} and hold the ${reportNoun} until it's paid?\n\n` +
+          `The customer gets the invoice + pay link now — no report. The FDACS-13645 report is emailed automatically the moment the invoice is paid.` +
+          (routingLines ? `\n\n${routingLines}` : "")
+        : `${verb} invoice${invoiceLabel} for ${amount} together with the ${reportNoun}?\n\n` +
+          `The customer gets one email (${emailContents}) and one text (report + pay links).` +
+          (routingLines ? `\n\n${routingLines}` : "");
+      if (!(await confirmAsk(confirmMessage, { confirmLabel: verb }))) {
         setSaving(false);
         return;
       }
@@ -1826,6 +1848,7 @@ export function ProjectDetail({
           // Only an existing invoice carries an id from the preview; a new WDO
           // (id null) routes to the server's locked create path on send.
           ...(inv.id ? { invoice_id: inv.id } : {}),
+          ...(sendHold ? { hold_report_until_paid: true } : {}),
           ...(overrideReason ? { override_reason: overrideReason } : {}),
         },
       });
@@ -1834,6 +1857,10 @@ export function ProjectDetail({
       setDelivery(d.channels || null);
       if (d.sent === false) {
         setError(`Delivery failed; project remains in review. ${deliverySummary(d.channels)}`.trim());
+      } else if (d.report_held) {
+        setNotice(
+          `Invoice ${d.invoice?.invoice_number || ""} sent — report held; it delivers automatically once the invoice is paid. ${deliverySummary(d.channels)}`.trim(),
+        );
       } else {
         setNotice(
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
@@ -2863,6 +2890,31 @@ export function ProjectDetail({
           />
         </div>
       )}
+      {reportHeld && (
+        <div style={{ padding: "0 16px 12px" }}>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #FCD34D",
+              background: "#FFFBEB",
+              color: "#92400E",
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+          >
+            Report held — the customer has the invoice and pay link, and the
+            report is emailed automatically the moment the invoice is paid.
+            &ldquo;Send report&rdquo; delivers it now and clears the hold.
+            {project.report_hold_last_error ? (
+              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 750 }}>
+                Last automatic release attempt failed:{" "}
+                {project.report_hold_last_error}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
       {/* Footer actions */}
       <div
         style={{
@@ -2875,6 +2927,29 @@ export function ProjectDetail({
           alignItems: "center",
         }}
       >
+        {canAdminActions && reportHoldAvailable && project.status !== "closed" && (
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              fontSize: 13,
+              color: "#3F3F46",
+              fontWeight: 500,
+              cursor: "pointer",
+              marginRight: "auto",
+            }}
+            title="Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
+          >
+            <input
+              type="checkbox"
+              checked={holdReportUntilPaid}
+              onChange={(e) => setHoldReportUntilPaid(e.target.checked)}
+              disabled={saving}
+            />
+            Hold report until invoice is paid
+          </label>
+        )}
         {canAdminActions && (
           <button
             type="button"
@@ -2964,9 +3039,15 @@ export function ProjectDetail({
               onClick={handleSend}
               disabled={saving || wdoNeedsSignature}
               style={{ ...btnPrimary, opacity: saving || wdoNeedsSignature ? 0.5 : 1 }}
-              title={wdoNeedsSignature ? "Capture the licensee signature first" : undefined}
+              title={
+                wdoNeedsSignature
+                  ? "Capture the licensee signature first"
+                  : reportHeld
+                    ? "Deliver the report now — this releases the payment hold"
+                    : undefined
+              }
             >
-              Send report
+              {reportHeld ? "Send report now (release hold)" : "Send report"}
             </button>
           )}
         {canAdminActions &&
@@ -3001,6 +3082,10 @@ const PROJECT_ACTIVITY_LABELS = {
   project_report_resent: "Resent",
   project_report_with_invoice_sent: "Report + invoice sent",
   project_report_with_invoice_failed: "Report + invoice failed",
+  project_invoice_sent_report_held: "Invoice sent — report held",
+  project_invoice_report_hold_failed: "Invoice send failed (hold)",
+  project_report_released_after_payment: "Report released (paid)",
+  project_report_release_blocked: "Report release blocked",
   project_prep_guide_sent: "Prep guide sent",
   project_prep_guide_failed: "Prep guide failed",
   project_portal_invite_sent: "Portal invite sent",

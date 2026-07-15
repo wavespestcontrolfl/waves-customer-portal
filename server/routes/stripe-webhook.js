@@ -1348,6 +1348,9 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
       source: 'stripe_webhook',
     });
     ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
+    // Fire-and-forget: a settled invoice may be gating a payment-held WDO
+    // report — nudge the release sweep (60s interval is the fallback).
+    require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 3000 });
   }
 
   // ── Bell + push for the admin team ──
