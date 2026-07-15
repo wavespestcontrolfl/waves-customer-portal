@@ -1005,17 +1005,25 @@ export default function CreateProjectModal({
   // Change / type-switch paths), so a stale sticker photo would otherwise
   // upload onto the new context's report (Codex P1/P2s on #2748).
   function treatmentExtractWentStale(seq, started) {
-    if (treatmentExtractSeqRef.current !== seq) return true;
     // An empty starting address ADOPTING a value (the async customer record
     // finishing its load) is not a property switch — only a change away
     // from a known address invalidates.
     const addressChanged = started.address !== '' && wdoAddressRef.current !== started.address;
-    if (customerIdRef.current !== started.customer || projectTypeRef.current !== started.type || addressChanged) {
+    const contextChanged = customerIdRef.current !== started.customer
+      || projectTypeRef.current !== started.type
+      || addressChanged;
+    if (contextChanged) {
+      // The photo cleanup must run even for a SUPERSEDED request — checking
+      // seq first let a request that was both superseded and context-stale
+      // (extract → edit address → extract again) leave its photo queued for
+      // the new property's report (Codex r7 P1). Only the LATEST request
+      // owns the pending state, though: resetting it here while a newer
+      // extraction is mid-flight would un-wedge its Save gate early.
       setPhotoQueue(prev => prev.filter(p => p.id !== started.photoId));
-      setTreatmentExtract({ status: 'idle', message: '' });
+      if (treatmentExtractSeqRef.current === seq) setTreatmentExtract({ status: 'idle', message: '' });
       return true;
     }
-    return false;
+    return treatmentExtractSeqRef.current !== seq;
   }
 
   async function handleTreatmentPhotoExtract(file) {
