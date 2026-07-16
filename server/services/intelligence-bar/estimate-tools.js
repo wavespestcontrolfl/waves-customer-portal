@@ -76,7 +76,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
         poolCage: { type: 'boolean' },
         services: {
           type: 'object',
-              description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"standard"|"enhanced"|"premium", lawnFreq: 4|6|9|12 }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { productKey, applicationRate, trenchDepthFt, warrantyTier, labelConfirmed, measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab Termiticide: { productKey, measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended, labelConfirmed }.',
+              description: 'Only services requested in this quote. The server selects the approved React presentation from priced line items. Recurring keys: pest, lawn, mosquito, treeShrub, termiteBait, rodentBait. One-time/specialty keys: oneTimePest, oneTimeLawn, lawnPestControl, oneTimeMosquito, germanRoach (multi-visit cleanout), pestInitialRoach (standalone cockroach treatment), flea, bedBug, stinging, rodentTrapping, trenching, boraCare, preSlabTermiticide. Never substitute generic pest for a specifically requested one-time or cockroach program.',
           properties: {
             pest: { type: 'object' },
             lawn: { type: 'object' },
@@ -89,6 +89,19 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
             preSlabTermiticide: { type: 'object' },
             preSlabTermidor: { type: 'object' },
             rodent: { type: 'object' },
+            rodentBait: { type: 'object' },
+            oneTimePest: { type: 'object' },
+            oneTimeLawn: { type: 'object' },
+            lawnPestControl: { type: 'object' },
+            oneTimeMosquito: { type: 'object' },
+            germanRoach: { type: 'object' },
+            germanRoachInitial: { type: 'object' },
+            pestInitialRoach: { type: 'object' },
+            flea: { type: 'object' },
+            bedBug: { type: 'object' },
+            stinging: { type: 'object' },
+            rodentTrapping: { type: 'object' },
+            palm: { type: 'object' },
           },
         },
       },
@@ -403,7 +416,59 @@ function forbiddenPricingInputError(input) {
   return `Agent Estimate cannot set price, cost, discount, margin, or manager-override inputs (${forbidden.slice(0, 8).join(', ')}). Remove them and let generateEstimate use DB-authoritative pricing.`;
 }
 
+const APPROVED_REACT_SERVICE_TEMPLATES = Object.freeze({
+  pest: 'pest_control',
+  pest_control: 'pest_control',
+  lawn: 'lawn_care',
+  lawn_care: 'lawn_care',
+  treeShrub: 'tree_shrub',
+  tree_shrub: 'tree_shrub',
+  mosquito: 'mosquito',
+  termite: 'termite_bait',
+  termiteBait: 'termite_bait',
+  termite_bait: 'termite_bait',
+  oneTimePest: 'one_time_pest',
+  one_time_pest: 'one_time_pest',
+  oneTimeLawn: 'one_time_lawn',
+  one_time_lawn: 'one_time_lawn',
+  lawnPestControl: 'lawn_pest_knockdown',
+  oneTimeMosquito: 'one_time_mosquito',
+  one_time_mosquito: 'one_time_mosquito',
+  germanRoach: 'german_roach_cleanout',
+  german_roach: 'german_roach_cleanout',
+  germanRoachInitial: 'german_roach_initial',
+  german_roach_initial: 'german_roach_initial',
+  pestInitialRoach: 'cockroach_control',
+  pest_initial_roach: 'cockroach_control',
+  flea: 'flea_control',
+  flea_package: 'flea_control',
+  bedBug: 'bed_bug',
+  bed_bug: 'bed_bug',
+  bed_bug_chemical: 'bed_bug',
+  bed_bug_heat: 'bed_bug',
+  stinging: 'stinging_insect',
+  stinging_v2: 'stinging_insect',
+  rodentTrapping: 'rodent',
+  rodent_trapping: 'rodent',
+  rodentBait: 'rodent_bait',
+  palm: 'palm_injection',
+  palm_injection: 'palm_injection',
+  trenching: 'termite_trenching',
+  boraCare: 'bora_care',
+  bora_care: 'bora_care',
+  preSlabTermiticide: 'pre_slab_termiticide',
+  pre_slab_termiticide: 'pre_slab_termiticide',
+});
+
+const ONE_TIME_REACT_TEMPLATES = new Set([
+  'one_time_pest', 'one_time_lawn', 'lawn_pest_knockdown', 'one_time_mosquito',
+  'german_roach_cleanout', 'german_roach_initial', 'cockroach_control',
+  'flea_control', 'bed_bug', 'stinging_insect', 'rodent', 'palm_injection',
+  'termite_trenching', 'bora_care', 'pre_slab_termiticide',
+]);
+
 function serviceTemplateKey(rawKey) {
+  if (APPROVED_REACT_SERVICE_TEMPLATES[rawKey]) return APPROVED_REACT_SERVICE_TEMPLATES[rawKey];
   const qualifying = toQualifyingKey(rawKey);
   if (qualifying) return qualifying;
   return String(rawKey || '')
@@ -413,11 +478,18 @@ function serviceTemplateKey(rawKey) {
     .toLowerCase();
 }
 
-function presentationForServices(services = {}) {
-  const serviceTemplateKeys = [...new Set(Object.keys(services).map(serviceTemplateKey).filter(Boolean))];
+function presentationForServices(services = {}, engineResult = null) {
+  const requestedKeys = Object.keys(services).map(serviceTemplateKey).filter(Boolean);
+  const pricedKeys = (engineResult?.lineItems || []).map((line) => serviceTemplateKey(line?.service)).filter(Boolean);
+  const serviceTemplateKeys = [...new Set(pricedKeys.length ? pricedKeys : requestedKeys)];
+  const hasOneTime = serviceTemplateKeys.some((key) => ONE_TIME_REACT_TEMPLATES.has(key));
+  const hasRecurring = serviceTemplateKeys.some((key) => !ONE_TIME_REACT_TEMPLATES.has(key));
   return {
     template: serviceTemplateKeys.length > 1 ? 'multi_service_bundle' : (serviceTemplateKeys[0] || 'manual_review'),
     serviceTemplateKeys,
+    reactPage: 'estimate_v2',
+    mode: hasOneTime && hasRecurring ? 'mixed' : (hasOneTime ? 'one_time' : 'recurring'),
+    selectionAuthority: pricedKeys.length ? 'priced_line_items' : 'requested_services',
   };
 }
 
@@ -602,7 +674,7 @@ async function computeEstimate(input) {
     year1_total: Number(summary.year1Total || 0),
     line_items: compactLines,
     customer_account: accountPricing.customerAccount,
-    presentation: presentationForServices(services),
+    presentation: presentationForServices(services, estimate),
     margin_check: {
       loaded_labor_rate_per_hour: 35,
       target_collected_margin: 0.35,
@@ -1100,7 +1172,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     lane_reasons: [...new Set(laneReasons)].slice(0, 30),
     engineResult,
     customer_account: accountPricing.customerAccount,
-    presentation: presentationForServices(input.engineInputs.services),
+    presentation: presentationForServices(input.engineInputs.services, engineResult),
   };
 }
 
@@ -1153,6 +1225,9 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
         existingCustomerExpansion: accountPricing.recognized,
         presentationTemplate: preview.presentation?.template || 'manual_review',
         serviceTemplateKeys: preview.presentation?.serviceTemplateKeys || [],
+        reactEstimatePage: preview.presentation?.reactPage || 'estimate_v2',
+        presentationMode: preview.presentation?.mode || 'recurring',
+        presentationSelectionAuthority: preview.presentation?.selectionAuthority || 'requested_services',
         revisions,
       },
     },
@@ -1475,6 +1550,7 @@ module.exports = {
     computeAgentDraftPreview,
     getNeighborhoodGrassProfile,
     anchorAgentEstimateContact,
+    presentationForServices,
     validateAgentEngineInput,
     verifyAgentEvidenceQuotes,
   },

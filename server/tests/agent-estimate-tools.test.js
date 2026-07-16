@@ -64,6 +64,25 @@ const ENGINE_RESULT = {
   }],
 };
 
+const LAWN_TREE_ENGINE_RESULT = {
+  summary: {
+    recurringMonthlyAfterDiscount: 145,
+    recurringAnnualAfterDiscount: 1740,
+    oneTimeTotal: 0,
+  },
+  waveGuard: { tier: 'gold' },
+  lineItems: [
+    {
+      service: 'lawn_care', annualAfterDiscount: 900, monthlyAfterDiscount: 75,
+      costs: { annualCost: 540 }, pricingConfidence: 'high',
+    },
+    {
+      service: 'tree_shrub', annualAfterDiscount: 840, monthlyAfterDiscount: 70,
+      costs: { annualCost: 500 }, pricingConfidence: 'high',
+    },
+  ],
+};
+
 const INPUT = {
   leadId: 'lead-1',
   customerName: 'Road Tester',
@@ -320,6 +339,7 @@ describe('Agent Estimate draft tool', () => {
       existingServices: [],
       newServices: [{ key: 'lawn_care' }, { key: 'tree_shrub' }],
     });
+    mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
 
     const result = await executeEstimateTool('create_agent_estimate_draft', {
       ...INPUT,
@@ -521,6 +541,7 @@ describe('Agent Estimate compute input boundary', () => {
         current_services: [{ key: 'pest_control', currentPerVisit: 117 }],
       },
     });
+    mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
 
     const result = await executeEstimateTool('compute_estimate', {
       leadId: 'lead-1',
@@ -540,7 +561,42 @@ describe('Agent Estimate compute input boundary', () => {
     expect(result.presentation).toEqual({
       template: 'multi_service_bundle',
       serviceTemplateKeys: ['lawn_care', 'tree_shrub'],
+      reactPage: 'estimate_v2',
+      mode: 'recurring',
+      selectionAuthority: 'priced_line_items',
     });
+  });
+
+  test('selects approved one-time and cockroach React presentations from priced lines', () => {
+    expect(_private.presentationForServices(
+      { oneTimePest: { urgency: 'NONE' } },
+      { lineItems: [{ service: 'one_time_pest', price: 250 }] },
+    )).toEqual({
+      template: 'one_time_pest',
+      serviceTemplateKeys: ['one_time_pest'],
+      reactPage: 'estimate_v2',
+      mode: 'one_time',
+      selectionAuthority: 'priced_line_items',
+    });
+
+    expect(_private.presentationForServices(
+      { pestInitialRoach: { roachType: 'regular' } },
+      { lineItems: [{ service: 'pest_initial_roach', price: 239 }] },
+    )).toEqual(expect.objectContaining({
+      template: 'cockroach_control',
+      serviceTemplateKeys: ['cockroach_control'],
+      reactPage: 'estimate_v2',
+      mode: 'one_time',
+    }));
+
+    expect(_private.presentationForServices(
+      { germanRoach: { severity: 'moderate' } },
+      { lineItems: [{ service: 'german_roach', total: 450 }] },
+    )).toEqual(expect.objectContaining({
+      template: 'german_roach_cleanout',
+      serviceTemplateKeys: ['german_roach_cleanout'],
+      mode: 'one_time',
+    }));
   });
 
   test('refuses to quote an active service again for a recognized customer', async () => {
