@@ -30,7 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5835,16 +5835,21 @@ const CallRecordingProcessor = {
           const v2RequestedForCompose = (() => {
             const sr = v2ApprovedExtraction?.service_request;
             if (!sr) return null;
-            const { mapServiceCategoryToLegacy } = require('../utils/extraction-compat');
+            // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
+            // legacy map collapses palm_injection into Tree & Shrub and
+            // hard-labels termite as inspection (codex r11).
             const cats = [sr.primary_service_category,
               ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : [])];
-            const words = cats.map((c) => mapServiceCategoryToLegacy(c)).filter(Boolean);
+            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
             return words.length ? words.join(' and ') : null;
           })();
           const serviceInterestLabel = composeServiceInterest(
             v2RequestedForCompose
               ? { ...extracted, requested_service: v2RequestedForCompose }
               : extracted,
+            // Caller wording still decides termite work-vs-inspection —
+            // families stay category-authoritative under V2 approval.
+            v2RequestedForCompose ? { cueText: extracted.requested_service } : {},
           );
           if (serviceInterestLabel && isEmpty(current?.service_interest)) {
             leadUpdates.service_interest = serviceInterestLabel;

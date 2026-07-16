@@ -7,7 +7,7 @@
  * same-lane alias, the null-matched legacy fallback, and the varchar(255) cap.
  */
 
-const { composeServiceInterest } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category } = require('../utils/lead-service-interest');
 
 describe('composeServiceInterest', () => {
   test('the motivating call: pest match + lawn request → both on the label', () => {
@@ -582,6 +582,27 @@ describe('composeServiceInterest', () => {
       matched_service: 'Quarterly Pest Control Service',
       requested_service: 'General Pest Control and Lawn Care',
     })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('V2 category words: palm injection survives, termite stays label-neutral (codex r11)', () => {
+    expect(composeWordsForV2Category('palm_injection')).toBe('palm injection');
+    expect(composeWordsForV2Category('termite')).toBe('termite');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and palm injection',
+    })).toBe('Quarterly Pest Control Service + Palm Injection');
+  });
+
+  test('cueText decides termite work-vs-inspection under V2 category words (codex r11)', () => {
+    // families from category words; work cue from the caller's own wording
+    expect(composeServiceInterest(
+      { matched_service: 'Quarterly Pest Control Service', requested_service: 'pest control and termite' },
+      { cueText: 'pest control plus termite monitoring' },
+    )).toBe('Quarterly Pest Control Service + Termite Service');
+    expect(composeServiceInterest(
+      { matched_service: 'Quarterly Pest Control Service', requested_service: 'pest control and termite' },
+      { cueText: 'pest control and a termite inspection for the sale' },
+    )).toBe('Quarterly Pest Control Service + Termite Inspection');
   });
 
   test('non-service chatter appends nothing', () => {

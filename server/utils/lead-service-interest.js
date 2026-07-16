@@ -209,7 +209,34 @@ function familiesIn(text) {
     .map((hit) => hit.fam);
 }
 
-function composeServiceInterest(extracted = {}) {
+// V2 service categories → words this composer can scan. Deliberately NOT
+// mapServiceCategoryToLegacy: that legacy-routing map collapses
+// palm_injection into "Tree & Shrub Care" and hard-labels termite as
+// "Termite Inspection", losing the family/work distinctions this label
+// carries (codex r11). Bare "termite" keeps the work-vs-inspection choice
+// with the caller-text cue (opts.cueText below).
+const V2_CATEGORY_COMPOSE_WORDS = {
+  pest_general: 'pest control',
+  termite: 'termite',
+  rodent: 'rodent control',
+  mosquito: 'mosquito control',
+  stinging_insect: 'wasps',
+  lawn_care: 'lawn care',
+  palm_injection: 'palm injection',
+  bed_bug: 'bed bugs',
+  wdo: 'WDO inspection',
+  exclusion: 'rodent control',
+  bundled_waveguard: 'pest control',
+};
+function composeWordsForV2Category(category) {
+  return V2_CATEGORY_COMPOSE_WORDS[category] || null;
+}
+
+// opts.cueText: original caller wording consulted ONLY for the termite
+// work-vs-inspection cue — families still come exclusively from
+// requested_service, so a V2-approved category list stays authoritative
+// while "termite monitoring/protection" wording keeps labeling as work.
+function composeServiceInterest(extracted = {}, opts = {}) {
   const matched = cleanText(extracted.matched_service);
   if (!matched) return null;
 
@@ -234,15 +261,18 @@ function composeServiceInterest(extracted = {}) {
   // stays visible (distinct billable work).
   const wdoPresent = covered.has('wdo')
     || (scanText ? SERVICE_FAMILIES.find((f) => f.key === 'wdo').re.test(scanText) : false);
+  const cueText = cleanText(opts.cueText);
+  const termiteWorkCue = (scanText && TERMITE_TREATMENT_RE.test(scanText))
+    || (cueText && TERMITE_TREATMENT_RE.test(cueText));
   let label = matched;
   for (const fam of familiesIn(scanText)) {
     if (covered.has(fam.key)) continue;
-    if (fam.key === 'termite' && wdoPresent && !TERMITE_TREATMENT_RE.test(scanText)) continue;
+    if (fam.key === 'termite' && wdoPresent && !termiteWorkCue) continue;
     covered.add(fam.key);
     // Inspection-only termite wording ("pest control and termite inspection
     // for VA loan") is the inspection deliverable, not treatment work —
     // label it as such so the office doesn't price a treatment (codex r7).
-    const famLabel = fam.key === 'termite' && !TERMITE_TREATMENT_RE.test(scanText)
+    const famLabel = fam.key === 'termite' && !termiteWorkCue
       ? 'Termite Inspection'
       : fam.label;
     const next = `${label} + ${famLabel}`;
@@ -252,4 +282,4 @@ function composeServiceInterest(extracted = {}) {
   return label;
 }
 
-module.exports = { composeServiceInterest };
+module.exports = { composeServiceInterest, composeWordsForV2Category };
