@@ -31,7 +31,7 @@ function formFromInitialValues(initialValues = null) {
     phone: initialValues?.phone || "",
     email: initialValues?.email || "",
     addressLine1: initialValues?.address || "",
-    addressLine2: "",
+    addressLine2: initialValues?.addressLine2 || "",
     city: initialValues?.city || "",
     state: initialValues?.state || "FL",
     zip: initialValues?.zip || "",
@@ -281,6 +281,7 @@ export default function MobileNewCustomerSheet({
               setForm((p) => ({
                 ...p,
                 addressLine1: parts.line1 || parts.formatted || p.addressLine1,
+                addressLine2: parts.line2 || "",
                 city: parts.city || p.city,
                 state: parts.state || p.state || "FL",
                 zip: parts.zip || p.zip,

@@ -135,4 +135,27 @@ describe('Customer360ProfileV2 profile state', () => {
     );
     expect(screen.queryAllByText('Avery Customer')).toHaveLength(0);
   });
+
+  it('closes customer-scoped edit state when navigation selects another customer', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (path.endsWith('/admin/customers/customer-b')) return response(customerDetail('customer-b', 'Blair'));
+      return response({});
+    }));
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
+    );
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByText('Edit customer')).toBeInTheDocument();
+
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Blair Customer')).toHaveLength(2);
+    expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
+  });
 });

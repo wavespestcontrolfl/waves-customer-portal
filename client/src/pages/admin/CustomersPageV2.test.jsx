@@ -10,7 +10,18 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
   default: ({ customerId }) => <div data-testid="customer-profile">Profile {customerId}</div>,
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
-vi.mock('../../components/AddressAutocomplete', () => ({ default: () => null }));
+vi.mock('../../components/AddressAutocomplete', () => ({
+  default: ({ onSelect }) => (
+    <>
+      <button type="button" onClick={() => onSelect({ line1: '10 Palm Ave', line2: 'Unit 8', city: 'Naples', state: 'FL', zip: '34102' })}>
+        Select unit address
+      </button>
+      <button type="button" onClick={() => onSelect({ line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34102' })}>
+        Select street address
+      </button>
+    </>
+  ),
+}));
 vi.mock('./CustomerHealthTabs', () => ({ CustomerHealthSection: () => null }));
 
 function response(body, status = 200) {
@@ -96,5 +107,21 @@ describe('CustomersPageV2 workflow state', () => {
     await waitFor(() => {
       expect(screen.getByTestId('customer-profile')).toHaveTextContent('Profile customer-b');
     });
+  });
+
+  it('replaces and clears address line 2 from desktop autocomplete selections', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => (
+      String(url).includes('/admin/customers?') ? response(list) : response({})
+    )));
+
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+
+    const line2 = screen.getByPlaceholderText('Unit, suite, apartment');
+    fireEvent.click(screen.getByRole('button', { name: 'Select unit address' }));
+    expect(line2).toHaveValue('Unit 8');
+    fireEvent.click(screen.getByRole('button', { name: 'Select street address' }));
+    expect(line2).toHaveValue('');
   });
 });

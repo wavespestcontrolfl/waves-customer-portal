@@ -4467,6 +4467,15 @@ export default function Customer360ProfileV2({
     setProfileLoadError("");
     setProfileActionErr("");
     setCommsLoading(false);
+    setMenuOpen(false);
+    setEditOpen(false);
+    setEditForm({});
+    setEditErr("");
+    setSavingEdit(false);
+    setDeletingCustomer(false);
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setCancelSignupOpen(false);
     Promise.all([
       adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
       adminFetch(`/admin/customers/${customerId}/timeline`, {

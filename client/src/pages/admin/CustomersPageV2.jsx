@@ -596,6 +596,7 @@ function QuickAddModalV2({
                 setForm((p) => ({
                   ...p,
                   address: parts.line1 || parts.formatted || p.address,
+                  addressLine2: parts.line2 || "",
                   city: parts.city || p.city,
                   state: parts.state || p.state || "FL",
                   zip: parts.zip || p.zip,

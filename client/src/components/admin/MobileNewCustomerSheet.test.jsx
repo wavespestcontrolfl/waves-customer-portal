@@ -6,8 +6,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import MobileNewCustomerSheet from './MobileNewCustomerSheet';
 
 vi.mock('../AddressAutocomplete', () => ({
-  default: ({ value, onChange, placeholder }) => (
-    <input placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
+  default: ({ value, onChange, onSelect, placeholder }) => (
+    <>
+      <input placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
+      <button type="button" onClick={() => onSelect({ line1: '10 Palm Ave', line2: 'Unit 8', city: 'Naples', state: 'FL', zip: '34102' })}>
+        Select unit address
+      </button>
+      <button type="button" onClick={() => onSelect({ line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34102' })}>
+        Select street address
+      </button>
+    </>
   ),
 }));
 
@@ -59,5 +67,15 @@ describe('MobileNewCustomerSheet', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Save' })[0]);
 
     expect(await screen.findByText('That phone number already belongs to another account')).toBeInTheDocument();
+  });
+
+  it('replaces and clears address line 2 from autocomplete selections', () => {
+    render(<MobileNewCustomerSheet open onClose={vi.fn()} onCreated={vi.fn()} />);
+
+    const line2 = screen.getByPlaceholderText('Address line 2');
+    fireEvent.click(screen.getByRole('button', { name: 'Select unit address' }));
+    expect(line2).toHaveValue('Unit 8');
+    fireEvent.click(screen.getByRole('button', { name: 'Select street address' }));
+    expect(line2).toHaveValue('');
   });
 });
