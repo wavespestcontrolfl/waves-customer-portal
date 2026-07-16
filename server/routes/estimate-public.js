@@ -9491,7 +9491,12 @@ router.put('/:token/accept', async (req, res, next) => {
       });
       await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
-        await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, { icon: '\u2705', link: notificationPayload.customerLink, metadata: { estimateId: estimate.id, invoiceId } });
+        await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
+          icon: '\u2705',
+          link: notificationPayload.customerLink,
+          dedupeKey: `estimate:${estimate.id}:accepted`,
+          metadata: { estimateId: estimate.id, invoiceId },
+        });
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
