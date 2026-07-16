@@ -78,6 +78,22 @@ function accountServiceKey(raw) {
     .toLowerCase();
 }
 
+function accountServiceKeys(raw) {
+  const text = String(raw || '').toLowerCase();
+  const commercial = text.includes('commercial');
+  const keys = new Set();
+  const add = (key) => keys.add(commercial ? `commercial_${key}` : key);
+  if (text.includes('pest')) add('pest_control');
+  if (text.includes('lawn') || text.includes('turf')) add('lawn_care');
+  if (text.includes('tree') || text.includes('shrub')) add('tree_shrub');
+  if (text.includes('mosquito')) add('mosquito');
+  if (text.includes('termite')) add('termite_bait');
+  if (text.includes('rodent') && text.includes('bait')) add('rodent_bait');
+  if (text.includes('palm')) add('palm_injection');
+  if (!keys.size) keys.add(accountServiceKey(raw));
+  return [...keys].filter(Boolean);
+}
+
 function accountServiceLabel(key, raw) {
   if (SERVICE_LABEL[key]) return SERVICE_LABEL[key];
   return String(raw || key || 'Service')
@@ -312,15 +328,22 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const qualifyingRows = Array.isArray(existingRows)
     ? existingRows
     : await loadExistingRecurringQualifyingRows(database, customerId);
-  const existingServiceKeys = [...new Set(qualifyingRows.map((row) => toQualifyingKey(row.service_type)).filter(Boolean))];
+  const existingServiceKeys = [...new Set(qualifyingRows
+    .flatMap((row) => accountServiceKeys(row.service_type))
+    .map((key) => toQualifyingKey(key))
+    .filter(Boolean))];
   const currentTier = existingServiceKeys.length ? determineWaveGuardTier(existingServiceKeys) : null;
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const byKey = new Map();
+  const componentKeysByKey = new Map();
   for (const row of rows) {
     const key = accountServiceKey(row.service_type);
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(row);
+    const components = componentKeysByKey.get(key) || new Set();
+    accountServiceKeys(row.service_type).forEach((component) => components.add(component));
+    componentKeysByKey.set(key, components);
   }
 
   const currentServices = [...byKey.entries()].map(([key, serviceRows]) => {
@@ -331,6 +354,7 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
     return {
       key,
+      keys: [...(componentKeysByKey.get(key) || new Set([key]))],
       label: accountServiceLabel(key, serviceRows[0]?.service_type),
       qualifiesForWaveGuard: existingServiceKeys.includes(key),
       // Every property this service is active at — lets duplicate checks

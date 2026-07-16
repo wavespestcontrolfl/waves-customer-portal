@@ -60,7 +60,12 @@ function normalizeLawnTrack(value) {
 }
 
 function normalizeProtocolKey(value) {
-  const requested = String(value || '').trim().toLowerCase();
+  const requested = String(value || '')
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
   // one_time_lawn / lawn_pest_knockdown are Agent Estimate service keys that
   // still follow the lawn protocol family — without the alias, get_protocol
   // reports "no program exists" and the required protocol review is skipped.

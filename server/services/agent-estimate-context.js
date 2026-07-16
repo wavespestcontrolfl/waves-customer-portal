@@ -307,6 +307,7 @@ async function buildAgentEstimateContext(leadId) {
   return {
     lead: {
       id: lead.id,
+      customer_id: lead.customer_id || null,
       ...contact,
       service_interest: lead.service_interest || null,
       lead_type: lead.lead_type || null,

@@ -546,9 +546,12 @@ function accountPricingFromContext(context = {}) {
       const addresses = row.serviceAddressesComplete === true && Array.isArray(row.serviceAddresses)
         ? row.serviceAddresses.filter(Boolean)
         : [];
-      const entries = [{ key: row.key, addresses }];
-      if (row.key.startsWith('commercial_')) {
-        entries.push({ key: row.key.slice('commercial_'.length), addresses });
+      const rowKeys = Array.isArray(row.keys) && row.keys.length ? row.keys : [row.key];
+      const entries = rowKeys.map((key) => ({ key, addresses }));
+      for (const key of rowKeys) {
+        if (key.startsWith('commercial_')) {
+          entries.push({ key: key.slice('commercial_'.length), addresses });
+        }
       }
       return entries;
     });
@@ -561,6 +564,8 @@ function accountPricingFromContext(context = {}) {
   return {
     customerId: account.recognized ? account.customer_id : null,
     recognized: account.recognized === true,
+    leadCustomerId: context?.lead?.customer_id || null,
+    leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
     serviceContextUnavailable: account.service_context_unavailable === true,
     priorQualifyingServices,
     activeServices,
@@ -1243,14 +1248,13 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const propertyFactEntries = Object.entries(propertyFacts);
   const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
   const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
-  const evidence = Array.isArray(input.evidence) ? input.evidence : [];
 
   if (accountPricing.recognized) {
     laneReasons.push('existing-customer expansion: verify current services, spend, and added-service scope before sending');
   }
 
-  if (!evidence.some((row) => row && (row.source || row.quote || row.decision))) {
-    laneReasons.push('source evidence was not attached to the draft');
+  if (!input.evidenceVerification || Number(input.evidenceVerification.verified || 0) <= 0) {
+    laneReasons.push('source evidence did not contain a quote verified against the selected lead and declared source');
   }
   if (input.evidenceVerification?.unverified > 0) {
     laneReasons.push(`${input.evidenceVerification.unverified} evidence quote(s) could not be verified against the selected lead`);
@@ -1310,6 +1314,29 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   requirePricingFact(Number.isFinite(Number(input.engineInputs.lotSqFt)), /lot|outdoor.*(sq|area|size)/i, 'lot square footage');
   requirePricingFact(Number.isFinite(Number(input.engineInputs.palmCount)), /palm.*count|treated.*palm/i, 'treated palm count');
   requirePricingFact(Number.isFinite(Number(input.engineInputs.perimeterLF)), /perimeter|linear/i, 'perimeter length');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.atticSqFt)), /attic.*(sq|area|size)/i, 'attic square footage');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.slabSqFt)), /slab.*(sq|area|size)/i, 'slab square footage');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.buildingSlabSqFt)), /building.*slab|slab.*building/i, 'building slab square footage');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.footprintSqFt)), /footprint.*(sq|area|size)/i, 'building footprint');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.estimatedBedAreaSf)), /bed.*area|treatable.*bed/i, 'treated bed area');
+  const nestedMeasurements = [];
+  const collectMeasurements = (value, path = []) => {
+    if (!value || typeof value !== 'object') return;
+    for (const [name, nested] of Object.entries(value)) {
+      const nextPath = [...path, name];
+      if (nested && typeof nested === 'object') collectMeasurements(nested, nextPath);
+      else if (Number.isFinite(Number(nested))
+        && /(?:sqft|sq_ft|sf|area|count|bedrooms?|units?|linear|perimeter|feet|lf)$/i.test(name)) {
+        nestedMeasurements.push({ path: nextPath.join('.'), name, value: Number(nested) });
+      }
+    }
+  };
+  collectMeasurements(input.engineInputs.services, ['services']);
+  for (const measurement of nestedMeasurements) {
+    const tokens = measurement.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^a-z0-9]+/gi, ' ').trim();
+    const pattern = new RegExp(tokens.split(/\s+/).filter(Boolean).map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i');
+    requirePricingFact(true, pattern, measurement.path);
+  }
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
   }
@@ -1627,6 +1654,10 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
     const leadCheck = await loadAgentEstimateLead(input.leadId, trx);
     if (leadCheck.error) return leadCheck;
+    if (accountPricing.leadCustomerIdKnown
+      && String(leadCheck.lead.customer_id || '') !== String(accountPricing.leadCustomerId || '')) {
+      return { error: 'The selected lead customer link changed after pricing. Refresh and rebuild the confirmation.' };
+    }
     if (leadCheck.lead.estimate_id && String(leadCheck.lead.estimate_id) !== String(estimateId)) {
       return { error: 'The selected lead is now linked to a different estimate. Refresh before revising.' };
     }
@@ -1707,6 +1738,10 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     const leadResult = await loadAgentEstimateLead(input.leadId, trx);
     if (leadResult.error) return leadResult;
     const lead = leadResult.lead;
+    if (accountPricing.leadCustomerIdKnown
+      && String(lead.customer_id || '') !== String(accountPricing.leadCustomerId || '')) {
+      return { error: 'The selected lead customer link changed after pricing. Refresh and rebuild the confirmation.' };
+    }
     // Re-anchor recipients from the LOCKED lead row: a contact correction
     // that landed between the pre-transaction anchor and this lock must win,
     // or the draft persists (and later sends to) the stale phone/email.

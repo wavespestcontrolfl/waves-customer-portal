@@ -266,11 +266,13 @@ class SatelliteAnalyzer {
     };
     if (providerResults.length === 1) {
       const only = providerResults[0];
+      const cleanedAnalysis = { ...only.analysis };
       const confidenceDetails = {};
       const fieldVerify = [];
       for (const field of numericFields) {
         const value = explicitNonNegative(only.analysis, field);
         if (value === null) {
+          cleanedAnalysis[field] = null;
           confidenceDetails[field] = { values: [], status: 'missing' };
           continue;
         }
@@ -297,7 +299,7 @@ class SatelliteAnalyzer {
         fieldVerify.push(field);
       }
       return {
-        ...only.analysis,
+        ...cleanedAnalysis,
         confidence: 'single_model',
         agreementPct: null,
         confidenceDetails,
