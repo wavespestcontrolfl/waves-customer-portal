@@ -59,14 +59,16 @@ function skip(reason, extra = {}) {
 }
 
 // " on Tue, Jul 21" — noon-anchored so the rendered weekday can't slip a
-// day across TZ seams. '' when the visit has no parseable date (the
-// template's {date_line} is clause-style: absent renders clean copy).
+// day across TZ seams, and rendered explicitly in ET (the business's
+// behavior timezone) rather than the server's locale default. '' when the
+// visit has no parseable date (the template's {date_line} is clause-style:
+// absent renders clean copy).
 function dateLineFor(scheduledDate) {
   const dateOnly = callBookingDateOnly(scheduledDate);
   if (!dateOnly) return '';
   const anchored = new Date(`${dateOnly}T12:00:00`);
   if (Number.isNaN(anchored.getTime())) return '';
-  return ` on ${anchored.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}`;
+  return ` on ${anchored.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`;
 }
 
 async function renderTemplate(vars) {

@@ -34,6 +34,17 @@ router.use(rateLimit({
   message: { error: 'Too many requests. Please try again in a minute.' },
 }));
 
+// Privacy headers on EVERY outcome (including 404s/errors): the token is a
+// bearer credential on a payment-adjacent surface, so responses must never
+// be cached, the token must never leak via Referer from any rendered
+// content, and the URLs must never be indexed (Codex follow-up on #2771).
+router.use((req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
+  next();
+});
+
 router.get('/:token', async (req, res) => {
   const token = String(req.params.token || '');
   if (!TOKEN_RE.test(token)) return res.status(404).json({ error: 'Not found' });
@@ -45,7 +56,6 @@ router.get('/:token', async (req, res) => {
       // bootstrap shape as the estimate card-capture endpoints.
       data.publishableKey = require('../config/stripe-config').publishableKey;
     }
-    res.set('Cache-Control', 'private, no-store');
     return res.json(data);
   } catch (err) {
     logger.error(`[secure-card-public] page load failed: ${err.message}`);
