@@ -45,19 +45,25 @@ function setupDb() {
   const calls = { updates: [], deletes: 0 };
   db.mockImplementation((table) => {
     const q = {
-      where: jest.fn(() => q),
+      _filters: {},
+      where: jest.fn(function (a, b) {
+        if (a && typeof a === 'object') Object.assign(q._filters, a);
+        else if (typeof a === 'string') q._filters[a] = b;
+        return q;
+      }),
       whereNull: jest.fn(() => q),
       whereNot: jest.fn(() => q),
       whereNotIn: jest.fn(() => q),
       orWhereNotIn: jest.fn(() => q),
       orWhereNull: jest.fn(() => q),
+      orWhere: jest.fn(() => q),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => Promise.resolve(tableState.rows || [])),
       groupBy: jest.fn(() => Promise.resolve([])),
       select: jest.fn(() => q),
       count: jest.fn(() => q),
       first: jest.fn(() => Promise.resolve(tableState.post ?? null)),
-      update: jest.fn((u) => { calls.updates.push({ table, updates: u }); return { returning: () => Promise.resolve([{ ...tableState.post, ...u }]) }; }),
+      update: jest.fn((u) => { calls.updates.push({ table, filters: { ...q._filters }, updates: u }); return { returning: () => Promise.resolve([{ ...tableState.post, ...u }]) }; }),
       // Mirrors the atomic guarded delete: only a non-astro-active existing
       // row deletes; anything else reports 0 rows like Postgres would.
       del: jest.fn(() => {
@@ -264,6 +270,10 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     expect(claimWrites).toHaveLength(2);
     expect(claimWrites[0]).toBeInstanceOf(Date);
     expect(claimWrites[1]).toBeNull();
+    // Tokenized release: the clear is CAS'd on the exact claim stamp, so a
+    // stale publisher can't release a newer publisher's lease (codex r5).
+    const release = calls.updates.find((u) => u.updates.publish_claimed_at === null);
+    expect(release.filters.publish_claimed_at).toEqual(claimWrites[0]);
     // pages-poll's auto-merge marker is never written by the manual lane
     expect(calls.updates.some((u) => 'publish_status' in u.updates)).toBe(false);
   });

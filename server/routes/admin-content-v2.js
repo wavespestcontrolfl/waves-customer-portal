@@ -667,10 +667,15 @@ router.put('/blog/:id', async (req, res, next) => {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
     // CAS on the status the no-jump rule was validated against — a concurrent
-    // unpublish (published→draft) must not let this write re-publish the row.
-    const [post] = await db('blog_posts')
-      .where('id', req.params.id)
-      .where('status', existing.status)
+    // unpublish (published→draft) must not let this write re-publish the row —
+    // AND on the publisher claims, so a publish acquired between the read
+    // above and this write can't have its captured source edited under it.
+    const [post] = await whereNoLivePublishClaim(
+      db('blog_posts')
+        .where('id', req.params.id)
+        .where('status', existing.status)
+        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing')),
+    )
       .update(updates)
       .returning('*');
     if (!post) return res.status(409).json({ error: 'Post state changed underneath this request — reload and retry.' });
@@ -838,17 +843,23 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
   // reads it, so an admin PR can NEVER be mistaken for the scheduler's
   // publishing+pr_open auto-merge authorization (that marker stays the
   // scheduler's alone). A crashed publish self-expires via the claim window.
-  let claimed = false;
+  let claimStamp = null;
   try {
     assertBlogPostId(req.params.id);
+    // claimStamp doubles as the release token: only the request that wrote
+    // this exact timestamp may clear it, so a >30m-stale publish finishing
+    // late can't release a NEWER publisher's lease. The scheduler lane is
+    // excluded symmetrically (its CAS also refuses a live claim).
+    const stamp = new Date();
     const got = await whereNoLivePublishClaim(db('blog_posts').where('id', req.params.id))
-      .update({ publish_claimed_at: new Date(), updated_at: new Date() });
+      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+      .update({ publish_claimed_at: stamp, updated_at: new Date() });
     if (!got) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
       return res.status(409).json({ error: 'Post is already being published.' });
     }
-    claimed = true;
+    claimStamp = stamp;
 
     const AstroPublisher = require('../services/content-astro/astro-publisher');
     const result = await AstroPublisher.publishAstro(req.params.id);
@@ -862,10 +873,11 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
       || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   } finally {
-    if (claimed) {
+    if (claimStamp) {
       try {
         await db('blog_posts')
           .where('id', req.params.id)
+          .where('publish_claimed_at', claimStamp)
           .update({ publish_claimed_at: null, updated_at: new Date() });
       } catch (e) {
         logger.warn(`[content] publish-astro claim release failed for ${req.params.id}: ${e.message} (claim self-expires in 30m)`);

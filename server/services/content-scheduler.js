@@ -484,6 +484,13 @@ const ContentScheduler = {
         claimed = (await db('blog_posts')
           .where('id', blog.id)
           .where('publish_status', blog.publish_status)
+          // Mutual exclusion with the manual /publish-astro lane: a live
+          // publish_claimed_at means an admin's publishAstro is mid-flight —
+          // claiming now would run two publishers over the same row and
+          // cross-wire their PR markers. Stale (>30m) claims are crashed
+          // publishes and don't block.
+          .where((q) => q.whereNull('publish_claimed_at')
+            .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
           .update({ publish_status: 'publishing', updated_at: new Date() })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] blog ${blog.id} already claimed by a concurrent tick — skipping`);
