@@ -166,11 +166,13 @@ describe('discount engine service filters', () => {
     mockDiscounts([
       serviceScopedDiscount({ id: 'discount-1', discount_type: 'fixed_amount', amount: 80 }),
       serviceScopedDiscount({ id: 'discount-2', discount_type: 'fixed_amount', amount: 80 }),
+      serviceScopedDiscount({ id: 'discount-3', discount_type: 'fixed_amount', amount: 10 }),
     ]);
 
     const result = await DiscountEngine.calculateDiscounts(null, { subtotal: 100 });
 
     expect(result.discounts.map((row) => row.discount_dollars)).toEqual([80, 20]);
+    expect(result.discounts.map((row) => row.id)).toEqual(['discount-1', 'discount-2']);
     expect(result.totalDiscount).toBe(100);
     expect(result.afterDiscount).toBe(0);
   });

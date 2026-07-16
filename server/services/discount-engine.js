@@ -251,7 +251,7 @@ const DiscountEngine = {
         color: disc.color,
         icon: disc.icon,
       };
-    });
+    }).filter((discount) => discount.discount_dollars > 0);
 
     // Don't let total discount exceed subtotal
     if (totalDiscount > subtotal) totalDiscount = subtotal;
