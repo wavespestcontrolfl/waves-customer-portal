@@ -72,6 +72,29 @@ describe('MobileAppointmentDetailSheet invoice-on-file block', () => {
     expect(onCompleteService).not.toHaveBeenCalled();
   });
 
+  it('keeps checkout enabled after completion when an attached invoice is still open', () => {
+    const onReviewCheckout = vi.fn();
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          ...ATTACHED_INVOICE_FIELDS,
+          status: 'completed',
+          estimatedPrice: 0,
+          completionProfile: { projectBacked: true },
+          linkedProject: { id: 'project-1', status: 'closed' },
+        }}
+        onClose={() => {}}
+        onReviewCheckout={onReviewCheckout}
+      />,
+    );
+
+    const checkout = screen.getByRole('button', { name: 'Review & checkout' });
+    expect(checkout).toBeEnabled();
+    fireEvent.click(checkout);
+    expect(onReviewCheckout).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the attached invoice breakdown under the visit total', () => {
     render(
       <MobileAppointmentDetailSheet

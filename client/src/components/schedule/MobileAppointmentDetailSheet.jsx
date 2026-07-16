@@ -369,9 +369,9 @@ export default function MobileAppointmentDetailSheet({
         <button
           type="button"
           onClick={handleReviewAction}
-          disabled={!hasChargeableAmount && !canCompleteService}
+          disabled={!hasCheckoutAmount && !canCompleteService}
           className={`w-full rounded-sm font-medium u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
-          style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasChargeableAmount && !canCompleteService) ? 0.55 : 1 }}
+          style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasCheckoutAmount && !canCompleteService) ? 0.55 : 1 }}
         >
           {hasCheckoutAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
         </button>
