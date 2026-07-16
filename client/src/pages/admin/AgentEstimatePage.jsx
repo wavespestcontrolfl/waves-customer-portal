@@ -529,6 +529,7 @@ export default function AgentEstimatePage() {
     context: "agent_estimate",
     buildPageData: () => ({ agent_estimate_context: context, current_estimate: draft }),
     fallbackActions: NO_FALLBACK_ACTIONS,
+    getRequestKey: () => selectedLeadId,
   });
 
   useEffect(() => {

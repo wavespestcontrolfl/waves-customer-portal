@@ -37,6 +37,7 @@ export function useIntelligenceBar({
   buildPageData,
   fallbackActions,
   onAfterSubmit,
+  getRequestKey,
 } = {}) {
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState(false);
@@ -58,8 +59,10 @@ export function useIntelligenceBar({
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
+  const getRequestKeyRef = useRef(getRequestKey);
   useEffect(() => { buildPageDataRef.current = buildPageData; }, [buildPageData]);
   useEffect(() => { onAfterSubmitRef.current = onAfterSubmit; }, [onAfterSubmit]);
+  useEffect(() => { getRequestKeyRef.current = getRequestKey; }, [getRequestKey]);
 
   useEffect(() => {
     setRecentPrompts(getRecents(context));
@@ -119,6 +122,7 @@ export function useIntelligenceBar({
     setResponse(null);
     setStructuredData(null);
     setPendingActions([]);
+    const requestKey = getRequestKeyRef.current?.();
 
     setRecentPrompts(addRecent(context, q));
 
@@ -137,6 +141,13 @@ export function useIntelligenceBar({
         method: 'POST',
         body: JSON.stringify(body),
       });
+
+      if (getRequestKeyRef.current && requestKey !== getRequestKeyRef.current()) {
+        setLoading(false);
+        setPrompt('');
+        resetAttachments();
+        return;
+      }
 
       setResponse(data.response);
       setStructuredData(data.structuredData);
