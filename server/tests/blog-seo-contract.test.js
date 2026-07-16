@@ -271,12 +271,14 @@ describe('blog SEO contract helpers', () => {
     expect(practices.wavesApproach).toBeTruthy();
   });
 
-  test('"whenever" does not satisfy the what-not-to-do bucket (codex r1)', () => {
+  test('neither "whenever" nor reassurance-"never" satisfies the what-not-to-do bucket (codex r1+r2)', () => {
     const { extractPestPractices } = require('../services/content/blog-seo-contract')._internals;
     const noAvoidance = extractPestPractices('Call whenever activity returns and schedule a visit.');
     expect(noAvoidance.whatNotToDo).toHaveLength(0);
-    const realNever = extractPestPractices('Never spray baseboards blindly.');
-    expect(realNever.whatNotToDo).toContain('never');
+    const reassurance = extractPestPractices("With WaveGuard you'll never have to worry again.");
+    expect(reassurance.whatNotToDo).toHaveLength(0);
+    const realProhibition = extractPestPractices("Don't spray baseboards blindly; avoid foggers.");
+    expect(realProhibition.whatNotToDo.length).toBeGreaterThan(0);
   });
 
   test('default Home breadcrumb keeps the root URL as "/" (codex r1)', () => {

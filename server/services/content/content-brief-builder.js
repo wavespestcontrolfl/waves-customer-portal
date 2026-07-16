@@ -334,10 +334,21 @@ const SERVICE_CONVERSION_LINK = {
 // _internalLinksFor so ALL three link maps (hubs, city slug, conversion)
 // resolve — aliasing only the conversion map left those opportunities
 // missing their mandatory service/city checklist links.
+// commercial-lawn / commercial-pest are DELIBERATELY absent: commercial is
+// a different funnel (no residential calculator, its own pricing rules) —
+// mapping it to residential hubs needs an owner call, not a default.
 const SERVICE_ID_ALIASES = {
   'pest-control': 'pest',
   'lawn-care': 'lawn',
   'tree-shrub-care': 'tree-shrub',
+  'bed-bug': 'pest',
+  'cockroach': 'pest',
+  'pest-inspection': 'pest',
+  'termite-inspection': 'termite',
+  'lawn-aeration': 'lawn',
+  'lawn-fertilization': 'lawn',
+  'lawn-weed-control': 'lawn',
+  'lawn-pest-control': 'lawn',
 };
 
 // ── main API ────────────────────────────────────────────────────────

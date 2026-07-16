@@ -355,12 +355,12 @@ function extractPestPractices(markdown = '') {
     identification: matchSection(body, /\b(what you'?re seeing|identify|identification|signs of|what this means|how to tell|what (?:it|they) looks? like|telltale|recognize)\b/),
     swflContext: matchSection(body, /\b(swfl|southwest florida|sarasota|bradenton|lakewood ranch|venice|parrish|palmetto|north port|afternoon storms?|sandy soil|humidity)\b/),
     homeownerChecks: collectSignals(body, ['check', 'look for', 'inspect', 'confirm', 'watch for', 'walk the', 'shine a flashlight']),
-    // 'never' needs a word boundary — a plain substring term would be
-    // satisfied by "whenever", filling the bucket with no avoidance guidance.
-    whatNotToDo: [
-      ...collectSignals(body, ['avoid', 'do not', "don't", 'what not to do', 'skip the', 'resist the']),
-      ...(/\bnever\b/.test(body) ? ['never'] : []),
-    ],
+    // No bare-'never' signal: as a substring it matched "whenever", and even
+    // word-bounded it passes reassurance copy ("you'll never have to worry
+    // again") that contains no avoidance guidance. Prohibition writing
+    // reliably carries don't/avoid/do not, which (apostrophe-normalized
+    // above) cover the bucket without that false positive.
+    whatNotToDo: collectSignals(body, ['avoid', 'do not', "don't", 'what not to do', 'skip the', 'resist the']),
     whenToCallPro: matchSection(body, /\b(when to call|call waves|call a pro|professional|schedule|inspection|exterminator|pest control company)\b/),
     wavesApproach: matchSection(body, /\b(waves pest control|waves can|our approach|we inspect|we treat|we start|our technicians?)\b/),
   };
