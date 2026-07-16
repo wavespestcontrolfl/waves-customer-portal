@@ -75,13 +75,12 @@ const PAYLOADS = {
       applicator_attestation: 'I attest that the soil treatment described above was applied in accordance with the product label and Florida Building Code 1816.1.7.',
     },
   }),
-  // WDO links are also emailed to the third parties named on the FDACS form,
-  // so the live payload redacts the homeowner's email/phone — mirror that.
   wdo: () => ({
     ...BASE,
     ...CARTER,
-    customerEmail: null,
-    customerPhone: null,
+    // owner ruling 2026-07-16: WDO shows the full identity block (the old
+    // server-side email/phone withholding is lifted) — CARTER's contact
+    // fields ride through like every other scenario
     projectType: 'wdo_inspection',
     fdacsPdfAvailable: true,
     title: 'WDO Inspection Service',
@@ -385,6 +384,20 @@ function ScenarioBar() {
           style={{
             color: s === scenario ? '#0F172A' : '#fff',
             background: s === scenario ? '#FFD700' : 'transparent',
+            border: '1px solid rgba(255,255,255,.25)',
+            borderRadius: 6, padding: '3px 8px', textDecoration: 'none', fontWeight: 700,
+          }}
+        >
+          {s}
+        </a>
+      ))}
+      <span style={{ opacity: 0.6, margin: '0 2px 0 8px' }}>service reports:</span>
+      {['lawn-v2', 'mosquito-v2', 'server-summary', 'client-built'].map((s) => (
+        <a
+          key={s}
+          href={`/preview-service-report.html?scenario=${s}`}
+          style={{
+            color: '#fff', background: 'transparent',
             border: '1px solid rgba(255,255,255,.25)',
             borderRadius: 6, padding: '3px 8px', textDecoration: 'none', fontWeight: 700,
           }}

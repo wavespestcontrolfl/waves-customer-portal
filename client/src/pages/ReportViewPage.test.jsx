@@ -155,7 +155,7 @@ describe('ReportViewPage report chrome helpers', () => {
     };
 
     expect(smartStatusSummary(data, 'static', Date.parse('2026-05-21T19:00:00.000Z'))).toEqual(expect.objectContaining({
-      heading: 'one area needs attention.',
+      heading: 'one area needs attention!',
       status: 'Follow-up recommended',
       result: 'Lanai was marked follow-up recommended.',
     }));
@@ -203,7 +203,7 @@ describe('ReportViewPage report chrome helpers', () => {
     }, 'static', Date.parse('2026-05-21T19:00:00.000Z'));
 
     expect(status).toEqual(expect.objectContaining({
-      heading: 'we found activity that needs attention.',
+      heading: 'we found activity that needs attention!',
       status: 'Ready after 4:00 PM',
       statusTone: 'pending',
     }));

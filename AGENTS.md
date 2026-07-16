@@ -724,6 +724,19 @@ finding and warns on P1. Reviewers must return JSON matching
   the already-emailed archived filing streamed from private S3 — never
   live/unsigned content — and returns a generic 404 for non-WDO projects, reports
   with no archived filing, or malformed tokens).
+  `/api/reports/project/:token/ask` (POST; Waves AI on project reports — owner
+  ruling 2026-07-16. Deterministic keyword-routed template answers built ONLY
+  from the project's own findings/recommendations/follow-up — data the sibling
+  `/data` viewer already serves this token; internal finding keys
+  (`inspection_fee` class) are excluded server-side; no LLM, so nothing new can
+  leak or be injected. Same long-lived report token + format gate as the
+  `/data` viewer (`extractProjectReportTokenLookup`), inherits the router-level
+  20 req/min `reportLimiter`, question length capped at 500 chars. The WDO
+  payment hold 402s BEFORE any content-derived answer; the paper compliance
+  documents (wdo_inspection, pre_treatment_termite_certificate) return a
+  generic 404 — their pages never mount the ask bar. Only write: an
+  `activity_log` analytics row recording question length, never answer
+  content).
   `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
   bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
   call ends. NOT browser-facing. Fail-closed shared-secret auth in the route

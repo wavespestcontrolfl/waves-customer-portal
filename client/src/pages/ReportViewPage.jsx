@@ -616,7 +616,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (primaryFinding) {
     return {
-      heading: 'we found activity that needs attention.',
+      heading: 'we found activity that needs attention!',
       status: pendingReadyText || 'Follow-up recommended',
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -634,7 +634,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     const area = item.areaName || item.name || 'one area';
     const inaccessible = isInaccessibleCoverageStatus(item.status);
     return {
-      heading: inaccessible ? 'one area could not be serviced.' : 'one area needs attention.',
+      heading: inaccessible ? 'one area could not be serviced!' : 'one area needs attention!',
       status: pendingReadyText || (inaccessible ? 'Action needed' : 'Follow-up recommended'),
       statusTone: pendingReadyText ? 'pending' : 'warning',
       result: pendingReadyText
@@ -662,7 +662,7 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 
   if (context.pressureTrend?.direction === 'down') {
     return {
-      heading: 'pest pressure is trending down.',
+      heading: 'pest pressure is trending down!',
       status: allReady ? 'Ready now' : 'Service complete',
       statusTone: 'ready',
       result: context.pressureTrend.customerSummary || 'Activity has decreased since the last visit.',
@@ -1756,8 +1756,8 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   return (
     <section className="service-report-hero" id="service-status">
       <div className="service-report-hero-copy">
-        <div className="section-eyebrow">Service report</div>
-        <h1 className="sr-title">Hey {firstName}, {headline}</h1>
+        <div className="section-eyebrow">Service report{serviceLabel ? ` \u00B7 ${serviceLabel}` : ''}</div>
+        <h1 className="sr-title">Hi {firstName}, {headline}</h1>
         {(() => {
           // Mirrors the estimate header's contact block: each of name / email /
           // phone / address on its own line, rendered mixed-case ("Chris Whitney",
@@ -4937,7 +4937,7 @@ function LegacyReport({ data, token, glass = false }) {
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
           </div>
           <h1 style={{ fontFamily: FONTS.serif, fontSize: 'clamp(34px, 5vw, 48px)', fontWeight: 500, letterSpacing: 0, lineHeight: 1.1, color: ESTIMATE_TEXT, margin: 0 }}>
-            Hey {firstName}, here's your service report.
+            Hi {firstName}, here's your service report!
           </h1>
           {data.cityState && <div style={{ fontSize: 20, color: ESTIMATE_BODY, marginTop: 16, lineHeight: 1.35 }}>{data.cityState}</div>}
         </div>
@@ -5189,7 +5189,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
-          margin: 0 0 16px;
+          /* owner 2026-07-16: the tools card sits almost overlapping the
+             Waves AI strip below it */
+          margin: 0 0 2px;
           padding: 20px 24px;
           background: var(--paper);
           border: 1px solid var(--line);
@@ -7975,6 +7977,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         /* the glass ::before/::after specular layers position against the card */
         html[data-glass-theme] .service-report-v1 [data-glass] { position: relative; }
+        /* the global glass card hover (translateY(-4px) scale(1.016) + 110px
+           shadow) reads as a jarring "pop" on the report's large reading
+           cards (owner-flagged 2026-07-16) — soften to a subtle 1px lift */
+        html[data-glass-theme] .service-report-v1 [data-glass="card"]:hover {
+          transform: translateY(-1px);
+          box-shadow: 0 28px 90px rgba(4, 57, 94, 0.18), 0 5px 18px rgba(4, 57, 94, 0.07),
+            inset 0 1px 0 rgba(255, 255, 255, 0.52), inset 1px 1px 0 rgba(175, 225, 255, 0.32) !important;
+        }
         /* glass layout drops the uppercase eyebrow labels (owner ask 2026-07-05);
            the :has(+ h1) form catches the V2 dashboards' ring-header eyebrows
            ("Overall Lawn Status") without touching their inner list labels */
@@ -7983,6 +7993,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
            page — codex P3 on #2567), so match them by class alongside the h1. */
         html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h1),
         html[data-glass-theme] .service-report-v1 [data-gt="eyebrow"]:has(+ h2.sr-v2-hero-title) { display: none; }
+        /* EXCEPT the hero kicker — owner ruling 2026-07-16: every report leads
+           with "[Report kind] · [the service performed]" above the header,
+           mirroring the project report's kicker. */
+        html[data-glass-theme] .service-report-v1 .service-report-hero .section-eyebrow { display: block; }
         html[data-glass-theme] .service-report-v1 .sr-cell,
         html[data-glass-theme] .service-report-v1 .sr-metric {
           background: rgba(255, 255, 255, 0.42);

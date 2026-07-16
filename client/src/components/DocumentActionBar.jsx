@@ -22,12 +22,23 @@ function buttonStyle() {
  * @param {string|null} pdfUrl   Absolute/API URL of the document PDF; omit or
  *                               null to hide the Download button (pages with
  *                               no server-side PDF render).
+ * @param {boolean} printFallbackDownload  Owner rule 2026-07-16: every doc
+ *                               page shows the same four boxes IN THIS ORDER —
+ *                               Download PDF / Share / Print / Portal Login —
+ *                               so this defaults ON. Pages with no server-side
+ *                               PDF keep the Download box, which opens the
+ *                               print dialog (every browser offers Save as PDF
+ *                               there). Hidden in the native shell alongside
+ *                               Print — window.print() is a no-op in the
+ *                               webview. Pass false only if the owner exempts
+ *                               a surface.
  * @param {string} pdfFileName   Save-sheet filename in the native shell.
  * @param {string} shareTitle    navigator.share sheet title.
  * @param {string} shareUrl      Defaults to the current location.
  */
 export default function DocumentActionBar({
   pdfUrl = null,
+  printFallbackDownload = true,
   pdfFileName = 'Waves_Document.pdf',
   shareTitle = 'Waves',
   shareUrl = null,
@@ -113,7 +124,11 @@ export default function DocumentActionBar({
             }}
             style={buttonStyle()}
           ><Download size={16} /> Download PDF</a>
-        ) : null}
+        ) : (printFallbackDownload && !isNativeApp() ? (
+          <button data-glass-accent="" type="button" onClick={() => window.print()} style={buttonStyle()}>
+            <Download size={16} /> Download PDF
+          </button>
+        ) : null)}
         <button data-glass-accent="" type="button" onClick={share} style={buttonStyle()}>
           <Share2 size={16} /> {copied ? 'Link copied' : 'Share'}
         </button>
