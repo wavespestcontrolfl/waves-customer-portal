@@ -864,13 +864,24 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // converges instead of looping.
     const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
     const currentHead = String(headSha || '').trim().toLowerCase();
-    if (!currentHead || (parkedHead && parkedHead === currentHead)) {
+    // A 'moved past' park claims ANOTHER push superseded ours mid-round. If
+    // the live head IS the push we parked against, that claim was a stale
+    // getPr read-after-write (PR #383) — and because such parks stamp OUR
+    // pushed head, the head-advanced re-arm below can never fire (the stamp
+    // equals the real head). The premise is contradicted by the observation
+    // in hand, so re-arm on it. Other same-head parks (sync failures, gate
+    // failures) keep holding for a human as designed.
+    const staleMovedPastPark = Boolean(parkedHead) && parkedHead === currentHead
+      && /^pr head moved past the remediation push/.test(String(state.park_reason || ''));
+    if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
       return { skipped: true, reason: 'parked' };
     }
     await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
     state.status = 'active';
     state.rounds = 0;
-    logger.info(`[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
+    logger.info(staleMovedPastPark
+      ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
+      : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
   }
 
   const reviewComments = await gh.listPrReviewComments(prNumber);
@@ -1063,13 +1074,26 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
     if (fresh.head?.sha && newHead
       && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
-      // A parallel push (usually a human) landed mid-round: our fix is no
-      // longer the head, so syncing it would mirror content the merge won't
-      // take. Park like the other withheld-sync paths — and stamp OUR
-      // pushed head, so the parked row re-arms on the very next blocked
-      // tick (branch head ≠ parked head) and remediation re-evaluates the
-      // newer content with fresh rounds instead of going silent.
-      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}); sync withheld`, onPark, newHead);
+      // Ambiguous mismatch: either a parallel push landed mid-round, or getPr
+      // served a stale read-after-write snapshot behind our OWN putFile (PR
+      // #383 — the "moved past" head was the parent of our commit, and the
+      // park below then wedged forever because it stamps the real head). The
+      // branch ref is authoritative for putFile's own write; consult it
+      // before withholding the sync. A getBranchSha failure falls through to
+      // the park (fail closed — the parked-branch contradiction re-arm
+      // recovers it if the read was stale).
+      let refHead = null;
+      try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+      if (refHead !== String(newHead).trim().toLowerCase()) {
+        // A parallel push (usually a human) landed mid-round: our fix is no
+        // longer the head, so syncing it would mirror content the merge won't
+        // take. Park like the other withheld-sync paths — and stamp OUR
+        // pushed head, so the parked row re-arms on the very next blocked
+        // tick (branch head ≠ parked head) and remediation re-evaluates the
+        // newer content with fresh rounds instead of going silent.
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
+      }
+      // The ref confirms our push IS the branch head — proceed with the round.
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that

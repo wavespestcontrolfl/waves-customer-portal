@@ -239,6 +239,34 @@ describe('runRemediationForPr', () => {
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  test('same-head park with a non-"moved past" reason → stays parked (human hold)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD, park_reason: `portal row sync failed after fix commit ${HEAD.slice(0, 7)}: boom` }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true); expect(r.reason).toBe('parked');
+    expect(gh._calls.putFile).toHaveLength(0);
+    expect(db._tables.codex_remediation_state[0].status).toBe('parked');
+  });
+
+  test('same-head "moved past" park → contradiction re-arm and run the round (PR #383 wedge)', async () => {
+    // The park claimed another push superseded ours, but the live head IS the
+    // push we parked against — the claim was a stale read. Must re-arm, not
+    // sit parked forever.
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: 'pr head moved past the remediation push (abc1234 → 9999999); sync withheld' }] });
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('X'), validateFixedBlogFile: PASS });
+    // Re-armed with no findings for this head → posts the review request the
+    // withheld round never sent.
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/requested codex review/);
+    expect(gh._calls.comments).toHaveLength(1);
+    expect(gh._calls.comments[0].body).toContain(HEAD);
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('active');
+    expect(row.park_reason).toBeNull();
+    expect(row.parked_head_sha).toBeNull();
+  });
+
   test('park persists reason + the head the verdict applied to', async () => {
     const db = makeDb();
     const gh = makeGh({ fileContent: 'ORIGINAL BODY' });
@@ -266,6 +294,48 @@ describe('runRemediationForPr', () => {
     const gh = makeGh();
     const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
     expect(r.remediated).toBe(true);
+  });
+
+  test('stale post-push getPr head + ref confirms our push → round completes (no park)', async () => {
+    // getPr keeps serving the PRE-push head (read-after-write lag behind our
+    // own putFile — PR #383); the branch ref says our commit is the head.
+    const db = makeDb();
+    const gh = makeGh({ gh: { getPr: async () => ({ state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }) } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.comments).toHaveLength(1); // re-review request posted
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
+    expect(db._tables.codex_remediation_state[0].rounds).toBe(1);
+  });
+
+  test('genuine parallel push (ref shows a third sha) → park stamped with OUR push', async () => {
+    const db = makeDb();
+    // First getPr (round start) serves the head Codex reviewed; the post-push
+    // read sees the parallel push, and so does the authoritative branch ref.
+    let getPrCalls = 0;
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: getPrCalls++ === 0 ? HEAD : 'parallel777push', ref: 'content/blog-x' } }),
+      getBranchSha: async () => 'parallel777push',
+    } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(gh._calls.comments).toHaveLength(0); // sync + re-review withheld
+    const row = db._tables.codex_remediation_state[0];
+    expect(row.status).toBe('parked');
+    expect(row.parked_head_sha).toBe('newcommit999aaa'); // our push → head-advance re-arm fires next tick
+  });
+
+  test('stale getPr head + getBranchSha failure → park (fail closed; contradiction re-arm recovers)', async () => {
+    const db = makeDb();
+    const gh = makeGh({ gh: {
+      getPr: async () => ({ state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }),
+      getBranchSha: async () => { throw new Error('gh 500'); },
+    } });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/moved past the remediation push/);
+    expect(db._tables.codex_remediation_state[0].parked_head_sha).toBe('newcommit999aaa');
   });
 
   test('closed PR → skip', async () => {
@@ -1533,6 +1603,9 @@ describe('post-push PR revalidation', () => {
           if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
           return { state: 'open', head: { sha: 'someoneelses111', ref: 'content/blog-x' } };
         },
+        // A REAL parallel push moves the branch ref too — the ref no longer
+        // reads our commit (a ref still at our push is the stale-getPr case).
+        async getBranchSha() { return 'someoneelses111'; },
       },
     });
     const onRemediated = jest.fn();
