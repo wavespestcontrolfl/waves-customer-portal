@@ -1200,10 +1200,10 @@ export default function ProjectsPage() {
     <div className="max-w-[1300px] mx-auto text-ink-primary">
       {" "}
       <AdminCommandHeader
-        title="Jobs"
+        title="Reports"
         icon={ClipboardList}
         action={{
-          label: "New Job",
+          label: "New Reports",
           icon: Plus,
           onClick: () => setCreateMode("general"),
         }}
@@ -1258,7 +1258,7 @@ export default function ProjectsPage() {
               <div className="p-6 text-13 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
               <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-13 text-zinc-500 text-center">
-                No jobs match these filters.
+                No reports match these filters.
               </div>
             ) : (
               regularProjects.map((p) => (

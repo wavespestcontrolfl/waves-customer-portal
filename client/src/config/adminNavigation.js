@@ -26,7 +26,6 @@ import {
   Settings,
   Share2,
   ShieldCheck,
-  Sprout,
   Star,
   Tags,
   Users,
@@ -78,7 +77,7 @@ export const ADMIN_NAV_ITEMS = {
   jobs: {
     id: "jobs",
     path: "/admin/projects",
-    label: "Jobs",
+    label: "Reports",
     icon: FileText,
   },
   contracts: {
@@ -160,12 +159,6 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/equipment",
     label: "Equipment",
     icon: Wrench,
-  },
-  turfHeight: {
-    id: "turfHeight",
-    path: "/admin/turf-height",
-    label: "Turf Height Review",
-    icon: Sprout,
   },
   inventory: {
     id: "inventory",
@@ -257,7 +250,6 @@ const NAV_SECTION_DEFINITIONS = [
       "assessments",
       "services",
       "equipment",
-      "turfHeight",
       "inventory",
       "priceMatch",
     ],

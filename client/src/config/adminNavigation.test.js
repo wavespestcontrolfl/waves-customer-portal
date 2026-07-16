@@ -31,7 +31,6 @@ describe("admin navigation registry", () => {
           "assessments",
           "services",
           "equipment",
-          "turfHeight",
           "inventory",
           "priceMatch",
         ],
@@ -95,7 +94,6 @@ describe("admin navigation registry", () => {
     ];
 
     expect(new Set(mobileIds)).toEqual(new Set(desktopIds));
-    expect(desktopIds).toContain("turfHeight");
     expect(mobileIds).toEqual(expect.arrayContaining(["jobs", "contracts", "payers"]));
   });
 
@@ -116,6 +114,9 @@ describe("admin navigation registry", () => {
     expect(ADMIN_NAV_ITEMS.knowledge.label).toBe("Knowledge");
     expect(ADMIN_NAV_ITEMS.knowledge.path).toBe("/admin/knowledge");
     expect(ADMIN_NAV_ITEMS.pricing.path).toBe("/admin/pricing-logic");
+    expect(ADMIN_NAV_ITEMS.jobs.label).toBe("Reports");
+    expect(ADMIN_NAV_ITEMS.jobs.path).toBe("/admin/projects");
+    expect(ADMIN_NAV_ITEMS.turfHeight).toBeUndefined();
     expect(ADMIN_NAV_ITEMS.priceNotices).toBeUndefined();
   });
 
@@ -149,6 +150,14 @@ describe("admin navigation registry", () => {
         nestedPath,
       );
     }
+  });
+
+  it("redirects the retired turf-height review route to Schedule", () => {
+    const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+
+    expect(appSource).toContain(
+      '<Route path="turf-height" element={<Navigate to="/admin/schedule" replace />} />',
+    );
   });
 });
 
