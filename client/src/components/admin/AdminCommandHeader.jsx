@@ -1,8 +1,6 @@
 import React from "react";
 import { Button, cn } from "../ui";
 
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
 export default function AdminCommandHeader({
   title,
   icon: Icon,
@@ -19,6 +17,8 @@ export default function AdminCommandHeader({
 }) {
   const resolvedActions = actions?.length ? actions : action ? [action] : [];
   const Heading = headingLevel === 2 ? "h2" : "h1";
+  const hasSections = sections.length > 0;
+
   return (
     <div
       className={cn(
@@ -26,24 +26,26 @@ export default function AdminCommandHeader({
         "z-20 mb-5 bg-surface-page/95 pb-3",
         className,
       )}
-      style={{ fontFamily: ROBOTO }}
     >
-      {" "}
       <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-        {" "}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          {" "}
-          <div className="flex items-center gap-3 min-w-0">
-            {" "}
+        <div
+          className={cn(
+            "flex flex-wrap items-center justify-between gap-3 px-4 py-3",
+            hasSections && "border-b border-hairline border-zinc-200",
+          )}
+        >
+          <div className="flex min-w-0 items-center gap-3">
             <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
               {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
-            </div>{" "}
+            </div>
             <Heading
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: ROBOTO }}
+              className={cn(
+                "m-0 min-w-0 font-medium tracking-normal text-zinc-900",
+                headingLevel === 2 ? "text-18" : "text-22",
+              )}
             >
               {title}
-            </Heading>{" "}
+            </Heading>
           </div>
           {resolvedActions.length > 0 && (
             <div className="flex flex-wrap items-center justify-end gap-2">
@@ -72,7 +74,7 @@ export default function AdminCommandHeader({
             </div>
           )}
         </div>
-        {sections.length > 0 && (
+        {hasSections && (
           <nav
             aria-label={ariaLabel || `${title} section`}
             className={cn("grid gap-1 p-2", navGridClassName)}
@@ -92,8 +94,8 @@ export default function AdminCommandHeader({
                     onClick={() => onSectionChange?.(key)}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
-                      "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
+                      "inline-flex h-11 min-w-0 items-center justify-center gap-2 rounded-sm border-hairline px-3 sm:h-9",
+                      "text-center text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors",
                       active
                         ? "bg-zinc-900 text-white border-zinc-900"
                         : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
@@ -110,7 +112,7 @@ export default function AdminCommandHeader({
             )}
           </nav>
         )}
-      </div>{" "}
+      </div>
     </div>
   );
 }
