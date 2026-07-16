@@ -6054,13 +6054,18 @@ const CallRecordingProcessor = {
     // never break call processing or eat the promise.
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
-      try {
-        const { maybeDraftEstimateForCall } = require('./estimator-engine');
-        const engineOutcome = await maybeDraftEstimateForCall({ callLogId: call.id });
-        logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
-      } catch (engineErr) {
-        logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
-      }
+      // Fire-and-forget: the DEEP composer + property pipeline can take
+      // minutes, and the scheduling/confirmation work below must not wait on
+      // a drafting pass. The engine's own dedupe guards make re-entry safe
+      // and it degrades to the fallback notification on any failure.
+      const { maybeDraftEstimateForCall } = require('./estimator-engine');
+      maybeDraftEstimateForCall({ callLogId: call.id })
+        .then((engineOutcome) => {
+          logger.info(`[call-proc] estimator engine lane=${engineOutcome.lane} created=${engineOutcome.created} for ${callSid}`);
+        })
+        .catch((engineErr) => {
+          logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
+        });
     }
 
     // A customer-less recovery lead is the ONLY durable record for this call, so

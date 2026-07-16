@@ -95,13 +95,15 @@ function sameStreetAddress(a, b) {
   const zip = (s) => (String(s || '').match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || null;
   const [za, zb] = [zip(a), zip(b)];
   if (za && zb && za !== zb) return false;
-  const cityTokens = (s) => new Set(
-    normSegment(String(s || '').split(',').slice(1).join(' '))
-      .split(' ')
-      .filter((t) => t && t !== 'fl' && t !== 'florida' && !/^\d+$/.test(t)),
-  );
-  const [ca, cb] = [cityTokens(a), cityTokens(b)];
-  if (ca.size && cb.size && ![...ca].some((t) => cb.has(t))) return false;
+  // Full-city equality, not token overlap — North Port vs Port Charlotte
+  // share a token but are different parcels. A spurious mismatch only costs
+  // a re-lookup.
+  const cityString = (s) => normSegment(String(s || '').split(',').slice(1).join(' '))
+    .split(' ')
+    .filter((t) => t && t !== 'fl' && t !== 'florida' && !/^\d+$/.test(t))
+    .join(' ');
+  const [ca, cb] = [cityString(a), cityString(b)];
+  if (ca && cb && ca !== cb) return false;
   return true;
 }
 

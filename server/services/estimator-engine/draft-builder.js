@@ -50,6 +50,10 @@ function lineRequiresReview(line = {}) {
     line.quoteRequired
     || line.requiresManualReview
     || line.requiresMeasurement
+    // Oversize-lawn custom quotes carry a price but the note says "field
+    // verification required" — priced-but-custom is still review-blocking.
+    || line.customQuoteFlag
+    || line.requiresCustomQuote
     || (Array.isArray(line.manualReviewReasons) && line.manualReviewReasons.length)
   );
 }

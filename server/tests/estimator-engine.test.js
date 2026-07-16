@@ -102,6 +102,19 @@ describe('intent schema', () => {
 
 // ── Source arbitration ────────────────────────────────────────
 describe('sqft source arbitration', () => {
+  test('commercial tenant with NO stated unit size never inherits the county building sqft', () => {
+    const facts = resolvePropertyFacts({
+      extraction: { caller: { relationship_to_property: 'tenant' }, property: {} },
+      propertyRecord: { squareFootage: 8000, yearBuilt: 1998, _parcel: countyParcel({ landUseDescription: 'Multiple Unit Stores' }) },
+      customer: null,
+      isCommercial: true,
+      subdivisionMedian: null,
+    });
+    expect(facts.home.value).toBeNull();
+    expect(facts.home.source).toBe(SQFT_SOURCES.NONE);
+    expect(facts.home.rejected[0].reason).toMatch(/no stated unit size/);
+  });
+
   test('commercial tenant: caller-stated unit size outranks county building sqft', () => {
     const facts = resolvePropertyFacts({
       extraction: tenantExtraction(),
@@ -460,6 +473,15 @@ describe('review fixes', () => {
     expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL 34209', '123 Palm Ave, Bradenton FL 34211')).toBe(false);
     expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL 34209', '123 Palm Avenue, Bradenton FL 34209')).toBe(true);
     expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton', '123 Palm Ave')).toBe(true);
+  });
+
+  test('token-sharing city pairs are still different parcels (North Port vs Port Charlotte)', () => {
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, North Port FL', '123 Palm Ave, Port Charlotte FL')).toBe(false);
+  });
+
+  test('priced-but-custom-quote lines are review-blocking', () => {
+    expect(draftPriv.lineRequiresReview({ monthly: 250, customQuoteFlag: true })).toBe(true);
+    expect(draftPriv.lineRequiresReview({ monthly: 250, requiresCustomQuote: true })).toBe(true);
   });
 
   test('pricing-safe property type keys reach the pest normalizer alias table', () => {

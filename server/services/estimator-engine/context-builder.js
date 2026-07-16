@@ -104,7 +104,7 @@ async function loadCustomerByPhone(phone, extraction) {
 // call's twilio_call_sid); the phone fallback is bounded to leads that
 // existed by ~the time this call processed — a NEWER unrelated lead on a
 // shared/long-lived number must not supply the address or notification link.
-async function loadLeadForCall(call, phone) {
+async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
   const LEAD_COLS = ['id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
     'service_interest', 'urgency', 'is_commercial', 'status', 'created_at'];
   try {
@@ -117,6 +117,10 @@ async function loadLeadForCall(call, phone) {
         .first();
       if (byCall) return byCall;
     }
+    // On an AMBIGUOUS shared line, a phone-matched lead is as untrusted as
+    // the ambiguous profiles — only the sid-matched lead may speak for this
+    // call.
+    if (!phoneFallback) return null;
     const digits = last10(phone);
     if (!digits) return null;
     let q = db('leads')
@@ -239,7 +243,7 @@ async function buildCallContext(callLogId) {
   const customer = customerMatch.customer;
 
   const [lead, smsThread, priorEstimates] = await Promise.all([
-    loadLeadForCall(call, phone),
+    loadLeadForCall(call, phone, { phoneFallback: !customerMatch.ambiguous }),
     // A shared line with MULTIPLE profiles carries texts about other
     // properties — feeding that history to the composer lets it lift an
     // unrelated address as evidence. Ambiguous match → no SMS context.

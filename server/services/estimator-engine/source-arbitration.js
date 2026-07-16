@@ -85,9 +85,18 @@ function resolveHomeSqft({ extraction, parcel, lookupSqft, profileSqft, isCommer
 
   // Commercial tenant: the caller's unit size is the ONLY number that
   // describes the treated space — county/lookup sqft describe the building.
-  if (isCommercial && stated && isTenant(extraction)) {
-    if (county) rejected.push({ value: county, source: SQFT_SOURCES.COUNTY_ASSESSED, reason: 'commercial tenant — county sqft covers the whole building, not the caller\'s unit' });
-    return { value: stated, source: SQFT_SOURCES.CALLER_STATED, confidence: 'medium', rejected };
+  if (isCommercial && isTenant(extraction)) {
+    if (stated) {
+      if (county) rejected.push({ value: county, source: SQFT_SOURCES.COUNTY_ASSESSED, reason: 'commercial tenant — county sqft covers the whole building, not the caller\'s unit' });
+      return { value: stated, source: SQFT_SOURCES.CALLER_STATED, confidence: 'medium', rejected };
+    }
+    // Tenant with NO stated unit size: the county building is the WRONG
+    // number by construction (multi-tenant plaza under the red-lane cap
+    // would auto-price the whole parcel — the exact overquote class this
+    // rule exists for). Unresolved → the engine's missing-footprint guard
+    // keeps commercial pest a manual quote.
+    if (county) rejected.push({ value: county, source: SQFT_SOURCES.COUNTY_ASSESSED, reason: 'commercial tenant with no stated unit size — county sqft covers the whole building' });
+    return { value: null, source: SQFT_SOURCES.NONE, confidence: 'none', rejected };
   }
 
   // Commercial non-tenant with a stated size that wildly disagrees with the
