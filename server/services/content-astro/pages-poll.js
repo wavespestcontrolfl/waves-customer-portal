@@ -281,6 +281,13 @@ async function pollPost(post, { allowMerge = true } = {}) {
   }
 }
 
+// Kill switch for the live-flip share (manual editor lane). Same env-var
+// convention as SOCIAL_BLOG_MERGE_SHARE_ENABLED (autonomous lane): ON unless
+// explicitly disabled.
+function liveShareOnFlipEnabled() {
+  return !/^(0|false|no|off)$/i.test(String(process.env.SOCIAL_BLOG_LIVE_SHARE_ENABLED || '').trim());
+}
+
 async function pollLivePost(post) {
   const url = post.astro_live_url || liveUrlForPost(post);
   if (!url) return { skipped: true, reason: 'no live url' };
@@ -302,6 +309,24 @@ async function pollLivePost(post) {
 
     await db('blog_posts').where({ id: post.id }).update(updates);
     await runPostPublishVisibility({ ...post, ...updates, astro_live_url: url });
+    // Auto-share at the moment a MANUAL-lane post is verified live (owner
+    // directive 2026-07-16, explicitly confirmed: every hub post shares
+    // without a click). The scheduler lane is excluded — it invokes
+    // sharePublishedBlog itself after observing live (publish_status=
+    // 'publishing' marks its claim) — and sharePublishedBlog carries every
+    // gate this needs: the per-post auto_share_social flag (default true),
+    // the shared_to_social dedupe, SOCIAL automation flag + admin pause,
+    // live-URL link, hero handling. Fail-soft: a share failure never blocks
+    // the live flip (already written above); the 4-hourly RSS backstop
+    // dedupes on source_url and recovers a transiently failed share.
+    if (post.publish_status !== 'publishing' && liveShareOnFlipEnabled()) {
+      try {
+        const { sharePublishedBlog } = require('../content-scheduler');
+        await sharePublishedBlog({ ...post, ...updates, astro_live_url: url });
+      } catch (err) {
+        logger.warn(`[pages-poll] live-flip social share failed for ${post.slug || post.id}: ${err.message} (RSS backstop will retry)`);
+      }
+    }
     return { live: true, url, deployment_url: deploy.url || null };
   } catch (err) {
     logger.warn(`[pages-poll] live check failed for ${url}: ${err.message}`);
