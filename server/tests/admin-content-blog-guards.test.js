@@ -286,6 +286,12 @@ describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invis
     db.mockImplementation((table) => {
       const q = {
         where: jest.fn(() => q),
+        whereNull: jest.fn(() => q),
+        whereNot: jest.fn(() => q),
+        whereNotIn: jest.fn(() => q),
+        orWhere: jest.fn(() => q),
+        orWhereNot: jest.fn(() => q),
+        orWhereNotIn: jest.fn(() => q),
         first: jest.fn(() => Promise.resolve(tableState.post ?? null)),
         update: jest.fn(() => Promise.resolve(0)),
       };

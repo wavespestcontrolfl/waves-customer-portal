@@ -491,6 +491,17 @@ const ContentScheduler = {
           // publishes and don't block.
           .where((q) => q.whereNull('publish_claimed_at')
             .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
+          // No external astro progress may exist at claim time: a manual
+          // publish that FINISHED between this tick's SELECT and this CAS
+          // left pr_open + a cleared lease with publish_status untouched —
+          // claiming from that stale snapshot would pair the manual PR with
+          // 'publishing', which pages-poll reads as auto-merge authorization
+          // (bypassing the Approve & Go Live click). Pending rows are
+          // no-progress by invariant (the stale sweep only returns
+          // marker-less rows to pending), so these are pure guards.
+          .whereNull('astro_pr_number')
+          .whereNull('astro_branch_name')
+          .whereNull('astro_status')
           .update({ publish_status: 'publishing', updated_at: new Date() })) > 0;
         if (!claimed) {
           logger.info(`[content-scheduler] blog ${blog.id} already claimed by a concurrent tick — skipping`);

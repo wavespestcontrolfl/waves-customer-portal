@@ -851,13 +851,20 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     // late can't release a NEWER publisher's lease. The scheduler lane is
     // excluded symmetrically (its CAS also refuses a live claim).
     const stamp = new Date();
-    const got = await whereNoLivePublishClaim(db('blog_posts').where('id', req.params.id))
-      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+    // Full not-astro-active predicate (markers, active states, scheduler
+    // marker, live claim): publishAstro would reject marker-bearing rows
+    // anyway, and requiring no external progress here also means a >30m
+    // stale-claim takeover only happens when the hung publisher verifiably
+    // did nothing external — takeover-with-progress needs a human.
+    const got = await whereNotAstroActive(db('blog_posts').where('id', req.params.id))
       .update({ publish_claimed_at: stamp, updated_at: new Date() });
     if (!got) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      return res.status(409).json({ error: 'Post is already being published.' });
+      const why = astroActivePost(post)
+        ? `Post already has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — use refresh/merge/unpublish instead.`
+        : 'Post is already being published.';
+      return res.status(409).json({ error: why });
     }
     claimStamp = stamp;
 
