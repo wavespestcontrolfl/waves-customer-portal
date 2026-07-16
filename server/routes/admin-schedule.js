@@ -6171,7 +6171,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
 router.post('/:id/regenerate-brief', async (req, res, next) => {
   try {
     const AppointmentTagger = require('../services/appointment-tagger');
-    await AppointmentTagger.onServiceScheduled(req.params.id);
+    await AppointmentTagger.onServiceScheduled(req.params.id, { rerun: true });
     const svc = await db('scheduled_services').where({ id: req.params.id }).first();
     res.json({ success: true, brief: svc.pre_service_brief ? JSON.parse(svc.pre_service_brief) : null });
   } catch (err) { next(err); }

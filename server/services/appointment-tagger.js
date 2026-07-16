@@ -38,7 +38,12 @@ const PREP_TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled',
 
 class AppointmentTagger {
 
-  async onServiceScheduled(scheduledServiceId) {
+  // opts.rerun marks a replay of an existing appointment (the admin
+  // regenerate-brief endpoint) rather than a fresh booking. Prep flows
+  // carry their own dedupe and may replay; the welcome must not — its
+  // history checks are scoped to rows created before the triggering
+  // booking, which is only meaningful at booking time.
+  async onServiceScheduled(scheduledServiceId, { rerun = false } = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -78,7 +83,7 @@ class AppointmentTagger {
     // count is blind to imported customers whose visit history lives only
     // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
-    if (service.waveguard_tier && service.is_recurring) {
+    if (!rerun && service.waveguard_tier && service.is_recurring) {
       const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
         excludeServiceId: service.id,
       });
