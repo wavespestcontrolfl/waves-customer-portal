@@ -7,6 +7,8 @@ import { adminFetch } from "../../lib/adminFetch";
  * can be sent, so this gates the send buttons upstream. Draws to a canvas,
  * exports a PNG data URL, and POSTs to /admin/projects/:id/wdo-signature.
  */
+const CANVAS_CSS_HEIGHT = 160;
+
 export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
@@ -20,9 +22,19 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
   const initCanvas = useCallback(() => {
     const c = canvasRef.current;
     if (!c) return;
+    // Size the bitmap from the rendered box (× devicePixelRatio): a fixed
+    // 520×160 bitmap on a ~350px-wide phone box stretched the exported PNG
+    // horizontally relative to what was actually signed, and rendered blurry
+    // on Retina. Falls back to the width/height attributes pre-layout.
+    const rect = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    if (rect.width > 0) {
+      c.width = Math.round(rect.width * dpr);
+      c.height = Math.round(CANVAS_CSS_HEIGHT * dpr);
+    }
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.lineWidth = 2.2;
+    ctx.lineWidth = 2.2 * (rect.width > 0 ? dpr : 1);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = "#0f172a";
@@ -31,6 +43,28 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
 
   useEffect(() => {
     if (editing) initCanvas();
+  }, [editing, initCanvas]);
+
+  // Re-size the bitmap when the rendered box changes (rotation, sheet
+  // resize): strokes drawn after a resize would otherwise map against the
+  // stale bitmap aspect and export distorted — the exact bug initCanvas
+  // fixes at mount. Re-initing clears any in-progress scribble; that beats
+  // silently stamping a stretched signature on an FDACS filing (the licensee
+  // just re-signs).
+  useEffect(() => {
+    if (!editing) return undefined;
+    const c = canvasRef.current;
+    if (!c || typeof ResizeObserver === "undefined") return undefined;
+    let lastWidth = c.getBoundingClientRect().width;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[entries.length - 1]?.contentRect?.width || 0;
+      if (width > 0 && Math.abs(width - lastWidth) > 1) {
+        lastWidth = width;
+        initCanvas();
+      }
+    });
+    ro.observe(c);
+    return () => ro.disconnect();
   }, [editing, initCanvas]);
 
   function pointFor(e) {
@@ -156,8 +190,8 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
         <canvas
           ref={canvasRef}
           width={520}
-          height={160}
-          style={{ width: "100%", height: 160, border: "1px dashed #a1a1aa", borderRadius: 8, background: "#fff", touchAction: "none", cursor: "crosshair" }}
+          height={CANVAS_CSS_HEIGHT}
+          style={{ width: "100%", height: CANVAS_CSS_HEIGHT, border: "1px dashed #a1a1aa", borderRadius: 8, background: "#fff", touchAction: "none", cursor: "crosshair" }}
           onMouseDown={startDraw}
           onMouseMove={moveDraw}
           onMouseUp={endDraw}
@@ -165,6 +199,7 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
           onTouchStart={startDraw}
           onTouchMove={moveDraw}
           onTouchEnd={endDraw}
+          onTouchCancel={endDraw}
         />
       </div>
       {error ? <div style={{ color: "#dc2626", fontSize: 13, marginTop: 6 }}>{error}</div> : null}

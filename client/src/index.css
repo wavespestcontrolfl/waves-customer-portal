@@ -26,25 +26,23 @@ html {
 }
 
 /* iOS Safari/WKWebView auto-zooms the whole page in whenever a focused form
-   control has a font smaller than 16px, then leaves the customer stranded
-   zoomed-in (pinch-out is fiddly). The portal's inline styles size inputs at
-   14px, so force >=16px on touch devices to suppress the involuntary zoom.
+   control has a font smaller than 16px, then leaves the user stranded
+   zoomed-in with the fixed chrome (tab bar/header) clipped off-screen
+   (pinch-out is fiddly). Inline styles size inputs at 13-14px across every
+   surface, so force >=16px on touch devices to suppress the involuntary zoom.
    Pinch-zoom itself stays enabled (no user-scalable=no in the viewport tag).
 
    !important is required: the fields set font-size inline (style={{ fontSize:
-   14 }}), and author CSS without it loses to inline styles. Scoped to two
-   customer-only hooks so admin/tech surfaces are untouched:
-   - .portal-root  — the in-page customer portal tree
-   - [data-glass]  — glass-themed modals portaled to <body> (e.g. AutopayCard's
-     Modal via createPortal), which sit outside .portal-root. data-glass is
-     never used on admin surfaces (they're monochrome). */
+   14 }}), and author CSS without it loses to inline styles. Unscoped on
+   purpose: this was originally limited to the customer portal
+   (.portal-root / [data-glass]), and the admin schedule's WDO report form
+   then hit the exact same stuck-zoom bug on iPhone — admin/tech sheets
+   portal to <body>, so any container scope leaves holes. Desktop is
+   untouched (pointer: coarse only). */
 @media (pointer: coarse) {
-  .portal-root input,
-  .portal-root textarea,
-  .portal-root select,
-  [data-glass] input,
-  [data-glass] textarea,
-  [data-glass] select {
+  input,
+  textarea,
+  select {
     font-size: 16px !important;
   }
 }
