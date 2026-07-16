@@ -73,12 +73,21 @@ function redactResult(result) {
   if (REVEAL) return result;
   const clone = JSON.parse(JSON.stringify(result));
   if (clone.addressUsed) clone.addressUsed = mask(clone.addressUsed, 4);
+  // Lane reasons and composer free text can quote names/addresses verbatim.
+  if (Array.isArray(clone.reasons)) clone.reasons = clone.reasons.map((r) => mask(r, 0));
   if (clone.intent) {
     for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address']) {
       if (clone.intent[field]) clone.intent[field] = mask(clone.intent[field], 2);
     }
     for (const e of clone.intent.evidence || []) {
       if (e.quote) e.quote = mask(e.quote, 6);
+    }
+    for (const f of clone.intent.constraint_flags || []) {
+      if (f.note) f.note = mask(f.note, 0);
+      if (f.quote) f.quote = mask(f.quote, 0);
+    }
+    if (Array.isArray(clone.intent.uncertainties)) {
+      clone.intent.uncertainties = clone.intent.uncertainties.map((u) => mask(u, 0));
     }
   }
   if (clone.propertyFacts?.countyParcel) {
@@ -96,7 +105,14 @@ function printSummary(result) {
   console.log('\n══ ESTIMATOR REPLAY (dryRun — nothing written) ══');
   if (!REVEAL) console.log('(PII masked — pass --reveal for full values; unsuitable for captured logs)');
   console.log(`Lane: ${String(result.lane || 'unknown').toUpperCase()}`);
-  if (result.reasons?.length) console.log(`Reasons:\n${result.reasons.map((r) => `  - ${r}`).join('\n')}`);
+  // Lane reasons carry LLM free text (uncertainties, constraint notes) that
+  // can quote real names/addresses from the call — redacted-mode shows only
+  // the count.
+  if (result.reasons?.length) {
+    console.log(REVEAL
+      ? `Reasons:\n${result.reasons.map((r) => `  - ${r}`).join('\n')}`
+      : `Reasons: ${result.reasons.length} review flag(s) (free text redacted — pass --reveal)`);
+  }
   console.log(`Address used: ${mask(result.addressUsed, 4)}`);
   if (facts.home) console.log(`Home/building sqft: ${facts.home.value ?? '(unresolved)'} [${facts.home.source}]${facts.home.sampleCount ? ` n=${facts.home.sampleCount}` : ''}`);
   if (facts.lot) console.log(`Lot sqft: ${facts.lot.value ?? '(unresolved)'} [${facts.lot.source}]`);

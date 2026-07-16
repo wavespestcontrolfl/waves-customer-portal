@@ -392,7 +392,19 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // estimate endpoint returns the `notes` COLUMN to the customer, so it must
   // never carry internal review material.
   const reviewNotes = buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call });
-  const customerPhone = intent.customer_phone || context?.phone || null;
+  // The composer's phone is only trusted when it is a real 10-digit number —
+  // a placeholder ("unknown") or misheard fragment would break the duplicate
+  // guard's phone lock and leave the draft unsendable/mis-keyed. The verified
+  // caller-ID from context is the fallback.
+  const validPhone = (v) => String(v || '').replace(/\D/g, '').length >= 10;
+  const customerPhone = (validPhone(intent.customer_phone) ? intent.customer_phone : null)
+    || context?.phone
+    || null;
+  // priorQualifyingServices must NOT ride inside the stored engineInputs —
+  // the public reconcile path clears only the TOP-LEVEL key on stale
+  // membership snapshots, and a nested copy would keep replaying the
+  // combined-tier discount after the membership lapsed.
+  const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
 
   const creationResult = await withAutomatedEstimatePhoneLock(customerPhone, async (trx) => {
     const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customerPhone, { database: trx });
@@ -400,9 +412,13 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify({
-        engineInputs: engineInput,
+        engineInputs: storedEngineInputs,
         engineResult,
         agentDraft: true,
+        // Mirror of leads.estimate_id — send/view/accept advancement falls
+        // back to phone/email matching without it, which deliberately no-ops
+        // when multiple open leads share the contact.
+        ...(context?.lead?.id ? { lead_id: context.lead.id } : {}),
         // Existing-customer marker the accept path reads to waive the $99
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
@@ -452,6 +468,17 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         || Object.keys(intent.services).map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(' + '),
       category: intent.category,
     }).returning(['id', 'token']);
+
+    // Link the originating lead to the draft (same transaction) so the
+    // send/view/accept pipeline advances THIS lead instead of falling back
+    // to shared-contact matching.
+    if (context?.lead?.id) {
+      try {
+        await trx('leads').where({ id: context.lead.id }).update({ estimate_id: estimate.id });
+      } catch (linkErr) {
+        logger.warn(`[estimator-engine] lead link update failed (non-blocking): ${linkErr.message}`);
+      }
+    }
 
     return { estimate };
   });

@@ -374,22 +374,15 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     result.propertyFacts = propertyFacts;
 
     // Existing-customer pricing context: qualifying services for the combined
-    // WaveGuard tier + the membership snapshot the accept path reads to waive
-    // the setup fee. Both fail-open.
+    // WaveGuard tier (the snapshot itself is computed AFTER pricing — it
+    // derives the NEW services from the priced line items). Fail-open.
     let priorQualifyingServices = [];
-    let membershipSnapshot = null;
     if (context.isExistingCustomer && context.customer?.id) {
       try {
         const { loadExistingQualifyingServiceKeys } = require('../waveguard-existing-services');
         priorQualifyingServices = await loadExistingQualifyingServiceKeys(db, context.customer.id) || [];
       } catch (err) {
         logger.warn(`[estimator-engine] prior qualifying services load failed: ${err.message}`);
-      }
-      try {
-        const { computeMembershipContext } = require('../estimate-membership-context');
-        membershipSnapshot = await computeMembershipContext(db, { customerId: context.customer.id });
-      } catch (err) {
-        logger.warn(`[estimator-engine] membership context load failed: ${err.message}`);
       }
     }
 
@@ -416,6 +409,22 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     }
     result.engineInput = engineInput;
     result.totals = totals;
+
+    // Membership snapshot AFTER pricing: computeMembershipContext derives the
+    // NEW qualifying services from the priced line items — computed before
+    // pricing it saw newKeys=[] and understated the combined tier.
+    let membershipSnapshot = null;
+    if (context.isExistingCustomer && context.customer?.id && engineResult) {
+      try {
+        const { computeMembershipContext } = require('../estimate-membership-context');
+        membershipSnapshot = await computeMembershipContext(db, {
+          customerId: context.customer.id,
+          estData: { lineItems: engineResult.lineItems || [] },
+        });
+      } catch (err) {
+        logger.warn(`[estimator-engine] membership context load failed: ${err.message}`);
+      }
+    }
 
     const comps = engineResult
       ? await compsBand({
