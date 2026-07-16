@@ -672,17 +672,29 @@ function normalizeEvidenceText(value) {
 }
 
 function verifyAgentEvidenceQuotes(evidence, context) {
-  const haystack = normalizeEvidenceText([
-    ...(context?.quote_form?.message_fields || []).map((row) => row.text),
-    ...(context?.calls || []).flatMap((call) => [call.transcript, call.transcript_summary]),
-    ...(context?.sms_thread || []).map((message) => message.body),
-    ...(context?.activities || []).map((activity) => activity.description),
-  ].filter(Boolean).join(' '));
+  const sourceHaystacks = {
+    quote_form: normalizeEvidenceText((context?.quote_form?.message_fields || []).map((row) => row.text).filter(Boolean).join(' ')),
+    call_transcript: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript).filter(Boolean).join(' ')),
+    transcript_summary: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript_summary).filter(Boolean).join(' ')),
+    sms: normalizeEvidenceText((context?.sms_thread || []).map((message) => message.body).filter(Boolean).join(' ')),
+    activity: normalizeEvidenceText((context?.activities || []).map((activity) => activity.description).filter(Boolean).join(' ')),
+  };
+  const evidenceSourceKey = (source) => {
+    const normalized = String(source || '').trim().toLowerCase();
+    if (/quote|form|submission/.test(normalized)) return 'quote_form';
+    if (/summary|extraction/.test(normalized)) return 'transcript_summary';
+    if (/call|transcript|recording/.test(normalized)) return 'call_transcript';
+    if (/sms|text|message/.test(normalized)) return 'sms';
+    if (/activity|note/.test(normalized)) return 'activity';
+    return null;
+  };
   const quotedRows = (Array.isArray(evidence) ? evidence : [])
-    .map((row, index) => ({ index, quote: row?.quote }))
+    .map((row, index) => ({ index, quote: row?.quote, source: row?.source }))
     .filter((row) => String(row.quote || '').trim());
-  const unverifiedIndexes = quotedRows.filter(({ quote }) => {
+  const unverifiedIndexes = quotedRows.filter(({ quote, source }) => {
     const needle = normalizeEvidenceText(quote);
+    const sourceKey = evidenceSourceKey(source);
+    const haystack = sourceKey ? sourceHaystacks[sourceKey] : '';
     return needle.length < 8 || !haystack.includes(needle);
   }).map(({ index }) => index);
   return {
@@ -1257,7 +1269,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const factMatchesPricingInput = (key, fact) => {
     if (!isVerifiedFact(fact)) return false;
     if (/address/i.test(key)) return sameStreetAddress(String(fact.value), input.address);
-    const candidateKeys = /palm/i.test(key)
+    const candidateKeys = /stor(y|ies)|floor.*count/i.test(key)
+      ? ['stories']
+      : (/palm/i.test(key)
       ? ['palmCount', 'services.palm.palmCount', 'services.palm.count']
       : (/bedroom/i.test(key)
         ? ['bedrooms', 'services.bedBug.bedrooms', 'services.bed_bug.bedrooms']
@@ -1269,7 +1283,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
         ? ['buildingSqFt', 'homeSqFt']
         : (/lot|outdoor/i.test(key)
           ? ['lotSqFt']
-          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : []))))));
+          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : [])))))));
     const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
     if (!candidateKeys.length) {
       return !(/count|sq\s*ft|sqft|\bsf\b|area|size|feet|\bft\b|linear/i.test(key)
@@ -1284,6 +1298,18 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const verifiedFactKeys = propertyFactEntries
     .filter(([key, fact]) => factMatchesPricingInput(key, fact))
     .map(([key]) => key);
+  const hasVerifiedMatchingFact = (pattern) => propertyFactEntries
+    .some(([key, fact]) => pattern.test(key) && factMatchesPricingInput(key, fact));
+  const requirePricingFact = (active, pattern, label) => {
+    if (active && !hasVerifiedMatchingFact(pattern)) {
+      laneReasons.push(`${label} was used for pricing without a matching verified property fact`);
+    }
+  };
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.homeSqFt)), /home|building.*(sq|area|size)/i, 'home/building square footage');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.stories)), /stor(y|ies)|floor.*count/i, 'story count');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.lotSqFt)), /lot|outdoor.*(sq|area|size)/i, 'lot square footage');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.palmCount)), /palm.*count|treated.*palm/i, 'treated palm count');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.perimeterLF)), /perimeter|linear/i, 'perimeter length');
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
   }
@@ -1375,6 +1401,10 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   for (const row of inventoryReview) {
     if (row?.onHand == null) {
       laneReasons.push(`${row?.productName || row?.product || 'inventory'}: count untracked`);
+    } else if (!Number.isFinite(Number(row.onHand)) || Number(row.onHand) < 0) {
+      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: invalid inventory count`);
+    } else if (Number(row.onHand) === 0) {
+      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: unavailable (zero on hand)`);
     } else if (!row?.status) {
       laneReasons.push(`${row?.productName || row?.product || 'inventory'}: status missing`);
     } else if (!['in_stock', 'ok', 'available', 'not_applicable'].includes(String(row.status).toLowerCase())) {
