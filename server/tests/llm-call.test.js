@@ -13,6 +13,7 @@ const {
   dispatch,
   extractOpenAIText,
   parseLooseJson,
+  providerErrorReason,
 } = require('../services/llm/call');
 const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST } = require('../config/models');
 
@@ -28,6 +29,12 @@ describe('llm/call parsers', () => {
     expect(parseLooseJson('sure: {"b":2} done')).toEqual({ b: 2 });
     expect(parseLooseJson('not json')).toBeNull();
     expect(parseLooseJson('')).toBeNull();
+  });
+
+  test('providerErrorReason preserves a provider HTTP status without response text', () => {
+    expect(providerErrorReason('anthropic', { status: 529 })).toBe('anthropic_529');
+    expect(providerErrorReason('anthropic', { message: '529 overloaded' })).toBe('anthropic_529');
+    expect(providerErrorReason('anthropic', new Error('socket closed'))).toBe('error');
   });
 });
 
@@ -108,6 +115,15 @@ describe('callAnthropic prompt caching', () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
+  });
+
+  test('handled Anthropic overload returns a classified fallback result', async () => {
+    const err = new Error('529 {"type":"overloaded_error"}');
+    err.status = 529;
+    mockAnthropicCreate.mockRejectedValue(err);
+
+    await expect(callAnthropic({ model: FLAGSHIP, text: 'hi' }))
+      .resolves.toEqual({ ok: false, reason: 'anthropic_529' });
   });
 });
 

@@ -28,6 +28,14 @@ const REQUEST_DATA_INCLUDE = Object.freeze({
   url: false,
 });
 
+// Tracing is intentionally disabled below. Sentry's default AI-provider
+// integrations still wrap SDK calls even at a zero trace sample rate and mark
+// rejected provider requests as `handled: false` before application fallback
+// code can catch them. That turns expected 429/529 saturation into false crash
+// issues (mechanism `auto.ai.*`). The shared LLM layer owns provider failure
+// classification and fallback, so keep these wrappers out entirely.
+const DISABLED_AI_INTEGRATIONS = new Set(['OpenAI', 'Anthropic_AI', 'Google_GenAI']);
+
 // Request URLs throughout this app can contain long-lived customer bearer
 // tokens, while auth/reset bodies and headers contain staff credentials. Keep
 // only the HTTP method on Sentry error events. This is intentionally stricter
@@ -72,7 +80,8 @@ function buildSentryOptions() {
     profilesSampleRate: 0,
     integrations(defaultIntegrations) {
       const withoutRequestData = (defaultIntegrations || [])
-        .filter((integration) => integration?.name !== 'RequestData');
+        .filter((integration) => integration?.name !== 'RequestData')
+        .filter((integration) => !DISABLED_AI_INTEGRATIONS.has(integration?.name));
       return [
         ...withoutRequestData,
         Sentry.requestDataIntegration({ include: REQUEST_DATA_INCLUDE }),
@@ -93,6 +102,7 @@ function buildSentryOptions() {
 Sentry.init(buildSentryOptions());
 
 module.exports = {
+  DISABLED_AI_INTEGRATIONS,
   REQUEST_DATA_INCLUDE,
   buildSentryOptions,
   stripSentryRequestData,
