@@ -74,13 +74,20 @@ async function sharePublishedBlog(blog) {
       noAiImage: true,
     });
     if (once?.skipped === 'already_posted') {
-      // Another lane definitively shared this URL — stamp so this row stops
-      // re-entering the share path.
-      await db('blog_posts').where('id', blog.id).update({
-        shared_to_social: true,
-        shared_at: new Date(),
-      });
-      return true;
+      // Same blocker distinction as the pages-poll live-flip path: only a
+      // published/scheduled row means the URL definitively went out (stamp,
+      // done). A studio DRAFT blocker means an admin has copy in flight for
+      // this URL and NOTHING has posted — don't stamp; return false so the
+      // caller parks the row at pending_review for the human who owns it.
+      if (['published', 'scheduled'].includes(once.blocking_status)) {
+        await db('blog_posts').where('id', blog.id).update({
+          shared_to_social: true,
+          shared_at: new Date(),
+        });
+        return true;
+      }
+      logger.info(`[content-scheduler] Social share for blog ${blog.id} blocked by a studio ${once.blocking_status || 'draft'} row for the same URL — leaving unshared for the admin to resolve`);
+      return false;
     }
     if (once?.skipped) {
       logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — ${once.skipped}`);

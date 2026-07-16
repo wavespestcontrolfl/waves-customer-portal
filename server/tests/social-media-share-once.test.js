@@ -64,7 +64,7 @@ describe('shareUrlOnce', () => {
 
     expect(trx.raw).toHaveBeenCalled(); // dedup happens UNDER the lock
     expect(publishSpy).not.toHaveBeenCalled();
-    expect(res).toEqual({ skipped: 'already_posted' });
+    expect(res).toEqual({ skipped: 'already_posted', blocking_status: 'published' });
   });
 
   test('passes the normalized URL to publishToAll as both link and guid', async () => {
