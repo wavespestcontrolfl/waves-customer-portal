@@ -200,7 +200,12 @@ export default function MobileAppointmentDetailSheet({
   // one-time types (server 409s those out of /complete); typed
   // service_report profiles serialize projectBacked:false and use the
   // standard completion sheet.
-  const projectBackedCompletion = !!(completionProfile.projectBacked || completionProfile.requiresProject || linkedProject?.id);
+  // An explicit projectBacked value is authoritative. Cut-over service-report
+  // visits can retain a legacy linked project, but the completion endpoint
+  // follows the profile and accepts those through the standard sheet.
+  const projectBackedCompletion = typeof completionProfile.projectBacked === 'boolean'
+    ? !!(completionProfile.projectBacked || completionProfile.requiresProject)
+    : !!(completionProfile.projectBacked || completionProfile.requiresProject || linkedProject?.id);
   const projectCompletionClosed = projectBackedCompletion
     && (linkedProject?.status === 'closed' || service.status === 'completed');
   const projectCompletionLabel = projectCompletionClosed
@@ -294,7 +299,13 @@ export default function MobileAppointmentDetailSheet({
     onCompleteService?.({ ...service, notes: note });
   };
 
-  const handleReviewAction = () => {
+  const handleReviewAction = async () => {
+    if (!hasChargeableAmount && projectBackedCompletion && canCompleteService) {
+      const saved = await saveNote();
+      if (!saved) return;
+      onCompleteService?.({ ...service, notes: note });
+      return;
+    }
     if (hasChargeableAmount || canCompleteService) {
       onReviewCheckout?.(service);
     }

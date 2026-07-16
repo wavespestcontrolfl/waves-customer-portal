@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldResetCompletionIdempotencyKey } from "./SchedulePage.jsx";
+import {
+  completionPreferencesNeedDraft,
+  normalizeCompletionDetourPhotos,
+  shouldResetCompletionIdempotencyKey,
+} from "./SchedulePage.jsx";
 
 describe("completion idempotency retry keys", () => {
   it("resets the key for ordinary client errors", () => {
@@ -28,5 +32,21 @@ describe("completion idempotency retry keys", () => {
 
   it("does not reset for server errors", () => {
     expect(shouldResetCompletionIdempotencyKey({ status: 500 })).toBe(false);
+  });
+});
+
+describe("completion detour draft state", () => {
+  it("treats outbound-message and pest-rating changes as draft content", () => {
+    expect(completionPreferencesNeedDraft()).toBe(false);
+    expect(completionPreferencesNeedDraft({ sendSms: false })).toBe(true);
+    expect(completionPreferencesNeedDraft({ includePayLink: false })).toBe(true);
+    expect(completionPreferencesNeedDraft({ requestReview: false })).toBe(true);
+    expect(completionPreferencesNeedDraft({ clientPestRating: 0 })).toBe(true);
+  });
+
+  it("keeps prepared photos available for the in-memory billing detour", () => {
+    const photos = [{ name: "after.jpg", data: "data:image/jpeg;base64,abc" }];
+    expect(normalizeCompletionDetourPhotos(photos)).toBe(photos);
+    expect(normalizeCompletionDetourPhotos(null)).toEqual([]);
   });
 });

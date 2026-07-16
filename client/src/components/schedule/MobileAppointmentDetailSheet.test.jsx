@@ -7,7 +7,7 @@
  * compliance) visit terminal in the other direction.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('./MobileCustomerDetailSheet', () => ({ default: () => null }));
 vi.mock('./RainOutSheet', () => ({ default: () => null }));
@@ -58,4 +58,49 @@ describe('MobileAppointmentDetailSheet terminal-action gating', () => {
       cleanup();
     },
   );
+});
+
+describe('MobileAppointmentDetailSheet completion routing', () => {
+  it('honors an explicit standard profile when a closed legacy project remains linked', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...baseService,
+          status: 'confirmed',
+          completionProfile: { projectBacked: false, requiresProject: false },
+          linkedProject: { id: 44, status: 'closed' },
+        }}
+        onClose={() => {}}
+      />,
+    );
+
+    const complete = screen.getByRole('button', { name: 'Complete service' });
+    expect(complete.disabled).toBe(false);
+    cleanup();
+  });
+
+  it('opens a no-charge project visit through the project completion route', async () => {
+    const onCompleteService = vi.fn();
+    const onReviewCheckout = vi.fn();
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...baseService,
+          status: 'confirmed',
+          monthlyRate: 0,
+          servicePrice: 0,
+          completionProfile: { projectBacked: true },
+          linkedProject: { id: 44, status: 'draft' },
+        }}
+        onClose={() => {}}
+        onCompleteService={onCompleteService}
+        onReviewCheckout={onReviewCheckout}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open project details' }));
+    await waitFor(() => expect(onCompleteService).toHaveBeenCalledTimes(1));
+    expect(onReviewCheckout).not.toHaveBeenCalled();
+    cleanup();
+  });
 });

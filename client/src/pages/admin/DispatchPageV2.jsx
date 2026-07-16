@@ -1276,6 +1276,7 @@ export default function DispatchPageV2({
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
+  const [completionDetourPhotos, setCompletionDetourPhotos] = useState(null);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -2439,19 +2440,31 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => {
+          billingDetourPhotos={
+            String(completionDetourPhotos?.serviceId) === String(completingService.id)
+              ? completionDetourPhotos.photos
+              : []
+          }
+          onClose={(completed) => {
             setCompletingService(null);
+            if (completed) setCompletionDetourPhotos(null);
             if (pendingPaymentAfterCompletionRef.current) {
               setPaymentData(pendingPaymentAfterCompletionRef.current);
               pendingPaymentAfterCompletionRef.current = null;
             }
           }}
           onSubmit={handleCompleteSubmit}
-          onBillingRequired={(svc) => {
+          onBillingRequired={(svc, detourState) => {
             // Typed one-time completion hit the billing 409 — close the
             // panel (its draft autosave preserves the findings) and open
             // the existing checkout flow; the post-payment paths re-open
             // completion automatically.
+            setCompletionDetourPhotos({
+              serviceId: svc.id,
+              photos: Array.isArray(detourState?.servicePhotos)
+                ? detourState.servicePhotos
+                : [],
+            });
             setCompletingService(null);
             setCheckoutService(svc);
           }}

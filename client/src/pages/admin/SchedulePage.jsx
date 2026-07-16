@@ -642,6 +642,22 @@ export function shouldResetCompletionIdempotencyKey(error) {
   return error?.code === "lawn_assessment_stale";
 }
 
+export function completionPreferencesNeedDraft({
+  sendSms = true,
+  includePayLink = true,
+  requestReview = true,
+  clientPestRating = null,
+} = {}) {
+  return sendSms !== true
+    || includePayLink !== true
+    || requestReview !== true
+    || clientPestRating != null;
+}
+
+export function normalizeCompletionDetourPhotos(photos) {
+  return Array.isArray(photos) ? photos : [];
+}
+
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
@@ -7571,6 +7587,7 @@ export function CompletionPanel({
   // follow-up CTA (wired by PR 4 — the button only renders when provided).
   onBillingRequired,
   onScheduleFollowup,
+  billingDetourPhotos = [],
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -7704,7 +7721,12 @@ export function CompletionPanel({
   const showPrepayCta = prepayAtCompletionFlag && prepayIsAdmin;
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
-  const [servicePhotos, setServicePhotos] = useState([]);
+  // Completion photos are intentionally kept out of localStorage (a handful
+  // of base64 images can exceed its quota). Dispatch keeps them in memory
+  // across the billing checkout detour and passes them back on remount.
+  const [servicePhotos, setServicePhotos] = useState(() =>
+    normalizeCompletionDetourPhotos(billingDetourPhotos),
+  );
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -8848,6 +8870,12 @@ export function CompletionPanel({
           (entry?.chips || []).length ||
           entry?.score != null,
       ) ||
+      completionPreferencesNeedDraft({
+        sendSms,
+        includePayLink,
+        requestReview,
+        clientPestRating,
+      }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) return;
 
@@ -8859,6 +8887,7 @@ export function CompletionPanel({
         sendSms,
         includePayLink,
         requestReview,
+        clientPestRating,
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
@@ -8952,6 +8981,7 @@ export function CompletionPanel({
     sendSms,
     includePayLink,
     requestReview,
+    clientPestRating,
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
@@ -9014,6 +9044,11 @@ export function CompletionPanel({
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
+    setClientPestRating(
+      Number.isInteger(savedDraft.clientPestRating)
+        ? savedDraft.clientPestRating
+        : null,
+    );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
@@ -10399,7 +10434,9 @@ export function CompletionPanel({
           "An invoice or payment is required before completing this one-time service." +
             (onBillingRequired ? " Opening checkout." : ""),
         );
-        if (onBillingRequired) onBillingRequired(service);
+        if (onBillingRequired) {
+          onBillingRequired(service, { servicePhotos });
+        }
       } else {
         alert("Failed to complete service: " + e.message);
       }
@@ -10807,6 +10844,9 @@ export function CompletionPanel({
           }}
         />{" "}
         <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={`completion-panel-title-${service.id}`}
           style={{
             position: "fixed",
             inset: 0,
@@ -11040,6 +11080,7 @@ export function CompletionPanel({
             >
               {" "}
               <div
+                id={`completion-panel-title-${service.id}`}
                 style={{
                   fontFamily: font,
                   fontSize: 17,
@@ -12825,6 +12866,9 @@ export function CompletionPanel({
         }}
       />{" "}
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`completion-panel-title-${service.id}`}
         style={{
           position: "fixed",
           top: 0,
@@ -12989,10 +13033,15 @@ export function CompletionPanel({
             }}
           >
             {" "}
-            <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+            <div
+              id={`completion-panel-title-${service.id}`}
+              style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
+            >
               Complete Service
             </div>{" "}
             <button
+              type="button"
+              aria-label="Close complete service"
               onClick={() => onClose(false)}
               style={{
                 background: "none",
