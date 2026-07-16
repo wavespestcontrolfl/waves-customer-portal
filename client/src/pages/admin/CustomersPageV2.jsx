@@ -2032,11 +2032,30 @@ export default function CustomersPageV2() {
       {/* ======================= MAP ======================= */}
       {view === "map" && (
         <div className="mt-4">
-          {" "}
-          <LegacyCustomersPanel
-            exportName="CustomerMap"
-            props={{ customers, onSelect: (c) => selectCustomer(c.id) }}
-          />{" "}
+          {error ? (
+            <Card>
+              <CardBody className="p-12 text-center">
+                <div className="text-14 text-alert-fg mb-2">
+                  {isRateLimitError(error)
+                    ? "Too many requests"
+                    : "Failed to load customers"}
+                </div>
+                <div className="text-13 text-ink-tertiary mb-4">
+                  {isRateLimitError(error)
+                    ? "Wait a few seconds and try again."
+                    : error?.message || String(error)}
+                </div>
+                <Button variant="primary" onClick={() => loadCustomers()}>
+                  Retry
+                </Button>
+              </CardBody>
+            </Card>
+          ) : (
+            <LegacyCustomersPanel
+              exportName="CustomerMap"
+              props={{ customers, onSelect: (c) => selectCustomer(c.id) }}
+            />
+          )}
         </div>
       )}
 

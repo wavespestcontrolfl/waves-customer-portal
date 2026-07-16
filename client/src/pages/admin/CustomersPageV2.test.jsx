@@ -124,4 +124,22 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select street address' }));
     expect(line2).toHaveValue('');
   });
+
+  it('shows a retryable customer-load error on the Map view', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => (
+      String(url).includes('/admin/customers?')
+        ? response({ error: 'Map customers unavailable' }, 503)
+        : response({})
+    )));
+
+    render(
+      <MemoryRouter initialEntries={['/admin/customers?view=map']}>
+        <CustomersPageV2 />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Failed to load customers')).toBeInTheDocument();
+    expect(screen.getByText('Map customers unavailable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
 });
