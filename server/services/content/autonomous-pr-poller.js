@@ -421,6 +421,18 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] astro_pr_merged_at stamp failed for run ${run.id}: ${err.message}`);
   }
+  // Retire the PR's remediation row at the FIRST merged observation — not
+  // after the completed-published claim. finalize legitimately stays pending
+  // on awaiting_live_deploy/awaiting_production_deploy for the 30–45 min hub
+  // deploy (or a whole outage), and remediation can never run again once the
+  // PR left the open state; stamping late preserved exactly the stale
+  // live-park telemetry this retires. Idempotent per tick (whereNotIn).
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'merged');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
+  }
   // Fresh queue re-check at finalize time: the tick-start validation is
   // stale by now (GitHub lookup + live-URL gating take seconds), and an
   // operator requeue/dismiss landing in that window must win — never mark a
@@ -531,15 +543,6 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
       updated_at: now,
     });
   if (!claimed) return { skipped: true, reason: 'already_finalized' };
-
-  // The PR left the open state — retire its remediation row ('parked'/
-  // 'remediating'/'active' rows over merged PRs read as live park telemetry).
-  try {
-    const { markPrTerminal } = require('./codex-remediation');
-    await markPrTerminal(prNumber, 'merged');
-  } catch (err) {
-    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
-  }
 
   const patch = {};
 

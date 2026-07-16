@@ -1454,6 +1454,22 @@ describe('terminal-write hygiene (claim clears tracker + remediation row retired
     expect(stamp.updates).toMatchObject({ status: 'closed' });
   });
 
+  test('the remediation row is stamped merged at FIRST merged observation, even while finalize waits on the deploy (codex r1)', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    // Hub deploy not live yet: finalize stays pending on awaiting_live_deploy…
+    pagesPoll.liveUrlResponds.mockResolvedValue(false);
+
+    await poller.pollPending();
+
+    // …no completed-published claim happened…
+    expect(runUpdates(updates).find((u) => u.updates.outcome === 'completed_published')).toBeUndefined();
+    // …but the remediation row is already terminal (PR left the open state).
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'merged' });
+  });
+
   test('supersedeRun clears poll_pending_* (pollPending continues past the tracker on that path)', async () => {
     const updates = setupDb({
       pending: [makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date() })],
