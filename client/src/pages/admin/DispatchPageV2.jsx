@@ -83,6 +83,11 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import {
+  mergePostPaymentService,
+  shouldReopenCompletionAfterPayment,
+  TERMINAL_VISIT_STATUSES,
+} from "../../lib/dispatchCompletionRouting";
 import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
@@ -143,13 +148,6 @@ function projectCompletionIsClosed(service) {
 // Visit statuses the dispatch status route treats as terminal — the
 // appointment detail sheet hides Cancel/No-show for these, and the
 // continue-snapshot sync below refuses to downgrade past them.
-const TERMINAL_VISIT_STATUSES = new Set([
-  "completed",
-  "cancelled",
-  "no_show",
-  "skipped",
-]);
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const SKIP_REASONS = [
@@ -2776,7 +2774,9 @@ export default function DispatchPageV2({
           }}
           onCompleteService={(svc) => {
             setDetailService(null);
-            handleComplete(svc);
+            if (shouldReopenCompletionAfterPayment(svc)) {
+              handleComplete(svc);
+            }
           }}
           onBookNext={(svc) => {
             setDetailService(null);
@@ -2971,7 +2971,10 @@ export default function DispatchPageV2({
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(updated ? { ...updated, ...svc } : svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
             setProjectReloadKey((k) => k + 1);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
@@ -2990,7 +2993,10 @@ export default function DispatchPageV2({
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(updated ? { ...updated, ...svc } : svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
             setProjectReloadKey((k) => k + 1);
           }}
         />
