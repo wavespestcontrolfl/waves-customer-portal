@@ -91,57 +91,13 @@ Both systems: 14px minimum for readable text (Virginia uses this 8 hours a day).
 
 # Intelligence Bar System
 
-Natural-language AI command center embedded across admin + tech portals. Replaces rigid UI elements (buttons, tabs, static panels) with conversational queries powered by Claude.
+Natural-language AI command center embedded across admin + tech portals — one Express route (`server/routes/admin-intelligence-bar.js`), many contexts; tool modules in `server/services/intelligence-bar/{context}-tools.js` export `TOOLS` + `executeTool` (see rule 7). Three ambient rules:
 
-## Architecture
+1. **Write tools go through the UI-confirm trust boundary** (`write-gates.js` + its mirror contract test) — use the **`ib-write-tools` skill** for any tool that creates, updates, sends, or schedules.
+2. **Every tool must pass the contract gate** (`npm run test:contracts` — schema, DB columns incl. raw SQL, execute smoke, response shape; runs in CI, warnings block). Write tools flag `sideEffects`, Claude-spawning tools flag `sonnetBacked`, UUID params declare `format: 'uuid'`.
+3. **Tech portal is isolated** — `tech-tools` only, read-only, low max_tokens.
 
-```
-⌘K (any admin page) or embedded bar
-    ↓
-POST /api/admin/intelligence-bar/query
-    ↓
-context param loads: base tools (admin only) + context tools
-                   + context system prompt + pageData (live UI state)
-    ↓
-Claude (FLAGSHIP default; env-overridable via INTELLIGENCE_BAR_MODEL
-        and INTELLIGENCE_BAR_TECH_MODEL) → up to 8 tool-use rounds
-```
-
-One Express route serves everything: `server/routes/admin-intelligence-bar.js`. Tool modules live in `server/services/intelligence-bar/{context}-tools.js`, one file per context. The `context` parameter drives which tools load and which system-prompt extension applies — no page-specific endpoints.
-
-## Context → Tools Mapping
-
-| Context | Route(s) | Extra tool module |
-|---|---|---|
-| `customers` | `/admin/customers`, `/admin/health` | — (base only) |
-| `leads` | `/admin/leads` | `leads-tools` |
-| `schedule` / `dispatch` | `/admin/schedule`, `/admin/dispatch` | `schedule-tools` |
-| `dashboard` | `/admin/dashboard`, `/admin` | `dashboard-tools` |
-| `seo` / `blog` | `/admin/seo`, `/admin/ppc`, `/admin/social-media` | `seo-tools` |
-| `procurement` | `/admin/inventory` | `procurement-tools` |
-| `revenue` | `/admin/revenue`, `/admin/invoices` | `revenue-tools` |
-| `reviews` | `/admin/reviews`, `/admin/referrals` | `review-tools` |
-| `comms` | `/admin/communications` | `comms-tools` |
-| `tax` | `/admin/tax` | `tax-tools` |
-| `banking` | (via IB) | `banking-tools` |
-| `email` | (via IB) | `email-tools` |
-| `estimate` | `/admin/estimates` | `estimate-tools` |
-| `tech` | `/tech/*` | `tech-tools` ONLY — no base tools, read-only, max_tokens 1024 |
-
-All admin contexts get base tools from `tools.js` (customers incl. `create_customer` / revenue / scheduling / SMS) plus the read-only comms subset (`COMMS_READ_TOOLS`: conversation threads, message search, SMS stats, call log) and the email read+reply subset (`EMAIL_SHARED_TOOLS`: inbox summary, email search, threads, draft/send reply, reply-via-SMS — the reply writes stay UI-confirm gated) so message history and the inbox are visible from any page. Tech portal is isolated — no base tools, strictly read-only, lower max_tokens for field speed.
-
-## Key Design Decisions
-
-- **One route, many contexts.** No page-specific API endpoints.
-- **Base tools always loaded on admin contexts.** Any admin page can answer "how many active customers?" even if it's the SEO page.
-- **Tech portal is isolated.** Only `tech-tools` loads. All read-only. Field-speed max_tokens.
-- **Write operations require UI confirmation (issue #1568).** With `GATE_IB_UI_CONFIRM=true` (prod default), write tools never execute from the model loop: the call returns a preview, the route persists a pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload hash, single-use), and the client renders a Confirm/Cancel card (`PendingActionsCard`). Only the operator's click commits, via `/confirm-action` — never a model tool, and the pending id is never model-visible. The gated tool list lives in `services/intelligence-bar/write-gates.js`, mirrored by `tests/intelligence-bar-write-gate-contract.test.js`. New write tools MUST be added to those sets. With the gate off (local dev), the legacy conversational `confirmed: true` two-step applies.
-- **`SEOIntelligenceBar` is the generic reusable wrapper.** Pass a `context` prop. Only build a custom wrapper if you need to inject page-specific React state as `pageData`.
-- **Some tools spawn their own Claude calls.** `run_price_lookup`, `draft_sms_reply` — they call Claude internally for content generation.
-
-## Adding a new tool module
-
-See `server/services/intelligence-bar/README.md` for the full template + 6-line route-wiring checklist.
+Everything else — architecture, the context→tools mapping, design decisions, the add-a-tool checklist — lives in the **`waves-ib` skill**: use it when adding or modifying any IB tool, context, or wrapper.
 
 ---
 
