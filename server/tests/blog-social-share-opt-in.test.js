@@ -76,6 +76,24 @@ describe('ContentScheduler.scheduleBlogPost default', () => {
 // text — a model that calls distribute_to_social anyway gets a refusal, and
 // schedule_content can't smuggle auto_share_social=true into a non-opted run.
 describe('content-agent tool-level enforcement', () => {
+  test('runBatch topic specs cannot override the normalized send gate', async () => {
+    jest.resetModules();
+    const agent = require('../services/content/content-agent');
+    const seen = [];
+    const origRun = agent.run;
+    agent.run = jest.fn(async (o) => { seen.push(o.distributeSocial); return {}; });
+    try {
+      await agent.runBatch([{ topic: 't1', distributeSocial: 'yes' }, { topic: 't2', distributeSocial: true }], { distributeSocial: false });
+      expect(seen).toEqual([false, false]);
+      seen.length = 0;
+      await agent.runBatch([{ topic: 't3' }], { distributeSocial: true });
+      expect(seen).toEqual([true]);
+    } finally {
+      agent.run = origRun;
+    }
+  });
+
+
   test('schedule_content tool treats omitted auto_share_social as FALSE', async () => {
     jest.resetModules();
     jest.doMock('../services/content-scheduler', () => ({ scheduleBlogPost: jest.fn().mockResolvedValue({}) }));

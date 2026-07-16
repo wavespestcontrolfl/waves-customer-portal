@@ -193,7 +193,7 @@ Save the post as a draft in the portal. Distribute to all social channels. Repor
         properties: {
           post_id: { type: 'string', description: 'Blog post UUID to schedule' },
           publish_at: { type: 'string', description: 'ISO 8601 datetime for when to publish (e.g., "2026-04-15T09:00:00-04:00")' },
-          auto_share_social: { type: 'boolean', description: 'Whether to auto-share to social media after publishing (default true)' },
+          auto_share_social: { type: 'boolean', description: 'Whether to auto-share to social media after publishing. Default FALSE (sharing is opt-in); the run-level "Distribute to social" instruction is authoritative and overrides this field either way.' },
         },
         required: ['post_id', 'publish_at'],
       },

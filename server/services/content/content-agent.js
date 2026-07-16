@@ -189,8 +189,13 @@ const ContentAgent = {
           if (!distributeSocial && toolName === 'distribute_to_social') {
             toolResult = { skipped: true, reason: 'Social distribution was not requested for this run (opt-in only).' };
           } else {
-            if (!distributeSocial && toolName === 'schedule_content') {
-              toolInput.auto_share_social = false;
+            if (toolName === 'schedule_content') {
+              // Deterministic BOTH ways: the run-level opt-in decides —
+              // a non-opted run can't share, and an opted-in run shares
+              // even if the model omits the field (the tool's own default
+              // is now false, so omission would otherwise silently drop
+              // the requested distribution).
+              toolInput.auto_share_social = distributeSocial === true;
             }
             toolResult = await executeContentTool(toolName, toolInput);
           }
@@ -295,7 +300,15 @@ const ContentAgent = {
     for (const topicSpec of topics) {
       const spec = typeof topicSpec === 'string' ? { topic: topicSpec } : topicSpec;
       try {
-        const result = await this.run({ ...opts, ...spec });
+        // Per-topic specs may set topic/city/angle but NEVER the send gate:
+        // the normalized top-level distributeSocial wins (a spec carrying
+        // distributeSocial: 'yes' must not re-enable customer-facing sends).
+        const result = await this.run({
+          ...opts,
+          ...spec,
+          publishDraft: opts.publishDraft,
+          distributeSocial: opts.distributeSocial === true,
+        });
         results.push({ success: true, ...result });
       } catch (err) {
         results.push({ success: false, topic: spec.topic, error: err.message });
