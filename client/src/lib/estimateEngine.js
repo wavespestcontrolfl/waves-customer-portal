@@ -1476,7 +1476,7 @@ export function calculateEstimate(inputs) {
     { f: 12, label: 'Monthly', disc: 0.70, rec: pestFreq === 12 },
   ];
 
-  // Track ALL property-level modifiers with dollar amounts
+  // Track active pest price modifiers and non-pricing property context.
   addMod('property', `Home: ${homeSqFt.toLocaleString()} sq ft · ${stories} story`, 0, 'info');
   addMod('property', `Footprint: ${footprint.toLocaleString()} sq ft`, 0, 'info');
   addMod('property', `Lot: ${lotSqFt.toLocaleString()} sq ft`, 0, 'info');
@@ -1497,12 +1497,6 @@ export function calculateEstimate(inputs) {
   else if (shrubDensity === 'LIGHT') addMod('pest', 'Light shrubs: -$5/visit', -5, 'down');
   else addMod('pest', 'Shrubs: not specified', 0, 'info');
 
-  // Trees
-  if (treeDensity === 'HEAVY') addMod('pest', 'Heavy trees: +$6/visit', 6, 'up');
-  else if (treeDensity === 'MODERATE') addMod('pest', 'Moderate trees: $0/visit', 0, 'info');
-  else if (treeDensity === 'LIGHT') addMod('pest', 'Light trees: -$5/visit', -5, 'down');
-  else addMod('pest', 'Trees: not specified', 0, 'info');
-
   // Complexity
   if (landscapeComplexity === 'COMPLEX') addMod('pest', 'Complex landscape: +$3/visit', 3, 'up');
   else if (landscapeComplexity === 'MODERATE') addMod('pest', 'Moderate landscape: $0/visit', 0, 'info');
@@ -1513,10 +1507,6 @@ export function calculateEstimate(inputs) {
   const waterAdj = (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) ? 3 : 0;
   if (waterAdj > 0) addMod('pest', `Near water: +$3/visit`, waterAdj, 'up');
   else addMod('pest', 'No water nearby: $0/visit', 0, 'info');
-
-  // Driveway
-  if (hasLargeDriveway) addMod('pest', 'Large driveway: +$3/visit', 3, 'up');
-  else addMod('pest', 'Standard driveway: $0/visit', 0, 'info');
 
   // Indoor treatment
   if (indoor) addMod('pest', 'Indoor treatment: +$15/visit', 15, 'up');
@@ -1546,12 +1536,9 @@ export function calculateEstimate(inputs) {
     if (shrubDensity === 'LIGHT') adj -= 5;
     else if (shrubDensity === 'HEAVY') adj += 6;
     if (hasPoolCage) adj += cageAdjBySize[cageSize];
-    if (treeDensity === 'LIGHT') adj -= 5;
-    else if (treeDensity === 'HEAVY') adj += 6;
     if (landscapeComplexity === 'COMPLEX') adj += 3;
     else if (landscapeComplexity === 'SIMPLE') adj -= 5;
     if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 3;
-    if (hasLargeDriveway) adj += 3;
     if (indoor) adj += 15;
     return adj + propTypeAdj;
   };

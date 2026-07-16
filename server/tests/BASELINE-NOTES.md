@@ -479,3 +479,17 @@ Updated LOCAL baselines — only lawn-inclusive cases changed; **all non-lawn ca
 Lawn recurring totals moved **up** (cost floor exceeds the old low-sqft bracket prices) — e.g. the zone-D bahia lawn line $360→$675/yr, zone-A enhanced lawn $696→$837/yr.
 
 **Not done here:** the DB-synced prod baselines (`*.baseline.json`) carry the same stale lawn totals and should be recaptured against prod (`PROD_URL` + `ADMIN_TOKEN`, or `CAPTURE_BASELINE=1` with `syncConstantsFromDB`) once the deploy is confirmed — out of scope for this local-only refresh.
+
+---
+
+## 2026-07-16 — Retire pest tree-density and large-driveway modifiers
+
+Tree density and large-driveway size no longer affect recurring or one-time pest-control pricing. The fields remain property context for other services. See the `pricing_changelog` entry keyed by `codex-2026-07-16` / “Stop using tree density and large-driveway size in pest-control pricing.”
+
+The DB-authoritative delta was isolated by running the pre-change `origin/main` engine and the changed engine read-only against the same production `pricing_config` snapshot (64 rows). Only before/after differences attributable to these two modifiers were applied to the checked DB fixtures; unrelated existing lawn/tree-shrub baseline drift was deliberately left out of this change.
+
+- `pricing-engine.baseline.json`: `zone_b_monthly_pest_bermuda_premium`, `zone_d_quarterly_pest_bahia_basic`, and `edge_large_footprint_5500sf_platinum_bundle`.
+- `pricing-engine-v1-adapter.baseline.json`: `v1adapter_platinum_bundle_4_services_zone_a`.
+- The corresponding local fixtures changed for the same scenarios under in-memory constants.
+
+Migration `20260716140000_retire_pest_tree_driveway_modifiers` records the actual retired DB values in both `pricing_config_audit` and `pricing_changelog`; rollback restores those exact values rather than hardcoded defaults.
