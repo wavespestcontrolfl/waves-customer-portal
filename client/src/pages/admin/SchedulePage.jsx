@@ -8885,8 +8885,13 @@ export function CompletionPanel({
     if (!hasDraftContent) {
       // A field can return to its default after an earlier debounced write.
       // Remove both copies so a billing 409 cannot flush stale preferences.
+      // Only remove storage when this mounted panel created the snapshot:
+      // during draft discovery, state updates for the restore prompt have not
+      // rendered yet and the form still appears empty here.
+      if (draftSnapshotRef.current) {
+        localStorage.removeItem(completionDraftKey(service.id));
+      }
       draftSnapshotRef.current = null;
-      localStorage.removeItem(completionDraftKey(service.id));
       return;
     }
 
