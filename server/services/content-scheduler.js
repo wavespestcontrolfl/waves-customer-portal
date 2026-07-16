@@ -60,21 +60,40 @@ async function sharePublishedBlog(blog) {
   try {
     const SocialMediaService = require('./social-media');
     const link = blog.astro_live_url || blog.url || `https://www.wavespestcontrol.com/${blog.slug}`;
-    const result = await SocialMediaService.publishToAll({
+    // shareUrlOnce (not publishToAll directly): the advisory-lock +
+    // source_url dedupe serializes this against the RSS backstop AND the
+    // pages-poll live-flip share — two lanes can observe the same live row
+    // in the same window and must not double-post. shareUrlOnce opts into
+    // every platform incl. Twitter and runs publishToAll's blog-hero
+    // resolve (og:image re-hosted as JPEG, brand-card fallback, never AI).
+    const once = await SocialMediaService.shareUrlOnce({
       title: blog.title,
       description: blog.meta_description || (blog.content || '').replace(/[#*_\[\]]/g, '').substring(0, 300),
       link,
-      guid: `blog_${blog.id}`,
       source: 'blog_scheduled',
-      // Blog shares opt into every platform incl. Twitter — the omitted-
-      // channels default deliberately excludes it (admin preview flow).
-      channels: SocialMediaService.PUBLISH_PLATFORMS,
-      // No imageUrl: publishToAll's blog-hero branch resolves the live page's
-      // og:image and re-hosts it as JPEG (Instagram rejects the raw .webp hero
-      // the old publicBlogImageUrl handed it), falling back to the brand card
-      // on a miss — never an AI image.
       noAiImage: true,
     });
+    if (once?.skipped === 'already_posted') {
+      // Same blocker distinction as the pages-poll live-flip path: only a
+      // published/scheduled row means the URL definitively went out (stamp,
+      // done). A studio DRAFT blocker means an admin has copy in flight for
+      // this URL and NOTHING has posted — don't stamp; return false so the
+      // caller parks the row at pending_review for the human who owns it.
+      if (['published', 'scheduled'].includes(once.blocking_status)) {
+        await db('blog_posts').where('id', blog.id).update({
+          shared_to_social: true,
+          shared_at: new Date(),
+        });
+        return true;
+      }
+      logger.info(`[content-scheduler] Social share for blog ${blog.id} blocked by a studio ${once.blocking_status || 'draft'} row for the same URL — leaving unshared for the admin to resolve`);
+      return false;
+    }
+    if (once?.skipped) {
+      logger.info(`[content-scheduler] Social share skipped for blog ${blog.id} — ${once.skipped}`);
+      return true;
+    }
+    const result = once;
     if (result?.dryRun) {
       logger.info(`[content-scheduler] Social share dry-run for blog ${blog.id} — not marking as shared`);
       return true;

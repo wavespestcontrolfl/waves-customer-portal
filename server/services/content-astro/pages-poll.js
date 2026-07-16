@@ -281,6 +281,13 @@ async function pollPost(post, { allowMerge = true } = {}) {
   }
 }
 
+// Kill switch for the live-flip share (manual editor lane). Same env-var
+// convention as SOCIAL_BLOG_MERGE_SHARE_ENABLED (autonomous lane): ON unless
+// explicitly disabled.
+function liveShareOnFlipEnabled() {
+  return !/^(0|false|no|off)$/i.test(String(process.env.SOCIAL_BLOG_LIVE_SHARE_ENABLED || '').trim());
+}
+
 async function pollLivePost(post) {
   const url = post.astro_live_url || liveUrlForPost(post);
   if (!url) return { skipped: true, reason: 'no live url' };
@@ -302,7 +309,61 @@ async function pollLivePost(post) {
 
     await db('blog_posts').where({ id: post.id }).update(updates);
     await runPostPublishVisibility({ ...post, ...updates, astro_live_url: url });
-    return { live: true, url, deployment_url: deploy.url || null };
+    // Auto-share at the moment a MANUAL-lane post is verified live (owner
+    // directive 2026-07-16, explicitly confirmed: every hub post shares
+    // without a click). The scheduler lane is excluded — it shares itself
+    // after observing live (publish_status='publishing' marks its claim).
+    // The share goes through shareUrlOnce — the same advisory-lock +
+    // source_url dedupe the autonomous poller and the RSS backstop share,
+    // so a cron tick racing an admin refresh can never double-post. The
+    // row is RE-FETCHED first: pollPending's projection carries only the
+    // astro lifecycle fields, and the per-post auto_share_social opt-out
+    // (schedule checkbox) plus title/meta live on the full row. Fail-soft:
+    // a share failure never blocks the live flip (already written above);
+    // the RSS backstop recovers transient failures.
+    let sharePromise = null;
+    if (post.publish_status !== 'publishing' && liveShareOnFlipEnabled()) {
+      // FIRE-AND-FORGET: shareUrlOnce takes the RSS advisory lock, which the
+      // 4-hourly RSS publisher can hold across several external platform
+      // calls — awaiting here would hang the admin refresh-astro request
+      // (which awaits pollLivePost) on an unrelated social run. The live
+      // flip is already written above; the share settles on its own. Tests
+      // await the returned _sharePromise.
+      sharePromise = (async () => {
+        const fresh = await db('blog_posts').where({ id: post.id }).first();
+        if (!fresh || !fresh.auto_share_social || fresh.shared_to_social) return;
+        const social = require('../social-media');
+        // Same flag set as the autonomous poller's live-share path:
+        // rssAutopublish is the established kill switch for autonomous
+        // blog shares (shareUrlOnce leaves policy gating to callers).
+        if (!social.SOCIAL_FLAGS?.automationEnabled || !social.SOCIAL_FLAGS?.rssAutopublish
+          || (await social.isPausedByAdmin())) return;
+        const r = await social.shareUrlOnce({
+          title: fresh.title,
+          description: fresh.meta_description || '',
+          link: url,
+          source: 'blog',
+          noAiImage: true,
+        });
+        const status = r?.skipped ? `skipped (${r.skipped}${r.blocking_status ? `:${r.blocking_status}` : ''})`
+          : r?.dryRun ? 'dry_run' : (r?.success ? 'published' : 'failed');
+        logger.info(`[pages-poll] live-flip social share for ${url}: ${status}`);
+        // Stamp on a real success, and on already_posted ONLY when the
+        // blocking row actually went out or is queued (published/scheduled)
+        // — a studio DRAFT for this URL blocks the auto-share by design but
+        // nothing has posted, so stamping would strand the row forever.
+        // Other skips and failures stay unstamped so the backstops recover.
+        const definitivelyOut = r?.skipped === 'already_posted'
+          && ['published', 'scheduled'].includes(r?.blocking_status);
+        if ((r?.shared && r?.success && !r?.dryRun) || definitivelyOut) {
+          await db('blog_posts').where({ id: post.id })
+            .update({ shared_to_social: true, shared_at: new Date(), updated_at: new Date() });
+        }
+      })().catch((err) => {
+        logger.warn(`[pages-poll] live-flip social share failed for ${post.slug || post.id}: ${err.message} (RSS backstop will retry)`);
+      });
+    }
+    return { live: true, url, deployment_url: deploy.url || null, _sharePromise: sharePromise };
   } catch (err) {
     logger.warn(`[pages-poll] live check failed for ${url}: ${err.message}`);
     return { pending: true, url, error: err.message };

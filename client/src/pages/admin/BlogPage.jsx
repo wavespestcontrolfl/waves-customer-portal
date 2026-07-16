@@ -645,12 +645,12 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   const [sharing, setSharing] = useState(false);
-  const handleShareSocial = async () => {
+  const handleShareSocial = async (force = false) => {
     setSharing(true);
     try {
       const result = await adminPost(
         `/admin/content/blog/${post.id}/share-social`,
-        {},
+        force ? { force: true } : {},
       );
       const platforms = result.platforms || [];
       const successes = platforms
@@ -665,6 +665,19 @@ function PostEditor({ post, onBack, onUpdate }) {
         `Shared to: ${successes || "none"}${failures ? "\n\nFailed:\n" + failures : ""}`,
       );
     } catch (err) {
+      // Posts auto-share when they go live now — a plain click on an
+      // already-shared post 409s; confirm before deliberately re-posting.
+      if (!force && /already went out|alreadyShared/i.test(err.message || "")) {
+        setSharing(false);
+        if (
+          window.confirm(
+            "This post was already shared to social. Share it again anyway?",
+          )
+        ) {
+          await handleShareSocial(true);
+        }
+        return;
+      }
       alert("Social share failed: " + err.message);
     }
     setSharing(false);
@@ -1637,7 +1650,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             404 link to every enabled platform. */}
         {editing.astro_status === "live" && (
           <button
-            onClick={handleShareSocial}
+            onClick={() => handleShareSocial()}
             disabled={sharing}
             style={{
               padding: "10px 20px",
