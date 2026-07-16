@@ -278,7 +278,12 @@ describe('lane classification', () => {
     totals: { monthly: 39, annual: 468, oneTime: 0 },
     comps: { samples: 10, median: 41, outlier: false, insufficient: false },
     calibration: [],
-    context: { isExistingCustomer: false, extractionSource: 'enriched' },
+    context: {
+      isExistingCustomer: false,
+      extractionSource: 'enriched',
+      transcript: 'Caller: hi, I am looking for quarterly pest control at my house.',
+      smsThread: [],
+    },
   });
 
   test('clean draft lands green', () => {
@@ -482,6 +487,107 @@ describe('review fixes', () => {
   test('priced-but-custom-quote lines are review-blocking', () => {
     expect(draftPriv.lineRequiresReview({ monthly: 250, customQuoteFlag: true })).toBe(true);
     expect(draftPriv.lineRequiresReview({ monthly: 250, requiresCustomQuote: true })).toBe(true);
+  });
+
+  test('review-only lines are excluded from stored totals even when the summary includes them', () => {
+    const totals = deriveTotals({
+      summary: { recurringMonthlyAfterDiscount: 300, recurringAnnualAfterDiscount: 3600, oneTimeTotal: 0 },
+      lineItems: [
+        { service: 'pest_control', monthly: 40, annual: 480 },
+        { service: 'lawn_care', monthly: 260, annual: 3120, customQuoteFlag: true },
+      ],
+    });
+    expect(totals.monthly).toBe(40);
+    expect(totals.annual).toBe(480);
+  });
+
+  test('fabricated evidence quotes force yellow; verbatim quotes pass', () => {
+    const context = { transcript: 'Caller: I want quarterly pest control please.', smsThread: [] };
+    const fabricated = draftPriv.verifyEvidenceQuotes(
+      { evidence: [{ decision: 'pest', quote: 'definitely sign me up for the platinum plan' }] },
+      context,
+    );
+    expect(fabricated.unverified).toBe(1);
+    const verbatim = draftPriv.verifyEvidenceQuotes(
+      { evidence: [{ decision: 'pest', quote: 'I want quarterly pest control' }] },
+      context,
+    );
+    expect(verbatim.unverified).toBe(0);
+  });
+
+  test('commercial pest without a risk type forces yellow', () => {
+    const { lane, reasons } = classifyLane({
+      intent: {
+        ...baseIntent(),
+        is_commercial: true,
+        category: 'COMMERCIAL',
+        commercial_risk_type: null,
+        evidence: [{ decision: 'pest', quote: 'looking for quarterly pest control', speaker: 'caller' }],
+      },
+      propertyFacts: {
+        home: { value: 1600, source: SQFT_SOURCES.CALLER_STATED, rejected: [] },
+        lot: { value: 8000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      },
+      engineResult: { summary: {}, lineItems: [{ service: 'commercial_pest', monthly: 105, annual: 1260 }] },
+      totals: { monthly: 105, annual: 1260, oneTime: 0 },
+      comps: null,
+      calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched', transcript: 'looking for quarterly pest control', smsThread: [] },
+    });
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/risk type/);
+  });
+
+  test('non-county sqft evidence never claims county-assessed confidence', () => {
+    const record = {
+      squareFootage: 2600,
+      yearBuilt: 2015,
+      _fieldEvidence: { squareFootage: { sourceType: 'listing' } },
+      _parcel: countyParcel(),
+    };
+    const facts = resolvePropertyFacts({
+      extraction: { property: {} },
+      propertyRecord: record,
+      customer: null,
+      isCommercial: false,
+      subdivisionMedian: null,
+    });
+    expect(facts.home.source).toBe(SQFT_SOURCES.LOOKUP_ESTIMATE);
+  });
+
+  test('treated-lawn profile sqft is never a home-sqft source', () => {
+    const facts = resolvePropertyFacts({
+      extraction: { property: {} },
+      propertyRecord: null,
+      customer: { property_sqft: 6000, lot_sqft: 9000 },
+      isCommercial: false,
+      subdivisionMedian: null,
+    });
+    expect(facts.home.value).toBeNull();
+    expect(facts.home.source).toBe(SQFT_SOURCES.NONE);
+  });
+
+  test('trusted profile lawn sqft feeds the engine as measured turf, not home sqft', () => {
+    const input = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      },
+      context: { customer: { property_sqft: 6000 }, customerPhoneAmbiguous: false },
+    });
+    expect(input.measuredTurfSf).toBe(6000);
+    expect(input.homeSqFt).toBe(2100);
+    const ambiguous = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      },
+      context: { customer: { property_sqft: 6000, property_type: 'Condo' }, customerPhoneAmbiguous: true },
+    });
+    expect(ambiguous.measuredTurfSf).toBeUndefined();
+    expect(ambiguous.propertyType).toBe('Single Family');
   });
 
   test('pricing-safe property type keys reach the pest normalizer alias table', () => {

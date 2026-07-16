@@ -78,8 +78,15 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     propertyType: isCommercial
       ? 'commercial'
       : (propertyFacts?.propertyType
-        || pricingSafePropertyType(context?.customer?.property_type)
+        // Ambiguous shared-phone profiles must not steer pricing modifiers
+        // either — same trust rule as address/sqft.
+        || (context?.customerPhoneAmbiguous ? null : pricingSafePropertyType(context?.customer?.property_type))
         || 'Single Family'),
+    // customers.property_sqft is TREATED LAWN AREA by schema — the correct
+    // plumbing is the engine's measured-turf input, never home sqft.
+    ...((!isCommercial && !context?.customerPhoneAmbiguous && positive(context?.customer?.property_sqft))
+      ? { measuredTurfSf: Number(context.customer.property_sqft) }
+      : {}),
     // Existing-customer WaveGuard context: qualifying recurring services the
     // caller already has, so an add-on quote gets the combined tier discount
     // and recurring-customer perks (same key the admin save path feeds).
@@ -111,16 +118,25 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
 // recurring-discount summary buckets).
 function deriveTotals(engineResult) {
   const summary = engineResult?.summary || {};
-  let monthly = Number(summary.recurringMonthlyAfterDiscount || 0);
-  let annual = Number(summary.recurringAnnualAfterDiscount || 0);
+  const lines = engineResult?.lineItems || [];
+  const pricedLines = lines.filter((l) => !lineRequiresReview(l));
+  // The engine summary sums EVERY line — including priced-but-review-only
+  // ones (oversize-lawn custom quotes). A draft's stored totals and the
+  // notification amount must only carry money the operator can actually
+  // send, so any review line forces the per-line computation.
+  const hasReviewLines = lines.some(lineRequiresReview);
+
+  let monthly = hasReviewLines ? 0 : Number(summary.recurringMonthlyAfterDiscount || 0);
+  let annual = hasReviewLines ? 0 : Number(summary.recurringAnnualAfterDiscount || 0);
   // Installation charges (termite bait install, etc.) are upfront one-time
   // money — the accept/converter path reads the stored one-time total, so
   // dropping them here would under-charge the accepted estimate.
-  let oneTime = Number(summary.oneTimeTotal || 0)
-    + Number(summary.specialtyTotal || 0)
-    + Number(summary.installationTotal || 0);
+  let oneTime = hasReviewLines
+    ? 0
+    : Number(summary.oneTimeTotal || 0)
+      + Number(summary.specialtyTotal || 0)
+      + Number(summary.installationTotal || 0);
 
-  const pricedLines = (engineResult?.lineItems || []).filter((l) => !lineRequiresReview(l));
   if (!monthly && !annual && pricedLines.length) {
     monthly = pricedLines.reduce((sum, l) => sum + (Number(l.monthlyAfterDiscount ?? l.monthly) || 0), 0);
     annual = pricedLines.reduce((sum, l) => sum + (Number(l.annualAfterDiscount ?? l.annual) || 0), 0);
@@ -207,6 +223,23 @@ async function calibrationWarnings(engineResult) {
   }
 }
 
+// ── Evidence verification ─────────────────────────────────────
+// Evidence quotes are the operator's 10-second review anchor — a paraphrased
+// or fabricated quote presented as verbatim defeats that. Verify each quote
+// actually appears in the transcript/SMS source (whitespace/case-normalized).
+function verifyEvidenceQuotes(intent, context) {
+  const normalize = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const haystack = normalize(
+    `${context?.transcript || ''} ${(context?.smsThread || []).map((m) => m.body).join(' ')}`,
+  );
+  const quotes = (intent?.evidence || []).map((e) => e.quote).filter(Boolean);
+  const unverified = quotes.filter((q) => {
+    const needle = normalize(q);
+    return needle.length >= 8 && !haystack.includes(needle);
+  });
+  return { total: quotes.length, unverified: unverified.length };
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context }) {
   const reasons = [];
@@ -269,6 +302,14 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if ((intent.uncertainties || []).length) reasons.push(`open questions: ${intent.uncertainties.join(' | ')}`);
   if ((intent.evidence || []).length < Object.keys(intent.services || {}).length) {
     reasons.push('evidence quotes do not cover every selected service');
+  }
+  const evidenceCheck = verifyEvidenceQuotes(intent, context);
+  if (evidenceCheck.unverified > 0) {
+    reasons.push(`${evidenceCheck.unverified} of ${evidenceCheck.total} evidence quotes are not verbatim from the transcript/SMS — verify before trusting them`);
+  }
+  if (intent.is_commercial && (intent.services?.pest || intent.services?.rodentBait)
+    && !intent.commercial_risk_type) {
+    reasons.push('commercial risk type not established — pest/rodent cadence priced at the program default');
   }
   if (context?.customerPhoneAmbiguous) {
     reasons.push('multiple customer profiles share this phone number — verify the matched profile before send');
@@ -416,5 +457,5 @@ module.exports = {
   calibrationWarnings,
   classifyLane,
   createDraftEstimate,
-  _private: { buildDraftNotes, lineRequiresReview },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes },
 };

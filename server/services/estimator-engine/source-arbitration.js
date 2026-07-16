@@ -72,15 +72,14 @@ function countyLooksUnassessed(parcel) {
  *   extraction     — enriched call extraction (may be null)
  *   parcel         — propertyRecord._parcel from performPropertyLookup (may be null)
  *   lookupSqft     — propertyRecord.squareFootage (lookup's own best estimate)
- *   profileSqft    — customers.property_sqft when an existing profile matched
+ *   (customers.property_sqft is treated LAWN area — never a home-sqft source)
  *   isCommercial   — composer/extraction commercial signal
  *   subdivisionMedian — { medianSqft, sampleCount } | null (pre-fetched)
  */
-function resolveHomeSqft({ extraction, parcel, lookupSqft, profileSqft, isCommercial, subdivisionMedian }) {
+function resolveHomeSqft({ extraction, parcel, lookupSqft, isCommercial, subdivisionMedian }) {
   const rejected = [];
   const stated = callerStatedSqft(extraction);
   const county = positive(parcel?.livingAreaSqft);
-  const profile = positive(profileSqft);
   const lookup = positive(lookupSqft);
 
   // Commercial tenant: the caller's unit size is the ONLY number that
@@ -121,11 +120,9 @@ function resolveHomeSqft({ extraction, parcel, lookupSqft, profileSqft, isCommer
   if (stated) {
     return { value: stated, source: SQFT_SOURCES.CALLER_STATED, confidence: 'medium', rejected };
   }
-
-  // Existing customer profile measurement.
-  if (profile) {
-    return { value: profile, source: SQFT_SOURCES.PROFILE, confidence: 'medium', rejected };
-  }
+  // NOTE: customers.property_sqft is deliberately NOT a home-sqft source —
+  // the schema defines it as TREATED LAWN AREA, not living area (it feeds
+  // the engine as measuredTurfSf instead; see buildEngineInput).
 
   // New construction / unassessed parcel: median of already-assessed homes
   // in the same subdivision phase.
@@ -204,6 +201,15 @@ const FALLBACK_SQFT_SOURCES = new Set([
  * detectUnassessedVacantParcel (the #2749 lane) already handles. Reuse it
  * rather than re-deriving.
  */
+// squareFootage provenance off the lookup's field-evidence trail. Missing
+// evidence (legacy cached rows) counts as county when the parcel matched —
+// the pre-evidence behavior; explicit non-county evidence downgrades.
+function sqftEvidenceIsCounty(propertyRecord) {
+  const evidence = propertyRecord?._fieldEvidence?.squareFootage;
+  if (!evidence) return true;
+  return evidence.sourceType === 'county';
+}
+
 function normalizeParcelView(propertyRecord) {
   if (!propertyRecord) return null;
   const parcel = propertyRecord._parcel || {};
@@ -222,11 +228,13 @@ function normalizeParcelView(propertyRecord) {
     lotSqft: positive(parcel.lotSqft) || positive(parcel.polygonAreaSqft),
     // County-backed building sqft: the stacked-parcel aggregate carries its
     // own living area on _parcel; otherwise the merged record's squareFootage
-    // counts when the county roll vouched for the parcel and it is NOT in the
-    // unassessed window. AI/listing-sourced sqft (no county evidence) stays a
-    // lookup-estimate, not a county fact.
+    // counts only when the field-evidence trail says it actually CAME from a
+    // county source — a hybrid lookup can match the parcel while the building
+    // sqft is AI/listing evidence, which must stay a lookup-estimate. Legacy
+    // cached rows without field evidence keep the parcel-matched behavior.
     livingAreaSqft: (!vacantEvidence && countyBacked)
-      ? (positive(parcel.livingAreaSqft) || positive(propertyRecord.squareFootage))
+      ? (positive(parcel.livingAreaSqft)
+        || (sqftEvidenceIsCounty(propertyRecord) ? positive(propertyRecord.squareFootage) : null))
       : null,
     landUseDescription: vacantEvidence?.landUseDescription
       || parcel.landUseDescription
@@ -254,7 +262,6 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     // The merged record's own sqft only counts as a soft lookup estimate when
     // it is NOT county-backed (county-backed sqft is already livingAreaSqft).
     lookupSqft: parcel?.livingAreaSqft ? null : propertyRecord?.squareFootage,
-    profileSqft: customer?.property_sqft,
     isCommercial,
     subdivisionMedian,
   });

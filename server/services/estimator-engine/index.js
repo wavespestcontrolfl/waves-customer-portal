@@ -43,8 +43,15 @@ function estimatorEngineEnabled() {
 function addressFromContext(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
-    return [sa.street_line_1, sa.city, [sa.state, sa.postal_code].filter(Boolean).join(' ')]
-      .filter(Boolean).join(', ');
+    // Street-only extractions (city/ZIP nullable in the schema) borrow the
+    // TRUSTED profile's city/ZIP — a bare street would geocode ambiguously
+    // and, because the comparison treats missing city/ZIP as matching, a
+    // composer-completed address would never trigger a re-gather.
+    const trusted = (!context.customerPhoneAmbiguous && context.customer) || null;
+    const city = sa.city || trusted?.city || context.lead?.city || null;
+    const stateZip = [sa.state || (city ? 'FL' : null), sa.postal_code || trusted?.zip || context.lead?.zip]
+      .filter(Boolean).join(' ');
+    return [sa.street_line_1, city, stateZip].filter(Boolean).join(', ');
   }
   const leadAddress = context.lead?.address
     ? [context.lead.address, context.lead.city, context.lead.zip].filter(Boolean).join(', ')
@@ -157,7 +164,7 @@ async function alreadyNotifiedForCall(callSid) {
   }
 }
 
-async function notify({ call, context, title, body, lane, estimateId = null }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true }) {
   if (await alreadyNotifiedForCall(call?.twilio_call_sid)) return;
   const link = estimateId
     ? '/admin/estimates'
@@ -168,7 +175,9 @@ async function notify({ call, context, title, body, lane, estimateId = null }) {
       metadata: {
         callSid: call?.twilio_call_sid || null,
         estimator_engine: true,
-        quote_promised: true,
+        // Only a real agent commitment counts as an owed quote — a mere
+        // pricing question must not create a false "send it" task.
+        quote_promised: quotePromised === true,
         lane: lane || null,
         estimateId,
       },
@@ -194,8 +203,12 @@ function callerLabel(intent, context) {
  *   dryRun        — replay/test mode: full pipeline, NO draft row, NO
  *                   notification, returns complete diagnostics.
  *   refreshLookup — force a live property lookup past the cache (replay use).
+ *   quotePromised — the agent COMMITTED to send a quote (vs a mere pricing
+ *                   question). Red-lane fallbacks only notify when true — a
+ *                   request-only call that can't draft must not mint a false
+ *                   owed-quote task.
  */
-async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false }) {
+async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
   try {
@@ -203,11 +216,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
-      if (!dryRun && context.call) {
+      if (!dryRun && context.call && quotePromised) {
         await notify({
           call: context.call,
           context,
           lane: LANES.RED,
+          quotePromised,
           title: 'Quote promised on call — send it',
           body: 'A quote was promised on a call the estimator engine could not read '
             + `(${context.error}). Review the call and send the estimate manually.`,
@@ -237,6 +251,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           call: context.call,
           context,
           lane: existingLane,
+          quotePromised,
           estimateId: existing.id,
           title: `AI estimate draft ${existingLane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
           body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingLane).toUpperCase()}). Review in admin/estimates and send.`,
@@ -266,11 +281,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (!composed.intent) {
       result.lane = LANES.RED;
       result.reasons = [`composer failed schema validation: ${(composed.errors || []).join('; ')}`];
-      if (!dryRun) {
+      if (!dryRun && quotePromised) {
         await notify({
           call: context.call,
           context,
           lane: LANES.RED,
+          quotePromised,
           title: 'Quote promised on call — send it',
           body: `${callerLabel(null, context)}: a quote was promised but the estimator engine could not compose a draft. Send it manually before end of day.`,
         });
@@ -364,7 +380,14 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     result.comps = comps;
     result.calibration = calibration;
 
-    const { lane, reasons } = engineResult
+    // classifyLane owns skip / no-services / no-address messaging; the bare
+    // engine-failure fallback applies ONLY when a draftable intent existed
+    // and generateEstimate itself threw — otherwise a composer skip would be
+    // misreported as a fake engine failure.
+    const draftable = intent.decision === 'draft'
+      && Object.keys(intent.services || {}).length > 0
+      && !!intent.address;
+    const { lane, reasons } = (engineResult || !draftable)
       ? classifyLane({ intent, propertyFacts, engineResult, totals, comps, calibration, context })
       : { lane: LANES.RED, reasons: ['pricing engine failed for the selected services'] };
     result.lane = lane;
@@ -374,13 +397,16 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (dryRun) return result;
 
     if (lane === LANES.RED) {
-      await notify({
-        call: context.call,
-        context,
-        lane,
-        title: 'Quote promised on call — send it',
-        body: `${callerLabel(intent, context)}: quote promised, no auto-draft (${reasons.join('; ')}). Send it manually before end of day.`,
-      });
+      if (quotePromised) {
+        await notify({
+          call: context.call,
+          context,
+          lane,
+          quotePromised,
+          title: 'Quote promised on call — send it',
+          body: `${callerLabel(intent, context)}: quote promised, no auto-draft (${reasons.join('; ')}). Send it manually before end of day.`,
+        });
+      }
       return result;
     }
 
@@ -396,6 +422,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         call: context.call,
         context,
         lane,
+        quotePromised,
         title: 'Quote promised on call — estimate already open',
         body: `${callerLabel(intent, context)}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
       });
@@ -409,6 +436,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       call: context.call,
       context,
       lane,
+      quotePromised,
       estimateId: draft.estimate.id,
       title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — $${totals.monthly}/mo`,
       body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the call (${lane.toUpperCase()} — ${laneWord}). `
@@ -423,11 +451,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     logger.error(`[estimator-engine] unexpected failure: ${err.message}`);
     result.lane = LANES.RED;
     result.reasons = [`engine error: ${err.message}`];
-    if (!dryRun && context?.call) {
+    if (!dryRun && context?.call && quotePromised) {
       await notify({
         call: context.call,
         context,
         lane: LANES.RED,
+        quotePromised,
         title: 'Quote promised on call — send it',
         body: 'A quote was promised on a call but the estimator engine hit an error. Send the estimate manually before end of day.',
       });
