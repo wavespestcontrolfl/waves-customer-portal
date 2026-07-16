@@ -260,7 +260,7 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
   // The token rides in the URL FRAGMENT: fragments are never sent to the
   // server (no morgan/Railway log line, no Referer leak) and survive the
   // short-link 302 because the Location target carries them verbatim.
-  const longUrl = `${PORTAL_BASE_URL}/estimate#vlead=${encodeURIComponent(leadId)}&vt=${encodeURIComponent(token)}`;
+  const longUrl = `${PORTAL_BASE_URL}/quote#vlead=${encodeURIComponent(leadId)}&vt=${encodeURIComponent(token)}`;
   // Fail CLOSED if the shortener can't mint a code — shortenOrPassthrough's
   // long-URL fallback is unsafe for THIS link: the fallback body would carry
   // the 14-day bearer token, and the send path persists rendered bodies in
