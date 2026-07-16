@@ -161,4 +161,23 @@ describe("AdminTabRedirect", () => {
       "/admin/service-library?alert=alert-123&protocolTab=readiness&tab=protocols#blocked",
     );
   });
+
+  it("moves Knowledge Base subareas into the Knowledge hub", () => {
+    const destination = renderRedirect({
+      entry: "/admin/kb?tab=audit&entry=entry-123#review",
+      source: "/admin/kb",
+      to: "/admin/knowledge",
+      tab: "base",
+      queryKey: "area",
+      remapQuery: {
+        from: "tab",
+        to: "kbTab",
+        preserveValues: ["browse", "create", "field", "audit", "tokens"],
+      },
+    });
+
+    expect(destination).toBe(
+      "/admin/knowledge?entry=entry-123&kbTab=audit&area=base#review",
+    );
+  });
 });

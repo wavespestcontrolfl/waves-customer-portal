@@ -3,7 +3,6 @@ import {
   Banknote,
   BookMarked,
   BookOpen,
-  Brain,
   Building2,
   Calculator,
   Calendar,
@@ -186,17 +185,11 @@ export const ADMIN_NAV_ITEMS = {
     label: "Compliance",
     icon: ShieldCheck,
   },
-  wiki: {
-    id: "wiki",
+  knowledge: {
+    id: "knowledge",
     path: "/admin/knowledge",
-    label: "Wiki",
+    label: "Knowledge",
     icon: BookMarked,
-  },
-  knowledgeBase: {
-    id: "knowledgeBase",
-    path: "/admin/kb",
-    label: "Knowledge Base",
-    icon: Brain,
   },
   invoices: {
     id: "invoices",
@@ -296,7 +289,7 @@ const NAV_SECTION_DEFINITIONS = [
       "pricing",
     ],
   },
-  { section: "Resources", itemIds: ["wiki", "knowledgeBase"] },
+  { section: "Resources", itemIds: ["knowledge"] },
   {
     section: "Administration",
     itemIds: ["compliance", "toolHealth", "settings"],

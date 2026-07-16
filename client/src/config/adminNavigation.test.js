@@ -63,7 +63,7 @@ describe("admin navigation registry", () => {
           "pricing",
         ],
       },
-      { section: "Resources", itemIds: ["wiki", "knowledgeBase"] },
+      { section: "Resources", itemIds: ["knowledge"] },
       {
         section: "Administration",
         itemIds: ["compliance", "toolHealth", "settings"],
@@ -113,8 +113,8 @@ describe("admin navigation registry", () => {
     }
 
     expect(ADMIN_NAV_ITEMS.communications.label).toBe("Communications");
-    expect(ADMIN_NAV_ITEMS.wiki.label).toBe("Wiki");
-    expect(ADMIN_NAV_ITEMS.knowledgeBase.label).toBe("Knowledge Base");
+    expect(ADMIN_NAV_ITEMS.knowledge.label).toBe("Knowledge");
+    expect(ADMIN_NAV_ITEMS.knowledge.path).toBe("/admin/knowledge");
     expect(ADMIN_NAV_ITEMS.pricing.path).toBe("/admin/pricing-logic");
     expect(ADMIN_NAV_ITEMS.priceNotices).toBeUndefined();
   });

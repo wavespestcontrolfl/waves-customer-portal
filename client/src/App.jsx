@@ -249,7 +249,7 @@ const AdminAdsPage = lazyWithRetry(() => import('./pages/admin/AdsPage'));
 const AdminSEOPage = lazyWithRetry(() => import('./pages/admin/SEOPage'));
 const AdminBlogPage = lazyWithRetry(() => import('./pages/admin/BlogPage'));
 const AgentsHubPage = lazyWithRetry(() => import('./pages/admin/AgentsHubPage'));
-const AdminKnowledgePage = lazyWithRetry(() => import('./pages/admin/KnowledgePage'));
+const KnowledgeHubPage = lazyWithRetry(() => import('./pages/admin/KnowledgeHubPage'));
 const AdminSettingsPage = lazyWithRetry(() => import('./pages/admin/SettingsPage'));
 const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestPressureSettingsPage'));
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
@@ -261,7 +261,6 @@ const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatch
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
 const AdminTurfHeightReviewPage = lazyWithRetry(() => import('./pages/admin/TurfHeightReviewPage'));
-const AdminKnowledgeBasePage = lazyWithRetry(() => import('./pages/admin/KnowledgeBasePage'));
 const AdminInvoicesPage = lazyWithRetry(() => import('./pages/admin/AdminInvoicesPage'));
 const BillingRecoveryPage = lazyWithRetry(() => import('./pages/admin/BillingRecoveryPage'));
 const PayersPage = lazyWithRetry(() => import('./pages/admin/PayersPage'));
@@ -462,7 +461,7 @@ export default function App() {
             <Route path="agents" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading agents...</div>}><AgentsHubPage /></Suspense>} />
             <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
             <Route path="blog" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading blog...</div>}><AdminBlogPage /></Suspense>} />
-            <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgePage /></Suspense>} />
+            <Route path="knowledge" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge...</div>}><KnowledgeHubPage /></Suspense>} />
             <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
@@ -490,7 +489,21 @@ export default function App() {
             <Route path="turf-height" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading turf height review...</div>}><AdminTurfHeightReviewPage /></Suspense>} />
             <Route path="equipment-calibration" element={<AdminTabRedirect to="/admin/equipment" tab="calibrations" />} />
             <Route path="equipment" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading equipment...</div>}><AdminEquipmentPage /></Suspense>} />
-            <Route path="kb" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading knowledge base...</div>}><AdminKnowledgeBasePage /></Suspense>} />
+            <Route
+              path="kb"
+              element={(
+                <AdminTabRedirect
+                  to="/admin/knowledge"
+                  queryKey="area"
+                  tab="base"
+                  remapQuery={{
+                    from: "tab",
+                    to: "kbTab",
+                    preserveValues: ["browse", "create", "field", "audit", "tokens"],
+                  }}
+                />
+              )}
+            />
             <Route path="invoices" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading invoices...</div>}><AdminInvoicesPage /></Suspense>} />
             <Route path="billing-recovery" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading billing recovery...</div>}><BillingRecoveryPage /></Suspense>} />
             <Route path="payers" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading payers...</div>}><PayersPage /></Suspense>} />
