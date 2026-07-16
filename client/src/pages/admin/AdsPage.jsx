@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   BarChart3,
   CalendarRange,
@@ -1037,9 +1037,17 @@ function AdvisorTab() {
       .catch(() => setLoading(false));
   }, []);
 
+  // Apply state belongs to ONE report: regenerating replaces the rec list, so
+  // stale positional state (or a late response from the old report's apply)
+  // must never mark the new report's recommendations as applied. The counter
+  // invalidates in-flight applies; the reset clears rendered state.
+  const reportGenRef = useRef(0);
+
   const handleGenerate = async () => {
     setGenerating(true);
     const r = await adminPost("/admin/ads/advisor/generate", {});
+    reportGenRef.current += 1;
+    setApplied({});
     setReport({
       report_data: r.report,
       date: etDateString(),
@@ -1049,7 +1057,19 @@ function AdvisorTab() {
   };
 
   const handleApply = async (rec, idx) => {
-    setApplied((prev) => ({ ...prev, [idx]: { status: "pending" } }));
+    // The button label shows the parsed value, and this confirm repeats it —
+    // the server applies rec.apply_value, not whatever number the rec's prose
+    // mentions, so the admin must see the actual amount before it goes live.
+    const summary =
+      rec.apply_action === "change_mode"
+        ? `Set "${rec.campaign}" budget mode to "${rec.apply_value}"?`
+        : `Set "${rec.campaign}" daily budget to $${Number(rec.apply_value)}/day?`;
+    if (!window.confirm(summary)) return;
+    const gen = reportGenRef.current;
+    const setAppliedIfCurrent = (updater) => {
+      if (reportGenRef.current === gen) setApplied(updater);
+    };
+    setAppliedIfCurrent((prev) => ({ ...prev, [idx]: { status: "pending" } }));
     try {
       const res = await fetch(`${API_BASE}/admin/ads/advisor/apply`, {
         method: "POST",
@@ -1070,7 +1090,7 @@ function AdvisorTab() {
       // 4xx/5xx, or an honest applied:false (couldn't resolve the campaign, no
       // concrete value, or a manual-only action), surfaces as an error instead.
       if (!res.ok || body.applied !== true) {
-        setApplied((prev) => ({
+        setAppliedIfCurrent((prev) => ({
           ...prev,
           [idx]: {
             status: "error",
@@ -1082,12 +1102,12 @@ function AdvisorTab() {
         }));
         return;
       }
-      setApplied((prev) => ({
+      setAppliedIfCurrent((prev) => ({
         ...prev,
         [idx]: { status: "applied", at: new Date().toLocaleTimeString() },
       }));
     } catch {
-      setApplied((prev) => ({
+      setAppliedIfCurrent((prev) => ({
         ...prev,
         [idx]: { status: "error", message: "Network error — not applied." },
       }));
@@ -1268,7 +1288,10 @@ function AdvisorTab() {
                         {priority} Priority
                       </div>
                       {recs.map((rec, idx) => {
-                        const globalIdx = `${priority}-${idx}`;
+                        // Identity-carrying key: positional state from a prior
+                        // report must not attach to an unrelated rec that
+                        // happens to land in the same slot.
+                        const globalIdx = `${priority}-${idx}-${rec.campaign || ""}-${rec.apply_action || ""}`;
                         return (
                           <div
                             key={idx}
@@ -1346,7 +1369,9 @@ function AdvisorTab() {
                                           ? `Applied at ${st.at}`
                                           : pending
                                             ? "Applying…"
-                                            : `Apply: ${rec.apply_action.replace(/_/g, " ")}`}
+                                            : rec.apply_action === "change_mode"
+                                              ? `Apply: set mode to ${rec.apply_value}`
+                                              : `Apply: ${rec.apply_action.replace(/_/g, " ")} to $${Number(rec.apply_value)}/day`}
                                       </button>
                                       {st?.status === "error" && (
                                         <div

@@ -562,12 +562,28 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
     if (campaign.platform !== 'google_ads') {
       return res.status(422).json({ applied: false, manual: true, error: `"${campaign.campaign_name}" is a ${campaign.platform} campaign managed outside this dashboard — apply this in its own Ads Manager.` });
     }
+    // The id is model output too: a rec can carry campaign A's id under
+    // campaign B's name. The card shows the NAME, so a mismatch means the
+    // click would mutate a different campaign than the admin approved.
+    if (campaignId && campaignName
+      && String(campaign.campaign_name).toLowerCase() !== String(campaignName).toLowerCase()) {
+      return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
+    }
 
     let result;
     if (isBudgetAction) {
       const amount = toFiniteNumber(value);
       if (!(amount > 0)) {
         return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
+      }
+      // Safety bound on AI-supplied budgets: apply_value is unvalidated model
+      // output, and the card's prose can say "$30" while the value is 3000.
+      // One click moves a budget at most 3× in either direction from the
+      // known base; anything larger goes through the manual budget editor,
+      // where the number is typed by a human.
+      const baseBudget = toFiniteNumber(campaign.daily_budget_base);
+      if (baseBudget > 0 && (amount > baseBudget * 3 || amount < baseBudget / 3)) {
+        return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${baseBudget}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
       }
       result = await getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`);
     } else {
@@ -577,21 +593,34 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       result = await getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`);
     }
 
-    // A linked campaign whose live push Google refused (shared budget, API
-    // error) is NOT applied — the live budget/mode didn't change, so a green
-    // "Applied" would be the exact lie this endpoint exists to prevent.
-    if (result && result.livePushAttempted && !result.googleAdsUpdated) {
-      return res.status(502).json({
+    // A campaign linked to a live Google campaign is only "applied" when the
+    // live budget/mode actually changed. That covers both a refused push
+    // (shared budget, API error) and a push that never ran (Ads client not
+    // configured, no base budget) — either way a green "Applied" would be the
+    // exact lie this endpoint exists to prevent. An UNLINKED campaign has no
+    // live counterpart, so its DB-only apply is the genuine outcome.
+    if (result && campaign.platform_campaign_id && !result.googleAdsUpdated) {
+      const refused = Boolean(result.livePushAttempted);
+      return res.status(refused ? 502 : 422).json({
         applied: false,
         result,
-        error: 'Google Ads refused the live update — the change was recorded locally but the live budget did not change. Check the campaign in Google Ads.',
+        error: refused
+          ? 'Google Ads refused the live update — the change was recorded locally but the live budget did not change. Check the campaign in Google Ads.'
+          : 'This campaign is linked to a live Google Ads campaign, but the live push could not run (Google Ads API not configured, or no base budget set) — the change was recorded locally only.',
       });
     }
 
-    // Count only genuinely-applied actions against today's report.
-    await db('ad_advisor_reports')
-      .where({ date: etDateString() })
-      .increment('applied_count', 1);
+    // Count only genuinely-applied actions against today's report. Reporting
+    // only: the live mutation is already done, so a transient failure here
+    // must not flip the response to "not applied" (the admin would retry and
+    // push the same change live twice).
+    try {
+      await db('ad_advisor_reports')
+        .where({ date: etDateString() })
+        .increment('applied_count', 1);
+    } catch (err) {
+      logger.warn(`[ads] advisor apply succeeded but applied_count increment failed: ${err.message}`);
+    }
 
     res.json({ applied: true, result });
   } catch (err) { next(err); }
