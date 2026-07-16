@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const config = require('../config');
-const { authenticate } = require('../middleware/auth');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const tokenStore = require('../services/bouncie-token-store');
@@ -164,7 +163,7 @@ async function exchangeBouncieAuthorizationCode(code, redirectUri) {
 // =========================================================================
 // GET /api/bouncie/vehicles — List all vehicles
 // =========================================================================
-router.get('/vehicles', authenticate, async (req, res, next) => {
+router.get('/vehicles', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const vehicles = await bouncieRequest('/vehicles');
     res.json(vehicles);
@@ -176,7 +175,7 @@ router.get('/vehicles', authenticate, async (req, res, next) => {
 // =========================================================================
 // GET /api/bouncie/location — Get live location for the configured vehicle
 // =========================================================================
-router.get('/location', authenticate, async (req, res, next) => {
+router.get('/location', adminAuthenticate, requireAdmin, async (req, res, next) => {
   try {
     const imei = req.query.imei || config.bouncie.vehicleImei;
     if (!imei) return res.status(400).json({ error: 'No vehicle IMEI configured' });

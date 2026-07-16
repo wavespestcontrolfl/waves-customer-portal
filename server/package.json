@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "test": "jest --coverage"
+    "test": "jest --coverage",
+    "test:customer-coverage": "jest --ci --silent --runInBand --config jest.customer-coverage.config.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.490.0",

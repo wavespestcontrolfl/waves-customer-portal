@@ -1,5 +1,8 @@
 @import "@fontsource/inter/400.css";
 @import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/inter/800.css";
 /* Self-host Roboto (the admin's forced font) so it loads reliably on iPhone
    instead of falling back to the system font when Google Fonts is slow/blocked. */
 @import "@fontsource/roboto/400.css";

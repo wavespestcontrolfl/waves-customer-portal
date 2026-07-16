@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:coverage": "vitest run --silent --coverage",
     "cap:sync": "cap sync ios",
     "cap:open": "cap open ios",
     "cap:add:ios": "cap add ios"
@@ -31,6 +32,7 @@
     "@growthbook/growthbook-react": "^1.6.5",
     "@react-google-maps/api": "2.20.8",
     "@vitejs/plugin-react": "^4.2.1",
+    "@waves/lawn-cost-floor": "1.0.0",
     "autoprefixer": "^10.4.16",
     "clsx": "^2.1.1",
     "date-fns": "^3.2.0",
@@ -50,6 +52,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/react": "^18.2.43",
+    "@vitest/coverage-v8": "^1.6.1",
     "jsdom": "^24.1.3",
     "vitest": "^1.6.1"
   }

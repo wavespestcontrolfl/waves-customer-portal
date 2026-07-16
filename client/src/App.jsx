@@ -618,8 +618,8 @@ export default function App() {
           />
         </Routes>
         </RoutesErrorBoundary>
-        </BiometricGate>
         <CustomerDialogHost />
+        </BiometricGate>
       </BrowserRouter>
     </AuthProvider>
   );

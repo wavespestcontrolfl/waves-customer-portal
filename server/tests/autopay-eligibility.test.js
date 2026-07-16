@@ -1,4 +1,10 @@
-const { customerOnAutopay, isChargeableAutopayMethod, isPaused } = require('../services/autopay-eligibility');
+const {
+  autopayActivePredicate,
+  customerOnAutopay,
+  isChargeableAutopayMethod,
+  isExpiredCardMethod,
+  isPaused,
+} = require('../services/autopay-eligibility');
 
 const chargeableCard = {
   id: 'pm-1',
@@ -7,6 +13,8 @@ const chargeableCard = {
   stripe_payment_method_id: 'pm_stripe_1',
   is_default: true,
   autopay_enabled: true,
+  exp_month: 12,
+  exp_year: 2099,
 };
 
 const chargeableAch = {
@@ -57,6 +65,51 @@ describe('autopay eligibility', () => {
     expect(isChargeableAutopayMethod({ ...chargeableCard, stripe_payment_method_id: null })).toBe(false);
   });
 
+  test('rejects expired or unknown-expiry cards while preserving bank eligibility', () => {
+    const now = new Date('2026-07-16T16:00:00Z');
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 6, exp_year: 2026 }, now)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: 6, exp_year: 2026 }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: null, exp_year: null }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: '', exp_year: '2099' }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: 'xx', exp_year: '2099' }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: '12', exp_year: 'nope' }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: 7, exp_year: 2026 }, now)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, exp_month: null, exp_year: null }, now)).toBe(true);
+  });
+
+  test('guards varchar expiry casts before aggregate numeric comparisons', () => {
+    const monthBoundaryUtc = new Date('2026-03-01T02:30:00Z');
+    const { sql, binding } = autopayActivePredicate(monthBoundaryUtc);
+    const normalizedSql = sql.replace(/\s+/g, ' ').trim();
+
+    const monthGuard = "NULLIF(BTRIM(pm.exp_month), '') ~ '^[0-9]{1,2}$'";
+    const yearGuard = "NULLIF(BTRIM(pm.exp_year), '') ~ '^[0-9]{4}$'";
+    const monthCast = "NULLIF(BTRIM(pm.exp_month), '')::integer";
+    const yearCast = "NULLIF(BTRIM(pm.exp_year), '')::integer";
+
+    expect(normalizedSql).toContain(`CASE WHEN ${monthGuard} AND ${yearGuard} THEN (`);
+    expect(normalizedSql).toContain(`${monthCast} BETWEEN 1 AND 12`);
+    expect(normalizedSql).toContain('FROM (VALUES (?::date)) AS et(today)');
+    expect(normalizedSql).toContain('c.autopay_paused_until >= et.today');
+    expect(normalizedSql).toContain(`${yearCast} > EXTRACT(YEAR FROM et.today)`);
+    expect(normalizedSql).toContain(`${monthCast} >= EXTRACT(MONTH FROM et.today)`);
+    expect(normalizedSql).toContain('ELSE FALSE END');
+    expect(normalizedSql.indexOf(monthGuard)).toBeLessThan(normalizedSql.indexOf(monthCast));
+    expect(normalizedSql.indexOf(yearGuard)).toBeLessThan(normalizedSql.indexOf(yearCast));
+    expect(normalizedSql).not.toContain('pm.exp_month BETWEEN');
+    expect(normalizedSql).not.toContain('CURRENT_DATE');
+    expect((sql.match(/\?/g) || [])).toHaveLength(1);
+    expect(binding).toBe('2026-02-28');
+  });
+
+  test('keeps JS and SQL card expiry on the prior ET month during UTC rollover', () => {
+    const utcMarchButEtFebruary = new Date('2026-03-01T02:30:00Z');
+
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 2, exp_year: 2026 }, utcMarchButEtFebruary)).toBe(false);
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 1, exp_year: 2026 }, utcMarchButEtFebruary)).toBe(true);
+    expect(autopayActivePredicate(utcMarchButEtFebruary).binding).toBe('2026-02-28');
+  });
+
   test('finds the default Stripe autopay payment method row', async () => {
     await expect(customerOnAutopay({
       id: 'customer-1',
@@ -91,5 +144,85 @@ describe('autopay eligibility', () => {
       autopay_payment_method_id: 'pm-1',
       ach_status: 'suspended',
     }, { db: knexReturning(chargeableCard) })).resolves.toBe(true);
+  });
+});
+
+// Runtime contract for the generated PostgreSQL predicate. This stays skipped
+// in unit-only environments and runs anywhere CI provides DATABASE_URL.
+const SKIP = !process.env.DATABASE_URL;
+const describeWithPostgres = SKIP ? describe.skip : describe;
+
+describeWithPostgres('autopay aggregate PostgreSQL contract', () => {
+  let database;
+
+  beforeAll(() => {
+    database = require('knex')(require('../knexfile').test);
+  });
+
+  afterAll(async () => {
+    await database?.destroy();
+  });
+
+  test('treats blank and malformed varchar expiry values as inactive without raising', async () => {
+    const { sql, binding } = autopayActivePredicate();
+    const result = await database.raw(`
+      WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
+        VALUES
+          ('blank-month', true, NULL::date, NULL::text),
+          ('blank-year', true, NULL::date, NULL::text),
+          ('invalid-month', true, NULL::date, NULL::text),
+          ('invalid-year', true, NULL::date, NULL::text),
+          ('valid-card', true, NULL::date, NULL::text)
+      ), payment_methods(
+        customer_id, processor, is_default, autopay_enabled,
+        stripe_payment_method_id, method_type, exp_month, exp_year
+      ) AS (
+        VALUES
+          ('blank-month', 'stripe', true, true, 'pm_blank_month', 'card', '  ', '2099'),
+          ('blank-year', 'stripe', true, true, 'pm_blank_year', 'card', '12', '    '),
+          ('invalid-month', 'stripe', true, true, 'pm_invalid_month', 'card', 'xx', '2099'),
+          ('invalid-year', 'stripe', true, true, 'pm_invalid_year', 'card', '12', 'nope'),
+          ('valid-card', 'stripe', true, true, 'pm_valid', 'card', '12', '2099')
+      )
+      SELECT c.id, ${sql} AS active
+      FROM c
+      ORDER BY c.id
+    `, [binding]);
+
+    expect(Object.fromEntries(result.rows.map((row) => [row.id, row.active]))).toEqual({
+      'blank-month': false,
+      'blank-year': false,
+      'invalid-month': false,
+      'invalid-year': false,
+      'valid-card': true,
+    });
+  });
+
+  test('uses the bound ET month during the UTC month-rollover window', async () => {
+    const utcMarchButEtFebruary = new Date('2026-03-01T02:30:00Z');
+    const { sql, binding } = autopayActivePredicate(utcMarchButEtFebruary);
+    const result = await database.raw(`
+      WITH c(id, autopay_enabled, autopay_paused_until, ach_status) AS (
+        VALUES
+          ('february-card', true, NULL::date, NULL::text),
+          ('january-card', true, NULL::date, NULL::text)
+      ), payment_methods(
+        customer_id, processor, is_default, autopay_enabled,
+        stripe_payment_method_id, method_type, exp_month, exp_year
+      ) AS (
+        VALUES
+          ('february-card', 'stripe', true, true, 'pm_february', 'card', '02', '2026'),
+          ('january-card', 'stripe', true, true, 'pm_january', 'card', '01', '2026')
+      )
+      SELECT c.id, ${sql} AS active
+      FROM c
+      ORDER BY c.id
+    `, [binding]);
+
+    expect(binding).toBe('2026-02-28');
+    expect(Object.fromEntries(result.rows.map((row) => [row.id, row.active]))).toEqual({
+      'february-card': true,
+      'january-card': false,
+    });
   });
 });

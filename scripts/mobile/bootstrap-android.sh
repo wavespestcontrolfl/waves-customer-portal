@@ -9,7 +9,7 @@
 #   - A Firebase project for FCM push (provides google-services.json)
 #
 # What it does:
-#   1. installs/updates the Capacitor deps in client/ (incl. @capacitor/android)
+#   1. installs the exact lockfile-pinned Capacitor deps (incl. Android)
 #   2. builds the web app into client/dist (the webDir Capacitor copies)
 #   3. generates the native Android project at client/android (idempotent)
 #   4. syncs web assets + native plugins into the Android project
@@ -21,12 +21,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT/client"
 
-echo "==> 1/5  Installing Capacitor deps (pinning to latest majors)…"
-npm install \
-  @capacitor/core@latest @capacitor/cli@latest @capacitor/android@latest \
-  @capacitor/push-notifications@latest @capacitor/app@latest \
-  @capacitor/status-bar@latest @capacitor/splash-screen@latest \
-  @capacitor/filesystem@latest @capacitor/share@latest
+echo "==> 1/5  Installing lockfile-pinned native dependencies…"
+# Run from client/ intentionally: npm resolves the workspace root lockfile.
+# `npm ci` refuses drift instead of silently moving Capacitor/plugin versions
+# between release builds.
+npm ci
 
 echo "==> 2/5  Building web bundle (dist/)…"
 npm run build
@@ -145,4 +144,8 @@ cat <<'NOTES'
 
    Then run on a device/emulator from Android Studio:
 NOTES
-npx cap open android
+if [ "${CI:-}" = "true" ]; then
+  echo "==> CI mode: native project synced; skipping Android Studio launch."
+else
+  npx cap open android
+fi

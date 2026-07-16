@@ -8,16 +8,14 @@ const crypto = require('crypto');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { postCreditMovement, round2 } = require('./customer-credit');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 function normalizePhone(phone) {
-  if (!phone) return null;
-  const digits = phone.replace(/\D/g, '');
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  return phone.startsWith('+') ? phone : `+${digits}`;
+  const normalized = toE164(phone);
+  return isLikelyE164(normalized) ? normalized : null;
 }
 
 function generateCode(len = 8) {
@@ -235,6 +233,7 @@ async function submitReferral(promoterId, { name, phone, email, address, notes, 
   if (!name) throw new Error('Name is required');
 
   const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) throw new Error('Enter a valid phone number');
   const promoter = await db('referral_promoters').where({ id: promoterId }).first();
   if (!promoter) throw new Error('Promoter not found');
 
@@ -1179,6 +1178,7 @@ module.exports = {
   getPromoterReferralLink,
   buildRefereeOfferLine,
   _internals: {
+    normalizePhone,
     normalizeReferralBaseUrl,
     referralLinkForCode,
     centsToDollars,

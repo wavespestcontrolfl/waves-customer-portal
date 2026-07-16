@@ -2,8 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-
-router.use(authenticate);
+const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 
 // =========================================================================
 // BADGE DEFINITIONS — 22 badges across 5 categories
@@ -91,10 +90,7 @@ async function evaluateBadges(customerId) {
 
   // Service type detection
   const svcTypes = services.map(s => s.service_type.toLowerCase());
-  const hasLawn = svcTypes.some(s => s.includes('lawn care'));
   const hasMosquito = svcTypes.some(s => s.includes('mosquito'));
-  const hasPest = svcTypes.some(s => s.includes('pest control'));
-  const hasTermite = svcTypes.some(s => s.includes('termite'));
 
   // Count distinct service types
   const distinctServiceTypes = new Set();
@@ -202,7 +198,7 @@ async function evaluateBadges(customerId) {
 // =========================================================================
 // GET /api/badges
 // =========================================================================
-router.get('/', async (req, res, next) => {
+router.get('/', authenticate, async (req, res, next) => {
   try {
     const { earned, progress } = await evaluateBadges(req.customerId);
 
@@ -305,7 +301,7 @@ router.get('/', async (req, res, next) => {
 // =========================================================================
 // POST /api/badges/:badgeType/notify
 // =========================================================================
-router.post('/:badgeType/notify', async (req, res, next) => {
+router.post('/:badgeType/notify', authenticate, async (req, res, next) => {
   try {
     await db('customer_badges')
       .where({ customer_id: req.customerId, badge_type: req.params.badgeType })
@@ -322,12 +318,12 @@ router.post('/:badgeType/notify', async (req, res, next) => {
 // =========================================================================
 
 // GET /api/badges/admin/definitions — all badge definitions
-router.get('/admin/definitions', async (req, res) => {
+router.get('/admin/definitions', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
   res.json({ badges: BADGE_DEFS });
 });
 
 // GET /api/badges/admin/stats — aggregate badge stats
-router.get('/admin/stats', async (req, res) => {
+router.get('/admin/stats', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
   try {
     const [earned, customers] = await Promise.all([
       db('customer_badges').count('* as c').first().catch(() => ({ c: 0 })),
@@ -338,13 +334,13 @@ router.get('/admin/stats', async (req, res) => {
       totalEarned: parseInt(earned?.c || 0),
       customersWithBadges: parseInt(customers?.c || 0),
     });
-  } catch (err) {
+  } catch {
     res.json({ totalDefinitions: BADGE_DEFS.length, totalEarned: 0, customersWithBadges: 0 });
   }
 });
 
 // GET /api/badges/admin/customer/:customerId — badges for a specific customer
-router.get('/admin/customer/:customerId', async (req, res) => {
+router.get('/admin/customer/:customerId', adminAuthenticate, requireTechOrAdmin, async (req, res) => {
   try {
     const { earned, progress } = await evaluateBadges(req.params.customerId);
     const earnedList = BADGE_DEFS.filter(b => earned[b.type]).map(b => {
@@ -359,7 +355,7 @@ router.get('/admin/customer/:customerId', async (req, res) => {
       ...b, progressLabel: progress[b.type],
     }));
     res.json({ earned: earnedList, progress: progressList });
-  } catch (err) {
+  } catch {
     res.json({ earned: [], progress: [] });
   }
 });
