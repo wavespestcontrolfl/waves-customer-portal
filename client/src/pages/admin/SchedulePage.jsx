@@ -4973,7 +4973,7 @@ function CPChip({ selected, onClick, children, dot }) {
       type="button"
       onClick={onClick}
       style={{
-        height: 36,
+        height: 44,
         padding: "0 14px",
         borderRadius: 999,
         background: selected ? CP_M.ink : CP_M.card,
@@ -11010,9 +11010,9 @@ export function CompletionPanel({
               onClick={() => onClose(false)}
               aria-label="Back"
               style={{
-                width: 36,
-                height: 36,
-                minWidth: 36,
+                width: 44,
+                height: 44,
+                minWidth: 44,
                 borderRadius: "50%",
                 background: M.muted,
                 border: "none",
@@ -11058,7 +11058,7 @@ export function CompletionPanel({
                 type="button"
                 onClick={() => onViewDetails(service)}
                 style={{
-                  height: 36,
+                  height: 44,
                   minWidth: 72,
                   borderRadius: 999,
                   background: M.card,
@@ -11612,8 +11612,8 @@ export function CompletionPanel({
                       position: "absolute",
                       bottom: 10,
                       right: 10,
-                      width: 38,
-                      height: 38,
+                      width: 44,
+                      height: 44,
                       borderRadius: "50%",
                       border: `1px solid ${dictation.listening ? M.err : M.hairline}`,
                       background: dictation.listening ? M.err : M.card,
@@ -13600,8 +13600,8 @@ export function CompletionPanel({
                   position: "absolute",
                   bottom: 12,
                   right: 10,
-                  width: 36,
-                  height: 36,
+                  width: 44,
+                  height: 44,
                   borderRadius: "50%",
                   border: `1px solid ${dictation.listening ? D.red : D.border}`,
                   background: dictation.listening ? D.red : D.card,

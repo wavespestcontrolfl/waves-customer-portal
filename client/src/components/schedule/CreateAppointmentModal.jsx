@@ -1313,7 +1313,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   return createPortal(
     <div style={overlayStyle} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={modalStyle}>
+      <div
+        style={modalStyle}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-appointment-title"
+      >
         <style>{`
           .waves-sq-date::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; filter: grayscale(1); transition: opacity 0.15s; }
           .waves-sq-date::-webkit-calendar-picker-indicator:hover { opacity: 1; }
@@ -1337,7 +1342,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             borderBottom: `1px solid ${D.border}`,
           }}>
             <div style={{ position: 'relative', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 17, fontWeight: 500, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 17, fontWeight: 500, color: '#18181B', margin: 0, maxWidth: 'calc(100% - 148px)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 New Appointment
               </h1>
               <button
@@ -1346,7 +1351,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 aria-label="Close"
                 style={{
                   position: 'absolute', left: 0, top: '50%', transform: 'translateY(-50%)',
-                  width: 36, height: 36, borderRadius: 18, border: 'none',
+                  width: 44, height: 44, borderRadius: 22, border: 'none',
                   background: '#FFFFFF', color: '#18181B', fontSize: 18, lineHeight: 1,
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                 }}
@@ -1357,7 +1362,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 disabled={!canSubmit}
                 style={{
                   position: 'absolute', right: 0, top: '50%', transform: 'translateY(-50%)',
-                  padding: '9px 20px', borderRadius: 999, border: 'none',
+                  height: 44, padding: '0 20px', borderRadius: 999, border: 'none',
                   background: canSubmit ? '#18181B' : '#E4E4E7',
                   color: canSubmit ? '#fff' : '#A1A1AA',
                   fontSize: 14, fontWeight: 500,
@@ -1370,7 +1375,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           </div>
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h1 style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
+            <h1 id="new-appointment-title" style={{ fontFamily: ROBOTO_STACK, fontSize: 28, fontWeight: 400, color: '#18181B', margin: 0 }}>New Appointment</h1>
             <button onClick={onClose} style={{ background: 'none', border: 'none', color: D.muted, fontSize: 22, cursor: 'pointer', minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
           </div>
         )}

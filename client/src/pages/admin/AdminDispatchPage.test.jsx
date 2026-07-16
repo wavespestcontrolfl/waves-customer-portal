@@ -8,10 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../components/admin/AdminCommandHeader", () => ({
   default: ({ sections, activeKey, onSectionChange, ariaLabel }) => (
     <nav aria-label={ariaLabel}>
-      {sections.map(({ key, label }) => (
+      {sections.map(({ key, label, className }) => (
         <button
           key={key}
           type="button"
+          className={className}
           aria-current={activeKey === key ? "page" : undefined}
           onClick={() => onSectionChange(key)}
         >
@@ -85,5 +86,19 @@ describe("AdminDispatchPage", () => {
         "?source=alert&tab=automation",
       );
     });
+  });
+
+  it("keeps the phone workspace focused on mobile-capable sections", () => {
+    renderSchedule("/admin/dispatch?tab=schedule");
+
+    for (const label of ["Board", "Schedule", "Protocols", "Automation"]) {
+      expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
+    }
+    for (const label of ["Tech Match", "CSR Booking", "Job Scores", "Insights"]) {
+      expect(screen.getByRole("button", { name: label })).toHaveClass(
+        "hidden",
+        "md:inline-flex",
+      );
+    }
   });
 });

@@ -2340,7 +2340,13 @@ export function ProjectDetail({
             color: "#71717A",
             fontSize: 22,
             cursor: "pointer",
-            padding: "0 8px",
+            width: 44,
+            height: 44,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
           }}
           aria-label="Close"
         >
@@ -2634,6 +2640,7 @@ export function ProjectDetail({
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
                 style={{
                   padding: "4px 10px",
+                  minHeight: 44,
                   borderRadius: 6,
                   fontSize: 11,
                   fontWeight: 500,
@@ -2665,7 +2672,7 @@ export function ProjectDetail({
             >
               {" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2678,7 +2685,7 @@ export function ProjectDetail({
                 Include recent calls/texts/emails
               </label>{" "}
               <label
-                style={{ display: "inline-flex", alignItems: "center", gap: 5 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
               >
                 {" "}
                 <input
@@ -2719,6 +2726,7 @@ export function ProjectDetail({
                 onClick={() => appendTechnicalSnippet(snippet.text)}
                 style={{
                   padding: "5px 8px",
+                  minHeight: 44,
                   borderRadius: 6,
                   border: `1px solid #D4D4D8`,
                   background: "#FFFFFF",

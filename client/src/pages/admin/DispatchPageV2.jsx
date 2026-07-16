@@ -1981,15 +1981,12 @@ export default function DispatchPageV2({
 
       {/* Mobile day strip — 7 rolling days centered on the selected date.
           Styled to mirror ViewModeSelectorV2 (Day / 5-Day / Week / Month):
-          h-8 hairline pills, dark fill when active, single inline label
+          touch-safe hairline pills, dark fill when active, single inline label
           "<num> <weekday-letter>" so all 7 fit comfortably in the row. */}
       {viewMode === "day" && (
-        <div
-          className="md:hidden mb-4 flex justify-center -mx-4 px-4 overflow-x-auto"
-          style={{ WebkitOverflowScrolling: "touch" }}
-        >
+        <div className="md:hidden mb-4 flex justify-center overflow-x-auto">
           {" "}
-          <div className="inline-flex gap-1.5 min-w-max">
+          <div className="inline-flex gap-1 min-w-max">
             {Array.from({ length: 7 }).map((_, i) => {
               const iso = addDaysISO(date, i - 3);
               const d = dateAtNoonUTC(iso);
@@ -2004,7 +2001,7 @@ export default function DispatchPageV2({
                   key={iso}
                   onClick={() => setDate(iso)}
                   className={cn(
-                    "inline-flex items-center justify-center gap-1 h-8 px-3 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0",
+                    "inline-flex items-center justify-center gap-1 h-11 min-w-11 px-2 text-11 uppercase font-medium tracking-label rounded-sm border-hairline u-focus-ring transition-colors flex-shrink-0",
                     selected
                       ? "bg-zinc-900 text-white border-zinc-900"
                       : "bg-white text-zinc-700 border-zinc-300 hover:bg-zinc-50",

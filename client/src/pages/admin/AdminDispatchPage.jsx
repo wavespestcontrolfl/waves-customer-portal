@@ -62,10 +62,30 @@ const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map },
   { key: TABS.SCHEDULE, label: "Schedule", Icon: CalendarDays },
   { key: TABS.PROTOCOLS, label: "Protocols", Icon: ClipboardList },
-  { key: TABS.MATCH, label: "Tech Match", Icon: ClipboardList },
-  { key: TABS.CSR, label: "CSR Booking", Icon: Headphones },
-  { key: TABS.REVENUE, label: "Job Scores", Icon: TrendingUp },
-  { key: TABS.INSIGHTS, label: "Insights", Icon: Lightbulb },
+  {
+    key: TABS.MATCH,
+    label: "Tech Match",
+    Icon: ClipboardList,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.CSR,
+    label: "CSR Booking",
+    Icon: Headphones,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.REVENUE,
+    label: "Job Scores",
+    Icon: TrendingUp,
+    className: "hidden md:inline-flex",
+  },
+  {
+    key: TABS.INSIGHTS,
+    label: "Insights",
+    Icon: Lightbulb,
+    className: "hidden md:inline-flex",
+  },
   { key: TABS.AUTOMATION, label: "Automation", Icon: Bot },
 ];
 const VALID_TABS = TAB_LIST.map((t) => t.key);
