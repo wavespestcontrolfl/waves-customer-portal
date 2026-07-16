@@ -51,7 +51,10 @@ const cleanText = (v) => {
 // distinct billable deliverables (project-types.js routes real-estate
 // transactions to WDO).
 const SERVICE_FAMILIES = [
-  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|(?<!\bstinging\s)\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|(?<!\bstinging\s)\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  // Flea/tick work is its own catalog job (flea elimination packages) —
+  // "pest program plus a flea treatment" must surface it (codex r16).
+  { key: 'flea', label: 'Flea Control Service', re: /\bfleas?\b|\bticks?\b/i },
   // Stinging work is its own catalog/pricing lane (Bee / Wasp Nest Removal)
   // — "quarterly pest plus a wasp nest" must surface it, not vanish into
   // the already-covered generic pest family (codex r12).
@@ -188,7 +191,7 @@ function stripNegatedClauses(s) {
 // WDO⇄termite lane check ("WDO report and termite extermination" must keep
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
-const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wasps?|bees?|hornets?|yellow\s?jackets?|stinging\s+insects?|wdo)\s+exterminat\w*/gi;
+const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|ticks?|roach(?:es)?|ants?|(?:wasps?|bees?|hornets?|yellow\s?jackets?)(?:\s+nests?)?|stinging\s+insects?|wdo)\s+exterminat\w*/gi;
 const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b|stinging\s+insects?\b)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
@@ -298,7 +301,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   const scanFamilies = familiesIn(scanText);
   const exclusionPresent = scanFamilies.some((f) => f.key === 'exclusion');
   const rodentWorkEvidence = scanText
-    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b/i.test(scanText)
+    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b|\btreat\w*\b/i.test(scanText)
     : false;
   let label = matched;
   for (const fam of scanFamilies) {
@@ -349,7 +352,7 @@ function primaryServiceInterest(value) {
 // these families may only exist in the V1 caller text — scan it for just
 // them so "pest control and shrub care" survives V2 routing (codex r14,
 // reconciling r12's no-V1-fallback rule with the enum gap).
-const V2_INEXPRESSIBLE_FAMILY_KEYS = new Set(['tree_shrub', 'wildlife']);
+const V2_INEXPRESSIBLE_FAMILY_KEYS = new Set(['tree_shrub', 'wildlife', 'flea']);
 function v2InexpressibleFamilyWords(callerText) {
   const requested = cleanText(callerText);
   if (!requested) return null;

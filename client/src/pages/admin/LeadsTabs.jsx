@@ -2173,9 +2173,19 @@ export function LeadsSection() {
                                         match = services.find((s) =>
                                           [s.name, s.short_name, s.service_key]
                                             .filter(Boolean)
-                                            .some((v) =>
-                                              v.toLowerCase().includes(cand),
-                                            ),
+                                            .some((v) => {
+                                              const name = v.toLowerCase();
+                                              // Two-way containment: stored
+                                              // labels can be LONGER than the
+                                              // catalog row ("Bee / Wasp Nest
+                                              // Removal Service" vs seeded
+                                              // "Bee / Wasp Nest Removal").
+                                              return (
+                                                name.includes(cand) ||
+                                                (name.length >= 8 &&
+                                                  cand.includes(name))
+                                              );
+                                            }),
                                         );
                                         if (match) break;
                                       }

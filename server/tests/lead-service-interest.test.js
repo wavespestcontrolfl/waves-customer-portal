@@ -729,6 +729,33 @@ describe('composeServiceInterest', () => {
     })).toBe('Bee / Wasp Nest Removal Service');
   });
 
+  test('nest extermination is one stinging service (codex r16)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Bee / Wasp Nest Removal Service',
+      requested_service: 'wasp nest extermination',
+    })).toBe('Bee / Wasp Nest Removal Service');
+  });
+
+  test('rodent treatment + exclusion keeps both (codex r16)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'rat treatment and exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Control Service + Rodent Exclusion');
+    // exclusion-only still stays one service
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mice exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion');
+  });
+
+  test('flea/tick work is its own family (codex r16)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and flea treatment',
+    })).toBe('Quarterly Pest Control Service + Flea Control Service');
+    expect(v2InexpressibleFamilyWords('pest control and a flea treatment')).toBe('Flea Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
