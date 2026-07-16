@@ -86,7 +86,14 @@ function makeDb(initial = {}) {
 function makeGh(over = {}) {
   const calls = { putFile: [], comments: [] };
   const gh = {
-    async getPr() { return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } }; },
+    // Post-push revalidation compares the live PR head to the pushed commit —
+    // after a putFile the fake PR's head is the pushed sha, like GitHub's.
+    async getPr() {
+      return {
+        state: 'open',
+        head: { sha: calls.putFile.length ? 'newcommit999aaa' : HEAD, ref: 'content/blog-x' },
+      };
+    },
     async listPrReviewComments() { return over.reviewComments || [finding()]; },
     async listIssueComments() { return over.issueComments || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
@@ -307,7 +314,7 @@ describe('lane entry points', () => {
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };
     // getPr returns the same open PR
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let revalidatedWith = null;
     const r = await maybeRemediateAutonomousPr(pr, run, {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
@@ -324,7 +331,7 @@ describe('lane entry points', () => {
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
@@ -339,7 +346,7 @@ describe('lane entry points', () => {
     const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note' }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: false, reason: 'uniqueness gate: near-duplicate' }),
@@ -356,7 +363,7 @@ describe('lane entry points', () => {
     const db = makeDb();
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     // No injected validator: the real validateAutonomousRunGates must bail on
     // the missing run BEFORE requiring the autonomous-runner module.
     const r = await maybeRemediateAutonomousPr(pr, null, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
@@ -675,7 +682,7 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let checked = false;
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
@@ -771,7 +778,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
       });
       const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-      gh.getPr = async () => pr;
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
       const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
         db, gh, callAnthropic: makeCall('FIXED'),
@@ -799,7 +806,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
       });
       const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-      gh.getPr = async () => pr;
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
       const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
         db, gh, callAnthropic: makeCall('FIXED'),
@@ -1222,7 +1229,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
@@ -1243,7 +1250,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
-    gh.getPr = async () => pr;
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
@@ -1477,5 +1484,76 @@ describe('saveState vs terminal rows', () => {
     expect(r.reason).toContain('terminal');
     expect(gh._calls.putFile).toHaveLength(0);
     expect(db._tables.codex_remediation_state[0].status).toBe('merged');
+  });
+});
+
+// codex r-local final: the PR can merge/close between the pre-push guard and
+// gh.putFile — the push is inert, but post-commit sync would mirror content
+// into portal state that never landed in main. The post-push revalidation
+// must catch it.
+describe('post-push PR revalidation', () => {
+  test('PR merged during the push → sync and comment are skipped, row stamped merged', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          // First call (round entry): open. Second call (post-push): merged.
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          return { state: 'closed', merged: true, merged_at: '2026-07-16T00:00:00Z', head: { sha: 'newcommit999aaa' } };
+        },
+      },
+    });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('post-push check');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber).status).toBe('merged');
+  });
+
+  test('PR head moved past our push (parallel update) → sync and comment are skipped', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          return { state: 'open', head: { sha: 'someoneelses111', ref: 'content/blog-x' } };
+        },
+      },
+    });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toContain('head moved');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+  });
+
+  test('a transient GitHub error during revalidation proceeds (recovery re-drives next tick)', async () => {
+    const db = makeDb();
+    let calls = 0;
+    const gh = makeGh({
+      gh: {
+        async getPr() {
+          calls += 1;
+          if (calls === 1) return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+          throw new Error('gh 502');
+        },
+      },
+    });
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(gh._calls.comments).toHaveLength(1);
   });
 });

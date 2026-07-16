@@ -1029,6 +1029,30 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
+  // Post-push revalidation: the PR can merge/close in the window between the
+  // pre-push saveState and gh.putFile. The push itself is then inert (the
+  // commit sits on a branch main never took), but the sync below would
+  // mirror content into portal state that was NEVER included in main — so
+  // verify the PR is still open and our commit is actually its head before
+  // any post-commit synchronization. Best-effort on transient GitHub errors
+  // (the recovery branch re-drives an interrupted round next tick).
+  try {
+    const fresh = await gh.getPr(prNumber);
+    if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
+      const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
+      await markPrTerminal(prNumber, terminal, db);
+      logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+      return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+    }
+    if (fresh.head?.sha && newHead
+      && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+      logger.warn(`[codex-remediation] PR #${prNumber} head moved past the fix push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}) — skipping post-commit sync/comment; the newer push owns the review cycle`);
+      return { skipped: true, reason: 'pr head moved past the remediation push' };
+    }
+  } catch (e) {
+    logger.warn(`[codex-remediation] post-push PR revalidation failed for #${prNumber}: ${e.message} — proceeding (recovery branch re-drives on the next tick)`);
+  }
+
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
   // blog_posts.content so a later edit/republish/social share can't resurrect
   // the pre-fix body). A failed sync parks: the branch now diverges from the
