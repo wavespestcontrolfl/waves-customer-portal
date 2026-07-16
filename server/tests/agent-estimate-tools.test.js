@@ -13,6 +13,10 @@ const mockBuildAgentEstimateContext = jest.fn(async () => ({
   sms_thread: [],
   activities: [],
 }));
+const mockComputeMembershipContext = jest.fn(async () => null);
+const mockLoadCurrentServiceSpendContext = jest.fn(async () => ({
+  existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0,
+}));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/pricing-engine', () => ({
@@ -33,6 +37,10 @@ jest.mock('../services/estimate-automation-duplicates', () => ({
 }));
 jest.mock('../services/agent-estimate-context', () => ({
   buildAgentEstimateContext: (...args) => mockBuildAgentEstimateContext(...args),
+}));
+jest.mock('../services/estimate-membership-context', () => ({
+  computeMembershipContext: (...args) => mockComputeMembershipContext(...args),
+  loadCurrentServiceSpendContext: (...args) => mockLoadCurrentServiceSpendContext(...args),
 }));
 jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.fn() }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (url) => url) }));
@@ -282,30 +290,88 @@ describe('Agent Estimate draft tool', () => {
     expect(update.notes).toBeNull();
   });
 
-  test('any linked existing-customer contact is rejected before pricing or writing', async () => {
+  test('David-style existing-customer expansion preserves current pest and prices only lawn plus tree-shrub', async () => {
     const { database, writes } = makeDatabase({
       lead: { id: 'lead-1', customer_id: 'customer-1', estimate_id: null },
-      customer: { id: 'customer-1', pipeline_stage: 'inactive' },
+      customer: { id: 'customer-1', pipeline_stage: 'active' },
     });
     mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      is_existing_customer: true,
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        active_plan: true,
+        existing_service_keys: ['pest_control'],
+        current_services: [{
+          key: 'pest_control', label: 'Pest Control', currentPerVisit: 117, spendSource: 'last_paid_invoice',
+        }],
+        current_spend_per_visit_total: 117,
+      },
+      quote_form: { message_fields: [{ field: 'message', text: 'add lawn and tree shrub' }] },
+      calls: [], sms_thread: [], activities: [],
+    });
+    mockComputeMembershipContext.mockResolvedValueOnce({
+      isExistingCustomer: true,
+      existingServiceKeys: ['pest_control'],
+      currentServices: [{ key: 'pest_control', currentPerVisit: 117 }],
+      newServices: [{ key: 'lawn_care' }, { key: 'tree_shrub' }],
+    });
 
-    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        ...INPUT.engineInputs,
+        services: {
+          lawn: { track: 'st_augustine', lawnFreq: 9 },
+          treeShrub: { tier: 'standard' },
+        },
+      },
+      evidence: [{ source: 'quote_form', quote: 'add lawn and tree shrub', decision: 'new services' }],
+    }, { confirmed: true });
 
-    expect(result.error).toMatch(/new leads only/i);
-    expect(mockGenerateEstimate).not.toHaveBeenCalled();
-    expect(writes).toEqual([]);
+    expect(result).toEqual(expect.objectContaining({
+      success: true,
+      presentation_template: 'multi_service_bundle',
+      service_template_keys: ['lawn_care', 'tree_shrub'],
+    }));
+    expect(mockGenerateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      priorQualifyingServices: ['pest_control'],
+      services: expect.objectContaining({ lawn: expect.any(Object), treeShrub: expect.any(Object) }),
+    }));
+    const insert = writes.find((write) => write.table === 'estimates' && write.op === 'insert').payload;
+    expect(insert.customer_id).toBe('customer-1');
+    const stored = JSON.parse(insert.estimate_data);
+    expect(stored.priorQualifyingServices).toEqual(['pest_control']);
+    expect(stored.membershipSnapshot).toEqual(expect.objectContaining({ isExistingCustomer: true }));
+    expect(stored.estimatorEngine).toEqual(expect.objectContaining({
+      existingCustomerExpansion: true,
+      presentationTemplate: 'multi_service_bundle',
+      serviceTemplateKeys: ['lawn_care', 'tree_shrub'],
+    }));
   });
 
-  test('a phone-matched existing customer is rejected even when the lead is not linked yet', async () => {
-    const { database, writes } = makeDatabase();
+  test('a phone-matched customer is linked to the estimate without mutating model pricing inputs', async () => {
+    const { database, writes } = makeDatabase({ lead: { id: 'lead-1', customer_id: null, estimate_id: null } });
     mockDb.mockImplementation(database);
-    mockBuildAgentEstimateContext.mockResolvedValueOnce({ is_existing_customer: true });
+    mockTransactionDb = database;
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      is_existing_customer: true,
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-phone-match',
+        existing_service_keys: [],
+        current_services: [],
+      },
+      quote_form: { message_fields: [] }, calls: [], sms_thread: [], activities: [],
+    });
 
     const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
 
-    expect(result.error).toMatch(/new leads only/i);
-    expect(mockGenerateEstimate).not.toHaveBeenCalled();
-    expect(writes).toEqual([]);
+    expect(result.success).toBe(true);
+    expect(mockGenerateEstimate).toHaveBeenCalledWith(INPUT.engineInputs);
+    expect(writes.find((write) => write.table === 'estimates').payload.customer_id).toBe('customer-phone-match');
   });
 
   test('rejects contact details that do not belong to the selected lead', async () => {
@@ -437,6 +503,57 @@ describe('Agent Estimate compute input boundary', () => {
     }));
   });
 
+  test('loads recognized-customer membership inputs server-side and selects service presentation', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['pest_control'],
+        current_services: [{ key: 'pest_control', currentPerVisit: 117 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      measuredTurfSf: 4500,
+      services: {
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+        treeShrub: { tier: 'standard' },
+      },
+    });
+
+    expect(mockGenerateEstimate).toHaveBeenCalledWith(expect.objectContaining({
+      priorQualifyingServices: ['pest_control'],
+    }));
+    expect(result.engine_input).not.toHaveProperty('priorQualifyingServices');
+    expect(result.customer_account).toEqual(expect.objectContaining({ customer_id: 'customer-1' }));
+    expect(result.presentation).toEqual({
+      template: 'multi_service_bundle',
+      serviceTemplateKeys: ['lawn_care', 'tree_shrub'],
+    });
+  });
+
+  test('refuses to quote an active service again for a recognized customer', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['pest_control'],
+        current_services: [{ key: 'pest_control', currentPerVisit: 117 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+
+    expect(result.error).toMatch(/already has active pest_control/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('rejects model-controlled price, cost, margin, discount, and manager override inputs', async () => {
     const result = await executeEstimateTool('compute_estimate', {
       homeSqFt: 2000,
@@ -464,6 +581,21 @@ describe('Agent Estimate compute input boundary', () => {
     }, { confirmed: true });
 
     expect(result.error).toMatch(/manualDiscount/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  test('rejects model-supplied prior qualifying services', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { ...INPUT.engineInputs, priorQualifyingServices: ['pest_control', 'lawn_care'] },
+    }, { confirmed: true });
+
+    expect(result.error).toMatch(/priorQualifyingServices/);
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
   });

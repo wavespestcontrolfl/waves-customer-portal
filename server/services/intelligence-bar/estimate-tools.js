@@ -27,6 +27,8 @@ const {
 } = require('../estimate-automation-duplicates');
 const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
+const { toQualifyingKey } = require('../waveguard-existing-services');
+const { computeMembershipContext, loadCurrentServiceSpendContext } = require('../estimate-membership-context');
 
 const ESTIMATE_TOOLS = [
   {
@@ -48,6 +50,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
     input_schema: {
       type: 'object',
       properties: {
+        leadId: { type: 'string', description: 'Selected lead UUID. Required on Agent Estimate so existing-customer services and membership pricing are loaded server-side.' },
         homeSqFt: { type: 'number', description: 'Home interior square footage' },
         lotSqFt: { type: 'number', description: 'Lot size in square feet (defaults to ~4× homeSqFt if unknown)' },
         buildingSqFt: { type: 'number', description: 'Verified commercial building/treatment footprint square footage.' },
@@ -131,8 +134,8 @@ Use for: any quote where you want to compare your draft against historical comps
   },
   {
     name: 'match_existing_customer',
-    description: `Search the customers table to check if the prospect is already a customer (by phone, address, or name). Prevents quoting a duplicate. Returns up to 10 matches.
-Use for: every quote — call before create_pending_estimate.`,
+    description: `Search for an existing customer by phone, address, or name. Returns active recurring services and current per-application spend so an expansion quote preserves current service and prices only additions. Ambiguous matches are not pricing authority.
+Use for: every quote when the selected lead is not already linked to a customer.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -369,6 +372,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'margindivisor',
   'priceoverride',
   'pricingconfig',
+  'priorqualifyingservices',
   'routedriveminutes',
   'servicespecificdiscounts',
   'targetlawngrossmargin',
@@ -397,6 +401,41 @@ function forbiddenPricingInputError(input) {
   const forbidden = [...new Set(findForbiddenAgentPricingInputs(input))];
   if (!forbidden.length) return null;
   return `Agent Estimate cannot set price, cost, discount, margin, or manager-override inputs (${forbidden.slice(0, 8).join(', ')}). Remove them and let generateEstimate use DB-authoritative pricing.`;
+}
+
+function serviceTemplateKey(rawKey) {
+  const qualifying = toQualifyingKey(rawKey);
+  if (qualifying) return qualifying;
+  return String(rawKey || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function presentationForServices(services = {}) {
+  const serviceTemplateKeys = [...new Set(Object.keys(services).map(serviceTemplateKey).filter(Boolean))];
+  return {
+    template: serviceTemplateKeys.length > 1 ? 'multi_service_bundle' : (serviceTemplateKeys[0] || 'manual_review'),
+    serviceTemplateKeys,
+  };
+}
+
+function accountPricingFromContext(context = {}) {
+  const account = context.customer_account || {};
+  return {
+    customerId: account.recognized ? account.customer_id : null,
+    recognized: account.recognized === true,
+    priorQualifyingServices: Array.isArray(account.existing_service_keys)
+      ? [...new Set(account.existing_service_keys.filter(Boolean))]
+      : [],
+    customerAccount: account,
+  };
+}
+
+function duplicateCurrentServices(services = {}, priorQualifyingServices = []) {
+  const current = new Set(priorQualifyingServices);
+  return [...new Set(Object.keys(services).map(serviceTemplateKey).filter((key) => current.has(key)))];
 }
 
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -512,8 +551,25 @@ async function computeEstimate(input) {
     pool: input.pool,
     poolCage: input.poolCage,
   }).filter(([, value]) => value !== undefined));
+
+  let accountPricing = accountPricingFromContext();
+  if (input.leadId) {
+    const context = await buildAgentEstimateContext(input.leadId);
+    if (context?.error) return { error: 'Selected lead could not be loaded for customer recognition' };
+    accountPricing = accountPricingFromContext(context);
+  }
+  const duplicateServices = duplicateCurrentServices(services, accountPricing.priorQualifyingServices);
+  if (duplicateServices.length) {
+    return {
+      error: `The customer already has active ${duplicateServices.join(', ')} service. Keep current services as account context and quote only requested additions.`,
+      customer_account: accountPricing.customerAccount,
+    };
+  }
+  const pricingEngineInput = accountPricing.priorQualifyingServices.length
+    ? { ...engineInput, priorQualifyingServices: accountPricing.priorQualifyingServices }
+    : engineInput;
   if (needsSync()) await syncConstantsFromDB(db);
-  const estimate = generateEstimate(engineInput);
+  const estimate = generateEstimate(pricingEngineInput);
 
   const summary = estimate?.summary || {};
   const monthlyTotal = Number(summary.recurringMonthlyAfterDiscount || 0);
@@ -545,6 +601,8 @@ async function computeEstimate(input) {
     annual_before_discount: Number(summary.recurringAnnualBeforeDiscount || 0),
     year1_total: Number(summary.year1Total || 0),
     line_items: compactLines,
+    customer_account: accountPricing.customerAccount,
+    presentation: presentationForServices(services),
     margin_check: {
       loaded_labor_rate_per_hour: 35,
       target_collected_margin: 0.35,
@@ -640,15 +698,27 @@ async function matchExistingCustomer({ phone, address, name }) {
   });
 
   const rows = await q;
+  const accounts = await Promise.all(rows.map(async (row) => {
+    try {
+      return await loadCurrentServiceSpendContext(db, row.id);
+    } catch {
+      return { existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0 };
+    }
+  }));
   return {
     count: rows.length,
-    matches: rows.map(r => ({
+    ambiguous: rows.length !== 1,
+    pricing_authority: rows.length === 1 ? 'unambiguous_match' : 'none',
+    matches: rows.map((r, index) => ({
       id: r.id,
       name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
       phone: r.phone,
       email: r.email,
       address: [r.address_line1, r.city, r.zip].filter(Boolean).join(', '),
       tier: r.waveguard_tier,
+      existing_service_keys: accounts[index].existingServiceKeys,
+      current_services: accounts[index].currentServices,
+      current_spend_per_visit_total: accounts[index].currentSpendPerVisitTotal,
     })),
   };
 }
@@ -878,7 +948,7 @@ function compactAgentLine(line) {
   };
 }
 
-async function computeAgentDraftPreview(input) {
+async function computeAgentDraftPreview(input, accountPricing = accountPricingFromContext()) {
   if (!input?.engineInputs || typeof input.engineInputs !== 'object' || Array.isArray(input.engineInputs)) {
     return { error: 'engineInputs must be the exact engine_input returned by compute_estimate' };
   }
@@ -893,8 +963,19 @@ async function computeAgentDraftPreview(input) {
     return { error: 'engineInputs.services must contain at least one service' };
   }
 
+  const duplicateServices = duplicateCurrentServices(
+    input.engineInputs.services,
+    accountPricing.priorQualifyingServices,
+  );
+  if (duplicateServices.length) {
+    return { error: `The customer already has active ${duplicateServices.join(', ')} service. Quote only requested additions.` };
+  }
+
   if (needsSync()) await syncConstantsFromDB(db);
-  const engineResult = generateEstimate(input.engineInputs);
+  const pricingEngineInputs = accountPricing.priorQualifyingServices.length
+    ? { ...input.engineInputs, priorQualifyingServices: accountPricing.priorQualifyingServices }
+    : input.engineInputs;
+  const engineResult = generateEstimate(pricingEngineInputs);
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {
     return { error: 'Pricing engine returned zero — keep this as a manual quote instead of drafting' };
@@ -910,6 +991,10 @@ async function computeAgentDraftPreview(input) {
   const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
   const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
   const evidence = Array.isArray(input.evidence) ? input.evidence : [];
+
+  if (accountPricing.recognized) {
+    laneReasons.push('existing-customer expansion: verify current services, spend, and added-service scope before sending');
+  }
 
   if (!evidence.some((row) => row && (row.source || row.quote || row.decision))) {
     laneReasons.push('source evidence was not attached to the draft');
@@ -1014,10 +1099,12 @@ async function computeAgentDraftPreview(input) {
     lane: laneReasons.length ? 'yellow' : 'green',
     lane_reasons: [...new Set(laneReasons)].slice(0, 30),
     engineResult,
+    customer_account: accountPricing.customerAccount,
+    presentation: presentationForServices(input.engineInputs.services),
   };
 }
 
-function agentEstimatePayload(input, preview, existingData = {}) {
+function agentEstimatePayload(input, preview, existingData = {}, accountPricing = accountPricingFromContext()) {
   const previousEngine = existingData.estimatorEngine || {};
   const priorRevisions = Array.isArray(previousEngine.revisions)
     ? previousEngine.revisions
@@ -1041,6 +1128,10 @@ function agentEstimatePayload(input, preview, existingData = {}) {
       engineResult: preview.engineResult,
       agentDraft: true,
       lead_id: input.leadId,
+      ...(accountPricing.membershipSnapshot ? { membershipSnapshot: accountPricing.membershipSnapshot } : {}),
+      ...(accountPricing.priorQualifyingServices.length
+        ? { priorQualifyingServices: accountPricing.priorQualifyingServices }
+        : {}),
       estimatorEngine: {
         version: 3,
         origin: 'manual_agent',
@@ -1059,6 +1150,9 @@ function agentEstimatePayload(input, preview, existingData = {}) {
         pricingAuthority: 'generateEstimate',
         loadedLaborRate: 35,
         targetCollectedMargin: 0.35,
+        existingCustomerExpansion: accountPricing.recognized,
+        presentationTemplate: preview.presentation?.template || 'manual_review',
+        serviceTemplateKeys: preview.presentation?.serviceTemplateKeys || [],
         revisions,
       },
     },
@@ -1081,9 +1175,6 @@ function agentEstimatePayload(input, preview, existingData = {}) {
 async function loadAgentEstimateLead(leadId, database = db) {
   const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at').first();
   if (!lead) return { error: 'Lead not found' };
-  if (lead.customer_id) {
-    return { error: 'Existing-customer contacts stay in the task/flag flow; Agent Estimate drafting is for new leads only.' };
-  }
   return { lead };
 }
 
@@ -1135,7 +1226,7 @@ function anchorAgentEstimateContact(input, lead) {
   };
 }
 
-async function reviseOwnedAgentDraft(estimateId, input, preview) {
+async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing = accountPricingFromContext()) {
   return db.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
@@ -1149,11 +1240,12 @@ async function reviseOwnedAgentDraft(estimateId, input, preview) {
     if (currentData.lead_id && String(currentData.lead_id) !== String(input.leadId)) {
       return { error: 'This Agent Estimate draft belongs to a different lead and will not be overwritten' };
     }
-    const payload = agentEstimatePayload(input, preview, currentData);
+    const payload = agentEstimatePayload(input, preview, currentData, accountPricing);
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
         estimate_data: JSON.stringify(payload.data),
         ...payload.fields,
+        customer_id: accountPricing.customerId || estimate.customer_id || null,
         notes: null,
         updated_at: trx.fn.now(),
       })
@@ -1164,7 +1256,7 @@ async function reviseOwnedAgentDraft(estimateId, input, preview) {
   });
 }
 
-async function persistNewAgentDraft(input, preview, actionContext) {
+async function persistNewAgentDraft(input, preview, actionContext, accountPricing = accountPricingFromContext()) {
   const phone = input.customerPhone || null;
   return withAutomatedEstimatePhoneLock(phone, async (trx) => {
     const leadResult = await loadAgentEstimateLead(input.leadId, trx);
@@ -1196,13 +1288,13 @@ async function persistNewAgentDraft(input, preview, actionContext) {
       };
     }
 
-    const payload = agentEstimatePayload(input, preview);
+    const payload = agentEstimatePayload(input, preview, {}, accountPricing);
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify(payload.data),
       ...payload.fields,
-      customer_id: lead.customer_id || null,
+      customer_id: accountPricing.customerId || lead.customer_id || null,
       notes: null,
       token,
       expires_at: expiresAt,
@@ -1222,15 +1314,20 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   if (anchored.error) return anchored;
   const leadContext = await buildAgentEstimateContext(input.leadId);
   if (leadContext?.error) return { error: 'Selected lead evidence could not be loaded' };
-  if (leadContext?.is_existing_customer) {
-    return { error: 'Existing-customer contacts stay in the task/flag flow; Agent Estimate drafting is for new leads only.' };
-  }
+  const accountPricing = accountPricingFromContext(leadContext);
   const anchoredInput = {
     ...anchored.input,
     evidenceVerification: verifyAgentEvidenceQuotes(anchored.input.evidence, leadContext),
   };
-  const preview = await computeAgentDraftPreview(anchoredInput);
+  const preview = await computeAgentDraftPreview(anchoredInput, accountPricing);
   if (preview.error) return preview;
+
+  if (accountPricing.customerId) {
+    accountPricing.membershipSnapshot = await computeMembershipContext(db, {
+      customerId: accountPricing.customerId,
+      estData: { lineItems: preview.engineResult?.lineItems || [] },
+    });
+  }
 
   if (actionContext.confirmed !== true) {
     const { engineResult: _engineResult, ...safePreview } = preview;
@@ -1242,13 +1339,14 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   }
 
   let persisted = input.estimateId
-    ? await reviseOwnedAgentDraft(input.estimateId, anchoredInput, preview)
-    : await persistNewAgentDraft(anchoredInput, preview, actionContext);
+    ? await reviseOwnedAgentDraft(input.estimateId, anchoredInput, preview, accountPricing)
+    : await persistNewAgentDraft(anchoredInput, preview, actionContext, accountPricing);
   if (persisted.useExistingEstimateId) {
     persisted = await reviseOwnedAgentDraft(
       persisted.useExistingEstimateId,
       { ...anchoredInput, estimateId: persisted.useExistingEstimateId },
       preview,
+      accountPricing,
     );
   }
   if (persisted.error) return persisted;
@@ -1269,6 +1367,9 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
     monthly_total: preview.totals.monthly,
     annual_total: preview.totals.annual,
     onetime_total: preview.totals.oneTime,
+    customer_account: preview.customer_account,
+    presentation_template: preview.presentation?.template || null,
+    service_template_keys: preview.presentation?.serviceTemplateKeys || [],
     admin_preview_url: `/estimate/${estimate.token}?adminPreview=1`,
     note_for_admin: revised
       ? 'Draft revised in place. Preview it before sending.'

@@ -35,6 +35,19 @@ describe('Agent Estimate context helpers', () => {
     expect(prompt).toMatch(/review and revise/i);
   });
 
+  test('recognized customer prompt preserves current service and quotes only additions', () => {
+    const prompt = _private.suggestedPrompt(
+      { id: 'lead-1', first_name: 'David', last_name: 'Thomas' },
+      null,
+      { recognized: true },
+    );
+    expect(prompt).toMatch(/recognized customer expansion/i);
+    expect(prompt).toMatch(/preserve every active current service/i);
+    expect(prompt).toMatch(/quote only services.*wants to add/i);
+    expect(prompt).toMatch(/selected lead ID to compute_estimate/i);
+    expect(prompt).toMatch(/presentation.*newly quoted service mix/i);
+  });
+
   test('oversized extracted data is bounded before entering the model prompt', () => {
     const compact = _private.compactJson({ message: 'x'.repeat(20000) }, 100);
     expect(compact.truncated).toBe(true);
