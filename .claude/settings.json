@@ -6,7 +6,8 @@
       "Bash(npm run dev:client)",
       "Bash(npm run dev:server)",
       "Bash(npm test)",
-      "Bash(npm run test:*)",
+      "Bash(npm run test:contracts)",
+      "Bash(npm run test:contracts:list)",
       "Bash(npm run check:portal-brand)",
       "Bash(npm run check:domain-rules)",
       "Bash(npm run lint:staged)",
@@ -16,9 +17,10 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
-      "Bash(git branch:*)",
+      "Bash(git branch --show-current)",
       "Bash(git ls-remote:*)",
-      "Bash(git fetch:*)"
+      "Bash(git fetch origin)",
+      "Bash(git fetch origin main)"
     ]
   }
 }

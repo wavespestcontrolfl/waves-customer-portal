@@ -203,19 +203,25 @@ finding and warns on P1. Reviewers must return JSON matching
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
-- **Permission-allowlist entries must account for npm lifecycle hooks and
-  wildcard sweep.** `.claude/settings.json` `permissions.allow` entries
-  auto-approve everything the allowlisted script's `pre`/`post` hooks run —
-  the root `predev` runs `npm run db:migrate`, so allowlisting
-  `npm run dev` silently auto-approves a DB write. Wildcard entries sweep
-  in every current AND future matching script — `npm run check:*` covered
-  `check:lawn-models`, which POSTs live prompts to three LLM providers.
-  Flag any allowlist addition of (a) an npm wrapper script whose lifecycle
-  hooks (check `package.json`) write to the DB, call external APIs, or
-  spend money, or (b) a wildcard over a script family that mixes safe and
-  spending commands. Allowlist the narrow script explicitly instead
-  (e.g. `dev:client` / `dev:server`, not `dev`; `check:portal-brand`,
-  not `check:*`).
+- **Permission-allowlist entries must account for npm lifecycle hooks,
+  wildcard sweep, and destructive flag variants.** `.claude/settings.json`
+  `permissions.allow` (and command-frontmatter `allowed-tools`) entries
+  auto-approve every variant the pattern matches. Flag any addition of:
+  (a) an npm wrapper script whose `pre`/`post` hooks (check `package.json`)
+  write to the DB, call external APIs, or spend money — root `predev` runs
+  `db:migrate`, so `npm run dev` auto-approves a DB write;
+  (b) a wildcard over a script family that mixes safe and spending
+  commands — `npm run check:*` swept in `check:lawn-models`, which POSTs
+  live prompts to three LLM providers;
+  (c) a prefix rule over a command with destructive flags or subcommands —
+  `git branch:*` includes `-D`/`-M`, `git push:*` includes
+  `--no-verify`/`-f`/`-d` (bypasses the Codex pre-push gate),
+  `git fetch:*` accepts ref-moving refspecs, `gh api:*` can POST.
+  Prefer exact command forms (`dev:client` not `dev`; `check:portal-brand`
+  not `check:*`; `git branch --show-current` not `git branch:*`).
+  Syntax trap: a trailing `:*` (equivalent to ` *`) enforces a word
+  boundary — `npm run test:*` matches `npm run test -x` but NOT
+  `npm run test:contracts`; colon-named scripts need exact entries.
 - **`ops/agents/` convention violations.** Scripts in that folder must
   declare READ-ONLY or MUTATES in their header, default to dry-run when
   they mutate (write only under `--execute`), and contain no secrets,
