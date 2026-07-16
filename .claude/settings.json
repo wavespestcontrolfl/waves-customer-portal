@@ -4,7 +4,6 @@
       "Bash(npm ci)",
       "Bash(npm run build)",
       "Bash(npm run dev:client)",
-      "Bash(npm run dev:server)",
       "Bash(npm test)",
       "Bash(npm run test:contracts)",
       "Bash(npm run test:contracts:list)",
@@ -18,7 +17,6 @@
       "Bash(git log:*)",
       "Bash(git show:*)",
       "Bash(git branch --show-current)",
-      "Bash(git ls-remote:*)",
       "Bash(git fetch origin)",
       "Bash(git fetch origin main)"
     ]

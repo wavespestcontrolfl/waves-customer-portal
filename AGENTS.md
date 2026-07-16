@@ -222,6 +222,20 @@ finding and warns on P1. Reviewers must return JSON matching
   Syntax trap: a trailing `:*` (equivalent to ` *`) enforces a word
   boundary — `npm run test:*` matches `npm run test -x` but NOT
   `npm run test:contracts`; colon-named scripts need exact entries.
+  Known sharp edges already ruled on: `git ls-remote:*` allows
+  `--upload-pack=<exec>` (arbitrary code execution), `gh pr create` can
+  itself push an unpushed branch, `gh pr comment:*` includes
+  `--delete-last`, and `npm run dev:server` boots `initScheduledJobs()`
+  with `cronJobs` defaulting ON outside prod — none of these may be
+  pre-approved.
+  *Accepted residual risk (owner ruling 2026-07-16, PR #2768):*
+  high-frequency LOCAL read/stage commands stay as prefix rules
+  (`git status/diff/log/show/add/commit:*`) despite write-capable flags
+  (`--output`, `-A`, `--amend`) — damage is local, reversible, and
+  visible in `git status`/`git diff` before push, and the containment
+  boundary is the always-prompting `git push`. Do not re-flag these
+  specific prefix rules; DO flag any new prefix rule whose abuse is
+  remote, irreversible, or invisible.
 - **`ops/agents/` convention violations.** Scripts in that folder must
   declare READ-ONLY or MUTATES in their header, default to dry-run when
   they mutate (write only under `--execute`), and contain no secrets,
