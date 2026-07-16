@@ -271,7 +271,7 @@ import { Button } from '../components/Button';
 
 **Props:** `variant`, `surface` (default `"customer"`), `fullWidthMobile`, `icon` + `iconPosition` (`"left"|"right"` default `"right"`), `as` (polymorphic — pass `"a"` for link CTAs), `className`, plus all native `<button>` / `<a>` props via spread.
 
-**In production on:** BookingPage, PayPage, PublicBookingPage, ReviewPage, RatePage, QuotePage. `/button-examples` route is a throwaway visual-QA harness — delete once all customer pages are migrated.
+**In production on:** BookingPage, PayPage, PublicBookingPage, ReviewPage, and RatePage. `/button-examples` route is a throwaway visual-QA harness — delete once all customer pages are migrated.
 
 ### FAB (bottom-right chat launcher)
 ```

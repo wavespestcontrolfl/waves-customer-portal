@@ -125,7 +125,10 @@ const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
-const SERVICE_ESTIMATE_SLUGS = require('./config/service-estimate-slugs');
+const {
+  estimateMarketingRedirectTarget,
+  preserveOriginalQuery,
+} = require('./config/estimate-marketing-redirects');
 
 // Railway terminates TLS upstream and forwards via X-Forwarded-For.
 // Trust a single proxy hop so express-rate-limit can key on the real client IP.
@@ -445,11 +448,18 @@ app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
 app.use('/api/service-outlines', serviceOutlinePublicRoutes);
-// Customer-facing estimate URL. Service slugs render the SPA quote wizard;
-// everything else remains a server-rendered accepted-estimate token.
+// Public acquisition pages now live on wavespestcontrol.com. Redirect them
+// before the SPA loads, preserving campaign parameters; URL fragments (the
+// voicemail prefill credential) remain browser-only and carry across the HTTP
+// redirect automatically. Unknown /estimate/:token values are private customer
+// estimates and must continue through the tokenized estimate renderer.
+app.get(['/estimate', '/estimate/', '/quote', '/quote/'], (req, res) => {
+  const target = estimateMarketingRedirectTarget(req.path);
+  return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
+});
 app.get('/estimate/:token', (req, res, next) => {
-  const slug = String(req.params.token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
+  const target = estimateMarketingRedirectTarget(`/estimate/${req.params.token}`);
+  if (target) return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
   return estimatePublicRoutes.handleEstimateView(req, res, next);
 });
 app.use('/api/public/quote', paidEstimatorDailyLimiter, publicQuoteRoutes);

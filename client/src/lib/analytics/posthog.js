@@ -1,8 +1,8 @@
 // =============================================================================
 // PostHog loader — PUBLIC funnel pages only.
 // =============================================================================
-// PostHog is initialized ONLY on the customer-acquisition funnel pages
-// (/book, /estimate, /pay). It is never loaded on /admin, /tech, or the
+// PostHog is initialized ONLY on the portal's retained acquisition funnel
+// (/book) and for explicit cookieless events on tokenized estimates. It is never loaded on /admin, /tech, or the
 // authenticated customer portal — those carry employee/customer PII and have
 // zero acquisition-funnel value. The gate is enforced by isPublicFunnelPath()
 // and by where <PublicFunnelTracking/> chooses to boot.
@@ -15,7 +15,7 @@
 // PUBLIC_POSTHOG_KEY gating) and until consent is present.
 // =============================================================================
 
-import { SERVICE_ESTIMATE_SLUGS } from '../serviceEstimateSlugs';
+import { SERVICE_ESTIMATE_SLUGS } from '../estimateMarketingRedirects';
 
 const KEY = import.meta.env.VITE_POSTHOG_KEY || '';
 const HOST = import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com';
@@ -28,21 +28,9 @@ let bootedMode = null; // 'funnel' | 'tokenized' — which route class initializ
  *  /tech, authed customer portal) is excluded. */
 export function isPublicFunnelPath(pathname) {
   const p = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
-  // Bare acquisition routes (/book, /estimate). /book?service=… still matches —
-  // the query string is not part of the pathname.
-  if (/^\/(book|estimate)\/?$/.test(p)) return true;
-  // Public marketing quote pages: /estimate/<service-slug> renders the public
-  // QuotePage (see EstimatePublicGateway). A /estimate/<x> whose segment is NOT
-  // a known slug is a tokenized customer estimate (PII) and stays excluded — as
-  // do /pay/:token and /book/:token.
-  const m = p.match(/^\/estimate\/([^/]+)\/?$/);
-  if (!m) return false;
-  // Decode defensively — a malformed escape (/estimate/%E0%A4%A) throws, and
-  // this runs during render even when analytics is dark, so a bad URL must fall
-  // through to "not public", never blank the SPA.
-  let seg;
-  try { seg = decodeURIComponent(m[1]).toLowerCase(); } catch { return false; }
-  return SERVICE_ESTIMATE_SLUGS.has(seg);
+  // Public estimate pages redirect to wavespestcontrol.com before this bundle
+  // loads. /book?service=… still matches because search is not in pathname.
+  return /^\/book\/?$/.test(p);
 }
 
 /** Tokenized customer estimate page (/estimate/<token> where the segment is
@@ -186,8 +174,8 @@ export function bootPostHog() {
         const bare = u.split('?')[0].split('#')[0];
         // The estimate token is a bearer credential — redact it from every
         // URL-ish property (path kept for funnel context, token never leaves
-        // the browser). Known marketing slugs (/estimate/pest-control) are
-        // NOT tokens and keep their real path.
+        // the browser). Retired marketing slugs are not bearer tokens and keep
+        // their real path if a client-side navigation briefly reaches the SPA.
         return bare.replace(/\/estimate\/([^/?#]+)/i, (full, seg) => {
           let dec;
           try { dec = decodeURIComponent(seg).toLowerCase(); } catch { return '/estimate/[token]'; }

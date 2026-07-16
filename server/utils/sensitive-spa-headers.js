@@ -1,4 +1,4 @@
-const SERVICE_ESTIMATE_SLUGS = require('../config/service-estimate-slugs');
+const { SERVICE_ESTIMATE_SLUGS } = require('../config/estimate-marketing-redirects');
 
 function isServiceOutlinePath(reqPath = '') {
   return /^\/service-outlines\/[A-Za-z0-9_-]{43}\/?$/.test(String(reqPath || ''));
@@ -35,7 +35,7 @@ function isServiceReportPath(reqPath = '') {
 // `${nameSlug}-${shortId}` (SMS/lead intake) — so matching a token SHAPE would
 // miss formats and leak. Instead, treat ANY single-segment /estimate/<x> as a
 // sensitive customer quote EXCEPT the known public marketing service slugs
-// (routed to QuotePage). Over-noindexing a marketing page is a minor SEO cost;
+// (permanently redirected to wavespestcontrol.com). Over-noindexing a marketing page is a minor SEO cost;
 // under-noindexing a real estimate leaks address + pricing, so default to
 // noindex.
 function isEstimatePath(reqPath = '') {

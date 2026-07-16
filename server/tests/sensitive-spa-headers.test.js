@@ -108,7 +108,7 @@ describe('sensitive SPA document headers', () => {
     expect(isEstimatePath(`/estimate/${ESTIMATE_TOKEN}/`)).toBe(true);
     expect(isEstimatePath('/estimate/jane-doe-9f8e7d6c')).toBe(true);
     expect(isEstimatePath('/estimate/lead-00112233')).toBe(true);
-    // Known public marketing service-slug quote pages (routed to QuotePage) stay indexable.
+    // Known public marketing service-slug paths redirect before the SPA privacy middleware.
     expect(isEstimatePath('/estimate/mosquito')).toBe(false);
     expect(isEstimatePath('/estimate/termite')).toBe(false);
     expect(isEstimatePath('/estimate/bed-bug')).toBe(false);
