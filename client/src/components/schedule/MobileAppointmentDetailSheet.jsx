@@ -194,6 +194,10 @@ export default function MobileAppointmentDetailSheet({
   const visitInvoice = (service.billedToPayer || attachedInvoice?.payerBilled)
     ? null
     : attachedInvoice;
+  const hasOpenVisitInvoice = !!(
+    visitInvoice?.open && Number(visitInvoice.amountDue || 0) > 0
+  );
+  const hasCheckoutAmount = hasChargeableAmount || hasOpenVisitInvoice;
   const completionProfile = service.completionProfile || {};
   const linkedProject = service.linkedProject || null;
   // projectBacked covers both special projects and still-project_required
@@ -300,13 +304,13 @@ export default function MobileAppointmentDetailSheet({
   };
 
   const handleReviewAction = async () => {
-    if (!hasChargeableAmount && projectBackedCompletion && canCompleteService) {
+    if (!hasCheckoutAmount && projectBackedCompletion && canCompleteService) {
       const saved = await saveNote();
       if (!saved) return;
       onCompleteService?.({ ...service, notes: note });
       return;
     }
-    if (hasChargeableAmount || canCompleteService) {
+    if (hasCheckoutAmount || canCompleteService) {
       onReviewCheckout?.(service);
     }
   };
@@ -369,7 +373,7 @@ export default function MobileAppointmentDetailSheet({
           className={`w-full rounded-sm font-medium u-focus-ring ${canCompleteService ? 'bg-white text-zinc-900 border border-hairline border-zinc-300 mt-3' : 'bg-zinc-900 text-white'}`}
           style={{ padding: '14px 20px', fontSize: 16, opacity: (!hasChargeableAmount && !canCompleteService) ? 0.55 : 1 }}
         >
-          {hasChargeableAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
+          {hasCheckoutAmount ? 'Review & checkout' : canCompleteService ? (projectBackedCompletion ? (linkedProject?.id ? 'Open project details' : 'Review project details') : 'Review visit details') : 'Visit complete'}
         </button>
         {coveredByMembership && !isPrepaid && (
           <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
