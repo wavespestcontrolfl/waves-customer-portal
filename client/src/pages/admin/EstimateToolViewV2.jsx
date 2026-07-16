@@ -3827,13 +3827,6 @@ export default function EstimateToolViewV2({
         else if (sd === "LIGHT")
           add("pest", "Light shrubs: -$5/visit", -5, "down");
         else add("pest", "Shrubs: not specified", 0, "info");
-        const td = p.treeDensity || p.trees;
-        if (td === "HEAVY") add("pest", "Heavy trees: +$6/visit", 6, "up");
-        else if (td === "MODERATE")
-          add("pest", "Moderate trees: $0/visit", 0, "info");
-        else if (td === "LIGHT")
-          add("pest", "Light trees: -$5/visit", -5, "down");
-        else add("pest", "Trees: not specified", 0, "info");
         const lc = p.landscapeComplexity || p.complexity;
         if (lc === "COMPLEX")
           add("pest", "Complex landscape: +$3/visit", 3, "up");
@@ -3844,8 +3837,6 @@ export default function EstimateToolViewV2({
         if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
           add("pest", "Near water: +$3/visit", 3, "up");
         else add("pest", "No water nearby: $0/visit", 0, "info");
-        if (p.hasLargeDriveway)
-          add("pest", "Large driveway: +$3/visit", 3, "up");
         if (p.yearBuilt)
           add(
             "property",
