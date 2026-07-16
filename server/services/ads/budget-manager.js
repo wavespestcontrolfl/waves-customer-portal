@@ -166,7 +166,12 @@ class BudgetManager {
   }
 
   calculateBudget(campaign, mode) {
-    const base = parseFloat(campaign.daily_budget_base || 20);
+    // $20 is the fallback ONLY for a NULL/blank/non-numeric base (legacy DB-only
+    // campaign not yet backfilled). A real stored 0 stays 0 — writes reject a
+    // non-positive base, so a genuine 0 never reaches a live campaign, and the
+    // old `|| 20` collapsing 0→$20 can't silently spend money.
+    const parsed = parseFloat(campaign.daily_budget_base);
+    const base = Number.isFinite(parsed) ? parsed : 20;
     switch (mode) {
       case 'base': return base;
       case 'spent': return parseFloat(campaign.daily_budget_current || base); // freeze at current
@@ -391,15 +396,38 @@ class BudgetManager {
    * Manually update a campaign's base daily budget.
    */
   async setBudget(campaignId, newBaseBudget, reason = 'manual') {
+    // Validate the amount up front — a non-positive / NaN / non-finite base would
+    // be written locally and pushed to Google as garbage micros (or, at 0,
+    // collapse to the $20 fallback), and the 2-hourly reconcile would keep
+    // re-pushing it. A daily budget must be strictly positive; use mode 'stop'
+    // to throttle. parseFloat is deliberately avoided so '50junk' is rejected.
+    const base = typeof newBaseBudget === 'number'
+      ? newBaseBudget
+      : (typeof newBaseBudget === 'string' && newBaseBudget.trim() !== '' ? Number(newBaseBudget) : NaN);
+    if (!Number.isFinite(base) || base <= 0) {
+      throw new Error(`Invalid budget "${newBaseBudget}" — must be a number > 0`);
+    }
+
     const campaign = await db('ad_campaigns').where({ id: campaignId }).first();
     if (!campaign) throw new Error('Campaign not found');
     if (campaign.platform !== 'google_ads') {
       throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
     }
 
+    // What Google should actually run given the campaign's CURRENT mode: editing
+    // the base while a campaign is throttled ('stop') or frozen ('spent') must
+    // NOT blast the raw new base live — push the mode-derived amount, exactly
+    // like setMode and the capacity cron. In 'base' mode this is the new base
+    // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
+    const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+
+    // daily_budget_current tracks what Google is running, so it moves to the
+    // amount we're about to push (mirrors setMode). In 'spent' mode this is a
+    // no-op (effectiveBudget == current); in 'stop' it advances the throttle to
+    // 1% of the NEW base so the dashboard and reconcile stay consistent.
     await db('ad_campaigns').where({ id: campaignId }).update({
-      daily_budget_base: newBaseBudget,
-      daily_budget_current: campaign.budget_mode === 'base' ? newBaseBudget : campaign.daily_budget_current,
+      daily_budget_base: base,
+      daily_budget_current: effectiveBudget,
     });
 
     await db('ad_budget_log').insert({
@@ -408,12 +436,27 @@ class BudgetManager {
       previous_mode: campaign.budget_mode,
       new_mode: campaign.budget_mode,
       previous_budget: campaign.daily_budget_base,
-      new_budget: newBaseBudget,
+      new_budget: base,
       reason,
       trigger: 'manual',
     });
 
-    return { campaign: campaign.campaign_name, previousBudget: campaign.daily_budget_base, newBudget: newBaseBudget };
+    // DB first, then best-effort live push (human-initiated path, healed by the
+    // 2-hourly reconcile) — mirrors setMode. The base is validated ≥ 0 above, so
+    // the NULL-base push guard never applies here.
+    let googleAdsUpdated = false;
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+      googleAdsUpdated = !!pushed;
+    }
+
+    return {
+      campaign: campaign.campaign_name,
+      previousBudget: campaign.daily_budget_base,
+      newBudget: base,
+      effectiveBudget,
+      googleAdsUpdated,
+    };
   }
 }
 

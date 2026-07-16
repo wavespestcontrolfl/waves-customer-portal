@@ -370,4 +370,64 @@ describe('BudgetManager live Google Ads push', () => {
       expect(result.googleAdsUpdated).toBe(false);
     });
   });
+
+  describe('setBudget (manual: base change)', () => {
+    test('base mode: pushes the new base and syncs current, reports googleAdsUpdated', async () => {
+      campaignFirstRow = baseCampaign(); // budget_mode 'base', base/current 40
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 50,
+      });
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 50);
+      expect(result).toMatchObject({ newBudget: 50, effectiveBudget: 50, googleAdsUpdated: true });
+    });
+
+    test('stop mode: pushes the mode-derived 1%, NOT the raw new base, and leaves current frozen', async () => {
+      campaignFirstRow = { ...baseCampaign(), budget_mode: 'stop', daily_budget_current: '0.4' };
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ success: true });
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      // base recorded; Google gets 1% of the NEW base (0.5), never the raw 50
+      // that would blast full spend during a stop; current advances to the new
+      // throttle so the dashboard/reconcile stay consistent.
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 0.5,
+      });
+      expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.5);
+      expect(result.effectiveBudget).toBe(0.5);
+    });
+
+    test('invalid or non-positive amount rejected before any write or push', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+
+      await expect(BudgetManager.setBudget('c-1', 'abc', 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', '50junk', 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', -5, 'test')).rejects.toThrow(/Invalid budget/);
+      await expect(BudgetManager.setBudget('c-1', 0, 'test')).rejects.toThrow(/Invalid budget/);
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+    });
+
+    test('unconfigured API: DB still updated, no push, googleAdsUpdated false', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(false);
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+  });
 });
