@@ -110,6 +110,26 @@ const BLOG_POST_TYPES = [
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 
+// blog_posts.publish_date is a pg DATE: knex hydrates it as a JS Date and the
+// API serializes a full ISO string ("2026-07-15T00:00:00.000Z"), while seeded
+// or legacy rows can carry a bare "YYYY-MM-DD". Appending "T12:00:00" to the
+// ISO form made every dated row render "Invalid Date" — take the stored date
+// part for either shape (same defense as ContentCalendar's calendarDateKey).
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+function publishDateLabel(value) {
+  if (!value) return "";
+  const text = String(value);
+  const dateOnly = DATE_ONLY.test(text) ? text : text.slice(0, 10);
+  const parsed = new Date(dateOnly + "T12:00:00");
+  return Number.isNaN(parsed.getTime())
+    ? ""
+    : parsed.toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      });
+}
+
 function Card({ children, style }) {
   return (
     <div
@@ -315,16 +335,8 @@ function PostList({ status, onSelectPost }) {
                   {p.tag && <span>{p.tag}</span>}
                   {p.city && <span>{p.city}</span>}
                   {p.keyword && <span>{p.keyword}</span>}
-                  {p.publish_date && (
-                    <span>
-                      {new Date(
-                        p.publish_date + "T12:00:00",
-                      ).toLocaleDateString("en-US", {
-                        month: "short",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </span>
+                  {publishDateLabel(p.publish_date) && (
+                    <span>{publishDateLabel(p.publish_date)}</span>
                   )}
                   {p.word_count > 0 && <span>{p.word_count} words</span>}
                 </div>{" "}
