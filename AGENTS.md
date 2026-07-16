@@ -226,7 +226,13 @@ finding and warns on P1. Reviewers must return JSON matching
   `--upload-pack=<exec>` (arbitrary code execution), `gh pr create` can
   itself push an unpushed branch, `gh pr comment:*` includes
   `--delete-last`, and `npm run dev:server` boots `initScheduledJobs()`
-  with `cronJobs` defaulting ON outside prod — none of these may be
+  with `cronJobs` defaulting ON outside prod; `npm ci` executes dependency
+  lifecycle scripts (`hasInstallScript` packages = remote code on a
+  lockfile change); `npm run models:check` sends `ANTHROPIC_API_KEY` to
+  api.anthropic.com; `npm run test:contracts` runs `execute-smoke` by
+  default, calling IB ops tools that make authenticated
+  Stripe/Twilio/GitHub/Cloudflare requests when secrets are loaded
+  (`test:contracts:list` is the safe variant) — none of these may be
   pre-approved.
   *Accepted residual risk (owner ruling 2026-07-16, PR #2768):*
   high-frequency LOCAL read/stage commands stay as prefix rules
