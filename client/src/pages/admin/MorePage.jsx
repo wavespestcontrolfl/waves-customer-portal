@@ -43,7 +43,7 @@ const SECTIONS = [
         label: "Pipeline",
       },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
+      { path: "/admin/service-library", icon: BookOpen, label: "Services", adminOnly: true },
     ],
   },
   {
@@ -116,6 +116,12 @@ const SECTIONS = [
 
 export default function MorePage() {
   const navigate = useNavigate();
+  let currentRole = null;
+  try {
+    currentRole = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
+  } catch {
+    currentRole = null;
+  }
 
   const handleLogout = () => {
     localStorage.removeItem("waves_admin_token");
@@ -143,7 +149,7 @@ export default function MorePage() {
             {section}
           </div>{" "}
           <ul className="bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            {items.map(({ path, icon: Icon, label }) => (
+            {items.filter((item) => !item.adminOnly || currentRole === "admin").map(({ path, icon: Icon, label }) => (
               <li key={path}>
                 {" "}
                 <Link

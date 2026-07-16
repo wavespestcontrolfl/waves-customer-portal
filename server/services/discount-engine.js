@@ -46,6 +46,75 @@ async function getServiceDiscountRules() {
 const DiscountEngine = {
 
   /**
+   * Validate an operator-selected discount against the same catalog rules
+   * that govern automatic calculation. Manual selection is not an eligibility
+   * bypass: it only bypasses is_auto_apply.
+   */
+  async manualEligibilityFailures(discount, customer, {
+    subtotal = 0,
+    serviceKey = null,
+    serviceCategory = null,
+    paymentMethod = null,
+  } = {}, database = db) {
+    const failures = [];
+    const customerId = customer?.id || null;
+    if (discount.requires_military && !customer?.is_military) failures.push('military status');
+    if (discount.requires_senior && !customer?.is_senior) failures.push('senior status');
+    if (discount.requires_multi_home && !customer?.has_multi_home) failures.push('multi-home status');
+
+    if (discount.requires_waveguard_tier) {
+      const tierOrder = ['Bronze', 'Silver', 'Gold', 'Platinum'];
+      if (discount.requires_waveguard_tier === 'One-Time') {
+        if (customer?.waveguard_tier !== 'One-Time') failures.push('WaveGuard One-Time');
+      } else {
+        const requiredIdx = tierOrder.indexOf(discount.requires_waveguard_tier);
+        const customerIdx = tierOrder.indexOf(customer?.waveguard_tier);
+        if (requiredIdx < 0 || customerIdx < requiredIdx) failures.push(`WaveGuard ${discount.requires_waveguard_tier}`);
+      }
+    }
+    if (discount.service_key_filter && discount.service_key_filter !== serviceKey) failures.push(`service ${discount.service_key_filter}`);
+    if (discount.service_category_filter && discount.service_category_filter !== serviceCategory) failures.push(`category ${discount.service_category_filter}`);
+    if (discount.min_subtotal && Number(subtotal) < Number(discount.min_subtotal)) failures.push(`minimum subtotal $${discount.min_subtotal}`);
+    if (discount.promo_code_expiry && new Date(discount.promo_code_expiry) < new Date()) failures.push('promo code expiry');
+    if (discount.promo_code_max_uses
+      && Number(discount.promo_code_current_uses || 0) >= Number(discount.promo_code_max_uses)) {
+      failures.push('promo code usage limit');
+    }
+    if (discount.payment_method_condition && discount.payment_method_condition !== paymentMethod) {
+      failures.push(`payment method ${discount.payment_method_condition}`);
+    }
+
+    if (customerId && discount.requires_new_customer) {
+      const completed = await database('service_records').where({ customer_id: customerId }).count('* as count').first();
+      if (Number(completed?.count || 0) > 0) failures.push('new-customer status');
+    } else if (discount.requires_new_customer) {
+      failures.push('new-customer status');
+    }
+
+    if (customerId && discount.min_service_count) {
+      const serviceCount = await database('scheduled_services')
+        .where({ customer_id: customerId })
+        .whereNotIn('status', ['cancelled'])
+        .countDistinct('service_type as count')
+        .first();
+      if (Number(serviceCount?.count || 0) < Number(discount.min_service_count)) failures.push(`minimum service count ${discount.min_service_count}`);
+    } else if (discount.min_service_count) {
+      failures.push(`minimum service count ${discount.min_service_count}`);
+    }
+
+    if (discount.requires_referral || discount.requires_prepayment || discount.promo_code) {
+      const assigned = customerId
+        ? await database('customer_discounts')
+          .where({ customer_id: customerId, discount_id: discount.id, is_active: true })
+          .where(function () { this.whereNull('expires_at').orWhere('expires_at', '>', new Date()); })
+          .first('id')
+        : null;
+      if (!assigned) failures.push('customer assignment');
+    }
+    return failures;
+  },
+
+  /**
    * Get the discount percentage for a WaveGuard tier.
    * Returns a decimal (0.10 = 10%).
    */
@@ -166,6 +235,11 @@ const DiscountEngine = {
       } else if (disc.discount_type === 'free_service') {
         dollars = subtotal; // entire service is free
       }
+      // Allocate only the remaining invoice subtotal. Keeping each result row
+      // bounded makes invoice_discounts and usage totals reconcile with the
+      // aggregate returned below when several fixed/free discounts stack.
+      dollars = Math.min(Math.max(0, dollars), Math.max(0, Number(subtotal) - totalDiscount));
+      dollars = Math.round(dollars * 100) / 100;
       totalDiscount += dollars;
       return {
         id: disc.id,

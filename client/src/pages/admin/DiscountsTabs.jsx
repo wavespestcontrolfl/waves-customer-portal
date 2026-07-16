@@ -584,6 +584,8 @@ function DiscountsSection() {
                 style={sInput}
                 value={form.discount_key}
                 onChange={(e) => upd("discount_key", e.target.value)}
+                disabled={!!editing}
+                title={editing ? "Discount keys are locked after creation" : undefined}
               />
             </label>{" "}
             <label style={{ color: D.muted, fontSize: 11 }}>

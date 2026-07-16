@@ -1,11 +1,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/audit-log', () => ({
   auditServiceCatalogChange: jest.fn(async () => ({})),
+  auditServicePackageChange: jest.fn(async () => ({})),
 }));
 
 const db = require('../models/db');
 const { auditServiceCatalogChange } = require('../services/audit-log');
 const serviceLibrary = require('../services/service-library');
+const { validatePackagePayload, assertPackagePriceRange } = serviceLibrary.__private;
 
 function serviceRow(overrides = {}) {
   return {
@@ -325,5 +327,59 @@ describe('service library guardrails', () => {
       change_type: 'archive',
       references: expect.objectContaining({ blocking_total: 0 }),
     }));
+  });
+
+  test('validates package replacement items before any write', () => {
+    expect(() => validatePackagePayload({
+      name: 'Gold',
+      items: [{ service_id: 'not-a-uuid' }],
+    })).toThrow(/valid service_id/);
+
+    expect(() => validatePackagePayload({ discount_pct: 101 }))
+      .toThrow(/cannot exceed 100/);
+  });
+
+  test('normalizes valid package metadata and items', () => {
+    expect(validatePackagePayload({
+      name: ' Gold ',
+      discount_pct: '15',
+      is_active: 'true',
+      ignored: 'nope',
+      items: [{
+        service_id: '11111111-1111-1111-1111-111111111111',
+        included_visits: '4',
+        addon_discount_pct: '10',
+      }],
+    })).toEqual({
+      packageData: { name: 'Gold', discount_pct: 15, is_active: true },
+      items: [{
+        service_id: '11111111-1111-1111-1111-111111111111',
+        is_included: true,
+        included_visits: 4,
+        addon_discount_pct: 10,
+        sort_order: 0,
+      }],
+    });
+  });
+
+  test('rejects a partial package price edit that inverts the stored range', () => {
+    expect(() => assertPackagePriceRange({
+      monthly_price_min: 250,
+      monthly_price_max: 200,
+    })).toThrow(/monthly_price_min cannot exceed monthly_price_max/);
+  });
+
+  test('rejects fractional operational integers and invalid duration bounds', () => {
+    expect(() => serviceLibrary.__private.validateServicePayload({
+      name: 'Bad Photos',
+      required_photo_count: 1.5,
+    })).toThrow(/required_photo_count must be a whole number/);
+  });
+
+  test('rejects malformed service-library JSON instead of erasing it', async () => {
+    mockServiceDb({ before: serviceRow() });
+    await expect(serviceLibrary.updateService('service-1', {
+      default_products: '[not json',
+    })).rejects.toMatchObject({ status: 400, message: 'default_products must be valid JSON' });
   });
 });

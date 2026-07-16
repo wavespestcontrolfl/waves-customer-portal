@@ -87,7 +87,7 @@ const NAV_SECTIONS = [
       { path: "/admin/pipeline", icon: ClipboardList, label: "Pipeline" },
       { path: "/admin/schedule", icon: Calendar, label: "Schedule" },
       { path: "/admin/timetracking", icon: Clock, label: "Staff" },
-      { path: "/admin/service-library", icon: BookOpen, label: "Services" },
+      { path: "/admin/service-library", icon: BookOpen, label: "Services", adminOnly: true },
       // Ratified Q7 (universal one-time services): label-only rename —
       // route and files stay /admin/projects.
       { path: "/admin/projects", icon: FileText, label: "Jobs" },
@@ -490,7 +490,7 @@ export default function AdminLayoutV2() {
               >
                 {section}
               </div>
-              {items.map(({ path, icon: Icon, label }) => {
+              {items.filter((item) => !item.adminOnly || user?.role === "admin").map(({ path, icon: Icon, label }) => {
                 const isActive =
                   location.pathname === path ||
                   (path === "/admin/schedule" &&

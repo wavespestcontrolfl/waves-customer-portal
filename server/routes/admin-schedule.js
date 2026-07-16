@@ -19,6 +19,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -829,10 +830,18 @@ async function loadInvoiceDiscount(discountId) {
   return discount;
 }
 
-async function resolveLineDiscount(input, baseAmount, customer) {
+async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
   const row = await loadInvoiceDiscount(discountId);
+  const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
+    subtotal: baseAmount,
+    serviceKey: serviceContext.serviceKey || null,
+    serviceCategory: serviceContext.serviceCategory || null,
+  });
+  if (failures.length) {
+    throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
+  }
   const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
   if (!(resolved.dollars > 0)) return null;
   return {
@@ -851,18 +860,37 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer);
+  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
+    serviceKey: serviceRecord?.service_key,
+    serviceCategory: serviceRecord?.category,
+  });
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
+  const appointmentServiceLines = [{
+    amount: primaryNet || 0,
+    serviceKey: serviceRecord?.service_key || null,
+    serviceCategory: serviceRecord?.category || null,
+  }];
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
-    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer);
+    const addonService = addon.serviceId
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      : null;
+    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
+      serviceKey: addonService?.service_key,
+      serviceCategory: addonService?.category,
+    });
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
+    appointmentServiceLines.push({
+      amount: net || 0,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
+    });
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
@@ -884,8 +912,32 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    let appointmentDiscountBase = subtotal;
+    if (appointmentDiscount) {
+      const isServiceScoped = Boolean(
+        appointmentDiscount.service_key_filter || appointmentDiscount.service_category_filter
+      );
+      const matchingLines = isServiceScoped
+        ? appointmentServiceLines.filter((line) => (
+          (!appointmentDiscount.service_key_filter || appointmentDiscount.service_key_filter === line.serviceKey)
+          && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
+        ))
+        : appointmentServiceLines;
+      const eligibilityContext = matchingLines[0] || {};
+      appointmentDiscountBase = isServiceScoped
+        ? matchingLines.reduce((sum, line) => sum + line.amount, 0)
+        : subtotal;
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscount, customer, {
+        subtotal,
+        serviceKey: eligibilityContext.serviceKey || null,
+        serviceCategory: eligibilityContext.serviceCategory || null,
+      });
+      if (failures.length) {
+        throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
+      }
+    }
     const resolvedAppointmentDiscount = appointmentDiscount
-      ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
+      ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
     return {
@@ -7126,6 +7178,7 @@ router._test = {
   recurringTemplateTechnicianId,
   shouldPreserveParentTemplateForThisOnlyAssignment,
   reportCopyRejection,
+  buildAppointmentPricing,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,

@@ -196,6 +196,50 @@ async function auditServiceCatalogChange({
   });
 }
 
+async function auditDiscountCatalogChange({
+  tech_user_id, discount_id, change_type, changed_fields,
+  before, after, ip_address, user_agent, trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: `discount_catalog.${change_type}`,
+    resource_type: 'discount',
+    resource_id: discount_id || null,
+    metadata: {
+      changed_fields: changed_fields || [],
+      before: before || null,
+      after: after || null,
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
+async function auditServicePackageChange({
+  tech_user_id, package_id, change_type, changed_fields,
+  before, after, ip_address, user_agent, trx = null,
+}) {
+  return recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: tech_user_id || null,
+    action: `service_package.${change_type}`,
+    resource_type: 'service_package',
+    resource_id: package_id || null,
+    metadata: {
+      changed_fields: changed_fields || [],
+      before: before || null,
+      after: after || null,
+    },
+    ip_address,
+    user_agent,
+    critical: true,
+    trx,
+  });
+}
+
 /**
  * Pest Pressure config change. Called from PUT /api/admin/pest-pressure/config
  * after validation passes. CRITICAL audit — the config drives customer-facing
@@ -459,6 +503,8 @@ module.exports = {
   auditTerminalHandoffValidate,
   auditPaymentReconcile,
   auditServiceCatalogChange,
+  auditDiscountCatalogChange,
+  auditServicePackageChange,
   auditPestPressureConfigChange,
   auditPestPressureScoreOverride,
   auditHygieneProposalCreate,
