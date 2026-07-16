@@ -11,7 +11,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/social-media', () => ({
-  SOCIAL_FLAGS: { automationEnabled: true },
+  SOCIAL_FLAGS: { automationEnabled: true, rssAutopublish: true },
   isPausedByAdmin: jest.fn().mockResolvedValue(false),
   shareUrlOnce: jest.fn().mockResolvedValue({ shared: true, success: true }),
 }));
@@ -69,6 +69,7 @@ function makePost(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   social.SOCIAL_FLAGS.automationEnabled = true;
+  social.SOCIAL_FLAGS.rssAutopublish = true;
   social.isPausedByAdmin.mockResolvedValue(false);
   social.shareUrlOnce.mockResolvedValue({ shared: true, success: true });
   process.env.CF_API_TOKEN = 't';
@@ -131,6 +132,11 @@ describe('pollLivePost live-flip auto-share', () => {
     expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
     social.SOCIAL_FLAGS.automationEnabled = true;
+
+    social.SOCIAL_FLAGS.rssAutopublish = false;
+    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect(social.shareUrlOnce).not.toHaveBeenCalled();
+    social.SOCIAL_FLAGS.rssAutopublish = true;
 
     social.isPausedByAdmin.mockResolvedValue(true);
     expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);

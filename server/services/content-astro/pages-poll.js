@@ -326,7 +326,11 @@ async function pollLivePost(post) {
         const fresh = await db('blog_posts').where({ id: post.id }).first();
         if (fresh && fresh.auto_share_social && !fresh.shared_to_social) {
           const social = require('../social-media');
-          if (social.SOCIAL_FLAGS?.automationEnabled && !(await social.isPausedByAdmin())) {
+          // Same flag set as the autonomous poller's live-share path:
+          // rssAutopublish is the established kill switch for autonomous
+          // blog shares (shareUrlOnce leaves policy gating to callers).
+          if (social.SOCIAL_FLAGS?.automationEnabled && social.SOCIAL_FLAGS?.rssAutopublish
+            && !(await social.isPausedByAdmin())) {
             const r = await social.shareUrlOnce({
               title: fresh.title,
               description: fresh.meta_description || '',
