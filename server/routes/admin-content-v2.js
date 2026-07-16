@@ -53,6 +53,47 @@ const BLOG_UPDATE_FIELDS = new Set([
   'hero_image_alt',
 ]);
 
+const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'published']);
+
+// Astro states in which the row's content is load-bearing outside this table
+// (an open PR, a merged commit, or a live page hangs off it) — destructive
+// row operations must go through the astro lifecycle endpoints instead.
+// build_failed keeps its open PR/branch; publish_failed can too when the
+// failure landed after PR creation, so astroActivePost() also checks the
+// PR marker itself.
+const ASTRO_PIPELINE_ACTIVE = new Set(['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']);
+
+function astroActivePost(post) {
+  return Boolean(post && (ASTRO_PIPELINE_ACTIVE.has(post.astro_status) || post.astro_pr_number));
+}
+
+// Atomic variant of the same predicate for WHERE clauses — the read-side
+// check alone is a check-then-act race (a publisher can open a PR between
+// the read and the destructive write). NULL semantics: whereNotIn excludes
+// NULL astro_status rows, hence the orWhereNull.
+function whereNotAstroActive(query) {
+  return query
+    .whereNull('astro_pr_number')
+    .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', Array.from(ASTRO_PIPELINE_ACTIVE)));
+}
+
+const BLOG_SORT_COLUMNS = new Set([
+  'publish_date', 'created_at', 'updated_at', 'title', 'status', 'city', 'tag', 'word_count', 'seo_score',
+]);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// blog_posts.id is a uuid PK — junk ids previously reached Postgres and
+// crashed as 22P02 500s instead of a clean 404.
+function assertBlogPostId(id) {
+  if (!UUID_RE.test(String(id || ''))) {
+    const err = new Error('Post not found');
+    err.isOperational = true;
+    err.statusCode = 404;
+    throw err;
+  }
+}
+
 function pickAllowedBlogUpdates(body) {
   const updates = {};
   for (const [key, value] of Object.entries(body || {})) {
@@ -354,8 +395,15 @@ router.post('/autonomous/run-now', aiContentLimiter, async (req, res, next) => {
     const runner = require('../services/content/autonomous-runner');
     const miner = require('../services/seo/gsc-opportunity-miner');
     const doMine = req.body?.mine !== false;
-    const minScore = req.body?.minScore != null ? parseInt(req.body.minScore, 10) : undefined;
-    const periodDays = req.body?.periodDays != null ? parseInt(req.body.periodDays, 10) : 28;
+    // parseInt NaN passthrough: minScore=NaN silently claims nothing
+    // (numeric NaN sorts above everything in Postgres) and periodDays=NaN
+    // poisons the miner's date math — bound both instead.
+    const minScore = req.body?.minScore != null
+      ? parseBoundedInt(req.body.minScore, { defaultValue: undefined, min: 0, max: 100, name: 'minScore' })
+      : undefined;
+    const periodDays = req.body?.periodDays != null
+      ? parseBoundedInt(req.body.periodDays, { defaultValue: 28, min: 1, max: 365, name: 'periodDays' })
+      : 28;
 
     let mined = null;
     if (doMine) {
@@ -413,7 +461,14 @@ router.post('/internal-links/:id/decision', async (req, res, next) => {
 // GET /api/admin/content/blog?status=queued&tag=Pest+Control&city=Bradenton&sort=publish_date
 router.get('/blog', async (req, res, next) => {
   try {
-    const { status, tag, city, sort = 'publish_date', order = 'asc', search, limit = 200 } = req.query;
+    const { status, tag, city, sort = 'publish_date', order = 'asc', search, limit } = req.query;
+
+    // sort went raw into orderBy (unknown column → 42703 → 500 killed the
+    // list view) and limit=NaN made knex silently drop the limit (full-table
+    // dump including all content).
+    const sortColumn = BLOG_SORT_COLUMNS.has(String(sort)) ? String(sort) : 'publish_date';
+    const sortOrder = String(order).toLowerCase() === 'desc' ? 'desc' : 'asc';
+    const boundedLimit = parseBoundedInt(limit, { defaultValue: 200, min: 1, max: 500, name: 'limit' });
 
     let query = db('blog_posts');
     if (status) query = query.where('status', status);
@@ -423,7 +478,7 @@ router.get('/blog', async (req, res, next) => {
       this.where('title', 'ilike', `%${search}%`).orWhere('keyword', 'ilike', `%${search}%`);
     });
 
-    const posts = await query.orderBy(sort, order).limit(parseInt(limit));
+    const posts = await query.orderBy(sortColumn, sortOrder).limit(boundedLimit);
 
     // Counts by status
     const statusCounts = await db('blog_posts').select('status').count('* as count').groupBy('status');
@@ -535,12 +590,18 @@ router.get('/blog/overlap-check', async (req, res, next) => {
 // GET /api/admin/content/blog/:id
 router.get('/blog/:id', async (req, res, next) => {
   try {
+    assertBlogPostId(req.params.id);
     const post = await db('blog_posts').where('id', req.params.id).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
 
-    // Parse optimization_suggestions if string
+    // Parse optimization_suggestions if string; a corrupt value must not
+    // 500 the whole editor load.
     if (post.optimization_suggestions && typeof post.optimization_suggestions === 'string') {
-      post.optimization_suggestions = JSON.parse(post.optimization_suggestions);
+      try {
+        post.optimization_suggestions = JSON.parse(post.optimization_suggestions);
+      } catch {
+        post.optimization_suggestions = null;
+      }
     }
 
     res.json({ post });
@@ -550,7 +611,22 @@ router.get('/blog/:id', async (req, res, next) => {
 // PUT /api/admin/content/blog/:id
 router.put('/blog/:id', async (req, res, next) => {
   try {
+    assertBlogPostId(req.params.id);
+    const existing = await db('blog_posts').where('id', req.params.id).first();
+    if (!existing) return res.status(404).json({ error: 'Post not found' });
+
     const updates = { ...normalizeBlogUpdates(req.body), updated_at: new Date() };
+    if (updates.status !== undefined) {
+      if (!BLOG_STATUS_VALUES.has(updates.status)) {
+        throw operationalBadRequest(`status must be one of: ${Array.from(BLOG_STATUS_VALUES).join(', ')}`);
+      }
+      // 'published' is stamped by the astro merge path (applyMergeEffect);
+      // setting it here would mark a post published with no live page behind
+      // it. Saving an already-published post keeps working.
+      if (updates.status === 'published' && existing.status !== 'published') {
+        throw operationalBadRequest('status cannot be set to published directly — publish via the Astro pipeline');
+      }
+    }
     if (updates.content) {
       updates.word_count = updates.content.split(/\s+/).filter(Boolean).length;
     }
@@ -562,7 +638,23 @@ router.put('/blog/:id', async (req, res, next) => {
 // DELETE /api/admin/content/blog/:id
 router.delete('/blog/:id', async (req, res, next) => {
   try {
-    await db('blog_posts').where('id', req.params.id).del();
+    assertBlogPostId(req.params.id);
+    // A row whose PR/page is live outside this table can't be hard-deleted:
+    // deleting a pr_open post orphans an open astro PR forever (pages-poll
+    // only iterates existing rows), and deleting a live post strands the
+    // live page with no unpublish path. The guard lives INSIDE the delete's
+    // WHERE (not a separate read) so a publisher opening a PR mid-request
+    // can't slip between check and delete.
+    const deleted = await whereNotAstroActive(
+      db('blog_posts').where('id', req.params.id),
+    ).del();
+    if (!deleted) {
+      const post = await db('blog_posts').where('id', req.params.id).first();
+      if (!post) return res.status(404).json({ error: 'Post not found' });
+      return res.status(409).json({
+        error: `Post has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — unpublish it first (unpublish-astro), then delete.`,
+      });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -574,6 +666,19 @@ router.delete('/blog/:id', async (req, res, next) => {
 // POST /api/admin/content/blog/:id/generate — generate AI content for a post
 router.post('/blog/:id/generate', aiContentLimiter, async (req, res, next) => {
   try {
+    assertBlogPostId(req.params.id);
+    const post = await db('blog_posts').where('id', req.params.id).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    // generatePost overwrites `content` and forces status back to draft —
+    // on a published/live post that irreversibly destroys the live
+    // article's source text (no versioning exists). This read-side check
+    // gives the friendly 409; generatePost's own CAS'd final write closes
+    // the race where the state changes during the long AI call.
+    if (post.status === 'published' || astroActivePost(post)) {
+      return res.status(409).json({
+        error: `Post is ${post.status === 'published' ? 'published' : `in Astro state '${post.astro_status || 'pending'}'`} — generating would overwrite its content. Unpublish it first.`,
+      });
+    }
     const result = await BlogWriter.generatePost(req.params.id);
     res.json(result);
   } catch (err) { next(err); }

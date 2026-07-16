@@ -257,12 +257,30 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     const content = response.content[0].text;
     const wordCount = content.split(/\s+/).filter(Boolean).length;
 
-    await db('blog_posts').where('id', blogPostId).update({
-      content,
-      word_count: wordCount,
-      status: 'draft',
-      updated_at: new Date(),
-    });
+    // CAS'd write: the AI call above is long, and a post can be published or
+    // enter the Astro pipeline (PR opened, merged, gone live) while it runs.
+    // Overwriting then would destroy the live article's source text and
+    // force a live post back to draft — so the overwrite only lands while
+    // the row is still outside the pipeline. Callers on the queued lane
+    // (scheduler 5am, bulk-generate, content-agent) are unaffected.
+    const updated = await db('blog_posts')
+      .where('id', blogPostId)
+      .whereNot('status', 'published')
+      .whereNull('astro_pr_number')
+      .where((q) => q.whereNull('astro_status')
+        .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']))
+      .update({
+        content,
+        word_count: wordCount,
+        status: 'draft',
+        updated_at: new Date(),
+      });
+    if (!updated) {
+      const err = new Error('Post was published or entered the Astro pipeline while content was generating — nothing was overwritten');
+      err.isOperational = true;
+      err.statusCode = 409;
+      throw err;
+    }
 
     logger.info(`Blog post generated: "${post.title}" (${wordCount} words)`);
     return { content, wordCount };
