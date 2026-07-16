@@ -315,6 +315,20 @@ const SERVICE_HUB_LINKS = {
   specialty: ['/pest-control-services/'],
 };
 
+// The SEO completion gate P1s a supporting-blog draft whose body has no
+// conversion link (/contact | *quote* | *estimate* | calculator), but the
+// checklist below never carried one — the writer only passed when it
+// improvised. Lawn/tree-shrub have no calculator flow, so they use /contact/.
+const SERVICE_CONVERSION_LINK = {
+  pest: '/pest-control-calculator/',
+  termite: '/pest-control-calculator/',
+  mosquito: '/pest-control-calculator/',
+  rodent: '/pest-control-calculator/',
+  specialty: '/pest-control-calculator/',
+  lawn: '/contact/',
+  'tree-shrub': '/contact/',
+};
+
 // ── main API ────────────────────────────────────────────────────────
 
 class ContentBriefBuilder {
@@ -704,6 +718,13 @@ class ContentBriefBuilder {
         const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
         links.add(`/${slug}-${citySlug}-fl/`);
       }
+    }
+    // Only supporting-blog carries the conversion-CTA gate requirement;
+    // other page types (customer-question's "one internal link" contract,
+    // city pages' own CTA rules) keep their existing link shape.
+    if (pageType === 'supporting-blog') {
+      const conversion = SERVICE_CONVERSION_LINK[opportunity.service];
+      if (conversion) links.add(conversion);
     }
     return Array.from(links).slice(0, 5);
   }
