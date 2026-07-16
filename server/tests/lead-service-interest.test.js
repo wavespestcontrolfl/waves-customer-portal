@@ -7,7 +7,12 @@
  * same-lane alias, the null-matched legacy fallback, and the varchar(255) cap.
  */
 
-const { composeServiceInterest, composeWordsForV2Category } = require('../utils/lead-service-interest');
+const {
+  composeServiceInterest,
+  composeWordsForV2Category,
+  primaryServiceInterest,
+  v2InexpressibleFamilyWords,
+} = require('../utils/lead-service-interest');
 
 describe('composeServiceInterest', () => {
   test('the motivating call: pest match + lawn request → both on the label', () => {
@@ -647,6 +652,51 @@ describe('composeServiceInterest', () => {
       { matched_service: 'Termite Bait Monitoring', requested_service: 'termite' },
       { cueText: 'termite monitoring' },
     )).toBe('Termite Bait Monitoring');
+  });
+
+  test('primaryServiceInterest strips only known composed tails (codex r14)', () => {
+    expect(primaryServiceInterest('Quarterly Pest Control Service + Lawn Care Service')).toBe('Quarterly Pest Control Service');
+    expect(primaryServiceInterest('Lawn + Tree & Shrub')).toBe('Lawn + Tree & Shrub');
+    expect(primaryServiceInterest('Lawn + Tree & Shrub + Pest Control Service')).toBe('Lawn + Tree & Shrub');
+    expect(primaryServiceInterest('Quarterly Pest Control Service + Termite Inspection')).toBe('Quarterly Pest Control Service');
+    expect(primaryServiceInterest('')).toBe('');
+  });
+
+  test('termite bond/warranty wording is work, not inspection (codex r14)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus termite bond',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
+  test('stinging extermination is one service (codex r14)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and wasp extermination',
+    })).toBe('Quarterly Lawn Care Service + Bee / Wasp Nest Removal Service');
+  });
+
+  test('exclusion-only wording adds no second rodent service (codex r14)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'rodent exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'seal entry points for rats',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion');
+    // trapping evidence keeps both (matched covers rodent here, so pin via pest match)
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'rodent trapping and exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Control Service + Rodent Exclusion');
+  });
+
+  test('V2-inexpressible families come from caller text only (codex r14)', () => {
+    expect(v2InexpressibleFamilyWords('pest control and shrub care')).toBe('Tree & Shrub Care Service');
+    expect(v2InexpressibleFamilyWords('pest control and lawn care')).toBeNull();
+    expect(v2InexpressibleFamilyWords('raccoons in the soffit')).toBe('Wildlife Control Service');
+    expect(v2InexpressibleFamilyWords(null)).toBeNull();
   });
 
   test('non-service chatter appends nothing', () => {

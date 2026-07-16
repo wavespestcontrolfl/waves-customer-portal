@@ -30,7 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5842,8 +5842,14 @@ const CallRecordingProcessor = {
               ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
             // Null-mapped categories (other/inspection_only/future enums)
             // yield an EMPTY category-authoritative request — never fall
-            // back to V1 caller text under V2 approval (codex r12).
-            return cats.map((c) => composeWordsForV2Category(c)).filter(Boolean).join(' and ');
+            // back to V1 caller text under V2 approval (codex r12)…
+            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
+            // …EXCEPT for families the V2 enum cannot express at all
+            // (tree/shrub, wildlife): those exist only in the caller text,
+            // so scan it for JUST them (codex r14 — closes the enum gap
+            // without reopening the V1-hallucination door).
+            const inexpressible = v2InexpressibleFamilyWords(extracted.requested_service);
+            return [words.join(' and '), inexpressible].filter(Boolean).join(' and ');
           })();
           // Prefix with the primary the V2 merge will adopt (same adoption
           // rule as the merge below: V2 anchored a specific service, V1 had

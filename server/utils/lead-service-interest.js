@@ -80,7 +80,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage)\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage|bonds?|warrant(?:y|ies))\b/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -188,8 +188,8 @@ function stripNegatedClauses(s) {
 // WDO⇄termite lane check ("WDO report and termite extermination" must keep
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
-const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wdo)\s+exterminat\w*/gi;
-const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito)/gi;
+const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wasps?|bees?|hornets?|yellow\s?jackets?|wdo)\s+exterminat\w*/gi;
+const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
 // "palm injection for my palms" / "trunk injection into the palms" — the
@@ -277,8 +277,19 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   const matchedTermiteWorkCue = TERMITE_TREATMENT_RE.test(
     [matched, cleanText(extracted.specific_service_name)].filter(Boolean).join(' '),
   );
+  // Exclusion-only wording ("rodent exclusion", "seal entry points for
+  // rats") is ONE deliverable — the rodent nouns inside it must not add a
+  // second trapping/control service unless the text carries rodent-work
+  // evidence of its own (codex r14; catalog models exclusion-only apart
+  // from trapping+exclusion).
+  const scanFamilies = familiesIn(scanText);
+  const exclusionPresent = scanFamilies.some((f) => f.key === 'exclusion');
+  const rodentWorkEvidence = scanText
+    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b|\bmice\b/i.test(scanText)
+    : false;
   let label = matched;
-  for (const fam of familiesIn(scanText)) {
+  for (const fam of scanFamilies) {
+    if (fam.key === 'rodent' && exclusionPresent && !rodentWorkEvidence) continue;
     if (covered.has(fam.key)) {
       if (!(fam.key === 'termite' && termiteWorkCue && !matchedTermiteWorkCue)) continue;
     }
@@ -297,4 +308,50 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   return label;
 }
 
-module.exports = { composeServiceInterest, composeWordsForV2Category };
+// Every label composeServiceInterest can APPEND (family labels plus the
+// dynamic termite pair). primaryServiceInterest strips these known tails
+// from the END of a stored label — never splitting on a bare " + ", which
+// would truncate plus-named catalog primaries like "Lawn + Tree & Shrub"
+// (codex r14). Attribution and other single-service consumers use this.
+const COMPOSED_TAIL_LABELS = new Set([
+  ...SERVICE_FAMILIES.map((f) => f.label),
+  'Termite Inspection',
+  'Termite Service',
+]);
+function primaryServiceInterest(value) {
+  let label = String(value == null ? '' : value).trim();
+  for (;;) {
+    const at = label.lastIndexOf(' + ');
+    if (at === -1) break;
+    const tail = label.slice(at + 3).trim();
+    if (!COMPOSED_TAIL_LABELS.has(tail)) break;
+    label = label.slice(0, at).trim();
+  }
+  return label || String(value == null ? '' : value);
+}
+
+// Families the V2 category enum CANNOT express (no tree/shrub or wildlife
+// category in call-extraction.model-output.schema.json). Under V2 approval
+// the category list is authoritative for everything it CAN express, but
+// these families may only exist in the V1 caller text — scan it for just
+// them so "pest control and shrub care" survives V2 routing (codex r14,
+// reconciling r12's no-V1-fallback rule with the enum gap).
+const V2_INEXPRESSIBLE_FAMILY_KEYS = new Set(['tree_shrub', 'wildlife']);
+function v2InexpressibleFamilyWords(callerText) {
+  const requested = cleanText(callerText);
+  if (!requested) return null;
+  const scan = normalizeExterminator(normalizePalmInjection(normalizeLawnPests(
+    stripLocationPhrases(stripNegatedClauses(stripComparedAway(requested))),
+  )));
+  const words = familiesIn(scan)
+    .filter((fam) => V2_INEXPRESSIBLE_FAMILY_KEYS.has(fam.key))
+    .map((fam) => fam.label);
+  return words.length ? words.join(' and ') : null;
+}
+
+module.exports = {
+  composeServiceInterest,
+  composeWordsForV2Category,
+  primaryServiceInterest,
+  v2InexpressibleFamilyWords,
+};

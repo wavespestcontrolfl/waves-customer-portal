@@ -133,7 +133,10 @@ async function recordCallPpcAttribution({
     // would bucket a pest-primary composite as lawn). Applies to EVERY
     // caller: immediate call path, attached-lead backfill, and the
     // bridge-unclaimed sweep all read the lead's stored composite here.
-    const primaryInterest = interest ? String(interest).split(' + ')[0].trim() || interest : interest;
+    // primaryServiceInterest strips only KNOWN composed tails, so plus-named
+    // catalog primaries ("Lawn + Tree & Shrub") survive intact (codex r14).
+    const { primaryServiceInterest } = require('../../utils/lead-service-interest');
+    const primaryInterest = interest ? primaryServiceInterest(interest) : interest;
     const serviceLine = inferServiceLine(primaryInterest);
     const specificService = inferSpecificService(primaryInterest);
     const serviceBucket = inferServiceBucket(primaryInterest);
