@@ -18,7 +18,15 @@ function LocationProbe() {
   );
 }
 
-function renderRedirect({ entry, source, to, tab, preserveTabs, queryKey }) {
+function renderRedirect({
+  entry,
+  source,
+  to,
+  tab,
+  preserveTabs,
+  queryKey,
+  remapQuery,
+}) {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
@@ -30,6 +38,7 @@ function renderRedirect({ entry, source, to, tab, preserveTabs, queryKey }) {
               tab={tab}
               preserveTabs={preserveTabs}
               queryKey={queryKey}
+              remapQuery={remapQuery}
             />
           )}
         />
@@ -132,6 +141,24 @@ describe("AdminTabRedirect", () => {
 
     expect(destination).toBe(
       "/admin/dispatch?run=run-123&tab=automation#audit",
+    );
+  });
+
+  it("moves Lawn Protocol subareas into the Services hub", () => {
+    const destination = renderRedirect({
+      entry: "/admin/lawn-protocol?tab=readiness&alert=alert-123#blocked",
+      source: "/admin/lawn-protocol",
+      to: "/admin/service-library",
+      tab: "protocols",
+      remapQuery: {
+        from: "tab",
+        to: "protocolTab",
+        preserveValues: ["overview", "readiness", "products"],
+      },
+    });
+
+    expect(destination).toBe(
+      "/admin/service-library?alert=alert-123&protocolTab=readiness&tab=protocols#blocked",
     );
   });
 });

@@ -14,12 +14,16 @@ export default function AdminCommandHeader({
   ariaLabel,
   navGridClassName = "grid-cols-2 lg:grid-cols-4",
   className,
+  headingLevel = 1,
+  sticky = true,
 }) {
   const resolvedActions = actions?.length ? actions : action ? [action] : [];
+  const Heading = headingLevel === 2 ? "h2" : "h1";
   return (
     <div
       className={cn(
-        "md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3",
+        sticky && "md:sticky md:top-0",
+        "z-20 mb-5 bg-surface-page/95 pb-3",
         className,
       )}
       style={{ fontFamily: ROBOTO }}
@@ -34,12 +38,12 @@ export default function AdminCommandHeader({
             <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
               {Icon && <Icon size={17} strokeWidth={1.9} aria-hidden />}
             </div>{" "}
-            <h1
+            <Heading
               className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
               style={{ fontFamily: ROBOTO }}
             >
               {title}
-            </h1>{" "}
+            </Heading>{" "}
           </div>
           {resolvedActions.length > 0 && (
             <div className="flex flex-wrap items-center justify-end gap-2">

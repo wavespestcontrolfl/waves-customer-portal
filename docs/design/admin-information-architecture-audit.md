@@ -8,7 +8,7 @@ Scope: the authenticated `/admin/*` application shell, routes, and navigation
 
 ## Executive finding
 
-The admin has 34 visible destinations, 65 mounted child paths, and 25 compatibility redirects. The gap is not a large body of provably dead pages. It is a set of specialist pages, duplicate entry routes, and already-retired URLs that are presented inconsistently.
+The admin has 34 visible destinations, 65 mounted child paths, and 26 compatibility redirects. The gap is not a large body of provably dead pages. It is a set of specialist pages, duplicate entry routes, and already-retired URLs that are presented inconsistently.
 
 Static code evidence cannot prove that a production page has no users. No mounted page should be deleted based only on this audit. Removal requires route telemetry or an owner-confirmed replacement, followed by a redirect window.
 
@@ -56,18 +56,20 @@ Keep these compatibility routes while old bookmarks, notifications, or server-ge
 | `/admin/pricing` | `/admin/pricing-logic?area=strategy` |
 | `/admin/price-change` | `/admin/pricing-logic?area=notices` |
 | `/admin/auto-dispatch` | `/admin/dispatch?tab=automation` |
+| `/admin/lawn-protocol` | `/admin/service-library?tab=protocols`; the former `tab` value is preserved as `protocolTab` |
 
 These redirect routes are compatibility infrastructure, not dead sections. Removing them would break deep links without improving navigation.
 
 ## Newly completed route consolidations
 
-These routes rendered a component that already existed inside a canonical destination. They now use query- and hash-preserving redirects. Their wrapper files remain in the repository until a later cleanup-only change.
+These active entry routes now resolve inside a canonical destination. They use query- and hash-preserving redirects, and no underlying workflow or API has been removed.
 
 | Current entry route | Evidence | Recommended destination |
 | --- | --- | --- |
 | `/admin/leads` | `LeadsPage` only wraps `LeadsSection`, which is also the Pipeline Leads tab. Server notifications still generate `?lead=` links. | `/admin/pipeline?tab=leads`, preserving all query parameters |
 | `/admin/estimates` | The route and `/admin/pipeline` both mount `EstimatesPageV2`. | `/admin/pipeline?tab=estimates`, while honoring explicit `tab=new` and estimate deep links |
 | `/admin/equipment-calibration` | `EquipmentCalibrationPanel` is already the Equipment `calibrations` tab. | `/admin/equipment?tab=calibrations` |
+| `/admin/lawn-protocol` | The command center owns seven related protocol-authoring and readiness areas. Services is its operational parent, and alert-driven subarea links must remain addressable. | `/admin/service-library?tab=protocols&protocolTab=<subarea>` |
 
 The `/admin/estimates/:estimateId/proposal` detail route remains a real workflow and must not be redirected.
 
@@ -77,10 +79,9 @@ These pages are active and must not be classified as dead. They should become ta
 
 | Current page | Why it is active | Recommended parent |
 | --- | --- | --- |
-| Lawn Protocol (`/admin/lawn-protocol`) | Inventory and readiness alerts deep-link to it; it owns publishing, readiness, product assignment, and substitutions. | Operations → Protocol & Readiness |
 | Wiki (`/admin/knowledge`) and Knowledge Base (`/admin/kb`) | Both are implemented and use separate APIs, but their labels describe overlapping concepts. | One Resources hub with Wiki and Knowledge Base tabs |
 
-Until those remaining hubs exist, retain their direct routes. Hiding them now would make active alert-driven workflows harder to recover.
+Until that remaining hub exists, retain both direct routes. Hiding them now would make active workflows harder to recover.
 
 ## Intentional non-navigation routes
 
@@ -103,7 +104,7 @@ The old page file should be deleted only in a cleanup-only change after confirmi
 1. Add route-reachability regression coverage for every navigation destination.
 2. Completed: redirect Leads, Estimates, and Equipment Calibration to their existing canonical tabs while preserving query parameters and fragments.
 3. Completed: Compliance + Credentials and the Pricing hub now remove the largest conceptual duplicates without deleting capabilities.
-4. In progress: Auto Dispatch is now the Schedule Automation tab; Protocol & Readiness remains to be consolidated inside Operations.
+4. Completed: Auto Dispatch is now the Schedule Automation tab, and Lawn Protocol is the Services Protocol & Readiness area.
 5. Build the Resources hub for Wiki and Knowledge Base.
 6. Collect route telemetry for at least one normal operating cycle before deleting retired page components.
 7. Apply the UI consistency contract one completed hub at a time.

@@ -1,10 +1,12 @@
 // Mobile-only Service Library views. Rendered from ServiceLibraryPage when
-// viewport < 768px. Three drill-in views mirroring the attached reference:
+// viewport < 768px. The menu exposes three drill-in views plus the parent
+// Services hub's Protocol & Readiness workspace:
 //   - Categories       — services grouped by `category`, item counts + subcategory counts
 //   - Discounts        — list from GET /admin/discounts with % / $ suffix
 //   - All Services     — flat list from GET /admin/services (+ Create Service CTA)
 //
-// Desktop ServiceLibraryPage (tabs + filters + grouped catalog) is unchanged.
+// Protocol & Readiness delegates to ServiceLibraryPage so desktop and mobile
+// use the same URL-addressable workflow.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { SERVICE_CATEGORY_LABELS as CATEGORY_LABELS } from "../../constants/serviceCategories";
@@ -126,7 +128,7 @@ function LargeTitle({ children }) {
 }
 
 // ── Menu (top of stack) ─────────────────────────────────────────────────
-function MenuView({ onNav }) {
+function MenuView({ onNav, onOpenProtocols }) {
   const items = [
     { key: "categories", label: "Categories", hint: "Group services by type" },
     {
@@ -138,6 +140,11 @@ function MenuView({ onNav }) {
       key: "services",
       label: "All Services",
       hint: "Every service in the library",
+    },
+    {
+      key: "protocols",
+      label: "Protocol & Readiness",
+      hint: "Lawn protocol publishing and route readiness",
     },
   ];
   return (
@@ -163,7 +170,10 @@ function MenuView({ onNav }) {
           <button
             key={it.key}
             type="button"
-            onClick={() => onNav(it.key)}
+            onClick={() => {
+              if (it.key === "protocols") onOpenProtocols?.();
+              else onNav(it.key);
+            }}
             className={`${rowChrome} justify-between cursor-pointer hover:bg-zinc-50 text-left`}
             style={{ height: 64 }}
           >
@@ -1204,7 +1214,10 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
 }
 
 // ── Root mobile component ───────────────────────────────────────────────
-export default function MobileServiceLibrary({ initialView = "menu" }) {
+export default function MobileServiceLibrary({
+  initialView = "menu",
+  onOpenProtocols,
+}) {
   const [view, setView] = useState(initialView); // 'menu' | 'categories' | 'discounts' | 'services'
   const onBack = () => setView("menu");
 
@@ -1215,5 +1228,5 @@ export default function MobileServiceLibrary({ initialView = "menu" }) {
   if (view === "categories") return <CategoriesView onBack={onBack} />;
   if (view === "discounts") return <DiscountsView onBack={onBack} />;
   if (view === "services") return <AllServicesView onBack={onBack} />;
-  return <MenuView onNav={setView} />;
+  return <MenuView onNav={setView} onOpenProtocols={onOpenProtocols} />;
 }

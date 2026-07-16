@@ -292,10 +292,25 @@ function buildGateDraft(gate) {
   };
 }
 
-export default function LawnProtocolCommandCenterPage() {
-  const [searchParams] = useSearchParams();
-  const initialTab = searchParams.get("tab") || "overview";
-  const [activeTab, setActiveTab] = useState(initialTab);
+const PROTOCOL_SECTIONS = [
+  { key: "overview", label: "Overview", Icon: Sprout },
+  { key: "readiness", label: "Readiness", Icon: AlertTriangle },
+  { key: "products", label: "Products", Icon: Package },
+  { key: "gates", label: "Gates", Icon: ShieldCheck },
+  { key: "calibration", label: "Calibration", Icon: Gauge },
+  { key: "bridges", label: "Bridges", Icon: BookOpen },
+  { key: "audit", label: "Audit", Icon: Clock },
+];
+const PROTOCOL_TAB_KEYS = new Set(PROTOCOL_SECTIONS.map(({ key }) => key));
+
+function normalizeProtocolTab(value) {
+  return PROTOCOL_TAB_KEYS.has(value) ? value : "overview";
+}
+
+export default function LawnProtocolCommandCenterPage({ embedded = false }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryKey = embedded ? "protocolTab" : "tab";
+  const activeTab = normalizeProtocolTab(searchParams.get(queryKey));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -323,6 +338,14 @@ export default function LawnProtocolCommandCenterPage() {
   const [savingSubstitutionKey, setSavingSubstitutionKey] = useState("");
   const [restockDrafts, setRestockDrafts] = useState({});
   const [savingRestockKey, setSavingRestockKey] = useState("");
+
+  const setActiveTab = (nextTab) => {
+    const next = new URLSearchParams(searchParams);
+    const normalized = normalizeProtocolTab(nextTab);
+    if (normalized === "overview") next.delete(queryKey);
+    else next.set(queryKey, normalized);
+    setSearchParams(next, { replace: true });
+  };
 
   const load = (protocolId = selectedProtocolId) => {
     setLoading(true);
@@ -672,24 +695,19 @@ export default function LawnProtocolCommandCenterPage() {
     }
   }
 
-  const sections = [
-    { key: "overview", label: "Overview", Icon: Sprout },
-    { key: "readiness", label: "Readiness", Icon: AlertTriangle },
-    { key: "products", label: "Products", Icon: Package },
-    { key: "gates", label: "Gates", Icon: ShieldCheck },
-    { key: "calibration", label: "Calibration", Icon: Gauge },
-    { key: "bridges", label: "Bridges", Icon: BookOpen },
-    { key: "audit", label: "Audit", Icon: Clock },
-  ];
-
   return (
-    <div className="mx-auto max-w-7xl px-4 py-4 md:px-6">
+    <div className={embedded
+      ? "px-4 pb-4 md:px-6"
+      : "mx-auto max-w-7xl px-4 py-4 md:px-6"}
+    >
       <AdminCommandHeader
-        title="Lawn Protocol"
+        title={embedded ? "Protocol & Readiness" : "Lawn Protocol"}
         icon={Sprout}
-        sections={sections}
+        sections={PROTOCOL_SECTIONS}
         activeKey={activeTab}
         onSectionChange={setActiveTab}
+        headingLevel={embedded ? 2 : 1}
+        sticky={!embedded}
         navGridClassName="grid-cols-2 lg:grid-cols-7"
         actions={[
           {
@@ -715,7 +733,7 @@ export default function LawnProtocolCommandCenterPage() {
             label: "Refresh",
             icon: RefreshCw,
             variant: "secondary",
-            onClick: load,
+            onClick: () => load(),
             disabled: loading,
           },
         ]}

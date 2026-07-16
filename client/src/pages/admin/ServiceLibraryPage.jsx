@@ -1,11 +1,15 @@
-import { useState, useEffect, useCallback, useId } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useId } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Library, Percent, Plus } from "lucide-react";
+import { Library, Percent, Plus, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { DiscountsSection } from "./DiscountsTabs";
 import useIsMobile from "../../hooks/useIsMobile";
 import MobileServiceLibrary from "../../components/admin/MobileServiceLibrary";
 import { SERVICE_CATEGORIES as CATEGORIES } from "../../constants/serviceCategories";
+
+const LawnProtocolCommandCenterPage = lazy(() =>
+  import("./LawnProtocolCommandCenterPage"),
+);
 
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -623,7 +627,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
 }
 
 function normalizeTab(value) {
-  return value === "discounts" ? "discounts" : "catalog";
+  return ["discounts", "protocols"].includes(value) ? value : "catalog";
 }
 
 // ── Left rail: category list + saved-view shortcuts ───────────────────
@@ -1446,8 +1450,13 @@ export default function ServiceLibraryPage() {
       const normalized = normalizeTab(nextTab);
       setTabState(normalized);
       const next = new URLSearchParams(searchParams);
-      if (normalized === "discounts") next.set("tab", "discounts");
-      else next.delete("tab");
+      if (normalized === "catalog") {
+        next.delete("tab");
+        next.delete("protocolTab");
+      } else {
+        next.set("tab", normalized);
+        if (normalized !== "protocols") next.delete("protocolTab");
+      }
       setSearchParams(next, { replace: true });
     },
     [searchParams, setSearchParams],
@@ -1471,13 +1480,14 @@ export default function ServiceLibraryPage() {
   }, []);
 
   useEffect(() => {
-    loadServices();
-  }, [loadServices]);
+    if (tab !== "protocols") loadServices();
+  }, [loadServices, tab]);
 
-  if (isMobile)
+  if (isMobile && tab !== "protocols")
     return (
       <MobileServiceLibrary
         initialView={tab === "discounts" ? "discounts" : "menu"}
+        onOpenProtocols={() => setTab("protocols")}
       />
     );
 
@@ -1588,6 +1598,7 @@ export default function ServiceLibraryPage() {
 
   const tabs = [
     { key: "catalog", label: "Service Catalog", Icon: Library },
+    { key: "protocols", label: "Protocol & Readiness", Icon: Sprout },
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 
@@ -1601,7 +1612,7 @@ export default function ServiceLibraryPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Services section"
-        navGridClassName="grid-cols-2"
+        navGridClassName="grid-cols-1 sm:grid-cols-3"
         action={
           tab === "catalog"
             ? {
@@ -1913,6 +1924,18 @@ export default function ServiceLibraryPage() {
             </div>{" "}
           </div>
         ))}
+      {/* === PROTOCOL & READINESS TAB === */}
+      {tab === "protocols" && (
+        <Suspense
+          fallback={(
+            <div className="p-10 text-center text-14 text-ink-tertiary">
+              Loading protocol workspace…
+            </div>
+          )}
+        >
+          <LawnProtocolCommandCenterPage embedded />
+        </Suspense>
+      )}
       {/* === DISCOUNTS TAB === */}
       {tab === "discounts" && <DiscountsSection />}
     </div>
