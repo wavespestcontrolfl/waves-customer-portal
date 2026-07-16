@@ -2044,7 +2044,10 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
       .forEach((i) => { if (QUESTION_BY_CATEGORY[i.category]) add(QUESTION_BY_CATEGORY[i.category]); });
   }
 
-  if (hasReentry) add('Is it safe to re-enter now?');
+  // never the word "safe" on a customer surface (owner rule; the server's own
+  // EXTRA_FORBIDDEN bans it for narrative on this exact page) — "re-enter"
+  // still routes to the assistant's re-entry answer
+  if (hasReentry) add('When can I re-enter treated areas?');
   if (hasCoverage) add('What areas were treated?');
   if (product) add(`Why was ${product} used?`);
   else if ((data.applications || []).length) add('Why were these products used?');
