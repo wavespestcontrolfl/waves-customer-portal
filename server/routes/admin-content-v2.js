@@ -53,10 +53,12 @@ const BLOG_UPDATE_FIELDS = new Set([
   'hero_image_alt',
 ]);
 
-// Full persisted set per the blog_content migration — legacy rows still
-// carry wp_draft/scheduled, and the editor always sends the row's current
-// status on save, so a narrower allowlist would 400 every legacy-row edit.
-const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'wp_draft', 'scheduled', 'published']);
+// Full persisted set: the blog_content migration documents
+// idea/queued/draft/wp_draft/scheduled/published, and the archive flow
+// (scripts/archive-stale-blog-rows.js) writes 'archived'. The editor always
+// sends the row's current status on save, so a narrower allowlist would 400
+// every edit of a row in the missing state.
+const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'wp_draft', 'scheduled', 'published', 'archived']);
 
 // Astro states in which the row's content is load-bearing outside this table
 // (an open PR, a merged commit, or a live page hangs off it) — destructive

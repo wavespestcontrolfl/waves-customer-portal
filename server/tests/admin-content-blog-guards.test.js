@@ -180,14 +180,13 @@ describe('DELETE /blog/:id guard', () => {
     expect(calls.deletes).toBe(0);
   });
 
-  test('legacy statuses (wp_draft/scheduled) still save through PUT (codex r2)', async () => {
+  test('legacy/archive statuses (wp_draft/scheduled/archived) still save through PUT (codex r2+r9)', async () => {
     setupDb();
-    tableState.post = { id: POST_ID, status: 'wp_draft', astro_status: 'draft' };
-    const a = await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { status: 'wp_draft', title: 'T' } });
-    expect(a.statusCode).toBe(200);
-    tableState.post = { id: POST_ID, status: 'scheduled', astro_status: 'draft' };
-    const b = await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { status: 'scheduled', title: 'T' } });
-    expect(b.statusCode).toBe(200);
+    for (const status of ['wp_draft', 'scheduled', 'archived']) {
+      tableState.post = { id: POST_ID, status, astro_status: 'draft' };
+      const r = await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { status, title: 'T' } });
+      expect(r.statusCode).toBe(200);
+    }
   });
 
   test('deletes a plain draft', async () => {
