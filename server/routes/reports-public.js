@@ -1,7 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const PDFDocument = require('pdfkit');
@@ -1133,16 +1131,11 @@ router.get('/:token', async (req, res, next) => {
       return res.send(pdf);
     }
 
-    // Check if pre-generated PDF exists
-    if (service.report_pdf_path) {
-      const fullPath = path.join(__dirname, '..', '..', service.report_pdf_path);
-      if (fs.existsSync(fullPath)) {
-        await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
-        return fs.createReadStream(fullPath).pipe(res);
-      }
-    }
+    // Legacy pre-generated PDF files (report_pdf_path) are deliberately NOT
+    // served anymore: they were written with raw technician_notes (gate
+    // codes, billing notes) before the 2026-07-16 owner ruling and a stored
+    // file can't be sanitized in place — regenerate on the fly instead, which
+    // routes notes through technicianReportCustomerCopy (codex P1 #2797).
 
     // Generate PDF on-the-fly
     const products = await db('service_products').where({ service_record_id: service.id });

@@ -17,7 +17,10 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // Visit Timeline moved directly below Re-entry — all change rendered content.
 // 20260709: report styling normalized onto the theme-doc tokens (type scale,
 // spacing grid, eyebrow spec) — rendered output shifts, so re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'style-tokens-20260709';
+// 20260716: P1 data fixes change rendered content — the pressure trend is now
+// bounded to visits before the report date and raw technician_notes no longer
+// prints; PDFs cached before the fix would keep serving both (codex P1 #2797).
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p1-data-fixes-20260716';
 
 const s3 = new S3Client({
   region: config.s3?.region,

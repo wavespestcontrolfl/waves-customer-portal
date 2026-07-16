@@ -35,6 +35,10 @@ const RECORD = {
 // (must never appear when the render-time bound is applied)
 const PRIOR = { id: 'rec-prior', customer_id: 'cust-1', status: 'completed', service_line: 'pest', service_type: 'Quarterly Pest Control Service', service_date: '2026-02-10', started_at: '2026-02-10T15:00:00Z', pressure_index: 1 };
 const LATER = { id: 'rec-later', customer_id: 'cust-1', status: 'completed', service_line: 'pest', service_type: 'Quarterly Pest Control Service', service_date: '2026-06-10', started_at: '2026-06-10T15:00:00Z', pressure_index: 4 };
+// same calendar day as the report — the morning visit before it stays in the
+// trend; the evening revisit after it must not (started_at tie-break)
+const SAME_DAY_EARLIER = { id: 'rec-sameday-am', customer_id: 'cust-1', status: 'completed', service_line: 'pest', service_type: 'Quarterly Pest Control Service', service_date: '2026-03-10', started_at: '2026-03-10T12:00:00Z', pressure_index: 3 };
+const SAME_DAY_LATER = { id: 'rec-sameday-pm', customer_id: 'cust-1', status: 'completed', service_line: 'pest', service_type: 'Quarterly Pest Control Service', service_date: '2026-03-10', started_at: '2026-03-10T19:00:00Z', pressure_index: 4.5 };
 
 function makeTrendKnex(fixtures) {
   return (table) => {
@@ -42,7 +46,35 @@ function makeTrendKnex(fixtures) {
     const q = {
       select: () => q,
       where(a, b, c) {
-        if (typeof a === 'function') return q; // service-line scope — fixtures are pre-scoped
+        if (typeof a === 'function') {
+          // execute nested boundary groups (this.where().orWhere(...)) as a
+          // disjunction of conjunctive branches, like knex would
+          const branches = [];
+          const collector = (branch) => ({
+            where(x, y, z) {
+              if (typeof x === 'function') { x.call(collector(branch)); return this; }
+              if (x && typeof x === 'object') branch.push((r) => Object.entries(x).every(([k, v]) => r[k] === v));
+              else if (arguments.length === 3) branch.push((r) => (y === '<' ? String(r[x]) < String(z) : String(r[x]) === String(z)));
+              else branch.push((r) => r[x] === y);
+              return this;
+            },
+            orWhere(x) {
+              const next = [];
+              branches.push(next);
+              if (typeof x === 'function') x.call(collector(next));
+              return this;
+            },
+            whereNull(col) { branch.push((r) => r[col] == null); return this; },
+            whereNotNull(col) { branch.push((r) => r[col] != null); return this; },
+          });
+          const first = [];
+          branches.push(first);
+          a.call(collector(first));
+          // service-line scope groups add no constraints in these fixtures —
+          // an empty branch matches everything
+          rows = rows.filter((r) => branches.some((branch) => branch.every((fn) => fn(r))));
+          return q;
+        }
         if (a && typeof a === 'object') {
           rows = rows.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
         } else if (arguments.length === 3 && b === '<') {
@@ -75,6 +107,18 @@ describe('pressure trend render-time bound', () => {
       knex,
     });
     expect(context.points.map((p) => p.pressureIndex)).toEqual([1, 2]);
+    expect(context.current.pressureIndex).toBe(2);
+  });
+
+  test('same-day earlier visits stay in the trend; same-day later ones do not (codex P2)', async () => {
+    const knex = makeTrendKnex({ service_records: [LATER, PRIOR, SAME_DAY_EARLIER, SAME_DAY_LATER], service_findings: [] });
+    const context = await actualPressureTrend.buildPressureTrendContext({
+      record: RECORD,
+      beforeDate: RECORD.service_date,
+      beforeStartedAt: RECORD.started_at,
+      knex,
+    });
+    expect(context.points.map((p) => p.pressureIndex)).toEqual([1, 3, 2]);
     expect(context.current.pressureIndex).toBe(2);
   });
 
@@ -116,6 +160,7 @@ describe('pressure trend render-time bound', () => {
     expect(buildPressureTrendContext).toHaveBeenCalledTimes(1);
     expect(buildPressureTrendContext.mock.calls[0][0]).toEqual(expect.objectContaining({
       beforeDate: record.service_date,
+      beforeStartedAt: record.started_at,
     }));
   });
 });

@@ -332,6 +332,7 @@ async function buildServiceReportDynamicContext({
       // the trend's "current" point, so an old link describes a later visit
       // (and contradicts sinceLastVisit, which is bounded).
       beforeDate: record.service_date || undefined,
+      beforeStartedAt: record.started_at || undefined,
       knex,
     }));
   const sinceLastVisitPromise = omitDecision
