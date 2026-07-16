@@ -3,7 +3,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
-const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isEnabled } = require('../config/feature-gates');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
@@ -72,11 +72,17 @@ class AppointmentTagger {
     // tiers are included (Bronze too) so the experience matches the
     // estimate-converter self-accept path; the is_recurring guard keeps the
     // auto_new_recurring text off one-time/standalone first appointments
-    // (onServiceScheduled runs for those jobs as well). Idempotent via
+    // (onServiceScheduled runs for those jobs as well). New-customer
+    // candidacy uses the same shared gate as every other booking path,
+    // scoped to history that predates this booking — a raw service_records
+    // count is blind to imported customers whose visit history lives only
+    // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
     if (service.waveguard_tier && service.is_recurring) {
-      const prevCount = await db('service_records').where({ customer_id: service.customer_id }).count('* as count').first();
-      if (parseInt(prevCount?.count || 0) === 0) {
+      const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
+        excludeServiceId: service.id,
+      });
+      if (isNewSignup) {
         await this.triggerWelcomeSequence(service);
       }
     }
