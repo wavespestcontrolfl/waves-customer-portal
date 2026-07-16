@@ -2936,7 +2936,7 @@ export default function DispatchPageV2({
           amount={paymentData.amount}
           desktopVisible
           onClose={() => setPaymentData(null)}
-          onInvoiceSent={() => {
+          onInvoiceSent={async () => {
             // Invoice SMS+email was just sent — the bill is now in the
             // customer's hands. Mirror the cash/check tender flow and
             // punch straight to the completion sheet so the tech can
@@ -2948,11 +2948,15 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
+            const fresh = await fetchSchedule(date, { silent: true });
+            const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
-            handleComplete(svc);
+            const completionService = mergePostPaymentService(updated, svc);
+            if (shouldReopenCompletionAfterPayment(completionService)) {
+              handleComplete(completionService);
+            }
             setProjectReloadKey((k) => k + 1);
-            fetchSchedule(date, { silent: true });
           }}
           onChargeSuccess={async () => {
             // Card paths reopen completion like the invoice/cash/check
