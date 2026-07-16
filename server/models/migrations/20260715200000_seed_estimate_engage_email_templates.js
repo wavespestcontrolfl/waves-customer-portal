@@ -33,6 +33,36 @@ const REAL_PHONE = '(941) 297-5749';
 
 const SHARED_VARIABLES = ['first_name', 'customer_portal_url', 'company_phone', 'company_email'];
 
+// Hosted product screenshots — same assets (and pattern) as the app_intro
+// email (migration 20260626000004). Absolute URLs: email clients can't
+// reach anything relative.
+const IMG = 'https://portal.wavespestcontrol.com/app-email';
+
+// Proof modules (owner scope 2026-07-15: "speak to the benefits of moving
+// forward with Waves"). Tiered — the never-engaged / deciding moments get
+// the full stack; quick behavioral touches carry just the reviews line so
+// the drip doesn't repeat itself. One CTA per email stays the rule (store
+// badges live in the footer, never the body).
+// OWNER DECISION: reviews claim is STATIC ("five-star rated"), no live
+// numbers — grounded in the public Google rating (5.0 displayed, 185 of
+// 186 reviews five-star at authoring time).
+const REVIEWS_LINE = {
+  type: 'small_note',
+  content: '★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.',
+};
+// COPY-ONLY for now (owner 2026-07-15: the June app screenshots show the
+// OLD UI) — the fresh visit-report capture drops in here as a follow-up;
+// never ship a stale-UI product shot.
+const PROTOCOL_MODULE = [
+  { type: 'paragraph', content: 'After every visit, you get a detailed service report — the areas we treated, the EPA-registered products we used, what we found, and photos from your property.' },
+];
+const APP_MODULE = [
+  { type: 'paragraph', content: 'And the Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app.' },
+  // Current-UI reschedule capture (owner-supplied 07-14 batch, cropped —
+  // the slot-confirm step; no customer identity in frame).
+  { type: 'image', src: `${IMG}/app-reschedule-slots.png`, alt: 'Waves app — pick a new visit time and confirm in a couple of taps', width: 220, radius: 18 },
+];
+
 const CATEGORY_VARIABLES = [
   'service_label', 'category_headline', 'category_hook', 'category_benefit', 'category_question',
 ];
@@ -48,6 +78,7 @@ const FIXTURE_CATEGORY = {
 const BASE_FIXTURE = {
   first_name: 'Taylor',
   estimate_url: 'https://portal.wavespestcontrol.com/estimate/example-token',
+  estimate_accept_url: 'https://portal.wavespestcontrol.com/estimate/example-token?intent=accept',
   ...FIXTURE_CATEGORY,
 };
 
@@ -64,6 +95,9 @@ const TEMPLATES = [
       { type: 'heading', content: '{{category_headline}}' },
       { type: 'paragraph', content: 'Hi {{first_name}}, we sent over your {{service_label}} estimate and wanted to make sure it didn’t get buried. It’s saved and waiting whenever you’re ready.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      ...PROTOCOL_MODULE,
+      ...APP_MODULE,
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'View my estimate', url_variable: 'estimate_url' },
       { type: 'signature', content: '— The Waves Team' },
@@ -73,15 +107,16 @@ const TEMPLATES = [
     key: 'estimate.engage_return_visit',
     name: 'Estimate Engagement — Return Visit',
     description: 'Engagement engine (return_visit_hot): the customer came back for a second look within 48h of the first. Warm, help-forward — leads with the category question. Spacing-exempt by rule design. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'category_question', 'category_benefit'],
-    optional: ['category_headline', 'category_hook'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_question', 'category_benefit'],
+    optional: ['category_headline', 'category_hook', 'estimate_url'],
     subject: 'Welcome back — questions about your estimate?',
     preview: 'Reply to this email and a real person answers in minutes.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, thanks for taking another look at your {{service_label}} estimate. If anything’s unclear, we’re happy to help.' },
       { type: 'paragraph', content: '{{category_question}}' },
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
-      { type: 'cta', label: 'Open my estimate', url_variable: 'estimate_url' },
+      { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -89,15 +124,18 @@ const TEMPLATES = [
     key: 'estimate.engage_high_intent',
     name: 'Estimate Engagement — High Intent',
     description: 'Engagement engine (multi_view_high_intent): three or more visits inside 72h — clearly weighing it. Strongest accept CTA in the set, still no pressure numbers. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'category_hook', 'category_benefit'],
-    optional: ['category_headline', 'category_question'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit'],
+    optional: ['category_headline', 'category_question', 'estimate_url'],
     subject: 'Ready when you are — it takes about a minute',
     preview: 'Your estimate is saved. Accepting takes about a minute.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, your {{service_label}} estimate is saved and ready whenever you are — accepting takes about a minute, and we handle the rest.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      { type: 'paragraph', content: 'Here’s how it goes: accept in about a minute, we schedule your first visit, and after every visit the full report — findings, photos, and all — lands in the Waves app.' },
+      ...APP_MODULE,
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
-      { type: 'cta', label: 'Review and accept', url_variable: 'estimate_url' },
+      { type: 'cta', label: 'Accept my estimate', url_variable: 'estimate_accept_url' },
       { type: 'small_note', content: 'Still weighing it? Reply with any question — a real person answers.' },
       { type: 'signature', content: '— The Waves Team' },
     ],
@@ -106,15 +144,17 @@ const TEMPLATES = [
     key: 'estimate.engage_return_after_dark',
     name: 'Estimate Engagement — Return After Quiet',
     description: 'Engagement engine (dark_then_return): the customer returned after 3+ days of silence. Re-engagement framing — the plan and pricing are unchanged (the engine only sends while the estimate is unexpired). Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'category_hook', 'category_benefit'],
-    optional: ['category_headline', 'category_question'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'category_hook', 'category_benefit'],
+    optional: ['category_headline', 'category_question', 'estimate_url'],
     subject: 'Your estimate is right where you left it',
     preview: 'Nothing has changed — same plan, same pricing, saved for you.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, good to see you back. Your {{service_label}} estimate is right where you left it — same plan, same pricing.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      ...PROTOCOL_MODULE,
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
-      { type: 'cta', label: 'Pick up where I left off', url_variable: 'estimate_url' },
+      { type: 'cta', label: 'Pick up where I left off', url_variable: 'estimate_accept_url' },
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
@@ -129,6 +169,7 @@ const TEMPLATES = [
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, just checking in on your {{service_label}} estimate — no rush at all.' },
       { type: 'paragraph', content: '{{category_question}}' },
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'Take another look', url_variable: 'estimate_url' },
       { type: 'signature', content: '— The Waves Team' },
@@ -138,15 +179,16 @@ const TEMPLATES = [
     key: 'estimate.engage_expiring',
     name: 'Estimate Engagement — Expiring (Engaged)',
     description: 'Engagement engine (expiring_engaged): the estimate expires within 2 days and the customer HAS viewed it. Deadline framing with a genuine extension offer — the reply-to-extend line is backed by the real extension flow. Dark behind GATE_ESTIMATE_ENGAGEMENT_FOLLOWUP.',
-    required: ['first_name', 'estimate_url', 'service_label', 'expires_date', 'category_benefit'],
-    optional: ['category_headline', 'category_hook', 'category_question'],
+    required: ['first_name', 'estimate_accept_url', 'service_label', 'expires_date', 'category_benefit'],
+    optional: ['category_headline', 'category_hook', 'category_question', 'estimate_url'],
     subject: 'Heads up — your estimate expires soon',
     preview: 'Your pricing holds until the expiration date on your estimate.',
     blocks: [
       { type: 'paragraph', content: 'Hi {{first_name}}, a quick heads up: your {{service_label}} estimate expires on {{expires_date}}. Until then, your pricing is locked in.' },
       { type: 'paragraph', content: 'Need more time to decide? Just reply — we’re happy to extend it.' },
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
-      { type: 'cta', label: 'Review my estimate', url_variable: 'estimate_url' },
+      { type: 'cta', label: 'Accept before it expires', url_variable: 'estimate_accept_url' },
       { type: 'signature', content: '— The Waves Team' },
     ],
     fixture: { expires_date: 'August 1' },
@@ -163,7 +205,10 @@ const TEMPLATES = [
       { type: 'heading', content: '{{category_headline}}' },
       { type: 'paragraph', content: 'Hi {{first_name}}, your {{service_label}} estimate expires on {{expires_date}} and it doesn’t look like you’ve had a chance to see it yet — worth one quick look before it does.' },
       { type: 'paragraph', content: '{{category_hook}}' },
+      ...PROTOCOL_MODULE,
+      ...APP_MODULE,
       { type: 'paragraph', content: 'Need more time? Just reply — we’re happy to extend it.' },
+      REVIEWS_LINE,
       { type: 'small_note', content: '{{category_benefit}}' },
       { type: 'cta', label: 'See my estimate', url_variable: 'estimate_url' },
       { type: 'signature', content: '— The Waves Team' },

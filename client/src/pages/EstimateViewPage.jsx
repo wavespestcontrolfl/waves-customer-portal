@@ -3642,6 +3642,26 @@ export default function EstimateViewPage() {
     selectedRef.current = selected;
   }, [selected]);
 
+  // Email-drip accept intent (?intent=accept): the engage emails' accept
+  // CTAs land here — bring the customer straight to the scheduling/accept
+  // step so the email tap and the on-page approve are the only two touches.
+  // Scroll-only, NEVER auto-accept: mail scanners prefetch email links, and
+  // acceptance runs the card step. One-shot after load; scrollToBooking
+  // no-ops when the booking section isn't rendered (already accepted,
+  // terminal, invoice-only), so no state guard is needed here.
+  const acceptIntentFiredRef = useRef(false);
+  useEffect(() => {
+    if (!data || acceptIntentFiredRef.current) return;
+    try {
+      if (new URLSearchParams(window.location.search).get('intent') !== 'accept') return;
+      acceptIntentFiredRef.current = true;
+      // Let the glass scroll-reveal mount before jumping.
+      window.setTimeout(scrollToBookingSection, 450);
+    } catch {
+      // The scroll intent is decoration — never let it break the page.
+    }
+  }, [data]);
+
   // 3DS redirect return: Stripe sends the customer back with
   // ?payment_intent=...&redirect_status=succeeded after a challenge.
   // Carry the paid PI forward and scrub the params from the URL.

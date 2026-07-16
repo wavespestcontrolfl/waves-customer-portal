@@ -228,8 +228,13 @@ function estimateEmailPayload(est, firstName, estimateUrl, extra = {}) {
 // A leg the estimate can't receive at all (no phone / no email) skips the
 // mint and falls back to the long URL — the same graceful degradation
 // shortenOrPassthrough already guarantees on shortener failure.
-async function mintStageLinks(est, purpose) {
-  const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`;
+// options.query appends a query string to the DESTINATION before shortening
+// (the short code redirects to the full URL, params intact) — e.g. the
+// engage emails' accept-intent CTA (?intent=accept). options.emailOnly skips
+// the SMS mint so single-channel callers don't leave orphan short codes.
+async function mintStageLinks(est, purpose, { query = null, emailOnly = false } = {}) {
+  const longUrl = `https://portal.wavespestcontrol.com/estimate/${est.token}`
+    + (query ? `${query.startsWith("?") ? "" : "?"}${query}` : "");
   const base = {
     kind: "estimate",
     entityType: "estimates",
@@ -238,7 +243,7 @@ async function mintStageLinks(est, purpose) {
     leadId: await leadIdForEstimate(est),
     purpose,
   };
-  const smsUrl = est.customer_phone
+  const smsUrl = est.customer_phone && !emailOnly
     ? await shortenOrPassthrough(longUrl, { ...base, channel: "sms" })
     : longUrl;
   const emailUrl = est.customer_email

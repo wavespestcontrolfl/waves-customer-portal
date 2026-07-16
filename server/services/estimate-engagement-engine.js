@@ -673,6 +673,13 @@ async function processDueBatch(now = new Date()) {
       }
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
+      // Accept-intent variant (owner 2026-07-15: as few clicks as possible)
+      // — the engaged-moment templates' CTA rides this: same tokened page
+      // with ?intent=accept, which scrolls straight to the accept step.
+      // Separate tracked link, so accept-intent clicks attribute distinctly.
+      const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
+        est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
+      );
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
@@ -685,6 +692,7 @@ async function processDueBatch(now = new Date()) {
           // (same ET formatting as the extension email).
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl, {
             ...followupEmailVars(est),
+            estimate_accept_url: acceptUrl,
             ...(expiringLifecycle ? {
               expires_date: expiringLifecycle.toLocaleDateString('en-US', {
                 month: 'long', day: 'numeric', timeZone: 'America/New_York',

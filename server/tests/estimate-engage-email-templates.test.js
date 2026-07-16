@@ -29,6 +29,7 @@ function payloadFor(pack, extra = {}) {
   return {
     first_name: 'Taylor',
     estimate_url: 'https://portal.wavespestcontrol.com/estimate/example-token',
+    estimate_accept_url: 'https://portal.wavespestcontrol.com/estimate/example-token?intent=accept',
     service_summary: 'Quarterly Pest Control',
     property_address: '123 Gulf Breeze Ln',
     price_summary: '',
@@ -56,11 +57,20 @@ describe('estimate.engage_* seeds — engine contract', () => {
     }
   });
 
-  test('every template CTA rides estimate_url and every template signs off', () => {
+  test('every template has exactly one CTA on the right URL, and signs off', () => {
+    // Owner 2026-07-15 (as few clicks as possible): engaged moments ride the
+    // accept-intent deep link (?intent=accept scrolls to the accept step);
+    // never-viewed moments and the gentle check-in keep the plain view link.
+    const ACCEPT_CTA = new Set([
+      'estimate.engage_return_visit',
+      'estimate.engage_high_intent',
+      'estimate.engage_return_after_dark',
+      'estimate.engage_expiring',
+    ]);
     for (const t of TEMPLATES) {
       const cta = t.blocks.filter((b) => b.type === 'cta');
       expect(cta).toHaveLength(1);
-      expect(cta[0].url_variable).toBe('estimate_url');
+      expect(cta[0].url_variable).toBe(ACCEPT_CTA.has(t.key) ? 'estimate_accept_url' : 'estimate_url');
       expect(cta[0].label).toBeTruthy();
       expect(t.blocks.some((b) => b.type === 'signature')).toBe(true);
     }
@@ -126,10 +136,38 @@ describe('estimate.engage_* seeds — render QA across the v1 category packs', (
 
   test('compliance language: no "safe", no fixed re-entry minutes, no invented stats', () => {
     for (const t of TEMPLATES) {
-      const text = [t.subject, t.preview, ...t.blocks.map((b) => b.content || b.label || '')].join(' ');
+      const text = [t.subject, t.preview, ...t.blocks.map((b) => b.content || b.label || b.alt || '')].join(' ');
       expect(text).not.toMatch(/\bsafe\b/i);
       expect(text).not.toMatch(/\d+\s*(minutes|mins)\b/i);
       expect(text).not.toMatch(/\d+%/);
+    }
+  });
+
+  test('proof modules follow the owner tier plan (reviews everywhere; current-UI screenshot on the sell moments)', () => {
+    const FULL_SELL = ['estimate.engage_unopened', 'estimate.engage_expiring_unseen'];
+    const PROTOCOL = [...FULL_SELL, 'estimate.engage_return_after_dark'];
+    const APP = [...FULL_SELL, 'estimate.engage_high_intent'];
+    for (const t of TEMPLATES) {
+      const text = t.blocks.map((b) => b.content || '').join(' ');
+      const images = t.blocks.filter((b) => b.type === 'image');
+      // Reviews line on ALL 7 — static five-star claim (owner decision:
+      // no live numbers), grounded in the public Google rating.
+      expect(text).toContain('Five-star rated on Google');
+      // Post-service protocol copy where the tier plan puts it (copy-only
+      // until the fresh visit-report capture lands — owner 07-15: never a
+      // stale-UI product shot).
+      expect(text.includes('detailed service report')).toBe(PROTOCOL.includes(t.key));
+      // The current-UI reschedule capture rides the app module.
+      const wantsAppShot = APP.includes(t.key);
+      expect(images.some((b) => b.src.endsWith('/app-reschedule-slots.png'))).toBe(wantsAppShot);
+      expect(images).toHaveLength(wantsAppShot ? 1 : 0);
+      // Hosted assets must be absolute portal URLs with alt text, and never
+      // the retired June (old-UI) captures.
+      for (const img of images) {
+        expect(img.src).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/app-email\//);
+        expect(img.src).not.toMatch(/app-(report|visits|home|track|tracking|reminders|reschedule|waves-ai)\.png$/);
+        expect(img.alt).toBeTruthy();
+      }
     }
   });
 });

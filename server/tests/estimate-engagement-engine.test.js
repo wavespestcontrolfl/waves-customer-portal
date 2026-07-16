@@ -344,7 +344,15 @@ describe('processDueJobs', () => {
         category_hook: expect.any(String),
         category_benefit: expect.stringContaining('90-day'),
         category_question: expect.any(String),
+        estimate_accept_url: expect.any(String),
       }),
+    );
+    // The accept variant is a SEPARATE tracked link with the intent param
+    // on the destination (email-only — no orphan SMS short code).
+    expect(followupShared.mintStageLinks).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'est-1' }),
+      'estimate_engage_viewed_gone_quiet_72h_accept',
+      { query: 'intent=accept', emailOnly: true },
     );
     // Non-expiring rules carry no deadline variable.
     expect(followupShared.estimateEmailPayload.mock.calls[0][3].expires_date).toBeUndefined();
