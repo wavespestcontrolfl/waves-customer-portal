@@ -336,14 +336,21 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
   const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
   const byKey = new Map();
   const componentKeysByKey = new Map();
+  const componentRowsByKey = new Map();
   for (const row of rows) {
     const key = accountServiceKey(row.service_type);
     if (!key) continue;
     if (!byKey.has(key)) byKey.set(key, []);
     byKey.get(key).push(row);
     const components = componentKeysByKey.get(key) || new Set();
-    accountServiceKeys(row.service_type).forEach((component) => components.add(component));
+    const componentRows = componentRowsByKey.get(key) || new Map();
+    accountServiceKeys(row.service_type).forEach((component) => {
+      components.add(component);
+      if (!componentRows.has(component)) componentRows.set(component, []);
+      componentRows.get(component).push(row);
+    });
     componentKeysByKey.set(key, components);
+    componentRowsByKey.set(key, componentRows);
   }
 
   const currentServices = [...byKey.entries()].map(([key, serviceRows]) => {
@@ -352,6 +359,15 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
     const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
     const currentPerVisit = lastPaid?.amount ?? scheduledPerVisit;
     const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
+    const componentServiceAddresses = {};
+    const componentServiceAddressesComplete = {};
+    for (const [componentKey, componentRows] of componentRowsByKey.get(key) || []) {
+      componentServiceAddresses[componentKey] = [...new Set(
+        componentRows.map((row) => row.effective_service_address).filter(Boolean),
+      )];
+      componentServiceAddressesComplete[componentKey] = componentRows.length > 0
+        && componentRows.every((row) => !!row.effective_service_address);
+    }
     return {
       key,
       keys: [...(componentKeysByKey.get(key) || new Set([key]))],
@@ -365,6 +381,12 @@ async function loadCurrentServiceSpendContext(database, customerId, { existingRo
       // to the account-wide block rather than trust the known-address subset.
       serviceAddressesComplete: serviceRows.length > 0
         && serviceRows.every((row) => !!row.effective_service_address),
+      // A combined row contributes its address only to the components it
+      // actually contains. Keeping this map separate prevents a pest-only
+      // row at property B from making the lawn component of a Pest + Lawn
+      // row at property A appear active at both properties.
+      componentServiceAddresses,
+      componentServiceAddressesComplete,
       currentPerVisit: currentPerVisit ?? null,
       spendSource: lastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
       lastPaidAt: lastPaid?.paidAt || null,

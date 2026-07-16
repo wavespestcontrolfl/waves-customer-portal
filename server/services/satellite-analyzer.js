@@ -270,10 +270,15 @@ class SatelliteAnalyzer {
       const confidenceDetails = {};
       const fieldVerify = [];
       for (const field of numericFields) {
+        const fieldWasProvided = Object.prototype.hasOwnProperty.call(only.analysis || {}, field);
         const value = explicitNonNegative(only.analysis, field);
         if (value === null) {
           cleanedAnalysis[field] = null;
           confidenceDetails[field] = { values: [], status: 'missing' };
+          // An invalid value must remain visible to the operator even though
+          // it is removed from the merged measurements. Truly omitted fields
+          // stay absent from Field Verify.
+          if (fieldWasProvided) fieldVerify.push(field);
           continue;
         }
         confidenceDetails[field] = {

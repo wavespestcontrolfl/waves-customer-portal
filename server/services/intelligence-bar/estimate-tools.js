@@ -543,14 +543,28 @@ function accountPricingFromContext(context = {}) {
       // Addresses are trusted for property scoping only when EVERY active row
       // of this service carries one — a mixed known/unknown set could hide a
       // row that covers the quoted street, so it stays account-wide.
-      const addresses = row.serviceAddressesComplete === true && Array.isArray(row.serviceAddresses)
-        ? row.serviceAddresses.filter(Boolean)
-        : [];
       const rowKeys = Array.isArray(row.keys) && row.keys.length ? row.keys : [row.key];
-      const entries = rowKeys.map((key) => ({ key, addresses }));
+      const entries = rowKeys.map((key) => {
+        const hasComponentAddressState = Object.prototype.hasOwnProperty.call(
+          row.componentServiceAddressesComplete || {}, key,
+        );
+        const addressesComplete = hasComponentAddressState
+          ? row.componentServiceAddressesComplete[key] === true
+          : row.serviceAddressesComplete === true;
+        const candidateAddresses = hasComponentAddressState
+          ? row.componentServiceAddresses?.[key]
+          : row.serviceAddresses;
+        return {
+          key,
+          addresses: addressesComplete && Array.isArray(candidateAddresses)
+            ? candidateAddresses.filter(Boolean)
+            : [],
+        };
+      });
       for (const key of rowKeys) {
         if (key.startsWith('commercial_')) {
-          entries.push({ key: key.slice('commercial_'.length), addresses });
+          const source = entries.find((entry) => entry.key === key);
+          entries.push({ key: key.slice('commercial_'.length), addresses: source?.addresses || [] });
         }
       }
       return entries;
@@ -566,6 +580,10 @@ function accountPricingFromContext(context = {}) {
     recognized: account.recognized === true,
     leadCustomerId: context?.lead?.customer_id || null,
     leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
+    phoneDerivedMatch: account.match_method === 'unambiguous_phone',
+    phoneDerivedMatchPhone: account.match_method === 'unambiguous_phone'
+      ? normalizeContactPhone(context?.lead?.phone)
+      : null,
     serviceContextUnavailable: account.service_context_unavailable === true,
     priorQualifyingServices,
     activeServices,
@@ -677,17 +695,29 @@ function normalizeEvidenceText(value) {
 }
 
 function verifyAgentEvidenceQuotes(evidence, context) {
+  const structuredText = (value) => {
+    try {
+      return JSON.stringify(value || {});
+    } catch (_err) {
+      return '';
+    }
+  };
   const sourceHaystacks = {
-    quote_form: normalizeEvidenceText((context?.quote_form?.message_fields || []).map((row) => row.text).filter(Boolean).join(' ')),
+    quote_form: normalizeEvidenceText([
+      ...(context?.quote_form?.message_fields || []).map((row) => row.text).filter(Boolean),
+      structuredText(context?.quote_form?.extracted_data),
+    ].join(' ')),
     call_transcript: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript).filter(Boolean).join(' ')),
     transcript_summary: normalizeEvidenceText((context?.calls || []).map((call) => call.transcript_summary).filter(Boolean).join(' ')),
+    call_extraction: normalizeEvidenceText((context?.calls || []).map((call) => structuredText(call.extraction)).join(' ')),
     sms: normalizeEvidenceText((context?.sms_thread || []).map((message) => message.body).filter(Boolean).join(' ')),
     activity: normalizeEvidenceText((context?.activities || []).map((activity) => activity.description).filter(Boolean).join(' ')),
   };
   const evidenceSourceKey = (source) => {
     const normalized = String(source || '').trim().toLowerCase();
     if (/quote|form|submission/.test(normalized)) return 'quote_form';
-    if (/summary|extraction/.test(normalized)) return 'transcript_summary';
+    if (/extraction|structured.*call/.test(normalized)) return 'call_extraction';
+    if (/summary/.test(normalized)) return 'transcript_summary';
     if (/call|transcript|recording/.test(normalized)) return 'call_transcript';
     if (/sms|text|message/.test(normalized)) return 'sms';
     if (/activity|note/.test(normalized)) return 'activity';
@@ -1270,25 +1300,53 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     return hasValue && !!fact.source && !!confidence
       && !['low', 'weak', 'unknown', 'unverified'].includes(confidence);
   };
+  const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
+  const normalizedMeasurementName = (value) => String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-z0-9]+/gi, '')
+    .toLowerCase();
+  const numericEngineMeasurements = [];
+  const collectNumericEngineMeasurements = (value, path = []) => {
+    if (!value || typeof value !== 'object') return;
+    for (const [name, nested] of Object.entries(value)) {
+      const nextPath = [...path, name];
+      if (nested && typeof nested === 'object') {
+        collectNumericEngineMeasurements(nested, nextPath);
+      } else if (Number.isFinite(Number(nested))
+        && /(?:sqft|sq_ft|sf|area|count|bedrooms?|units?|linear|perimeter|feet|lf)$/i.test(name)) {
+        numericEngineMeasurements.push({ path: nextPath.join('.'), name, value: Number(nested) });
+      }
+    }
+  };
+  collectNumericEngineMeasurements(input.engineInputs);
   const factMatchesPricingInput = (key, fact) => {
     if (!isVerifiedFact(fact)) return false;
     if (/address/i.test(key)) return sameStreetAddress(String(fact.value), input.address);
-    const candidateKeys = /stor(y|ies)|floor.*count/i.test(key)
-      ? ['stories']
-      : (/palm/i.test(key)
-      ? ['palmCount', 'services.palm.palmCount', 'services.palm.count']
-      : (/bedroom/i.test(key)
-        ? ['bedrooms', 'services.bedBug.bedrooms', 'services.bed_bug.bedrooms']
-        : (/unit|apartment/i.test(key)
-          ? ['unitCount', 'commercialUnitCount', 'services.pest.unitCount', 'services.lawn.unitCount']
-          : (/lawn|turf|treatable/i.test(key)
-      ? ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf']
-      : (/building|home|unit/i.test(key)
-        ? ['buildingSqFt', 'homeSqFt']
-        : (/lot|outdoor/i.test(key)
-          ? ['lotSqFt']
-          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : [])))))));
-    const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
+    let candidateKeys = [];
+    if (/building.*slab|slab.*building/i.test(key)) candidateKeys = ['buildingSlabSqFt'];
+    else if (/attic/i.test(key)) candidateKeys = ['atticSqFt'];
+    else if (/footprint/i.test(key)) candidateKeys = ['footprintSqFt'];
+    else if (/bed.*area|treatable.*bed/i.test(key)) candidateKeys = ['estimatedBedAreaSf'];
+    else if (/slab/i.test(key)) candidateKeys = ['slabSqFt'];
+    else if (/stor(y|ies)|floor.*count/i.test(key)) candidateKeys = ['stories'];
+    else if (/palm/i.test(key)) candidateKeys = ['palmCount', 'services.palm.palmCount', 'services.palm.count'];
+    else if (/bedroom/i.test(key)) candidateKeys = ['bedrooms', 'services.bedBug.bedrooms', 'services.bed_bug.bedrooms'];
+    else if (/unit|apartment/i.test(key)) candidateKeys = ['unitCount', 'commercialUnitCount', 'services.pest.unitCount', 'services.lawn.unitCount'];
+    else if (/lawn|turf|treatable/i.test(key)) candidateKeys = ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf'];
+    else if (/building|home/i.test(key)) candidateKeys = ['buildingSqFt', 'homeSqFt'];
+    else if (/lot|outdoor/i.test(key)) candidateKeys = ['lotSqFt'];
+    else if (/perimeter|linear/i.test(key)) candidateKeys = ['perimeterLF'];
+    if (!candidateKeys.length) {
+      const factName = normalizedMeasurementName(String(key).split('.').pop());
+      candidateKeys = numericEngineMeasurements
+        .filter((measurement) => {
+          const measurementName = normalizedMeasurementName(measurement.name);
+          return measurementName === factName
+            || (measurementName.length >= 5 && factName.includes(measurementName))
+            || (factName.length >= 5 && measurementName.includes(factName));
+        })
+        .map((measurement) => measurement.path);
+    }
     if (!candidateKeys.length) {
       return !(/count|sq\s*ft|sqft|\bsf\b|area|size|feet|\bft\b|linear/i.test(key)
         && Number.isFinite(Number(fact.value)));
@@ -1304,21 +1362,28 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     .map(([key]) => key);
   const hasVerifiedMatchingFact = (pattern) => propertyFactEntries
     .some(([key, fact]) => pattern.test(key) && factMatchesPricingInput(key, fact));
-  const requirePricingFact = (active, pattern, label) => {
-    if (active && !hasVerifiedMatchingFact(pattern)) {
+  const valuesMatch = (observed, expected) => Number.isFinite(Number(observed))
+    && Number.isFinite(Number(expected))
+    && Math.abs(Number(expected) - Number(observed)) <= Math.max(1, Math.abs(Number(expected)) * 0.01);
+  const requirePricingFact = (active, pattern, label, expected = undefined) => {
+    const hasMatch = expected === undefined
+      ? hasVerifiedMatchingFact(pattern)
+      : propertyFactEntries.some(([key, fact]) => pattern.test(key)
+        && isVerifiedFact(fact) && valuesMatch(fact.value, expected));
+    if (active && !hasMatch) {
       laneReasons.push(`${label} was used for pricing without a matching verified property fact`);
     }
   };
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.homeSqFt)), /home|building.*(sq|area|size)/i, 'home/building square footage');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.stories)), /stor(y|ies)|floor.*count/i, 'story count');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.lotSqFt)), /lot|outdoor.*(sq|area|size)/i, 'lot square footage');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.palmCount)), /palm.*count|treated.*palm/i, 'treated palm count');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.perimeterLF)), /perimeter|linear/i, 'perimeter length');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.atticSqFt)), /attic.*(sq|area|size)/i, 'attic square footage');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.slabSqFt)), /slab.*(sq|area|size)/i, 'slab square footage');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.buildingSlabSqFt)), /building.*slab|slab.*building/i, 'building slab square footage');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.footprintSqFt)), /footprint.*(sq|area|size)/i, 'building footprint');
-  requirePricingFact(Number.isFinite(Number(input.engineInputs.estimatedBedAreaSf)), /bed.*area|treatable.*bed/i, 'treated bed area');
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.homeSqFt)), /home|building.*(sq|area|size)/i, 'home/building square footage', input.engineInputs.homeSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.stories)), /stor(y|ies)|floor.*count/i, 'story count', input.engineInputs.stories);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.lotSqFt)), /lot|outdoor.*(sq|area|size)/i, 'lot square footage', input.engineInputs.lotSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.palmCount)), /palm.*count|treated.*palm/i, 'treated palm count', input.engineInputs.palmCount);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.perimeterLF)), /perimeter|linear/i, 'perimeter length', input.engineInputs.perimeterLF);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.atticSqFt)), /attic.*(sq|area|size)/i, 'attic square footage', input.engineInputs.atticSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.slabSqFt)), /slab.*(sq|area|size)/i, 'slab square footage', input.engineInputs.slabSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.buildingSlabSqFt)), /building.*slab|slab.*building/i, 'building slab square footage', input.engineInputs.buildingSlabSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.footprintSqFt)), /footprint.*(sq|area|size)/i, 'building footprint', input.engineInputs.footprintSqFt);
+  requirePricingFact(Number.isFinite(Number(input.engineInputs.estimatedBedAreaSf)), /bed.*area|treatable.*bed/i, 'treated bed area', input.engineInputs.estimatedBedAreaSf);
   const nestedMeasurements = [];
   const collectMeasurements = (value, path = []) => {
     if (!value || typeof value !== 'object') return;
@@ -1335,7 +1400,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   for (const measurement of nestedMeasurements) {
     const tokens = measurement.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[^a-z0-9]+/gi, ' ').trim();
     const pattern = new RegExp(tokens.split(/\s+/).filter(Boolean).map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i');
-    requirePricingFact(true, pattern, measurement.path);
+    requirePricingFact(true, pattern, measurement.path, measurement.value);
   }
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
@@ -1658,6 +1723,10 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
       && String(leadCheck.lead.customer_id || '') !== String(accountPricing.leadCustomerId || '')) {
       return { error: 'The selected lead customer link changed after pricing. Refresh and rebuild the confirmation.' };
     }
+    if (accountPricing.phoneDerivedMatch
+      && normalizeContactPhone(leadCheck.lead.phone) !== accountPricing.phoneDerivedMatchPhone) {
+      return { error: 'The selected lead phone changed after customer recognition. Refresh and rebuild the confirmation.' };
+    }
     if (leadCheck.lead.estimate_id && String(leadCheck.lead.estimate_id) !== String(estimateId)) {
       return { error: 'The selected lead is now linked to a different estimate. Refresh before revising.' };
     }
@@ -1741,6 +1810,10 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     if (accountPricing.leadCustomerIdKnown
       && String(lead.customer_id || '') !== String(accountPricing.leadCustomerId || '')) {
       return { error: 'The selected lead customer link changed after pricing. Refresh and rebuild the confirmation.' };
+    }
+    if (accountPricing.phoneDerivedMatch
+      && normalizeContactPhone(lead.phone) !== accountPricing.phoneDerivedMatchPhone) {
+      return { error: 'The selected lead phone changed after customer recognition. Refresh and rebuild the confirmation.' };
     }
     // Re-anchor recipients from the LOCKED lead row: a contact correction
     // that landed between the pre-transaction anchor and this lock must win,

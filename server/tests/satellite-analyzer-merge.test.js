@@ -44,6 +44,17 @@ describe('satellite analyzer per-field confidence', () => {
     expect(result.fieldVerify).toContain('palm_count');
   });
 
+  test('clears invalid supplied measurements but keeps them reviewable', () => {
+    const result = satelliteAnalyzer.mergeResults([
+      { provider: 'claude', analysis: { palm_count: -2, lawn_sqft: 'unknown' } },
+    ]);
+
+    expect(result.palm_count).toBeNull();
+    expect(result.lawn_sqft).toBeNull();
+    expect(result.fieldVerify).toEqual(expect.arrayContaining(['palm_count', 'lawn_sqft']));
+    expect(result.fieldVerify).not.toContain('tree_count');
+  });
+
   test('keeps single-model boolean and string facts reviewable', () => {
     const result = satelliteAnalyzer.mergeResults([
       {

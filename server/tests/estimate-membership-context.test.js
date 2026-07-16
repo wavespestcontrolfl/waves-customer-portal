@@ -115,6 +115,33 @@ describe('computeMembershipContext', () => {
     expect(spend.currentServices.map((service) => service.key).sort()).toEqual(['palm_injection', 'rodent_bait']);
   });
 
+  test('combined service components retain only their own property addresses', async () => {
+    const database = fakeDb();
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1', {
+      existingRows: [
+        {
+          id: 'combo-a', service_type: 'Quarterly Pest + Lawn', scheduled_date: '2099-01-05',
+          estimated_price: 180, effective_service_address: '1 Property A St, Bradenton FL 34208',
+        },
+        {
+          id: 'pest-b', service_type: 'Quarterly Pest Control', scheduled_date: '2099-02-05',
+          estimated_price: 117, effective_service_address: '2 Property B St, Venice FL 34285',
+        },
+      ],
+    });
+
+    const grouped = spend.currentServices.find((service) => service.key === 'pest_control');
+    expect(grouped.keys).toEqual(expect.arrayContaining(['pest_control', 'lawn_care']));
+    expect(grouped.componentServiceAddresses).toEqual({
+      pest_control: ['1 Property A St, Bradenton FL 34208', '2 Property B St, Venice FL 34285'],
+      lawn_care: ['1 Property A St, Bradenton FL 34208'],
+    });
+    expect(grouped.componentServiceAddressesComplete).toEqual({
+      pest_control: true,
+      lawn_care: true,
+    });
+  });
+
   test('existing-service spend is preserved as context while discounts apply only to additions', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

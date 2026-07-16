@@ -8,7 +8,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 //     stations → seasonal mosquito ladder instead of "Add Pest Control").
 // Leads (no membership snapshot) keep the original page untouched.
 
-const { renderPage, buildPricingBundle } = require('../routes/estimate-public');
+const { renderPage, buildPricingBundle, clampLawnLadderEntry } = require('../routes/estimate-public');
 const { shouldIncludeWaveGuardSetupFeeForRecurring } = require('../services/estimate-converter');
 
 function lawnEstimate(overrides = {}) {
@@ -69,6 +69,21 @@ function donMembership(overrides = {}) {
     ...overrides,
   };
 }
+
+test('a monthly lawn floor re-anchors annual billing to the rounded monthly charge', () => {
+  const result = clampLawnLadderEntry({
+    monthlyBase: 50,
+    monthly: 50,
+    annual: 600,
+    perTreatment: 66.67,
+    visits: 9,
+    manualDiscount: null,
+    marginFloorAnnual: 640,
+  });
+
+  expect(result.monthly).toBe(53.34);
+  expect(result.annual).toBe(640.08);
+});
 
 describe('existing-customer public estimate page', () => {
   test('existing-customer lawn estimate has no setup fee and no prepay option', () => {

@@ -118,12 +118,14 @@ function makeDatabase({
   // Default lead carries the contact INPUT expects — the anchor now uses the
   // lead as the only recipient authority, so a bare lead would null them out.
   lead = { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },
+  lockedLead = null,
   customer = null,
   estimate = null,
   estimateRows = null,
   turfRows = [],
 } = {}) {
   const writes = [];
+  let leadReadCount = 0;
   const database = (table) => {
     const builder = {
       where: () => builder,
@@ -137,7 +139,10 @@ function makeDatabase({
       limit: () => builder,
       forUpdate: () => builder,
       first: async () => {
-        if (table === 'leads') return lead;
+        if (table === 'leads') {
+          leadReadCount += 1;
+          return lockedLead && leadReadCount > 1 ? lockedLead : lead;
+        }
         if (table === 'customers') return customer;
         if (table === 'estimates') return estimate;
         return null;
@@ -222,6 +227,57 @@ describe('Agent Estimate draft tool', () => {
 
     expect(result.lane).toBe('yellow');
     expect(result.lane_reasons).toContain('1 evidence quote(s) could not be verified against the selected lead');
+  });
+
+  test('verifies structured form and call extraction quotes only against those sources', () => {
+    const context = {
+      quote_form: { message_fields: [], extracted_data: { selectedService: 'lawn care' } },
+      calls: [{ transcript: 'unrelated words', transcript_summary: 'unrelated summary', extraction: { stationCount: '12 stations' } }],
+      sms_thread: [],
+      activities: [],
+    };
+    expect(_private.verifyAgentEvidenceQuotes([
+      { source: 'quote_form', quote: 'lawn care' },
+      { source: 'call_extraction', quote: '12 stations' },
+    ], context)).toMatchObject({ quoted: 2, verified: 2, unverified: 0 });
+    expect(_private.verifyAgentEvidenceQuotes([
+      { source: 'call_transcript', quote: '12 stations' },
+    ], context)).toMatchObject({ quoted: 1, verified: 0, unverified: 1 });
+  });
+
+  test('accepts exact facts for specialty top-level and nested price measurements', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 500 },
+      waveGuard: { tier: 'none' },
+      lineItems: [{ service: 'rodent', price: 500, costs: { total: 250 }, pricingConfidence: 'high' }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: {
+        homeSqFt: 2000,
+        atticSqFt: 1200,
+        services: { rodentTrapping: { stationCount: 12 } },
+      },
+      propertyFacts: {
+        ...INPUT.propertyFacts,
+        atticSqFt: { value: 1200, source: 'satellite', confidence: 'high' },
+        stationCount: { value: 12, source: 'inspection', confidence: 'high' },
+      },
+      protocolReview: [{ serviceKey: 'rodentTrapping', programKey: 'rodent', visitCount: 3 }],
+      inventoryReview: [{ serviceKey: 'rodentTrapping', productName: 'Traps', status: 'in_stock', onHand: 12 }],
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.lane_reasons || []).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/attic square footage.*without a matching/i),
+      expect.stringMatching(/services\.rodentTrapping\.stationCount.*without a matching/i),
+      expect.stringMatching(/atticSqFt does not match/i),
+      expect.stringMatching(/stationCount does not match/i),
+    ]));
   });
 
   test('computes one-time collected margin when the engine exposes a cost basis', () => {
@@ -1379,6 +1435,51 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(unknown.error).toMatch(/already has active pest_control/i);
   });
 
+  test('combined-service duplicate checks use each component service address', async () => {
+    const account = {
+      recognized: true,
+      customer_id: 'customer-1',
+      existing_service_keys: ['pest_control', 'lawn_care'],
+      current_services: [{
+        key: 'pest_control',
+        keys: ['pest_control', 'lawn_care'],
+        componentServiceAddresses: {
+          pest_control: ['1 Property A St, Bradenton FL 34208', '2 Property B St, Venice FL 34285'],
+          lawn_care: ['1 Property A St, Bradenton FL 34208'],
+        },
+        componentServiceAddressesComplete: { pest_control: true, lawn_care: true },
+      }],
+    };
+    mockGenerateEstimate.mockReturnValue({
+      summary: { recurringMonthlyAfterDiscount: 75, recurringAnnualAfterDiscount: 900, oneTimeTotal: 0 },
+      waveGuard: { tier: 'gold' },
+      lineItems: [{
+        service: 'lawn_care', annualAfterDiscount: 900, monthlyAfterDiscount: 75,
+        costs: { annualCost: 540 }, pricingConfidence: 'high',
+      }],
+    });
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
+    const expansion = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      address: '2 Property B St, Venice FL 34285',
+      homeSqFt: 2000,
+      services: { lawn: { frequency: 'monthly' } },
+    });
+    expect(expansion.error).toBeUndefined();
+    expect(mockGenerateEstimate).toHaveBeenCalled();
+
+    mockGenerateEstimate.mockClear();
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({ customer_account: account });
+    const duplicate = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      address: '1 Property A St, Bradenton FL 34208',
+      homeSqFt: 2000,
+      services: { lawn: { frequency: 'monthly' } },
+    });
+    expect(duplicate.error).toMatch(/already has active lawn_care/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('a draft with an unpriced requested service is refused', async () => {
     mockGenerateEstimate.mockReturnValue({
       summary: { recurringMonthlyAfterDiscount: 54.17, recurringAnnualAfterDiscount: 650, oneTimeTotal: 0 },
@@ -1421,6 +1522,36 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(result.success).toBe(true);
     const insert = writes.find((write) => write.table === 'estimates' && write.op === 'insert').payload;
     expect(insert.customer_id).toBeNull();
+  });
+
+  test('a phone-derived customer match is rejected when the locked lead phone changed', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      lead: { id: 'lead-1', customer_id: null, phone: '9415550100' },
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-by-old-phone',
+        match_method: 'unambiguous_phone',
+        existing_service_keys: [],
+        current_services: [],
+      },
+      quote_form: { message_fields: [{ field: 'message', text: 'quarterly pest' }] },
+      calls: [], sms_thread: [], activities: [],
+    });
+    const initialLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      phone: '9415550100', email: 'road@example.com',
+    };
+    const { database, writes } = makeDatabase({
+      lead: initialLead,
+      lockedLead: { ...initialLead, phone: '9415550199' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/lead phone changed after customer recognition/i);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
   });
 
   test('a revision invalidates authored proposal data when engine pricing changes', async () => {

@@ -12640,9 +12640,9 @@ function clampLawnLadderEntry({ monthlyBase, monthly, annual, perTreatment, visi
   // Only re-derive annual/per-app when the floor actually moved a number —
   // untouched rows keep their stored annual (it is the billing source of
   // truth and carries exact cents the monthly×12 round-trip would lose).
-  const clampedAnnual = annual != null
-    ? Math.max(annual, minAnnual)
-    : (monthlyWasClamped ? roundMonthly(clampedMonthly * 12) : annual);
+  const clampedAnnual = monthlyWasClamped
+    ? roundMonthly(clampedMonthly * 12)
+    : (annual != null ? Math.max(annual, minAnnual) : annual);
   const annualWasClamped = clampedAnnual != null && annual != null && clampedAnnual !== annual;
   // An annual-only row the floor moved must ALSO carry a derived monthly:
   // accept reads selectedFrequency.monthly first and otherwise falls back to
@@ -16340,6 +16340,7 @@ module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTi
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
+module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;
 module.exports.pricingBundleHasStaleTermiteRow = pricingBundleHasStaleTermiteRow;
 module.exports.cleanStoredName = cleanStoredName;
