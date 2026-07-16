@@ -1,9 +1,9 @@
 {
   "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1021.2,
-      "recurringMonthlyAfterDiscount": 85.1,
-      "year1Total": 1021
+      "recurringAnnualAfterDiscount": 1039.11,
+      "recurringMonthlyAfterDiscount": 86.59,
+      "year1Total": 1039
     },
     "waveGuard": {
       "tier": "silver",
@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1938.6,
-      "recurringMonthlyAfterDiscount": 161.55,
-      "year1Total": 1939
+      "recurringAnnualAfterDiscount": 2033.75,
+      "recurringMonthlyAfterDiscount": 169.48,
+      "year1Total": 2034
     },
     "waveGuard": {
       "tier": "silver",
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 4355.67,
-      "recurringMonthlyAfterDiscount": 362.97,
-      "year1Total": 4356
+      "recurringAnnualAfterDiscount": 4621.61,
+      "recurringMonthlyAfterDiscount": 385.13,
+      "year1Total": 4622
     },
     "waveGuard": {
       "tier": "platinum",
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 2101.51,
-      "recurringMonthlyAfterDiscount": 175.13,
-      "year1Total": 2102
+      "recurringAnnualAfterDiscount": 2119.42,
+      "recurringMonthlyAfterDiscount": 176.62,
+      "year1Total": 2119
     },
     "waveGuard": {
       "tier": "platinum",
