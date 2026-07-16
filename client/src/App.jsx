@@ -210,7 +210,17 @@ function NewsletterExternalRedirect() {
   return null;
 }
 
-import { SERVICE_ESTIMATE_SLUGS } from './lib/serviceEstimateSlugs';
+function ExternalRedirect({ to }) {
+  useEffect(() => {
+    window.location.replace(`${to}${window.location.search}${window.location.hash}`);
+  }, [to]);
+  return null;
+}
+
+import {
+  ESTIMATE_MARKETING_REDIRECTS,
+  ESTIMATE_QUOTE_URL,
+} from './lib/estimateMarketingRedirects';
 import LoginPage from './pages/LoginPage';
 import AdminLoginPage from './pages/AdminLoginPage';
 import AdminChangePasswordPage from './pages/AdminChangePasswordPage';
@@ -362,6 +372,7 @@ const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
+const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
 const AdminPriceChangePage = lazyWithRetry(() => import('./pages/admin/AdminPriceChangePage'));
@@ -381,21 +392,9 @@ const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
-const QuotePage = lazyWithRetry(() => import('./pages/QuotePage'));
 const LawnCareIncludedPage = lazyWithRetry(() => import('./pages/LawnCareIncludedPage'));
 const ServiceOutlinePage = lazyWithRetry(() => import('./pages/ServiceOutlinePage'));
 const NewsletterArchivePage = lazyWithRetry(() => import('./pages/NewsletterArchivePage'));
-
-function EstimatePublicGateway() {
-  const { token } = useParams();
-  const slug = String(token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) {
-    return <QuotePage serviceSlug={slug} />;
-  }
-  // Tokened estimates get the standard shell chrome (owner 2026-07-06);
-  // the slug branch keeps the quote wizard's own hero.
-  return <WavesShell><EstimateViewPage /></WavesShell>;
-}
 
 // Route-tree error boundary: keyed on pathname so navigating away from a
 // crashed page automatically clears the fallback. Customer routes previously
@@ -493,13 +492,16 @@ export default function App() {
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
+          <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/price-change/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PriceChangeNoticePage /></Suspense>} />
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />
+          {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
+            <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
+          ))}
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The
-              /estimate quote wizard keeps #FAF8F3 (deliberately un-glassed),
               /newsletter keeps its dark hero. The /pay group joined the full
               scene 2026-07-09 (pro wash retired), so it uses the same wash. */}
           <Route path="/lawn-report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><LawnReportViewPage /></WavesShell></Suspense>} />
@@ -508,8 +510,8 @@ export default function App() {
           <Route path="/service-outlines/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ServiceOutlinePage /></WavesShell></Suspense>} />
           <Route path="/review/:token" element={<ReviewLinkRedirect />} />
           <Route path="/book" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PublicBookingPage /></Suspense>} />
-          <Route path="/estimate" element={<Suspense fallback={<div style={{background:'#FAF8F3',minHeight:'100vh'}}/>}><QuotePage /></Suspense>} />
-          <Route path="/quote" element={<Navigate to="/estimate" replace />} />
+          <Route path="/estimate" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
+          <Route path="/quote" element={<ExternalRedirect to={ESTIMATE_QUOTE_URL} />} />
           <Route path="/newsletter" element={<NewsletterExternalRedirect />} />
           <Route path="/newsletter/archive/:id" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><NewsletterArchivePage /></Suspense>} />
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />

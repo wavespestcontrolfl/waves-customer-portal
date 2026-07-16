@@ -229,3 +229,69 @@ describe('autonomous-review-queue read model helpers', () => {
     });
   });
 });
+
+// 2026-07-16 observability: the review API previously omitted the PR handle
+// and all live pipeline state — a run parked at astro_pr_pending_merge
+// reached the operator with no PR link and no visible reason for the wait,
+// and codex_remediation_state (park_reason) was read by NO admin route.
+describe('run observability exposure', () => {
+  const db = require('../models/db');
+
+  test('buildReviewItem exposes the PR handle, poller pending state, and remediation', () => {
+    const item = buildReviewItem({
+      opportunity: { id: 'opp-1', status: 'pending_review' },
+      brief: null,
+      run: {
+        id: 'run-1',
+        outcome: 'completed_pending_review',
+        skip_reason: 'astro_pr_pending_merge',
+        astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/374',
+        published_url: null,
+        poll_pending_reason: 'preview_build_stale_commit',
+        poll_pending_since: '2026-07-15T13:00:00Z',
+        quality_gate_result: '{}',
+        uniqueness_gate_result: '{}',
+        comparison_table_result: '{}',
+        draft_payload: '{}',
+      },
+      remediation: { pr_number: 374, status: 'parked', rounds: 2, park_reason: 'fix changed frontmatter', parked_head_sha: 'abc' },
+    });
+
+    expect(item.run.astro_pr_url).toContain('/pull/374');
+    expect(item.run.poll_pending_reason).toBe('preview_build_stale_commit');
+    expect(item.run.poll_pending_since).toBe('2026-07-15T13:00:00Z');
+    expect(item.run.remediation).toMatchObject({ status: 'parked', rounds: 2, park_reason: 'fix changed frontmatter' });
+  });
+
+  test('getReviewItem attaches remediation by PR number, fail-soft when the table is missing', async () => {
+    const { getReviewItem } = require('../services/content/autonomous-review-queue');
+    const rows = {
+      opportunity_queue: { id: 'opp-1', status: 'pending_review' },
+      content_briefs: null,
+      autonomous_runs: {
+        id: 'run-1',
+        astro_pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/377',
+        quality_gate_result: '{}',
+        uniqueness_gate_result: '{}',
+        comparison_table_result: '{}',
+        draft_payload: '{}',
+      },
+      codex_remediation_state: { pr_number: 377, status: 'parked', rounds: 0, park_reason: 'seo canary: 3 P1', parked_head_sha: null, updated_at: 'x' },
+    };
+    db.mockImplementation((table) => ({
+      where: jest.fn(function () { return this; }),
+      orderBy: jest.fn(function () { return this; }),
+      first: jest.fn(() => (table === 'codex_remediation_state' && rows.remediationThrows
+        ? Promise.reject(Object.assign(new Error('missing table'), { code: '42P01' }))
+        : Promise.resolve(rows[table] ?? null))),
+    }));
+
+    const item = await getReviewItem('opp-1');
+    expect(item.run.remediation).toMatchObject({ pr_number: 377, status: 'parked', park_reason: 'seo canary: 3 P1' });
+
+    rows.remediationThrows = true;
+    const soft = await getReviewItem('opp-1');
+    expect(soft.run.remediation).toBeNull();
+    expect(soft.run.astro_pr_url).toContain('/pull/377');
+  });
+});

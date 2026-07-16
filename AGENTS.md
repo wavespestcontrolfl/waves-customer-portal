@@ -750,6 +750,27 @@ finding and warns on P1. Reviewers must return JSON matching
   exact `/ws/voice-agent` path; `ws://localhost` for dev) — so the WS secret is
   never appended to a foreign host. Any change to this endpoint, its auth, or its
   frame handling is security-critical).
+  `/api/public/secure-card/:token` (+ `/:token/complete`) (GET + POST;
+  "secure your appointment" card-on-file capture page for the
+  appointment-card-request funnel — dark until `APPOINTMENT_CARD_REQUEST`
+  AND the `secure_appointment_card` SMS template are both enabled, and
+  unreachable until the funnel mints links. 64-hex bearer token
+  (`appointment_card_requests.token`) with format gate + generic 404 (no
+  existence oracle); its own 60 req/min limiter on top of the global /api
+  limiter; `private, no-store` / `Referrer-Policy: no-referrer` /
+  `X-Robots-Tag: noindex` on EVERY outcome including 404s (the SPA shell
+  for `/secure/:token` carries the same headers via
+  `sensitive-spa-headers.js`). NO money moves on this surface — the GET
+  mints/replays a card-only off-session SetupIntent (request-pinned
+  metadata, deterministic idempotency key) after re-checking visit
+  liveness AND payer exemption; the POST live-verifies the SetupIntent
+  against Stripe (status + purpose + request id — never the client's
+  word), re-checks visit/payer again, and runs the idempotent
+  save → consent → enroll sequence under a pending → completing claim
+  with a 10-min stale-claim lease (page POST and the
+  `setup_intent.succeeded` webhook backstop are mutually exclusive;
+  failures revert and stay retryable). Treat the token, the verification
+  gates, and the claim mechanics as security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

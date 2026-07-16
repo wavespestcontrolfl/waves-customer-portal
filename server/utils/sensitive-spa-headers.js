@@ -1,4 +1,4 @@
-const SERVICE_ESTIMATE_SLUGS = require('../config/service-estimate-slugs');
+const { SERVICE_ESTIMATE_SLUGS } = require('../config/estimate-marketing-redirects');
 
 function isServiceOutlinePath(reqPath = '') {
   return /^\/service-outlines\/[A-Za-z0-9_-]{43}\/?$/.test(String(reqPath || ''));
@@ -35,7 +35,7 @@ function isServiceReportPath(reqPath = '') {
 // `${nameSlug}-${shortId}` (SMS/lead intake) — so matching a token SHAPE would
 // miss formats and leak. Instead, treat ANY single-segment /estimate/<x> as a
 // sensitive customer quote EXCEPT the known public marketing service slugs
-// (routed to QuotePage). Over-noindexing a marketing page is a minor SEO cost;
+// (permanently redirected to wavespestcontrol.com). Over-noindexing a marketing page is a minor SEO cost;
 // under-noindexing a real estimate leaks address + pricing, so default to
 // noindex.
 function isEstimatePath(reqPath = '') {
@@ -49,6 +49,14 @@ function isEstimatePath(reqPath = '') {
 // indexed/archived and must not leak the token via Referer.
 function isCardPath(reqPath = '') {
   return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
+// Public "secure your appointment" card-capture page — 64-hex bearer token
+// (appointment_card_requests.token) on a payment-adjacent surface, so the
+// shell must never be indexed/archived and must not leak the token via
+// Referer (matches the API route's headers in secure-card-public.js).
+function isSecureCardPath(reqPath = '') {
+  return /^\/secure\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
 // Public tokened price-change notice page — 32-hex bearer token
@@ -66,7 +74,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -81,5 +89,6 @@ module.exports = {
   isServiceReportPath,
   isEstimatePath,
   isCardPath,
+  isSecureCardPath,
   isPriceChangeNoticePath,
 };

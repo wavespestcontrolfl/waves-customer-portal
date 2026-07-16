@@ -125,7 +125,10 @@ const toolHealthRoutes = require('./routes/tool-health');
 
 const app = express();
 
-const SERVICE_ESTIMATE_SLUGS = require('./config/service-estimate-slugs');
+const {
+  estimateMarketingRedirectTarget,
+  preserveOriginalQuery,
+} = require('./config/estimate-marketing-redirects');
 
 // Railway terminates TLS upstream and forwards via X-Forwarded-For.
 // Trust a single proxy hop so express-rate-limit can key on the real client IP.
@@ -268,6 +271,16 @@ app.use('/api/ai/chat/report', (req, res, next) => {
   if (process.env.GATE_AI_CONTENT_REPORT === 'false') {
     return res.status(404).json({ error: 'Not found' });
   }
+  next();
+});
+// Secure-card privacy headers must survive EVERY outcome — including the
+// GLOBAL /api limiter's 429s, which fire before the router's own header
+// middleware can run (Codex #2771 r7). Scoped ahead of the limiter; the
+// route's middleware still covers everything downstream.
+app.use('/api/public/secure-card', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
   next();
 });
 app.use('/api/', limiter);
@@ -445,11 +458,18 @@ app.use('/api/admin/pipeline', require('./routes/admin-pipeline'));
 app.use('/api/admin/lookup', adminPropertyLookupRoutes);
 app.use('/api/estimates', estimatePublicRoutes);
 app.use('/api/service-outlines', serviceOutlinePublicRoutes);
-// Customer-facing estimate URL. Service slugs render the SPA quote wizard;
-// everything else remains a server-rendered accepted-estimate token.
+// Public acquisition pages now live on wavespestcontrol.com. Redirect them
+// before the SPA loads, preserving campaign parameters; URL fragments (the
+// voicemail prefill credential) remain browser-only and carry across the HTTP
+// redirect automatically. Unknown /estimate/:token values are private customer
+// estimates and must continue through the tokenized estimate renderer.
+app.get(['/estimate', '/estimate/', '/quote', '/quote/'], (req, res) => {
+  const target = estimateMarketingRedirectTarget(req.path);
+  return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
+});
 app.get('/estimate/:token', (req, res, next) => {
-  const slug = String(req.params.token || '').toLowerCase();
-  if (SERVICE_ESTIMATE_SLUGS.has(slug)) return next();
+  const target = estimateMarketingRedirectTarget(`/estimate/${req.params.token}`);
+  if (target) return res.redirect(301, preserveOriginalQuery(target, req.originalUrl));
   return estimatePublicRoutes.handleEstimateView(req, res, next);
 });
 app.use('/api/public/quote', paidEstimatorDailyLimiter, publicQuoteRoutes);
@@ -484,6 +504,9 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// "Secure your appointment" card-on-file capture page (appointment-card-
+// request funnel). Token-gated; unreachable until the funnel sends links.
+app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));

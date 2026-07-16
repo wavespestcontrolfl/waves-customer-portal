@@ -111,4 +111,79 @@ describe('discount engine service filters', () => {
     expect(matching.totalDiscount).toBe(25);
     expect(mismatched.discounts).toEqual([]);
   });
+
+  test('manual selection still enforces customer and service eligibility', async () => {
+    const discount = serviceScopedDiscount({
+      requires_military: true,
+      service_key_filter: 'termite_inspection',
+      min_subtotal: 100,
+    });
+
+    await expect(DiscountEngine.manualEligibilityFailures(discount, {
+      id: 'customer-1',
+      is_military: false,
+    }, {
+      subtotal: 75,
+      serviceKey: 'general_pest',
+    })).resolves.toEqual([
+      'military status',
+      'service termite_inspection',
+      'minimum subtotal $100',
+    ]);
+  });
+
+  test('treats One-Time as an exact tier instead of an ordered membership tier', async () => {
+    const discount = serviceScopedDiscount({ requires_waveguard_tier: 'One-Time' });
+
+    await expect(DiscountEngine.manualEligibilityFailures(discount, {
+      id: 'customer-1',
+      waveguard_tier: 'One-Time',
+    })).resolves.toEqual([]);
+    await expect(DiscountEngine.manualEligibilityFailures(discount, {
+      id: 'customer-2',
+      waveguard_tier: 'Silver',
+    })).resolves.toEqual(['WaveGuard One-Time']);
+  });
+
+  test('fails closed for expired or payment-restricted manual discounts', async () => {
+    const discount = serviceScopedDiscount({
+      promo_code_expiry: '2020-01-01T00:00:00.000Z',
+      promo_code_max_uses: 5,
+      promo_code_current_uses: 5,
+      payment_method_condition: 'us_bank_account',
+    });
+
+    await expect(DiscountEngine.manualEligibilityFailures(discount, null, {
+      subtotal: 100,
+    })).resolves.toEqual([
+      'promo code expiry',
+      'payment method us_bank_account',
+    ]);
+  });
+
+  test('does not reapply the promo claim cap during redemption', async () => {
+    const discount = serviceScopedDiscount({
+      promo_code_max_uses: 5,
+      promo_code_current_uses: 5,
+    });
+
+    await expect(DiscountEngine.manualEligibilityFailures(discount, null, {
+      subtotal: 100,
+    })).resolves.toEqual([]);
+  });
+
+  test('caps each applied result so recorded rows reconcile to the subtotal', async () => {
+    mockDiscounts([
+      serviceScopedDiscount({ id: 'discount-1', discount_type: 'fixed_amount', amount: 80 }),
+      serviceScopedDiscount({ id: 'discount-2', discount_type: 'fixed_amount', amount: 80 }),
+      serviceScopedDiscount({ id: 'discount-3', discount_type: 'fixed_amount', amount: 10 }),
+    ]);
+
+    const result = await DiscountEngine.calculateDiscounts(null, { subtotal: 100 });
+
+    expect(result.discounts.map((row) => row.discount_dollars)).toEqual([80, 20]);
+    expect(result.discounts.map((row) => row.id)).toEqual(['discount-1', 'discount-2']);
+    expect(result.totalDiscount).toBe(100);
+    expect(result.afterDiscount).toBe(0);
+  });
 });

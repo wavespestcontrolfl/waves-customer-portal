@@ -75,7 +75,31 @@ async function getReviewItem(opportunityId) {
       .first(),
   ]);
 
-  return buildReviewItem({ opportunity, brief, run, includeDraftBody: true });
+  // Remediation/park state for the run's PR (detail view only — one extra
+  // lookup). Before this, codex_remediation_state was read by NO admin route,
+  // so a parked Codex remediation was invisible to the operator. Fail-soft:
+  // the detail must render even when the table is missing.
+  let remediation = null;
+  const prNumber = prNumberFromUrl(run?.astro_pr_url);
+  if (prNumber) {
+    try {
+      const row = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
+      if (row) {
+        remediation = {
+          pr_number: row.pr_number,
+          status: row.status,
+          rounds: row.rounds,
+          park_reason: row.park_reason,
+          parked_head_sha: row.parked_head_sha,
+          updated_at: row.updated_at,
+        };
+      }
+    } catch (err) {
+      logger.warn(`[autonomous-review-queue] remediation lookup failed for PR #${prNumber}: ${err.message}`);
+    }
+  }
+
+  return buildReviewItem({ opportunity, brief, run, remediation, includeDraftBody: true });
 }
 
 async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null } = {}) {
@@ -226,7 +250,12 @@ function latestByOpportunity(rows = []) {
   return out;
 }
 
-function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) {
+function prNumberFromUrl(url) {
+  const match = String(url || '').match(/\/pull\/(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function buildReviewItem({ opportunity, brief, run, remediation = null, includeDraftBody = false }) {
   const scoreBreakdown = parseJsonMaybe(opportunity?.score_breakdown, {});
   const signalMetadata = parseJsonMaybe(opportunity?.signal_metadata, {});
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
@@ -278,6 +307,14 @@ function buildReviewItem({ opportunity, brief, run, includeDraftBody = false }) 
       skip_reason: run.skip_reason,
       failure_message: run.failure_message,
       reviewer_notes: run.reviewer_notes,
+      // PR handle + live poller state: a run parked at astro_pr_pending_merge
+      // previously reached the operator with no PR link and no visible reason
+      // for the wait (poll_pending_* landed in the DB but no route exposed it).
+      astro_pr_url: run.astro_pr_url || null,
+      published_url: run.published_url || null,
+      poll_pending_reason: run.poll_pending_reason || null,
+      poll_pending_since: run.poll_pending_since || null,
+      remediation,
       trust_build_count_after: run.trust_build_count_after,
       claimed_at: run.claimed_at,
       completed_at: run.completed_at,

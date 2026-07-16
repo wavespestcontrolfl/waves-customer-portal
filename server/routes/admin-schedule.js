@@ -19,6 +19,7 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
+const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
@@ -573,6 +574,8 @@ function copyLineDiscountFields(target, source, cols) {
   if (cols.line_discount_type && source.line_discount_type) target.line_discount_type = source.line_discount_type;
   if (cols.line_discount_amount && source.line_discount_amount != null) target.line_discount_amount = source.line_discount_amount;
   if (cols.line_discount_dollars && source.line_discount_dollars != null) target.line_discount_dollars = source.line_discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function copyAppointmentDiscountFields(target, source, cols) {
@@ -582,6 +585,29 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
+}
+
+function clearAppointmentDiscountCatalogFields(target, cols) {
+  if (!target || !cols) return;
+  if (cols.discount_id) target.discount_id = null;
+  if (cols.discount_name) target.discount_name = null;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
+}
+
+function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
+  const existingType = existing?.discount_type || null;
+  const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
+    ? null
+    : Number(existing.discount_amount);
+  const nextType = discountType === undefined ? existingType : (discountType || null);
+  const nextAmount = discountAmount === undefined
+    ? existingAmount
+    : (discountAmount == null || discountAmount === '' ? null : Number(discountAmount));
+  return nextType !== existingType
+    || (nextAmount == null ? existingAmount != null : existingAmount == null || Math.abs(nextAmount - existingAmount) >= 0.005);
 }
 
 function copyAddonDiscountFields(target, source, cols) {
@@ -592,6 +618,8 @@ function copyAddonDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.service_key_snapshot) target.service_key_snapshot = source.service_key_snapshot || null;
+  if (cols.service_category_snapshot) target.service_category_snapshot = source.service_category_snapshot || null;
 }
 
 function httpError(status, message) {
@@ -829,10 +857,18 @@ async function loadInvoiceDiscount(discountId) {
   return discount;
 }
 
-async function resolveLineDiscount(input, baseAmount, customer) {
+async function resolveLineDiscount(input, baseAmount, customer, serviceContext = {}) {
   const discountId = input?.discountId || input?.id || null;
   if (!discountId) return null;
   const row = await loadInvoiceDiscount(discountId);
+  const failures = await DiscountEngine.manualEligibilityFailures(row, customer, {
+    subtotal: baseAmount,
+    serviceKey: serviceContext.serviceKey || null,
+    serviceCategory: serviceContext.serviceCategory || null,
+  });
+  if (failures.length) {
+    throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
+  }
   const resolved = calculateDiscountDollars(row, baseAmount, input?.discountAmount ?? input?.amount);
   if (!(resolved.dollars > 0)) return null;
   return {
@@ -851,21 +887,42 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer);
+  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
+    serviceKey: serviceRecord?.service_key,
+    serviceCategory: serviceRecord?.category,
+  });
   const primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
+  const appointmentServiceLines = [{
+    amount: primaryNet || 0,
+    serviceKey: serviceRecord?.service_key || null,
+    serviceCategory: serviceRecord?.category || null,
+  }];
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
     const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
-    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer);
+    const addonService = addon.serviceId
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      : null;
+    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
+      serviceKey: addonService?.service_key,
+      serviceCategory: addonService?.category,
+    });
     const net = base == null
       ? null
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
+    appointmentServiceLines.push({
+      amount: net || 0,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
+    });
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
@@ -884,14 +941,40 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    let appointmentDiscountBase = subtotal;
+    if (appointmentDiscount) {
+      const isServiceScoped = Boolean(
+        appointmentDiscount.service_key_filter || appointmentDiscount.service_category_filter
+      );
+      const matchingLines = isServiceScoped
+        ? appointmentServiceLines.filter((line) => (
+          (!appointmentDiscount.service_key_filter || appointmentDiscount.service_key_filter === line.serviceKey)
+          && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
+        ))
+        : appointmentServiceLines;
+      const eligibilityContext = matchingLines[0] || {};
+      appointmentDiscountBase = isServiceScoped
+        ? matchingLines.reduce((sum, line) => sum + line.amount, 0)
+        : subtotal;
+      const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscount, customer, {
+        subtotal: appointmentDiscountBase,
+        serviceKey: eligibilityContext.serviceKey || null,
+        serviceCategory: eligibilityContext.serviceCategory || null,
+      });
+      if (failures.length) {
+        throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
+      }
+    }
     const resolvedAppointmentDiscount = appointmentDiscount
-      ? calculateDiscountDollars(appointmentDiscount, subtotal, discountAmount)
+      ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
       : null;
     finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
     return {
       finalPrice,
       primaryBase,
       primaryNet,
+      primaryServiceKey: serviceRecord?.service_key || null,
+      primaryServiceCategory: serviceRecord?.category || null,
       primaryDiscount,
       addonLines,
       appointmentDiscount: appointmentDiscount ? {
@@ -900,6 +983,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
         discountDollars: resolvedAppointmentDiscount.dollars,
+        serviceKeyFilter: appointmentDiscount.service_key_filter || null,
+        serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       } : null,
     };
   }
@@ -908,6 +993,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     finalPrice,
     primaryBase,
     primaryNet,
+    primaryServiceKey: serviceRecord?.service_key || null,
+    primaryServiceCategory: serviceRecord?.category || null,
     primaryDiscount,
     addonLines,
     appointmentDiscount: null,
@@ -924,6 +1011,8 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
       estimated_price: addon.price != null ? addon.price : null,
     };
     if (addonCols.base_price && addon.base != null) addonData.base_price = addon.base;
+    if (addonCols.service_key_snapshot) addonData.service_key_snapshot = addon.serviceKey || addon.service_key_snapshot || null;
+    if (addonCols.service_category_snapshot) addonData.service_category_snapshot = addon.serviceCategory || addon.service_category_snapshot || null;
     if (addonCols.estimated_duration_minutes && addon.estimatedDuration != null && addon.estimatedDuration !== '' && !isNaN(parseInt(addon.estimatedDuration, 10))) {
       addonData.estimated_duration_minutes = parseInt(addon.estimatedDuration, 10);
     }
@@ -986,19 +1075,32 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
+  const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
-    + (Array.isArray(addonLines) ? addonLines : []).reduce((sum, line) => sum + (line.price || 0), 0);
+    + addons.reduce((sum, line) => sum + (line.price || 0), 0);
   if (!(subtotal > 0)) {
     return { price: null, appointmentDiscountDollars: null };
   }
-  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(pricing.appointmentDiscount, subtotal);
+  const discount = pricing.appointmentDiscount;
+  const isServiceScoped = Boolean(discount?.serviceKeyFilter || discount?.serviceCategoryFilter);
+  const matchesScope = (serviceKey, serviceCategory) => (
+    (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
+    && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
+  );
+  const discountBase = isServiceScoped
+    ? (matchesScope(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
+      + addons.reduce((sum, line) => (
+        matchesScope(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
+      ), 0)
+    : subtotal;
+  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
   return {
     price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
+function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope = null) {
   const addons = Array.isArray(addonRows) ? addonRows : [];
   const addonNetTotal = addons.reduce((sum, addon) => {
     const n = Number(addon.estimated_price);
@@ -1020,19 +1122,36 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
       : 0;
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
+  let discountBase = subtotal;
+  if (discountScope?.isScoped) {
+    const servicesById = discountScope.servicesById || new Map();
+    const matchesScope = (serviceId) => {
+      const service = servicesById.get(serviceId) || {};
+      return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
+        && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
+    };
+    discountBase = matchesScope(parent?.service_id) ? primaryNet : 0;
+    discountBase += addons.reduce((sum, addon) => {
+      const amount = Number(addon.estimated_price);
+      return matchesScope(addon.service_id) && Number.isFinite(amount) && amount > 0
+        ? sum + amount
+        : sum;
+    }, 0);
+    discountBase = Math.round(discountBase * 100) / 100;
+  }
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars({
     discountType: parent?.discount_type,
     discountAmount: parent?.discount_amount,
-  }, subtotal);
+  }, discountBase);
   return {
     price: subtotal > 0 ? Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100) : null,
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows) {
+function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows, discountScope = null) {
   if (!target || !cols) return;
-  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
+  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
   // Re-service callbacks must stay flagged on every cloned visit (ongoing
@@ -1042,6 +1161,33 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   // billing a free callback — and drop it from callback reporting — once the
   // seeded visits are exhausted.
   if (cols.is_callback && parent?.is_callback) target.is_callback = true;
+}
+
+async function loadStoredDiscountScope(_database, parent, addonRows = []) {
+  const serviceKeyFilter = parent?.discount_service_key_filter || null;
+  const serviceCategoryFilter = parent?.discount_service_category_filter || null;
+  if (!serviceKeyFilter && !serviceCategoryFilter) return null;
+
+  const lines = [parent, ...(Array.isArray(addonRows) ? addonRows : [])];
+  const servicesById = new Map();
+  for (const line of lines) {
+    if (!line?.service_id) continue;
+    if ((serviceKeyFilter && !line.service_key_snapshot)
+      || (serviceCategoryFilter && !line.service_category_snapshot)) {
+      throw new Error('Cannot replay a scoped recurring discount because a service identity snapshot is missing');
+    }
+    servicesById.set(line.service_id, {
+      id: line.service_id,
+      service_key: line.service_key_snapshot || null,
+      category: line.service_category_snapshot || null,
+    });
+  }
+  return {
+    isScoped: true,
+    serviceKeyFilter,
+    serviceCategoryFilter,
+    servicesById,
+  };
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -2256,6 +2402,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
+      if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
+      if (cols.service_category_snapshot) insertData.service_category_snapshot = pricing.primaryServiceCategory || null;
       if (cols.estimated_price && finalPrice != null) insertData.estimated_price = finalPrice;
       if (cols.primary_line_price && pricing.primaryBase != null) insertData.primary_line_price = pricing.primaryBase;
       if (cols.urgency) insertData.urgency = urgency || 'routine';
@@ -2280,6 +2428,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
       if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
       if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
+      if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+      if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2332,6 +2482,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
           recurring_parent_id: svc.id,
         };
         if (cols.recurring_ongoing) childData.recurring_ongoing = !!recurringOngoing;
+        if (cols.service_id && serviceId) childData.service_id = serviceId;
+        if (cols.service_key_snapshot) childData.service_key_snapshot = pricing.primaryServiceKey || null;
+        if (cols.service_category_snapshot) childData.service_category_snapshot = pricing.primaryServiceCategory || null;
         if (cols.recurring_nth && rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) childData.recurring_nth = parseInt(rOpts.nth);
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
@@ -2354,6 +2507,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
         if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
         if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
+        if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+        if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2398,6 +2553,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
             notes: combinedNotes,
           };
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
+          if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
+          if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
@@ -2417,6 +2574,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
           if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
           if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
+          if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+          if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -3210,6 +3369,19 @@ router.put('/:id/update-details', async (req, res, next) => {
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
+    let appointmentDiscountChanged = false;
+    let appointmentDiscountCols = null;
+    if (discountType !== undefined || discountAmount !== undefined) {
+      appointmentDiscountCols = await db('scheduled_services').columnInfo();
+      const existingDiscount = await db('scheduled_services')
+        .where({ id: req.params.id })
+        .first('discount_type', 'discount_amount');
+      appointmentDiscountChanged = appointmentDiscountInputChanged(
+        existingDiscount,
+        discountType,
+        discountAmount
+      );
+    }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
     // lines for this appointment (replace strategy) and recompute the stored
@@ -3235,26 +3407,34 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         let incomingIsReService = null; // null = unknown → leave flag as-is
         let resolvedServiceId; // undefined = don't touch service_id
+        let resolvedServiceKey;
+        let resolvedServiceCategory;
 
         if (serviceId !== undefined) {
           const svcRow = serviceId
-            ? await db('services').where({ id: serviceId }).first('service_key', 'name').catch(() => null)
+            ? await db('services').where({ id: serviceId }).first('service_key', 'category', 'name').catch(() => null)
             : null;
           incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
           resolvedServiceId = serviceId || null;
+          resolvedServiceKey = svcRow?.service_key || null;
+          resolvedServiceCategory = svcRow?.category || null;
         } else if (isReService({ serviceType })) {
           // Label-only switch INTO a re-service (dispatch card). Resolve the
           // catalog row so completion-profile resolution (keyed off service_id)
           // is correct; lawn vs pest is inferred from the label.
           incomingIsReService = true;
           const reKey = /lawn|turf/i.test(serviceType) ? 'lawn_re_service' : 'pest_re_service';
-          const reSvc = await db('services').where({ service_key: reKey }).first('id').catch(() => null);
+          const reSvc = await db('services').where({ service_key: reKey }).first('id', 'service_key', 'category').catch(() => null);
           resolvedServiceId = reSvc?.id || null;
+          resolvedServiceKey = reSvc?.service_key || null;
+          resolvedServiceCategory = reSvc?.category || null;
         }
 
         if (incomingIsReService !== null) {
           if (cols.is_callback) updates.is_callback = incomingIsReService;
           if (cols.service_id && resolvedServiceId !== undefined) updates.service_id = resolvedServiceId;
+          if (cols.service_key_snapshot && resolvedServiceId !== undefined) updates.service_key_snapshot = resolvedServiceKey || null;
+          if (cols.service_category_snapshot && resolvedServiceId !== undefined) updates.service_category_snapshot = resolvedServiceCategory || null;
         }
 
         if (incomingIsReService === true) {
@@ -3344,8 +3524,9 @@ router.put('/:id/update-details', async (req, res, next) => {
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
-        if (cols.discount_type) updates.discount_type = discountType || null;
-        if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
+        if (cols.discount_amount && discountAmount !== undefined) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.create_invoice_on_complete && createInvoice !== undefined) updates.create_invoice_on_complete = !!createInvoice;
       } catch {}
     }
@@ -3405,6 +3586,16 @@ router.put('/:id/update-details', async (req, res, next) => {
     // primary line + add-on lines, then replace add-on rows in the transaction.
     if (Array.isArray(addons)) {
       const cols = await db('scheduled_services').columnInfo();
+      const addonServiceIds = Array.from(new Set(addons
+        .map((addon) => addon?.serviceId)
+        .filter(Boolean)));
+      const addonServices = addonServiceIds.length > 0
+        ? await db('services').whereIn('id', addonServiceIds).select('id', 'service_key', 'category')
+        : [];
+      const addonServiceById = new Map(addonServices.map((service) => [service.id, service]));
+      if (addonServices.length !== addonServiceIds.length) {
+        return res.status(400).json({ error: 'One or more add-on services no longer exist' });
+      }
       const toMoney = (v) => {
         if (v == null || v === '') return null;
         const n = Number(v);
@@ -3414,6 +3605,7 @@ router.put('/:id/update-details', async (req, res, next) => {
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
         if (!serviceName) continue;
+        const catalogService = a.serviceId ? addonServiceById.get(a.serviceId) : null;
         const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
@@ -3432,6 +3624,8 @@ router.put('/:id/update-details', async (req, res, next) => {
         }
         normalizedAddons.push({
           serviceId: a.serviceId || null,
+          serviceKey: catalogService?.service_key || null,
+          serviceCategory: catalogService?.category || null,
           serviceName: serviceName.slice(0, 200),
           base: gross,
           price: net,
@@ -3455,16 +3649,25 @@ router.put('/:id/update-details', async (req, res, next) => {
           primaryGross = Math.max(0, Math.round((total - addonGross) * 100) / 100);
         }
       }
-      const addonNetTotal = normalizedAddons.reduce((s, l) => s + (l.price || 0), 0);
       const hasAnyPrice = primaryGross != null || normalizedAddons.some((l) => l.price != null);
       if (hasAnyPrice) {
         // This editor neither displays nor edits the appointment-level discount
         // or the primary line discount, and it runs on every save once an
         // appointment has add-ons. Preserve both so an unrelated edit can't
         // silently drop a discount and overcharge at invoicing.
+        const existingFields = [
+          'service_id',
+          'discount_type',
+          'discount_amount',
+          'line_discount_dollars',
+        ];
+        if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
+        if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
+        if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
+        if (cols.discount_service_category_filter) existingFields.push('discount_service_category_filter');
         const existing = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('discount_type', 'discount_amount', 'line_discount_dollars')
+          .first(...existingFields)
           .catch(() => null);
 
         // Appointment-level discount: the editor only sends discountType/
@@ -3490,20 +3693,31 @@ router.put('/:id/update-details', async (req, res, next) => {
           ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
           : 0;
 
-        const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
-        const finalPrice = applyDiscount(subtotal, effDiscountType, effDiscountAmount);
-        const discountDollars = Math.max(0, Math.round((subtotal - finalPrice) * 100) / 100);
-        if (cols.estimated_price) updates.estimated_price = finalPrice;
+        const financials = calculateVisitFinancialsForAddons({
+          primaryNet,
+          primaryServiceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
+          primaryServiceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          appointmentDiscount: effDiscountType ? {
+            discountType: effDiscountType,
+            discountAmount: effDiscountAmount,
+            serviceKeyFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_key_filter || null),
+            serviceCategoryFilter: appointmentDiscountChanged
+              ? null
+              : (existing?.discount_service_category_filter || null),
+          } : null,
+        }, normalizedAddons);
+        if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
         if (discountProvided) {
-          if (cols.discount_id) updates.discount_id = null;
-          if (cols.discount_name) updates.discount_name = null;
+          if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
-        if (cols.discount_dollars) updates.discount_dollars = discountDollars > 0 ? discountDollars : null;
+        if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
         // Leave the primary line_discount_* columns untouched — invoicing reads
         // them and this editor can't resend them.
       }
@@ -3549,8 +3763,7 @@ router.put('/:id/update-details', async (req, res, next) => {
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
         if (cols.primary_line_price) updates.primary_line_price = primaryGross;
-        if (cols.discount_id) updates.discount_id = null;
-        if (cols.discount_name) updates.discount_name = null;
+        clearAppointmentDiscountCatalogFields(updates, cols);
         if (cols.discount_type) updates.discount_type = discountType || (replayDiscountDollars > 0 ? 'fixed_amount' : null);
         if (cols.discount_amount) {
           updates.discount_amount = (discountAmount != null && discountAmount !== '')
@@ -3572,7 +3785,11 @@ router.put('/:id/update-details', async (req, res, next) => {
         const cols = await db('scheduled_services').columnInfo();
         if (cols.discount_type) updates.discount_type = discountType || null;
         if (cols.discount_amount) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
+        if (appointmentDiscountChanged) clearAppointmentDiscountCatalogFields(updates, cols);
       } catch {}
+    }
+    if (appointmentDiscountChanged) {
+      clearAppointmentDiscountCatalogFields(updates, appointmentDiscountCols);
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
@@ -4010,6 +4227,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           try {
             parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parent.id });
           } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+          const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
           // Dedupe shifted child dates — same rationale as the POST spawn:
           // skip-weekends can collapse consecutive recurrences onto the
           // same weekday.
@@ -4059,7 +4277,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
-              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
+              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
               // Inherit the (freshly-updated) parent's third-party Bill-To so
@@ -5520,8 +5738,9 @@ router.put('/:id/status', async (req, res, next) => {
                   parentAddons = await db('scheduled_service_addons')
                     .where({ scheduled_service_id: parentId });
                 } catch { parentAddons = []; }
+                const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
-                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
+                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Post-insert re-check closes the remaining race: a
                 // cancellation can stop the series between the pre-insert
@@ -6829,6 +7048,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     try {
       parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
     } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+    const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
 
     // Boosters share recurring_parent_id but have is_recurring=false;
     // exclude them so the next-date math keys off the true cadence.
@@ -6917,7 +7137,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -6976,7 +7196,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -7126,6 +7346,12 @@ router._test = {
   recurringTemplateTechnicianId,
   shouldPreserveParentTemplateForThisOnlyAssignment,
   reportCopyRejection,
+  buildAppointmentPricing,
+  calculateVisitFinancialsForAddons,
+  calculateStoredVisitFinancials,
+  loadStoredDiscountScope,
+  clearAppointmentDiscountCatalogFields,
+  appointmentDiscountInputChanged,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
