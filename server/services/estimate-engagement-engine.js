@@ -36,6 +36,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
 const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
+const { followupEmailVars } = require('./estimate-followup-copy');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
 
@@ -677,7 +678,19 @@ async function processDueBatch(now = new Date()) {
           templateKey: rule.template_key,
           stage: `engage_${rule.rule_key}`,
           ...(expiringLifecycle ? { idempotencySuffix: expiringLifecycle.toISOString() } : {}),
-          payload: followupShared.estimateEmailPayload(est, firstName, emailUrl),
+          // Per-category copy slots (PR 3): the estimate.engage_* templates
+          // render {{service_label}}/{{category_*}} from the copy packs —
+          // truth-scope demotion rules live in estimate-followup-copy.js.
+          // Expiring rules additionally carry the deadline for the copy
+          // (same ET formatting as the extension email).
+          payload: followupShared.estimateEmailPayload(est, firstName, emailUrl, {
+            ...followupEmailVars(est),
+            ...(expiringLifecycle ? {
+              expires_date: expiringLifecycle.toLocaleDateString('en-US', {
+                month: 'long', day: 'numeric', timeZone: 'America/New_York',
+              }),
+            } : {}),
+          }),
         },
       });
       if (ok) {

@@ -334,6 +334,20 @@ describe('processDueJobs', () => {
     );
     // Non-expiring stages keep the plain per-(stage, estimate) key.
     expect(followupShared.sendDualChannel.mock.calls[0][1].email.idempotencySuffix).toBeUndefined();
+    // PR 3: the payload's extra carries the per-category copy slots (pest
+    // pack here — inferEstimateServiceLines is mocked to [{key:'pest'}]).
+    expect(followupShared.estimateEmailPayload).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'est-1' }), 'Taylor', 'url',
+      expect.objectContaining({
+        service_label: 'pest control',
+        category_headline: expect.any(String),
+        category_hook: expect.any(String),
+        category_benefit: expect.stringContaining('90-day'),
+        category_question: expect.any(String),
+      }),
+    );
+    // Non-expiring rules carry no deadline variable.
+    expect(followupShared.estimateEmailPayload.mock.calls[0][3].expires_date).toBeUndefined();
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'done' }));
     expect(followupShared.bumpFollowupCounters).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
@@ -625,6 +639,16 @@ describe('processDueJobs', () => {
       'est-1', 'expiring_engaged', 'estimate.engage_expiring',
       expect.objectContaining({ deadline: expires.toISOString() }),
       expect.objectContaining({ requireExpiresAt: expires }),
+    );
+    // PR 3: expiring sends carry the ET-formatted deadline for the copy.
+    expect(followupShared.estimateEmailPayload).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), expect.anything(),
+      expect.objectContaining({
+        service_label: 'pest control',
+        expires_date: expires.toLocaleDateString('en-US', {
+          month: 'long', day: 'numeric', timeZone: 'America/New_York',
+        }),
+      }),
     );
   });
 
