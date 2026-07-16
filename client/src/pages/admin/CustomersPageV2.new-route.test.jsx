@@ -66,7 +66,13 @@ describe("CustomersPageV2 new-customer route", () => {
           id: "cust-1",
           firstName: "Ada",
           lastName: "Lovelace",
-          address: {},
+          phone: "9415550123",
+          address: {
+            line1: "123 Main Street",
+            city: "Lakewood Ranch",
+            state: "FL",
+            zip: "34202",
+          },
         }],
         total: 1,
         totalPages: 1,
@@ -89,9 +95,16 @@ describe("CustomersPageV2 new-customer route", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole("button", {
+    const profileButton = await screen.findByRole("button", {
       name: "Open Ada Lovelace customer profile",
-    }));
+    });
+    const row = profileButton.closest('[data-customer-id="cust-1"]');
+    expect(row).not.toHaveAttribute("role");
+    expect(row).not.toHaveAttribute("tabindex");
+    expect(profileButton.querySelector("button, a")).toBeNull();
+    expect(screen.getByRole("link", { name: "SMS" })).toBeInTheDocument();
+
+    fireEvent.click(profileButton);
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent(
         "/admin/customers?customerId=cust-1",
@@ -102,5 +115,20 @@ describe("CustomersPageV2 new-customer route", () => {
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
     });
+  });
+
+  it("keeps the mobile filter dialog above the persistent navigation", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/customers"]}>
+        <Routes>
+          <Route path="/admin/customers" element={<CustomersPageV2 />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Filter customers" }),
+    );
+    expect(screen.getByRole("dialog")).toHaveStyle({ zIndex: "100" });
   });
 });

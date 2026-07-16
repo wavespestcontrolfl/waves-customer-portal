@@ -1377,6 +1377,7 @@ export default function CustomersPageV2() {
               <button
                 type="button"
                 onClick={() => setShowFilters(true)}
+                aria-label="Filter customers"
                 className="inline-flex items-center justify-center gap-1.5 u-label px-3 h-11 bg-white text-ink-secondary border-hairline border-zinc-300 rounded-sm transition-colors u-focus-ring"
               >
                 {" "}
@@ -1439,7 +1440,11 @@ export default function CustomersPageV2() {
             {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
           </div>
           {/* Filters dialog */}
-          <Dialog open={showFilters} onClose={() => setShowFilters(false)}>
+          <Dialog
+            open={showFilters}
+            onClose={() => setShowFilters(false)}
+            style={{ zIndex: 100 }}
+          >
             {" "}
             <DialogHeader onClose={() => setShowFilters(false)}>
               {" "}
@@ -1611,27 +1616,22 @@ export default function CustomersPageV2() {
                       const addr = formatCustomerAddress(c.address);
                       return (
                         <div
-                          onClick={() => openCustomerProfile(c.id)}
-                          onKeyDown={(event) => {
-                            if (event.target !== event.currentTarget) return;
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              openCustomerProfile(c.id);
-                            }
-                          }}
-                          role="button"
-                          tabIndex={0}
-                          aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
+                          data-customer-id={c.id}
+                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
                           style={{ height: 64 }}
                         >
                           {" "}
                           <HealthDot score={c.healthScore} />{" "}
                           <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                             {" "}
-                            <div className="text-14 font-medium text-ink-primary truncate">
+                            <button
+                              type="button"
+                              onClick={() => openCustomerProfile(c.id)}
+                              aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                              className="text-14 font-medium text-blue-700 underline decoration-dotted underline-offset-2 truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+                            >
                               {c.firstName} {c.lastName}
-                            </div>
+                            </button>
                             {addr ? (
                               <a
                                 href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
