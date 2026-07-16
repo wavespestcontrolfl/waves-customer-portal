@@ -1434,6 +1434,7 @@ export default function PayPageV2() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [paymentState, setPaymentState] = useState('idle');
   const [paymentError, setPaymentError] = useState(null);
   const [stripeSetup, setStripeSetup] = useState(null);
@@ -1483,15 +1484,21 @@ export default function PayPageV2() {
     // Abort on unmount/token change so a slow response can't setState against
     // an unmounted page (or land stale data under a different token).
     const controller = new AbortController();
+    setLoading(true);
+    setError(null);
     fetch(`${API_BASE}/pay/${token}`, { signal: controller.signal })
       .then((r) => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
+        if (!r.ok) {
+          const loadError = new Error(r.status === 404 ? 'Invoice not found' : 'Failed to load');
+          loadError.status = r.status;
+          throw loadError;
+        }
         return r.json();
       })
       .then((d) => { if (!controller.signal.aborted) { setData(d); setLoading(false); } })
-      .catch((e) => { if (!controller.signal.aborted) { setError(e.message); setLoading(false); } });
+      .catch((e) => { if (!controller.signal.aborted) { setError({ message: e.message, status: e.status }); setLoading(false); } });
     return () => controller.abort();
-  }, [token]);
+  }, [token, loadAttempt]);
 
   // Stripe redirect return (3DS, bank redirect).
   //
@@ -1907,7 +1914,7 @@ export default function PayPageV2() {
     );
   }
 
-  if (error || !data) {
+  if (error?.status === 404) {
     return (
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
@@ -1916,6 +1923,22 @@ export default function PayPageV2() {
             <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
               The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
             </p>
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't load that invoice</SerifHeading>
+            <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              This looks temporary. Your link is still valid—try again in a moment.
+            </p>
+            <BrandButton onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Try again</BrandButton>
           </BrandCard>
         </div>
       </WavesShell>

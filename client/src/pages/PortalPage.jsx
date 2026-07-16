@@ -11436,7 +11436,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               </div>
               <div style={{ fontSize: 22, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, marginTop: 16 }}>Request sent</div>
               <div style={{ fontSize: 15, color: B.textBody, marginTop: 8, lineHeight: 1.55 }}>
-                Waves will review this and text you when it is assigned.
+                Waves will review this and follow up directly.
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
               </div>
               <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
