@@ -83,6 +83,7 @@ import {
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
+import { requestDispatchSync } from "../../lib/dispatchSync";
 
 const TechMatchPanel = lazy(
   () => import("../../components/dispatch/TechMatchPanelV2"),
@@ -1436,21 +1437,17 @@ export default function DispatchPageV2({
     setSyncing(true);
     setSyncMsg("");
     try {
-      const res = await fetch(`${API_BASE}/dispatch/sync`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ date }),
+      const d = await requestDispatchSync({
+        apiBase: API_BASE,
+        date,
+        token: localStorage.getItem("waves_admin_token"),
       });
-      const d = await res.json();
       setSyncMsg(
         d.message || `Synced ${d.bridge?.synced || 0} jobs from schedule`,
       );
       setTimeout(() => setSyncMsg(""), 5000);
-    } catch {
-      setSyncMsg("Sync failed");
+    } catch (error) {
+      setSyncMsg(error?.message || "Sync failed");
     }
     setSyncing(false);
   };
@@ -1543,8 +1540,10 @@ export default function DispatchPageV2({
           body: JSON.stringify({ status: "en_route" }),
         });
         handleStatusChange(service.id, "en_route");
+        return true;
       } catch (e) {
         alert("En route failed: " + e.message);
+        return false;
       }
     },
     [handleStatusChange],
@@ -2072,6 +2071,8 @@ export default function DispatchPageV2({
           mode="week"
           date={date}
           refreshKey={scheduleRefreshKey}
+          technicians={technicians}
+          onRefresh={() => setScheduleRefreshKey((key) => key + 1)}
           onEdit={(svc) => {
             if (shouldOpenMobileCompletion(svc)) {
               handleComplete(svc);
@@ -2410,6 +2411,8 @@ export default function DispatchPageV2({
               mode="day"
               date={date}
               services={services}
+              technicians={technicians}
+              onRefresh={() => fetchSchedule(date)}
               onEdit={(svc) => {
                 if (shouldOpenMobileCompletion(svc)) {
                   handleComplete(svc);
