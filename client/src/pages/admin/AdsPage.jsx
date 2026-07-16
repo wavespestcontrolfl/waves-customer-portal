@@ -1059,6 +1059,7 @@ function AdvisorTab() {
         },
         body: JSON.stringify({
           action: rec.apply_action,
+          campaignId: rec.campaign_id,
           campaignName: rec.campaign,
           value: rec.apply_value,
           reason: rec.action,
@@ -1096,8 +1097,17 @@ function AdvisorTab() {
   // Only these advisor actions map to an automated change (setBudget/setMode);
   // everything else (add_negative, SEO/GBP/bid/keyword actions) is advisory and
   // must be done by hand — so it never gets an Apply button that could imply it
-  // was executed.
+  // was executed. An auto action without a concrete value (stale pre-apply_value
+  // reports, a fallback rec with no known budget) is equally un-executable —
+  // its Apply click could only ever 422 — so it renders as manual too.
   const AUTO_APPLY_ACTIONS = ["increase_budget", "decrease_budget", "change_mode"];
+  const canAutoApply = (rec) => {
+    if (!AUTO_APPLY_ACTIONS.includes(rec.apply_action)) return false;
+    if (rec.apply_action === "change_mode")
+      return ["base", "spent", "stop"].includes(rec.apply_value);
+    const n = Number(rec.apply_value);
+    return Number.isFinite(n) && n > 0;
+  };
 
   if (loading)
     return (
@@ -1309,7 +1319,7 @@ function AdvisorTab() {
                               </div>
                             )}
                             {rec.apply_action &&
-                              (AUTO_APPLY_ACTIONS.includes(rec.apply_action) ? (
+                              (canAutoApply(rec) ? (
                                 (() => {
                                   const st = applied[globalIdx];
                                   const done = st?.status === "applied";

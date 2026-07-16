@@ -531,37 +531,61 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
 
-    async function resolveCampaign() {
-      if (campaignId) return db('ad_campaigns').where({ id: campaignId }).first();
-      if (campaignName) {
-        return db('ad_campaigns').whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()]).first();
+    const isBudgetAction = action === 'increase_budget' || action === 'decrease_budget';
+    if (!isBudgetAction && action !== 'change_mode') {
+      // add_negative / adjust_bid / SEO / GBP / etc. — no automated action yet.
+      return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
+    }
+
+    // Prefer the stable id the advisor now carries; a bare name is a fallback
+    // for older stored reports. campaign_name is NOT unique (Google vs Meta
+    // rows, duplicated experiments), so a name matching more than one row is
+    // rejected rather than mutating whichever row Postgres returns first.
+    let campaign = null;
+    if (campaignId) {
+      campaign = await db('ad_campaigns').where({ id: campaignId }).first();
+    } else if (campaignName) {
+      const matches = await db('ad_campaigns')
+        .whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()])
+        .select('*');
+      if (matches.length > 1) {
+        return res.status(422).json({ applied: false, error: `More than one campaign is named "${campaignName}" — apply this manually to the right one.` });
       }
-      return null;
+      campaign = matches[0] || null;
+    }
+    if (!campaign) {
+      return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
+    }
+    // The advisor sees every platform's rows, but only Google campaigns are
+    // remotely controllable (the budget manager throws on the rest — that
+    // must surface as an honest "can't", not a 500).
+    if (campaign.platform !== 'google_ads') {
+      return res.status(422).json({ applied: false, manual: true, error: `"${campaign.campaign_name}" is a ${campaign.platform} campaign managed outside this dashboard — apply this in its own Ads Manager.` });
     }
 
     let result;
-    if (action === 'increase_budget' || action === 'decrease_budget') {
-      const campaign = await resolveCampaign();
-      if (!campaign) {
-        return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
-      }
+    if (isBudgetAction) {
       const amount = toFiniteNumber(value);
       if (!(amount > 0)) {
         return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
       }
       result = await getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`);
-    } else if (action === 'change_mode') {
-      const campaign = await resolveCampaign();
-      if (!campaign) {
-        return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
-      }
+    } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
         return res.status(422).json({ applied: false, error: 'This recommendation has no concrete mode (base/spent/stop) — set the mode manually.' });
       }
       result = await getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`);
-    } else {
-      // add_negative / adjust_bid / SEO / GBP / etc. — no automated action yet.
-      return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
+    }
+
+    // A linked campaign whose live push Google refused (shared budget, API
+    // error) is NOT applied — the live budget/mode didn't change, so a green
+    // "Applied" would be the exact lie this endpoint exists to prevent.
+    if (result && result.livePushAttempted && !result.googleAdsUpdated) {
+      return res.status(502).json({
+        applied: false,
+        result,
+        error: 'Google Ads refused the live update — the change was recorded locally but the live budget did not change. Check the campaign in Google Ads.',
+      });
     }
 
     // Count only genuinely-applied actions against today's report.

@@ -383,13 +383,19 @@ class BudgetManager {
     // adsBudgetLivePush — that gate covers only the autonomous cron. NULL
     // daily_budget_base skips the push like the cron does: calculateBudget's
     // $20 fallback must never reach a real campaign.
+    // livePushAttempted lets callers distinguish "Google refused the push"
+    // (googleAdsUpdated false AFTER an attempt — the live budget did NOT
+    // change) from an unlinked/unconfigured campaign where false just means
+    // there was nothing live to push.
     let googleAdsUpdated = false;
+    let livePushAttempted = false;
     if (campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+      livePushAttempted = true;
       const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
       googleAdsUpdated = !!pushed;
     }
 
-    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated };
+    return { campaign: campaign.campaign_name, previousMode: campaign.budget_mode, newMode: mode, newBudget, googleAdsUpdated, livePushAttempted };
   }
 
   /**
@@ -460,6 +466,7 @@ class BudgetManager {
       newBudget: base,
       effectiveBudget,
       googleAdsUpdated,
+      livePushAttempted: pushAttempted,
     };
   }
 }

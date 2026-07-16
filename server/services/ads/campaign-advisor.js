@@ -104,7 +104,9 @@ class CampaignAdvisor {
       const perf30d = last30days.filter(p => p.campaign_id === c.id);
 
       return {
+        id: c.id,
         name: c.campaign_name,
+        platform: c.platform,
         type: c.campaign_type,
         area: c.target_area,
         serviceLine: c.service_line,
@@ -141,7 +143,7 @@ PAID ADS RULES:
 - Flag campaigns where ROAS is declining week-over-week
 - Identify opportunities where impression share is being lost on profitable campaigns
 - Consider capacity — don't recommend scaling ads in areas that are already at 90%+ utilization
-- For an auto-applicable action, "campaign" MUST be the EXACT campaign_name from CAMPAIGN PERFORMANCE, and "apply_value" MUST be set so the change can be applied with one click: for increase_budget/decrease_budget it is the new daily budget in dollars (a number, e.g. 30); for change_mode it is one of "base"|"spent"|"stop". Omit apply_action (or use a non-budget action) when you can't tie the recommendation to a specific campaign and value.
+- For an auto-applicable action (increase_budget/decrease_budget/change_mode), the target MUST be a platform "google_ads" campaign — other platforms are managed in their own Ads Manager and can only be advised on, never auto-applied. Set "campaign" to the EXACT campaign_name AND "campaign_id" to the EXACT id from CAMPAIGN PERFORMANCE (names are not unique; the id is what gets applied), and set "apply_value" so the change can be applied with one click: for increase_budget/decrease_budget it is the new daily budget in dollars (a number, e.g. 30); for change_mode it is one of "base"|"spent"|"stop". Omit apply_action (or use a non-budget action) when you can't tie the recommendation to a specific google_ads campaign and value.
 
 SEO/GSC RULES:
 - Distinguish branded (people already searching "Waves") from non-branded (real organic market capture)
@@ -161,7 +163,7 @@ BUSINESS CONTEXT:
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 
-Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
+Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "campaign_id": "EXACT id from CAMPAIGN PERFORMANCE — REQUIRED for budget/mode actions; omit otherwise", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
 
         messages: [{
           role: 'user',
@@ -237,21 +239,34 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     const recommendations = [];
     const minRoas = parseFloat(targets?.min_roas || 4.0);
 
+    // Only google_ads campaigns get apply_action/apply_value — other platforms
+    // are managed in their own Ads Manager, so their recs stay advisory. A rec
+    // that can't carry a concrete executable value stays advisory too (the
+    // client only renders Apply when the value is concrete).
     for (const c of summaries) {
+      const controllable = c.platform === 'google_ads';
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,
           action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
           reasoning: 'Underperforming campaign burning budget',
-          apply_action: 'change_mode',
-          apply_value: 'stop',
+          ...(controllable ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' } : {}),
         });
       } else if (c.last7d.lostISBudget > 20 && c.last7d.roas >= minRoas) {
+        // setBudget sets the BASE daily budget, so derive the target from the
+        // base (current can be throttled by spent/stop mode); +25%, whole dollars.
+        const baseBudget = Number(c.dailyBudgetBase ?? c.dailyBudgetCurrent);
+        // Math.max keeps tiny budgets from rounding to a no-op "increase".
+        const target = Number.isFinite(baseBudget) && baseBudget > 0
+          ? Math.max(Math.round(baseBudget * 1.25), Math.floor(baseBudget) + 1)
+          : null;
         recommendations.push({
           priority: 'medium', campaign: c.name,
-          action: `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
+          action: target
+            ? `Increase daily budget from $${baseBudget} to $${target} — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`
+            : `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
           reasoning: 'Profitable campaign with headroom',
-          apply_action: 'increase_budget',
+          ...(controllable && target ? { campaign_id: c.id, apply_action: 'increase_budget', apply_value: target } : {}),
         });
       }
     }
