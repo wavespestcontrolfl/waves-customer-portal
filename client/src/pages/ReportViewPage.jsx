@@ -5,7 +5,7 @@ import { showCustomerAlert } from '../components/brand/CustomerDialogHost';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
-import { LawnVisitTimeline } from '../components/report/lawnV2/LawnReportV2';
+import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -1706,7 +1706,9 @@ function readinessSummary(context, mode = 'live', nowMsOverride) {
     areaType: areaTypes.length ? areaTypes.join(', ') : 'Treatment areas',
     status: targets.length ? (allReady ? 'Ready now' : 'Ready time pending') : 'See advisory',
     badge: targets.length ? (allReady ? 'Ready now' : 'Re-entry timing') : 'Readiness noted',
-    headline: allReady ? `Treated ${areaTypes.join(', ').toLowerCase() || 'areas'} areas are ready now.` : (context?.customerSummary || 'Review the readiness details below.'),
+    headline: allReady
+      ? (areaTypes.length ? `Treated ${areaTypes.join(', ').toLowerCase()} areas are ready now.` : 'Treated areas are ready now.')
+      : (context?.customerSummary || 'Review the readiness details below.'),
     precautions: context?.petAdvisory || 'None listed',
   };
 }
@@ -1742,7 +1744,12 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
   const smartStatus = smartStatusSummary(data, mode, nowMs);
   const completedEvent = (data.workflowEvents || []).find((event) => event.type === 'service_completed');
   const completionStatus = completionDisplayTime ? 'Completed' : (completedEvent?.status === 'pending' ? 'In progress' : 'Completed');
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   const serviceLabel = serviceDisplayName(data);
   // "Quarterly Pest Control Service" → "Quarterly Pest Control" so the
   // headline never reads "... Service service is complete".
@@ -2306,8 +2313,17 @@ const CHIP_SEPARATOR_STYLE = {
 };
 
 function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
-  const items = typedReport?.findings;
-  if (!Array.isArray(items) || !items.length) return null;
+  const rawItems = typedReport?.findings;
+  const hasTileText = (item) => {
+    const text = item?.customerValueLabel != null && item.customerValueLabel !== ''
+      ? String(item.customerValueLabel)
+      : (item?.value != null ? String(item.value) : '');
+    return !!text.trim();
+  };
+  // all-valueless snapshots hide the whole card, not a header over zero
+  // tiles (codex P3)
+  const items = Array.isArray(rawItems) ? rawItems.filter(hasTileText) : [];
+  if (!items.length) return null;
   return (
     <section data-glass="card" className="sr-section" id={sectionId} data-section="typed-findings">
       <h2>What we found &amp; did</h2>
@@ -2325,7 +2341,7 @@ function TypedFindingsCard({ typedReport, sectionId = 'typed-findings' }) {
         {items.map((item) => {
           const text = item.customerValueLabel != null && item.customerValueLabel !== ''
             ? String(item.customerValueLabel)
-            : String(item.value);
+            : (item.value != null ? String(item.value) : '');
           // Chips render ONLY from the snapshot's authoritative mapped
           // parts (multi-select fields persist them at completion) — never
           // from splitting the display text, which would shred customer
@@ -3744,11 +3760,15 @@ function ServiceCoverageMap({
   const projection = useMemo(() => buildCoverageProjection(mapLocations), [mapLocations]);
   const legend = Array.isArray(coverage?.legend) && coverage.legend.length
     ? coverage.legend.map((entry) => {
+      // legend entries built by coverageLegendItems carry TONE keys ('green',
+      // 'orange') in `key` and their own tone/Icon/label; server statusLegend
+      // entries carry STATUS keys. Feeding tone keys to coverageStatusConfig
+      // painted every chip gray (audit 2026-07-16) — trust the entry first.
       const config = coverageStatusConfig(entry.key);
       return {
         key: entry.key,
-        tone: config.tone,
-        Icon: config.Icon,
+        tone: entry.tone || config.tone,
+        Icon: entry.Icon || config.Icon,
         label: entry.label || config.label,
       };
     })
@@ -4905,7 +4925,12 @@ function NotFoundState({ glass = false }) {
 
 function LegacyReport({ data, token, glass = false }) {
   const pdfUrl = `${API_BASE}/reports/${token}`;
-  const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  // ALL-CAPS records (older customer rows) title-case for display, same rule
+  // as the contact block ("Hey CHRIS" → "Hey Chris"; audit 2026-07-16)
+  const rawFirstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
+  const firstName = rawFirstName.length > 1 && rawFirstName === rawFirstName.toUpperCase()
+    ? rawFirstName[0] + rawFirstName.slice(1).toLowerCase()
+    : rawFirstName;
   // The /report route is shell-wrapped (owner 2026-07-06), so the shell's
   // sticky header replaces this page-local top bar — rendering both stacked
   // two headers (codex P2, PR #2439). Kept for any standalone render.
@@ -8183,10 +8208,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           <>
             {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
                 only a bottom margin, so without this it sat flush against the
-                Re-enter card above (owner-flagged overlap 2026-07-09). */}
-            <div id="service-timeline" style={{ marginTop: 20 }}>
-              <LawnVisitTimeline timeline={data.visitTimeline || normalizedVisitTimeline} />
-            </div>
+                Re-enter card above (owner-flagged overlap 2026-07-09).
+                Audit 2026-07-16 fixes: (a) the timeline always feeds through
+                normalizeVisitTimeline — the raw server object bypassed the
+                per-event-type config filters; (b) PrintContext rides this
+                mount (the one V2 mount outside its Section wrapper), else PDF
+                capture races the stagger-fade and prints faded/blank rows;
+                (c) the anchor div only renders when the timeline will. */}
+            {normalizedVisitTimeline.enabled && (normalizedVisitTimeline.events || []).length > 0 && (
+              <div id="service-timeline" style={{ marginTop: 20 }}>
+                <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+                  <LawnVisitTimeline timeline={normalizedVisitTimeline} />
+                </LawnPrintContext.Provider>
+              </div>
+            )}
             {mode !== 'live' && (
               <QuickNavigationAndAsk
                 mode={mode}
