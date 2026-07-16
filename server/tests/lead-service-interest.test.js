@@ -901,6 +901,32 @@ describe('composeServiceInterest', () => {
     expect(labelIsSpecialtyPestFamily(null)).toBe(false);
   });
 
+  test('plain pest problem lists keep every family (codex r21)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and bed bugs, roaches',
+    })).toBe('Quarterly Lawn Care Service + Bed Bug Treatment + Pest Control Service');
+    // exterminator-scoped lists still collapse
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and an exterminator for fleas/ticks',
+    })).toBe('Quarterly Lawn Care Service + Flea Control Service');
+  });
+
+  test('WDO survives when termite work is said first (codex r21)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'termite treatment and a WDO report',
+    })).toBe('Quarterly Pest Control Service + Termite Service + WDO Inspection Service');
+  });
+
+  test('located pests without interest context shed article-less rescues (codex r21)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Fire Ant Treatment',
+      requested_service: 'fire ants in lawn and mosquito service',
+    })).toBe('Fire Ant Treatment + Mosquito Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

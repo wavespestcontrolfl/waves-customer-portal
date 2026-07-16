@@ -131,22 +131,16 @@ function stripLocationPhrases(s) {
       // Coordinated phrases keep only the FINAL noun bound to the service
       // word — "ants in THE lawn and shrub care" requests shrub care, and
       // "mosquitoes around palm trees and lawn care" requests lawn care
-      // (codex r6/r18). The ONE exception is article-less "in"-shorthand
-      // ("interested in lawn and shrub care"), which is a request list and
-      // stays whole.
+      // (codex r6/r18). Request LISTS ("interested in lawn and shrub
+      // care") are kept whole by the interest-verb guard above — with no
+      // interest context, "fire ants in lawn and shrub care" is a located
+      // pest plus one request (codex r21).
       const parts = match.split(/\s+(?:and|or|&)\s+/i);
-      const inShorthand = /^\s*in\b/i.test(match) && !LOCATION_HAS_ARTICLE_RE.test(match);
-      if (parts.length > 1 && !inShorthand) {
+      if (parts.length > 1) {
         return ` ${parts[parts.length - 1]}`;
       }
       return match;
     }
-    // The coordinated-tail rescue is for "in"-shorthand requests only
-    // ("interested in lawn and mosquito service") — around/near/on a
-    // vegetation noun is a pest LOCATION even when another service follows
-    // ("mosquitoes around palm trees and lawn care", codex r18).
-    if (/^\s*in\b/i.test(match)
-      && !LOCATION_HAS_ARTICLE_RE.test(match) && COORDINATED_SERVICE_TAIL_RE.test(after)) return match;
     return ' ';
   });
 }
@@ -204,11 +198,14 @@ const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?
 // Slash/comma exterminator pest lists are ONE job — collapse to the first
 // pest so "exterminator for fleas/ticks/roaches/ants" scans one family,
 // not flea + generic pest (codex r20).
-const EXTERMINATE_PEST_LIST_RE = /\b(fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?)(?:\s*[/,]\s*(?:fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?))+/gi;
+// Scoped to exterminator/treat context (the rewrites above produce
+// "treat fleas/ticks/…") — a plain problem list like "bed bugs, roaches"
+// keeps every family (codex r21).
+const EXTERMINATE_PEST_LIST_RE = /\b((?:treat\w*|exterminat\w*)\s+(?:for\s+)?(?:the\s+)?(?:fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?))(?:\s*[/,]\s*(?:fleas?|ticks?|roach(?:es)?|ants?|spiders?|bed[\s-]*bugs?))+/gi;
 const normalizeExterminator = (s) => s
   .replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment')
   .replace(EXTERMINATE_FOR_RE, 'treat ')
-  .replace(EXTERMINATE_PEST_LIST_RE, '$1');
+  .replace(EXTERMINATE_PEST_LIST_RE, '$1'); // keeps only the first listed pest of the treated set
 
 // "palm injection for my palms" / "trunk injection into the palms" — the
 // trailing target noun is part of the SAME injection request, not a second
@@ -337,6 +334,11 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   const rodentWorkEvidence = scanText
     ? /\b(?:rodents?|rats?|mice|mouse)\s+(?:\w+\s+)?(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*|control|service|program|plan|infestation\w*)\b|\b(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*)\s+(?:for\s+)?(?:the\s+)?(?:rodents?|rats?|mice|mouse)\b|\brodent\s+control\b|\bdroppings?\b/i.test(scanText)
     : false;
+  // WDO-tail suppression keys off whether the MATCHED primary covers
+  // termite — never the live covered set, which gains termite mid-loop and
+  // made the rule order-dependent ("termite treatment and a WDO report"
+  // lost the WDO when the work was said first, codex r21).
+  const matchedCoversTermite = covered.has('termite');
   let label = matched;
   for (const fam of scanFamilies) {
     if (fam.key === 'rodent' && exclusionPresent && !rodentWorkEvidence) continue;
@@ -348,7 +350,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
     // ("Termite Inspection") already IS the WDO deliverable — a requested
     // WDO report must not render as a second inspection (codex r17).
     // A work-cued termite primary keeps the WDO tail (distinct deliverable).
-    if (fam.key === 'wdo' && covered.has('termite') && !matchedTermiteWorkCue) continue;
+    if (fam.key === 'wdo' && matchedCoversTermite && !matchedTermiteWorkCue) continue;
     covered.add(fam.key);
     // Inspection-only termite wording ("pest control and termite inspection
     // for VA loan") is the inspection deliverable, not treatment work —

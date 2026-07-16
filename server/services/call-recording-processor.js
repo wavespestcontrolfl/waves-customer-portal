@@ -5885,7 +5885,16 @@ const CallRecordingProcessor = {
           })();
           const serviceInterestLabel = composeServiceInterest(
             v2ServiceRequest !== null
-              ? { ...extracted, matched_service: matchedForCompose, requested_service: v2RequestedForCompose }
+              ? {
+                ...extracted,
+                matched_service: matchedForCompose,
+                requested_service: v2RequestedForCompose,
+                // Only the V2-ADOPTED specific may mark coverage — a stale
+                // V1 specific belonging to a secondary family (e.g. V1
+                // "Monthly Lawn Care Service" under V2 pest+lawn) would
+                // swallow that secondary's tail (codex r21).
+                specific_service_name: flatView(v2ApprovedExtraction).specific_service_name || null,
+              }
               : extracted,
             // Caller wording still decides termite work-vs-inspection —
             // families stay category-authoritative under V2 approval.
