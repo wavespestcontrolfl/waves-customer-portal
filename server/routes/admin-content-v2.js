@@ -1303,7 +1303,11 @@ router.post('/schedule-blog/:id', async (req, res, next) => {
   try {
     const { publishAt, autoShareSocial } = req.body;
     if (!publishAt) return res.status(400).json({ error: 'publishAt is required' });
-    const post = await ContentScheduler.scheduleBlogPost(req.params.id, publishAt, autoShareSocial !== false);
+    // Owner rule: customer-facing sends are opt-IN. Scheduling a publish
+    // previously defaulted autoShareSocial to true — a silent social share
+    // for anyone who didn't notice the checkbox (2026-07-15 audit, owner
+    // decision 2026-07-16). Only an explicit true shares.
+    const post = await ContentScheduler.scheduleBlogPost(req.params.id, publishAt, autoShareSocial === true);
     res.json({ success: true, post });
   } catch (err) { next(err); }
 });
@@ -1367,7 +1371,8 @@ router.post('/agent/run', async (req, res, next) => {
       city: city || null,
       angle: angle || null,
       publishDraft: publishDraft !== false,
-      distributeSocial: distributeSocial !== false,
+      // opt-in only (same owner rule as schedule-blog)
+      distributeSocial: distributeSocial === true,
     });
 
     // If the client wants to wait for completion (long-running)
@@ -1407,7 +1412,8 @@ router.post('/agent/batch', async (req, res, next) => {
     // Fire-and-forget
     const batchPromise = ContentAgent.runBatch(topics, {
       publishDraft: publishDraft !== false,
-      distributeSocial: distributeSocial !== false,
+      // opt-in only (same owner rule as schedule-blog)
+      distributeSocial: distributeSocial === true,
     });
 
     batchPromise

@@ -63,7 +63,9 @@ export default function ContentCalendar() {
     title: "",
     date: "",
     time: "09:00",
-    autoShare: true,
+    // Opt-IN: social sharing on a scheduled publish requires ticking the box
+    // (owner rule — customer-facing sends are never a silent default).
+    autoShare: false,
   });
   const [draftPosts, setDraftPosts] = useState([]);
   const [loadingDrafts, setLoadingDrafts] = useState(false);

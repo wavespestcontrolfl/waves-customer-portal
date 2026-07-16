@@ -383,7 +383,9 @@ const ContentScheduler = {
   /**
    * Schedule a blog post for auto-publish at a specific time.
    */
-  async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = true) {
+  // autoShareSocial defaults FALSE: customer-facing sends are opt-in
+  // (owner rule; flipped 2026-07-16 from the silent default-true).
+  async scheduleBlogPost(blogPostId, publishAt, autoShareSocial = false) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Blog post not found');
     const scheduledAt = parseScheduledTime(publishAt, 'publishAt');
