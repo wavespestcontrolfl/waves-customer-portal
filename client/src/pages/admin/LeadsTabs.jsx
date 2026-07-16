@@ -2201,11 +2201,50 @@ export function LeadsSection() {
                                         time: "",
                                         serviceId: match ? match.id : "",
                                         // No catalog match: prefill the
-                                        // primary segment, not the composite
-                                        // — the appointment books ONE service.
+                                        // primary by stripping only KNOWN
+                                        // composed tails (mirror of
+                                        // primaryServiceInterest in
+                                        // server/utils/lead-service-interest)
+                                        // — a bare " + " split would chop a
+                                        // plus-named primary like "Lawn +
+                                        // Tree & Shrub" down to "Lawn".
                                         serviceType: match
                                           ? match.name
-                                          : ((lead.service_interest || "").split(" + ")[0] || "").trim(),
+                                          : (() => {
+                                              const tails = new Set([
+                                                "pest control service",
+                                                "lawn care service",
+                                                "tree & shrub care service",
+                                                "mosquito control service",
+                                                "termite service",
+                                                "termite inspection",
+                                                "rodent control service",
+                                                "wildlife control service",
+                                                "wdo inspection service",
+                                                "bed bug treatment",
+                                                "palm injection",
+                                                "bee / wasp nest removal service",
+                                                "rodent exclusion",
+                                                "flea control service",
+                                              ]);
+                                              let label = (
+                                                lead.service_interest || ""
+                                              ).trim();
+                                              for (;;) {
+                                                const at =
+                                                  label.lastIndexOf(" + ");
+                                                if (at === -1) break;
+                                                const tail = label
+                                                  .slice(at + 3)
+                                                  .trim()
+                                                  .toLowerCase();
+                                                if (!tails.has(tail)) break;
+                                                label = label
+                                                  .slice(0, at)
+                                                  .trim();
+                                              }
+                                              return label;
+                                            })(),
                                         technicianId: "",
                                         notes: "",
                                       });

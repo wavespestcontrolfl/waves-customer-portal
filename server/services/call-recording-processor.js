@@ -30,7 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5846,7 +5846,10 @@ const CallRecordingProcessor = {
             // (codex r20).
             const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
             if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
-              cats = cats.filter((c) => c !== 'pest_general' && c !== 'bundled_waveguard');
+              // Only the coarse category BACKING the specialty pick (the
+              // PRIMARY slot) is redundant — a separate pest_general
+              // SECONDARY is a real second request (codex r22).
+              cats = cats.filter((c, i) => !(i === 0 && (c === 'pest_general' || c === 'bundled_waveguard')));
             }
             // Null-mapped categories (other/inspection_only/future enums)
             // yield an EMPTY category-authoritative request — never fall
@@ -5877,6 +5880,13 @@ const CallRecordingProcessor = {
             // wasp-only call renders as two services (codex r15).
             const catPrimary = v2PrimaryLabelForCategory(v2Cat);
             if (catPrimary) return catPrimary;
+            // Termite category with no specific pick: flatView's coarse
+            // "Termite Inspection" would pair with the composed
+            // "+ Termite Service" as a phantom double — pick the single
+            // right primary from the caller's work cue (codex r22).
+            if (v2Cat === 'termite') {
+              return hasTermiteWorkCue(extracted.requested_service) ? 'Termite Service' : 'Termite Inspection';
+            }
             const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
             return v2Flat.matched_service
               && (!extracted.matched_service || preciseV2Category)

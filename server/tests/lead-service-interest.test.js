@@ -12,6 +12,7 @@ const {
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,
   labelIsSpecialtyPestFamily,
+  hasTermiteWorkCue,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 } = require('../utils/lead-service-interest');
@@ -925,6 +926,22 @@ describe('composeServiceInterest', () => {
       matched_service: 'Fire Ant Treatment',
       requested_service: 'fire ants in lawn and mosquito service',
     })).toBe('Fire Ant Treatment + Mosquito Control Service');
+  });
+
+  test('hasTermiteWorkCue picks the V2 termite primary label (codex r22)', () => {
+    expect(hasTermiteWorkCue('termite monitoring for the house')).toBe(true);
+    expect(hasTermiteWorkCue('termite inspection for a VA loan')).toBe(false);
+    expect(hasTermiteWorkCue(null)).toBe(false);
+    expect(v2PrimaryLabelForCategory('palm_injection')).toBe('Palm Injection');
+  });
+
+  test('a specialty primary label still appends a real pest secondary (codex r22 shape)', () => {
+    // Mirrors V2 stinging primary + pest_general secondary after the
+    // primary-slot-only category filter.
+    expect(composeServiceInterest({
+      matched_service: 'Bee / Wasp Nest Removal Service',
+      requested_service: 'wasp nest and pest control',
+    })).toBe('Bee / Wasp Nest Removal Service + Pest Control Service');
   });
 
   test('non-service chatter appends nothing', () => {

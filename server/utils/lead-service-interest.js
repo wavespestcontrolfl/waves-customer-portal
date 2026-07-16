@@ -261,7 +261,16 @@ function composeWordsForV2Category(category) {
 const V2_CATEGORY_PRIMARY_LABELS = {
   stinging_insect: 'Bee / Wasp Nest Removal Service',
   exclusion: 'Rodent Exclusion',
+  palm_injection: 'Palm Injection',
 };
+
+// Exported so the V2 compose path can pick the right termite PRIMARY label
+// when the category is termite with no specific catalog pick (codex r22):
+// work-cued caller text → Termite Service, else Termite Inspection.
+function hasTermiteWorkCue(text) {
+  const s = cleanText(text);
+  return !!(s && TERMITE_TREATMENT_RE.test(s));
+}
 function v2PrimaryLabelForCategory(category) {
   return V2_CATEGORY_PRIMARY_LABELS[category] || null;
 }
@@ -411,6 +420,7 @@ module.exports = {
   composeWordsForV2Category,
   v2PrimaryLabelForCategory,
   labelIsSpecialtyPestFamily,
+  hasTermiteWorkCue,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 };
