@@ -11,6 +11,7 @@ const {
   callGemini,
   callAnthropic,
   dispatch,
+  dispatchWithFallback,
   extractOpenAIText,
   parseLooseJson,
 } = require('../services/llm/call');
@@ -26,6 +27,7 @@ describe('llm/call parsers', () => {
   test('parseLooseJson tolerates fenced / preamble JSON, rejects non-JSON', () => {
     expect(parseLooseJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
     expect(parseLooseJson('sure: {"b":2} done')).toEqual({ b: 2 });
+    expect(parseLooseJson('ideas: [{"title":"one"}] done')).toEqual([{ title: 'one' }]);
     expect(parseLooseJson('not json')).toBeNull();
     expect(parseLooseJson('')).toBeNull();
   });
@@ -109,6 +111,12 @@ describe('callAnthropic prompt caching', () => {
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system).toBeUndefined();
   });
+
+  test('forwards temperature for repeatable vision scoring', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, text: 'inspect', temperature: 0.2 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].temperature).toBe(0.2);
+  });
 });
 
 // jsonMode is the mechanism the knowledge-bridge fallback relies on: invalid JSON
@@ -132,5 +140,77 @@ describe('callOpenAI jsonMode parsing', () => {
   test('non-JSON output → empty_json so the caller can fall back', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'no json here' }) });
     expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true })).toEqual({ ok: false, reason: 'empty_json' });
+  });
+
+  test('incomplete response → fallback signal instead of partial output', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output_text: 'partial' }),
+    });
+    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: false })).toEqual({ ok: false, reason: 'openai_incomplete' });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.reasoning).toEqual({ effort: 'low' });
+  });
+});
+
+describe('dispatchWithFallback', () => {
+  let savedOpenAI;
+  let savedAnthropic;
+  beforeEach(() => {
+    mockAnthropicCreate.mockReset();
+    savedOpenAI = process.env.OPENAI_API_KEY;
+    savedAnthropic = process.env.ANTHROPIC_API_KEY;
+    process.env.OPENAI_API_KEY = 'openai-test';
+    process.env.ANTHROPIC_API_KEY = 'anthropic-test';
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (savedOpenAI === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = savedOpenAI;
+    if (savedAnthropic === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = savedAnthropic;
+  });
+
+  test('uses the other provider when primary is unavailable', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 529 });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false });
+    expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, text: 'backup copy' });
+    expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'openai_529' });
+  });
+
+  test('uses the other provider when primary returns blank text', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '   ' }) });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false });
+    expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, text: 'backup copy' });
+    expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'empty_text' });
+  });
+
+  test('shares one timeout budget across primary and fallback', async () => {
+    jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1000)
+      .mockReturnValueOnce(1300);
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 529 });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false, timeoutMs: 1000 });
+    expect(result.ok).toBe(true);
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 700 });
+  });
+
+  test('rejects a same-provider fallback policy', async () => {
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'a' },
+      fallback: { provider: PROVIDER.OPENAI, model: 'b' },
+    }, { text: 'write' });
+    expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
   });
 });

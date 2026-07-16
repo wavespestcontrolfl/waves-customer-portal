@@ -24,11 +24,7 @@
 
 const MODELS = require('../../config/models');
 const logger = require('../logger');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
-
-const { createDeepMessage } = require('../llm/deep');
+const { dispatchWithFallback } = require('../llm/call');
 
 const FACTCHECK_MODEL = process.env.MODEL_FACTCHECK || MODELS.DEEP;
 // Bound how long a publish (or the autonomous publishing lock) can wait on this
@@ -87,43 +83,32 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   if (process.env.GATE_FACTCHECK === 'false') {
     return { pass: true, findings: [], checked: false, skipped: 'disabled' };
   }
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-    logger.warn('[fact-check-gate] Anthropic SDK / API key unavailable — passing (fail-open)');
-    return { pass: true, findings: [], checked: false, skipped: 'no_api' };
-  }
   if (!body || body.trim().length < 50) {
     return { pass: true, findings: [], checked: false, skipped: 'empty_body' };
   }
 
-  const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    maxRetries: 0,
-    timeout: FACTCHECK_TIMEOUT_MS,
-  });
-  let raw;
+  let response;
   try {
-    const response = await createDeepMessage(anthropic, {
-      model: FACTCHECK_MODEL,
-      max_tokens: 6000,
+    const policy = FACTCHECK_MODEL === MODELS.DEEP
+      ? MODELS.TEXT_POLICIES.deepAnalysis
+      : {
+        primary: { provider: MODELS.PROVIDER.ANTHROPIC, model: FACTCHECK_MODEL },
+        fallback: MODELS.TEXT_POLICIES.deepAnalysis.fallback,
+      };
+    response = await dispatchWithFallback(policy, {
+      maxTokens: 6000,
+      timeoutMs: FACTCHECK_TIMEOUT_MS,
+      jsonMode: true,
       system: SYSTEM_PROMPT,
-      messages: [{
-        role: 'user',
-        content: `City: ${city || '(none)'}\nKeyword: ${keyword || '(none)'}\nTag: ${tag || '(none)'}\nTitle: ${title || '(none)'}\n\n--- POST BODY ---\n${body}`,
-      }],
+      text: `City: ${city || '(none)'}\nKeyword: ${keyword || '(none)'}\nTag: ${tag || '(none)'}\nTitle: ${title || '(none)'}\n\n--- POST BODY ---\n${body}`,
     });
-    raw = response.content[0].text;
+    if (!response.ok || !response.json) throw new Error(response.reason || 'invalid_json');
   } catch (err) {
     logger.warn(`[fact-check-gate] check failed for "${title}" — passing (fail-open): ${err.message}`);
     return { pass: true, findings: [], checked: false, skipped: 'api_error' };
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(String(raw).replace(/```json|```/g, '').trim());
-  } catch {
-    logger.warn(`[fact-check-gate] unparseable model output for "${title}" — passing (fail-open)`);
-    return { pass: true, findings: [], checked: false, skipped: 'parse_error' };
-  }
+  const parsed = response.json;
 
   const findings = (Array.isArray(parsed.findings) ? parsed.findings : []).map(normalizeFinding);
   // Block ONLY on P0 (objective, unambiguous errors). P1/P2 are debatable
@@ -132,7 +117,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   // run showed an LLM reliably flags debatable agronomy at P1; blocking on that
   // would stall accurate posts.)
   const pass = !findings.some((f) => f.severity === 'P0');
-  return { pass, findings, checked: true, model: FACTCHECK_MODEL };
+  return { pass, findings, checked: true, model: response.model };
 }
 
 module.exports = { evaluate, _internals: { normalizeFinding, FACTCHECK_MODEL } };

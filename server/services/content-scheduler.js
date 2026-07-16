@@ -7,6 +7,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('./llm/call');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -143,16 +145,6 @@ function normalizeGbpByLocation(gbp) {
 }
 
 async function generateNewsletterSocialContent(send) {
-  let Anthropic;
-  try {
-    const sdk = require('@anthropic-ai/sdk');
-    Anthropic = sdk.default || sdk.Anthropic || sdk;
-  } catch { return null; }
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
-
-  const MODELS = require('../config/models');
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
   const safeSubject = String(send.subject || '').replace(/[\r\n]+/g, ' ').slice(0, 300);
   const safePreview = String(send.preview_text || '').replace(/[\r\n]+/g, ' ').slice(0, 500);
 
@@ -161,12 +153,10 @@ async function generateNewsletterSocialContent(send) {
     .map((l) => `  "${l.id}": ${l.name} (${l.area})`)
     .join('\n');
 
-  const response = await client.messages.create({
-    model: MODELS.WORKHORSE,
-    max_tokens: 800,
-    messages: [{
-      role: 'user',
-      content: `Generate social media captions for Waves Pest Control's weekly local events guide "Fresh This Week."
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+    maxTokens: 800,
+    jsonMode: true,
+    text: `Generate social media captions for Waves Pest Control's weekly local events guide "Fresh This Week."
 This is NOT a pest control post — it's a punchy, upbeat local events roundup for SW Florida (North Port to Tampa).
 Tone: fun, local-guide energy. Light FOMO is good ("just dropped", "here's what's happening this week") but don't be spammy or clickbaity.
 
@@ -181,14 +171,9 @@ Return ONLY valid JSON with these keys:
 - instagram: 150-300 chars before hashtags, end with 3-5 hashtags (#FreshThisWeek #SWFL #SWFLevents etc), do NOT include any URL
 - linkedin: 100-200 chars, professional but fun community tone, do NOT include any URL
 - gbp: an OBJECT keyed by the location ids above. Each value is 80-150 chars, community-oriented, names/nods to THAT specific area, no hashtags, no URL. Example: {"bradenton": "...", "parrish": "...", "sarasota": "...", "venice": "..."}`,
-    }],
   });
-
-  const text = (response.content[0]?.text || '').trim();
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) return null;
-
-  const parsed = JSON.parse(jsonMatch[0]);
+  if (!response.ok || !response.json) return null;
+  const parsed = response.json;
   if (!parsed.facebook || !parsed.instagram || !parsed.linkedin) return null;
   // Always hand the social loop a complete per-location gbp object, filling
   // any area the model skipped (or a legacy single string) from fallback.

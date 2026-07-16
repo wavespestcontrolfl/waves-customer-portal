@@ -1,23 +1,9 @@
 /**
- * DEEP-tier Anthropic calls (MODELS.DEEP → claude-fable-5).
- *
- * fable-5 differs from the Opus line in two ways every caller must handle,
- * so the handling lives in one place:
- *
- * 1. Thinking blocks. fable-5 thinks on every request (always-on adaptive
- *    thinking — there is no way to disable it, and thinking spends from
- *    max_tokens). Responses put `thinking` blocks ahead of the `text`
- *    block, so legacy `response.content[0].text` parsing reads the wrong
- *    block. This wrapper strips thinking blocks before returning; call
- *    sites were also given larger max_tokens so thinking can't starve the
- *    visible answer.
- *
- * 2. Refusals. fable-5 runs safety classifiers that return HTTP 200 with
- *    stop_reason 'refusal' (empty or partial content). Pesticide /
- *    termiticide reasoning is a benign-adjacent domain where false
- *    positives are possible, so a refusal retries the identical request
- *    once on MODELS.FLAGSHIP (Opus) — the lane degrades to Opus, it never
- *    gaps. response.model reports which model actually answered.
+ * DEEP-tier calls. Opus is the cost-aware automatic primary; OpenAI Sol is
+ * the independent provider fallback for API failures and refusals. The helper
+ * preserves the legacy Anthropic-shaped response so existing DEEP callers do
+ * not need provider-specific parsing. It also strips thinking blocks when an
+ * explicit MODEL_DEEP override selects Fable.
  *
  * The caller passes its own Anthropic client so per-site timeout / retry
  * config and test mocks keep working. API errors throw exactly like
@@ -28,6 +14,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { callOpenAI } = require('./call');
 
 // The refusal fallback reuses the caller's client, whose `timeout` applies
 // per request — so a refusal + retry could run ~2× the caller's budget (the
@@ -50,7 +37,15 @@ function stripThinkingBlocks(response) {
 async function createDeepMessage(client, params = {}) {
   const model = params.model || MODELS.DEEP;
   const startedAt = Date.now();
-  const response = await client.messages.create({ ...params, model });
+  let response;
+  try {
+    response = await client.messages.create({ ...params, model });
+  } catch (err) {
+    logger.warn(`[llm-deep] ${model} failed (${err.message}) — trying OpenAI backup`);
+    const fallback = await callOpenAIDeepFallback(params, remainingBudget(client, startedAt));
+    if (fallback) return fallback;
+    throw err;
+  }
 
   if (response && response.stop_reason === 'max_tokens') {
     logger.warn(`[llm-deep] ${model} hit max_tokens (${params.max_tokens}) — output may be truncated`);
@@ -60,21 +55,53 @@ async function createDeepMessage(client, params = {}) {
   }
 
   const category = response.stop_details?.category || 'uncategorized';
-  const budgetMs = Number.isFinite(client.timeout) ? client.timeout : null;
-  if (budgetMs !== null) {
-    const remainingMs = budgetMs - (Date.now() - startedAt);
-    if (remainingMs < FALLBACK_MIN_MS) {
-      logger.warn(`[llm-deep] ${model} refused (${category}) — skipping ${MODELS.FLAGSHIP} fallback, only ${Math.max(0, remainingMs)}ms left of the client's ${budgetMs}ms timeout`);
-      return stripThinkingBlocks(response);
-    }
-    logger.warn(`[llm-deep] ${model} refused (${category}) — retrying on ${MODELS.FLAGSHIP} with ${remainingMs}ms of the timeout remaining`);
-    const retry = await client.messages.create({ ...params, model: MODELS.FLAGSHIP }, { timeout: remainingMs });
-    return stripThinkingBlocks(retry);
+  const remainingMs = remainingBudget(client, startedAt);
+  if (remainingMs !== null && remainingMs < FALLBACK_MIN_MS) {
+    logger.warn(`[llm-deep] ${model} refused (${category}) — skipping OpenAI backup, only ${Math.max(0, remainingMs)}ms left`);
+    return stripThinkingBlocks(response);
   }
-
-  logger.warn(`[llm-deep] ${model} refused (${category}) — retrying on ${MODELS.FLAGSHIP}`);
-  const retry = await client.messages.create({ ...params, model: MODELS.FLAGSHIP });
-  return stripThinkingBlocks(retry);
+  logger.warn(`[llm-deep] ${model} refused (${category}) — trying OpenAI backup`);
+  return (await callOpenAIDeepFallback(params, remainingMs)) || stripThinkingBlocks(response);
 }
 
-module.exports = { createDeepMessage, stripThinkingBlocks };
+function remainingBudget(client, startedAt) {
+  return Number.isFinite(client?.timeout) ? client.timeout - (Date.now() - startedAt) : null;
+}
+
+function messageText(messages = []) {
+  return (Array.isArray(messages) ? messages : []).map((message) => {
+    const content = message?.content;
+    if (typeof content === 'string') return `${message.role || 'user'}: ${content}`;
+    const text = (Array.isArray(content) ? content : [])
+      .filter((block) => block?.type === 'text' && block.text)
+      .map((block) => block.text)
+      .join('\n');
+    return `${message?.role || 'user'}: ${text}`;
+  }).join('\n\n');
+}
+
+function systemText(system) {
+  if (typeof system === 'string') return system;
+  return (Array.isArray(system) ? system : []).map((block) => block?.text || '').filter(Boolean).join('\n');
+}
+
+async function callOpenAIDeepFallback(params, timeoutMs) {
+  const result = await callOpenAI({
+    model: MODELS.TEXT_POLICIES.deepAnalysis.fallback.model,
+    system: systemText(params.system),
+    text: messageText(params.messages),
+    jsonMode: false,
+    maxTokens: params.max_tokens || 4096,
+    timeoutMs: timeoutMs && timeoutMs > 0 ? timeoutMs : undefined,
+  });
+  if (!result.ok || !String(result.text || '').trim()) return null;
+  return {
+    id: null,
+    model: result.model,
+    role: 'assistant',
+    stop_reason: 'end_turn',
+    content: [{ type: 'text', text: result.text }],
+  };
+}
+
+module.exports = { createDeepMessage, stripThinkingBlocks, _test: { messageText, systemText, remainingBudget } };

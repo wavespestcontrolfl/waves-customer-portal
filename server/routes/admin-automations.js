@@ -15,9 +15,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const AutomationRunner = require('../services/automation-runner');
 const MODELS = require('../config/models');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../services/llm/call');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -201,9 +199,6 @@ router.delete('/steps/:id', async (req, res, next) => {
 // Body: { templateKey, stepGoal, stepIndex, totalSteps, audience?, tone?, includeCTA? }
 router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
   try {
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: 'Anthropic API not configured' });
-    }
     const { templateKey, stepGoal, stepIndex = 0, totalSteps = 1, audience, tone, includeCTA = true } = req.body;
     const cleanStepGoal = limitedText(stepGoal, 'stepGoal', 2000);
     if (cleanStepGoal.length < 4) {
@@ -215,8 +210,6 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
     const safeTotalSteps = Math.max(1, Math.min(Number(totalSteps) || 1, 20));
 
     const template = templateKey ? await db('automation_templates').where({ key: templateKey }).first() : null;
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const systemPrompt = `You draft transactional automation emails for Waves Pest Control, a family-owned pest control + lawn care company in Southwest Florida (Bradenton, Parrish, Palmetto, Sarasota, Venice, North Port, Lakewood Ranch).
 
@@ -256,17 +249,14 @@ No prose outside the JSON.`;
 ${cleanAudience ? `\nAudience: ${cleanAudience}` : ''}
 ${cleanTone ? `\nTone: ${cleanTone}` : ''}`;
 
-    const response = await anthropic.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 1500,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 1500,
+      jsonMode: true,
       system: systemPrompt,
-      messages: [{ role: 'user', content: userPrompt }],
+      text: userPrompt,
     });
-
-    const text = response.content?.[0]?.text || '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('Claude did not return JSON');
-    const draft = JSON.parse(jsonMatch[0]);
+    if (!response.ok || !response.json) throw new Error('Automation AI providers did not return valid JSON');
+    const draft = response.json;
     res.json({ success: true, draft });
   } catch (err) {
     logger.error(`[automations/draft-ai] failed: ${err.message}`);

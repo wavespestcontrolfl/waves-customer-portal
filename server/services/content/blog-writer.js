@@ -4,9 +4,7 @@ const MODELS = require('../../config/models');
 const { CITIES } = require('./scoring-config');
 const { _internals: uniq } = require('./uniqueness-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
+const { dispatchWithFallback } = require('../llm/call');
 
 // ── idea-generation taxonomy & weighting ──────────────────────────────
 //
@@ -207,12 +205,6 @@ class BlogWriter {
       differentiationNote = `\n\nIMPORTANT: We already have published content on similar topics:\n${existingOnTopic.map(e => `- "${e.title}" (${e.city}) targeting "${e.keyword}"`).join('\n')}\n\nYour post MUST differentiate by:\n- Focusing specifically on ${post.city} (not the cities above)\n- Taking a different angle or subtopic\n- Covering aspects the existing posts don't\n- DO NOT repeat the same core advice — add new value`;
     }
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return { content: null, error: 'Anthropic API not configured' };
-    }
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
     const systemPrompt = `You write blog posts for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
 
 YOUR VOICE — study these real Waves blog titles and match the tone EXACTLY:
@@ -233,13 +225,11 @@ ${faqFormatInstruction([post.category, post.tag])}
 - Include the target keyword naturally 3-5 times
 - End with a practical takeaway + soft Waves mention`;
 
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 3000,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 3000,
+      jsonMode: false,
       system: systemPrompt,
-      messages: [{
-        role: 'user',
-        content: `Write the full blog post for:
+      text: `Write the full blog post for:
 
 Title: ${post.title}
 Target keyword: ${post.keyword}
@@ -250,11 +240,11 @@ Slug: ${post.slug}
 ${differentiationNote}
 ${similarPosts.length > 0 ? `\nHere are similar published posts for tone reference:\n${similarPosts.map(p => `---\nTitle: ${p.title}\n${(p.content || '').substring(0, 400)}...`).join('\n')}` : ''}
 
-Write the full post in the Waves voice. Return ONLY the blog post content (no JSON wrapper). Use markdown formatting for headers.`
-      }]
+Write the full post in the Waves voice. Return ONLY the blog post content (no JSON wrapper). Use markdown formatting for headers.`,
     });
+    if (!response.ok) return { content: null, error: 'AI content providers unavailable' };
 
-    const content = response.content[0].text;
+    const content = response.text;
     const wordCount = content.split(/\s+/).filter(Boolean).length;
 
     await db('blog_posts').where('id', blogPostId).update({
@@ -272,19 +262,11 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Post not found');
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return { error: 'Anthropic API not configured' };
-    }
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 3000,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.deepAnalysis, {
+      maxTokens: 3000,
+      jsonMode: true,
       system: 'You optimize existing blog posts for Waves Pest Control. Improve SEO without changing core content. Match the Waves voice: snarky, casual, Florida-specific, technically knowledgeable.',
-      messages: [{
-        role: 'user',
-        content: `Optimize this published blog post. Current SEO score: ${post.seo_score || 'unknown'}/100.
+      text: `Optimize this published blog post. Current SEO score: ${post.seo_score || 'unknown'}/100.
 
 TITLE: ${post.title}
 KEYWORD: ${post.keyword || 'NOT SET — suggest one'}
@@ -331,16 +313,11 @@ Return JSON: {
   "faq_to_add": [{"question": "", "answer": ""}],
   "seo_improvements": ["specific fix"],
   "estimated_new_score": 0
-}`
-      }]
+}`,
     });
+    if (!response.ok) return { error: 'AI optimization providers unavailable' };
 
-    let optimization;
-    try {
-      optimization = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-    } catch {
-      optimization = { raw: response.content[0].text, parse_error: true };
-    }
+    const optimization = response.json;
 
     await db('blog_posts').where('id', blogPostId).update({
       optimization_suggestions: JSON.stringify(optimization),
@@ -400,10 +377,6 @@ Return JSON: {
   async generateNewIdeas(count = 20) {
     count = Math.min(Math.max(Number.parseInt(count, 10) || 20, 1), 50);
 
-    if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
-      return [];
-    }
-
     const existing = await db('blog_posts').select('title', 'keyword', 'tag', 'slug', 'city');
     const voice = await this.getVoiceConfig().catch(() => null);
     const demand = await this.getDemandSignals(25);
@@ -454,11 +427,9 @@ Return JSON: {
     // the target count.
     const requestCount = Math.min(Math.ceil(count * 1.4), 60);
 
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    const response = await anthropic.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 6000,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 6000,
+      jsonMode: true,
       system: `You are the editorial planner for Waves Pest Control's local blog in Southwest Florida. Generate ${requestCount} genuinely distinct blog post ideas.
 
 ${voiceBlock}
@@ -481,19 +452,11 @@ TARGETING:
 - keyword = a specific local-intent search phrase. Avoid any of these existing keywords: ${[...existingKeywords].slice(0, 40).join('; ') || '(none yet)'}.
 
 Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "slug": "", "meta_description": "", "city": "" }]`,
-      messages: [{
-        role: 'user',
-        content: `Generate ${requestCount} distinct, demand-aware, seasonally-relevant blog ideas. Reject your own duplicates before returning.`
-      }]
+      text: `Generate ${requestCount} distinct, demand-aware, seasonally-relevant blog ideas. Reject your own duplicates before returning.`,
     });
+    if (!response.ok) return [];
 
-    let candidates;
-    try {
-      candidates = JSON.parse(response.content[0].text.replace(/```json|```/g, '').trim());
-    } catch (err) {
-      logger.error(`Blog idea generation: failed to parse model output: ${err.message}`);
-      return [];
-    }
+    const candidates = response.json;
     if (!Array.isArray(candidates)) return [];
 
     // Concept saturation — count how many cities each concept already

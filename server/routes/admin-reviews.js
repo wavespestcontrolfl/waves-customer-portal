@@ -8,6 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { etDateString, addETDays, startOfETMonth } = require('../utils/datetime-et');
 const { getServiceContact } = require('../services/customer-contact');
 const { runExclusive } = require('../utils/cron-lock');
@@ -369,9 +370,6 @@ router.post('/:id/ai-reply', async (req, res, next) => {
       if (cust) customerCity = cust.city || '';
     }
 
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic();
-
     const prompt = `You are an expert in local business reputation management and are writing a personalized response on behalf of Waves Pest Control ${locationName}, a family-owned pest control & lawn care company serving ${locationName} and neighboring cities.
 
 Your response must strictly adhere to Google's best practices, be limited to a maximum of two paragraphs, and be written in the first person plural (using "we" and "our").
@@ -407,13 +405,13 @@ The 🌊 Waves Pest Control ${locationName} Team
 
 Generate the reply now.`;
 
-    const msg = await client.messages.create({
-      model: MODELS.FLAGSHIP,
-      max_tokens: 500,
-      messages: [{ role: 'user', content: prompt }],
+    const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      text: prompt,
+      jsonMode: false,
+      maxTokens: 500,
     });
-
-    const reply = msg.content[0]?.text || '';
+    if (!result.ok) return res.status(502).json({ error: 'AI reply providers unavailable' });
+    const reply = result.text || '';
     res.json({ reply });
   } catch (err) {
     logger.error(`AI reply generation failed: ${err.message}`);

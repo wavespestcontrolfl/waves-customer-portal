@@ -1,5 +1,6 @@
 const MODELS = require('../config/models');
 const logger = require('./logger');
+const { dispatchWithFallback } = require('./llm/call');
 
 // Outcomes that always skip the AI path. These are customer-sensitive
 // situations where generated wording could go off-tone or contradict the
@@ -157,24 +158,16 @@ Return only the recap text.`;
 }
 
 async function aiRecap(input = {}) {
-  let Anthropic;
-  try {
-    Anthropic = require('@anthropic-ai/sdk');
-  } catch {
-    return null;
-  }
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
-
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  // Customer-facing recap → VOICE (Sonnet 4.6). Only the happy-path "completed"
+  // Customer-facing recap → Sonnet VOICE, with OpenAI Terra as the independent
+  // provider fallback. Only the happy-path "completed"
   // outcome reaches here; sensitive outcomes (concern/incomplete/declined/etc.)
   // skip AI entirely via DETERMINISTIC_OUTCOMES above, so no escalation needed.
-  const msg = await anthropic.messages.create({
-    model: MODELS.VOICE,
-    max_tokens: 220,
-    messages: [{ role: 'user', content: buildPrompt(input) }],
+  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+    text: buildPrompt(input),
+    jsonMode: false,
+    maxTokens: 220,
   });
-  return cleanText(msg.content?.[0]?.text || '');
+  return result.ok ? cleanText(result.text) : null;
 }
 
 async function generateRecap(input = {}) {

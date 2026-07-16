@@ -1,9 +1,9 @@
 /**
  * SMS reply-drafting model split (owner directive 2026-07-05):
- *   default auto-reply draft              → ROUTES.smsDraftDefault (GPT-5.4-mini)
+ *   default auto-reply draft              → ROUTES.smsDraftDefault (GPT-5.6 Luna)
  *   save-the-sale (cancel/complaint/issue) → ROUTES.smsDraftSaveSale (Claude Sonnet 5)
  *   tone rewrite (/rewrite-sms)            → ROUTES.smsToneRewrite (Claude Sonnet 5)
- * Every routed lane falls back to the original Claude call on a miss.
+ * Every routed lane falls back to the opposite provider on a miss.
  */
 
 jest.mock('../services/logger', () => ({
@@ -19,10 +19,10 @@ jest.mock('../models/db', () => {
 });
 
 jest.mock('../services/llm/call', () => ({
-  dispatch: jest.fn(),
+  dispatchWithFallback: jest.fn(),
 }));
 
-const { dispatch } = require('../services/llm/call');
+const { dispatchWithFallback } = require('../services/llm/call');
 const MODELS = require('../config/models');
 const {
   generateDraftOnce,
@@ -36,7 +36,7 @@ const DRAFT_JSON = JSON.stringify({
 });
 
 beforeEach(() => {
-  dispatch.mockReset();
+  dispatchWithFallback.mockReset();
 });
 
 describe('route selection', () => {
@@ -105,14 +105,18 @@ describe('generateDraftOnce', () => {
     client.messages.create.mockReset();
   });
 
-  test('routed success: draft comes from the routed model, no Claude fallback call', async () => {
-    dispatch.mockResolvedValue({ ok: true, text: DRAFT_JSON, model: MODELS.OPENAI_SMS_DRAFT });
+  test('routed success: draft comes from the routed model', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: DRAFT_JSON, model: MODELS.OPENAI_SMS_DRAFT });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftDefault);
 
-    expect(dispatch).toHaveBeenCalledWith(
-      MODELS.ROUTES.smsDraftDefault,
+    expect(dispatchWithFallback).toHaveBeenCalledWith(
+      {
+        primary: MODELS.ROUTES.smsDraftDefault,
+        fallback: MODELS.TEXT_POLICIES.fastStructured.fallback,
+      },
       expect.objectContaining({ system: 'system', text: 'user content', jsonMode: false }),
+      expect.objectContaining({ validate: expect.any(Function) }),
     );
     expect(result.model).toBe(MODELS.OPENAI_SMS_DRAFT);
     expect(result.parsed.reply).toBe('Hello! Happy to help with that.');
@@ -120,39 +124,50 @@ describe('generateDraftOnce', () => {
   });
 
   test('dispatches whatever route it is given (save-the-sale lane)', async () => {
-    dispatch.mockResolvedValue({ ok: true, text: DRAFT_JSON, model: MODELS.SMS_SONNET });
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: DRAFT_JSON, model: MODELS.SMS_SONNET });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftSaveSale);
 
-    expect(dispatch).toHaveBeenCalledWith(MODELS.ROUTES.smsDraftSaveSale, expect.any(Object));
+    expect(dispatchWithFallback).toHaveBeenCalledWith(
+      {
+        primary: MODELS.ROUTES.smsDraftSaveSale,
+        fallback: MODELS.TEXT_POLICIES.highStakes.fallback,
+      },
+      expect.any(Object),
+      expect.objectContaining({ validate: expect.any(Function) }),
+    );
     expect(result.model).toBe(MODELS.SMS_SONNET);
   });
 
-  test('routed miss (no key / provider error) falls back to FLAGSHIP via the Anthropic client', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    client.messages.create.mockResolvedValue({ content: [{ type: 'text', text: DRAFT_JSON }] });
+  test('routed miss is returned from the opposite-provider fallback', async () => {
+    dispatchWithFallback.mockResolvedValue({
+      ok: true,
+      text: DRAFT_JSON,
+      model: MODELS.TEXT_POLICIES.fastStructured.fallback.model,
+      fallbackUsed: true,
+    });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftDefault);
 
-    expect(client.messages.create).toHaveBeenCalledWith(
-      expect.objectContaining({ model: MODELS.FLAGSHIP }),
-    );
-    expect(result.model).toBe(MODELS.FLAGSHIP);
+    expect(result.model).toBe(MODELS.TEXT_POLICIES.fastStructured.fallback.model);
     expect(result.parsed.reply).toBe('Hello! Happy to help with that.');
   });
 
-  test('routed output unparseable falls back to FLAGSHIP', async () => {
-    dispatch.mockResolvedValue({ ok: true, text: 'not json at all', model: MODELS.OPENAI_SMS_DRAFT });
-    client.messages.create.mockResolvedValue({ content: [{ type: 'text', text: DRAFT_JSON }] });
+  test('unparseable primary output is replaced by valid fallback output', async () => {
+    dispatchWithFallback.mockResolvedValue({
+      ok: true,
+      text: DRAFT_JSON,
+      model: MODELS.TEXT_POLICIES.fastStructured.fallback.model,
+      fallbackUsed: true,
+    });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftDefault);
 
-    expect(result.model).toBe(MODELS.FLAGSHIP);
+    expect(result.model).toBe(MODELS.TEXT_POLICIES.fastStructured.fallback.model);
   });
 
   test('both paths unusable returns null', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'error' });
-    client.messages.create.mockResolvedValue({ content: [{ type: 'text', text: 'still not json' }] });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
 
     const result = await generateDraftOnce(client, 'system', 'user content', MODELS.ROUTES.smsDraftDefault);
 

@@ -4,6 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 
 // Nearest GBP to the customer's geocoded address, with fallbacks. Prefers the
 // haversine winner when the customer has a lat/lng; otherwise falls back to
@@ -418,19 +419,16 @@ Rules:
 
 Return ONLY the review body. No quotes, no preamble, no sign-off.`;
 
-    // Call Claude API — FAST tier is plenty for 256-token review body.
+    // Low-cost OpenAI first, Claude Sonnet backup; deterministic template last.
     let reviewText = '';
     try {
-      const Anthropic = require('@anthropic-ai/sdk');
-      const anthropic = new Anthropic();
-
-      const message = await anthropic.messages.create({
-        model: MODELS.FAST,
-        max_tokens: 256,
-        messages: [{ role: 'user', content: prompt }],
+      const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+        text: prompt,
+        jsonMode: false,
+        maxTokens: 256,
       });
-
-      reviewText = message.content[0]?.text?.trim() || '';
+      if (!result.ok) throw new Error('both AI providers unavailable');
+      reviewText = result.text?.trim() || '';
       // Strip accidental quotes or "Review:" preambles
       reviewText = reviewText.replace(/^["']+|["']+$/g, '').replace(/^(Review|My review):\s*/i, '').trim();
     } catch (aiErr) {

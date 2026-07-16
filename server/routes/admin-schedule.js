@@ -4,6 +4,7 @@ const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
 const MODELS = require('../config/models');
@@ -5748,14 +5749,127 @@ function reportCopyRejection(report) {
   return banned.length ? `banned:${banned.join(',')}` : null;
 }
 
+// Completed-service report failover chain. OpenAI Sol is the primary writer;
+// Claude Opus is the independent backup. Each provider gets
+// one retry only when it returned copy that was empty or failed the customer-copy
+// safety gate. Transport/auth/overload failures move straight to the next
+// provider because the shared LLM adapters already handle their own retries.
+async function generateReportCopyWithFallback({
+  systemPrompt,
+  userMessage,
+  providers = [
+    {
+      name: MODELS.TEXT_POLICIES.report.primary.provider,
+      model: MODELS.TEXT_POLICIES.report.primary.model,
+      call: callOpenAI,
+    },
+    {
+      name: MODELS.TEXT_POLICIES.report.fallback.provider,
+      model: MODELS.TEXT_POLICIES.report.fallback.model,
+      call: callAnthropic,
+    },
+  ],
+} = {}) {
+  const failures = [];
+  let lastRejection = null;
+
+  for (const provider of providers) {
+    if (!provider?.model || typeof provider.call !== 'function') {
+      failures.push({ provider: provider?.name || 'unknown', reason: 'not_configured' });
+      continue;
+    }
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      let result;
+      try {
+        result = await provider.call({
+          model: provider.model,
+          system: systemPrompt,
+          text: userMessage,
+          jsonMode: false,
+          maxTokens: 800,
+        });
+      } catch (err) {
+        result = { ok: false, reason: 'error' };
+        logger.warn(`[generate-report] ${provider.name} call threw; trying backup: ${err.message}`);
+      }
+
+      if (!result?.ok) {
+        failures.push({ provider: provider.name, reason: result?.reason || 'error' });
+        logger.warn(`[generate-report] ${provider.name} unavailable (${result?.reason || 'error'}); trying backup`);
+        break;
+      }
+
+      const report = String(result.text || '').trim();
+      const rejection = reportCopyRejection(report);
+      if (!rejection) {
+        return { ok: true, report, provider: provider.name, model: provider.model, failures };
+      }
+
+      lastRejection = rejection;
+      logger.warn(
+        `[generate-report] ${provider.name} attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : '; trying backup'}`,
+      );
+      if (attempt === 2) failures.push({ provider: provider.name, reason: 'copy_rejected' });
+    }
+  }
+
+  const onlyCopyRejections = failures.length > 0 && failures.every((failure) => failure.reason === 'copy_rejected');
+  return {
+    ok: false,
+    reason: onlyCopyRejections ? 'report_copy_unsafe' : 'all_providers_failed',
+    rejection: lastRejection,
+    failures,
+  };
+}
+
+// Last-resort copy when both AI providers miss. Only structured, technician-
+// selected values are echoed; raw notes and product names are intentionally
+// excluded because they may contain customer-private details, brand names, or
+// unsafe claims that an AI validator would normally rewrite.
+function buildDeterministicReportCopy({ serviceType, areas, actions, observations, recommendations, ratingLabel } = {}) {
+  const cleanItems = (items) => (Array.isArray(items) ? items : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .filter((item) => ActivityIndicators.findBannedCustomerCopy(item).length === 0)
+    .slice(0, 4);
+  const cleanAreas = cleanItems(areas);
+  const cleanActions = cleanItems(actions);
+  const cleanObservations = cleanItems(observations);
+  const cleanRecommendations = cleanItems(recommendations);
+  const hasSafeVisitDetails = cleanAreas.length > 0
+    || cleanActions.length > 0
+    || cleanObservations.length > 0
+    || cleanRecommendations.length > 0
+    || Boolean(ratingLabel);
+  if (!hasSafeVisitDetails) return null;
+  const candidateType = String(serviceType || 'scheduled service').trim().slice(0, 120) || 'scheduled service';
+  const safeType = ActivityIndicators.findBannedCustomerCopy(candidateType).length === 0
+    ? candidateType
+    : 'scheduled service';
+
+  const did = [];
+  did.push(`We completed the ${safeType} visit${cleanAreas.length ? ` in ${cleanAreas.join(', ')}` : ''}.`);
+  did.push(cleanActions.length
+    ? `Completed work included ${cleanActions.join('; ')}.`
+    : 'The technician documented the work performed and the areas addressed during the visit.');
+
+  const found = [];
+  if (cleanObservations.length) found.push(`The technician noted ${cleanObservations.join('; ')}.`);
+  if (ratingLabel) found.push(`Recorded pest activity was ${ratingLabel}.`);
+  if (cleanRecommendations.length) found.push(`Recommended next steps include ${cleanRecommendations.join('; ')}.`);
+  if (!found.length) found.push('The visit details were documented for continued monitoring at the next scheduled service.');
+
+  const report = `WHAT WE DID\n\n${did.join(' ')}\n\nWHAT WE FOUND\n\n${found.join(' ')}`;
+  if (!reportCopyRejection(report)) return report;
+  return 'WHAT WE DID\n\nWe completed the scheduled service and documented the work performed.\n\nWHAT WE FOUND\n\nThe visit details were recorded for continued monitoring at the next scheduled service.';
+}
+
 // POST /api/admin/schedule/generate-report — AI customer-facing service report copy
 router.post('/generate-report', async (req, res) => {
   try {
-    const Anthropic = require('@anthropic-ai/sdk');
     const crypto = require('crypto');
     const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
-    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: 'AI not configured' });
-
     const {
       scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
@@ -5782,13 +5896,12 @@ router.post('/generate-report', async (req, res) => {
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };
 
-    const model = MODELS.FLAGSHIP;
-    if (!model || typeof model !== 'string') {
+    const primaryModel = MODELS.TEXT_POLICIES.report.primary.model;
+    const backupModel = MODELS.TEXT_POLICIES.report.fallback.model;
+    if ((!primaryModel || typeof primaryModel !== 'string') && (!backupModel || typeof backupModel !== 'string')) {
       logger.error('[generate-report] Model not configured', { MODELS });
       return res.status(500).json({ error: 'AI model not configured' });
     }
-
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v3
 
@@ -6056,39 +6169,47 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     }
 
     const fullUserMessage = `${userMessage}${contextText}`;
-    const cacheKey = crypto.createHash('sha256').update(`v3|${model}|${fullUserMessage}`).digest('hex');
+    const cacheKey = crypto.createHash('sha256')
+      .update(`v5|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
+      .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
 
-    // Generate, validate, and retry once if the model returns empty copy or
-    // liability language ("guaranteed", "eliminated", ...). Never cache or
-    // return unsafe/empty copy as a success — the other AI copy paths
-    // (photo-analysis, ai-summary) guard the same way.
-    let report = '';
-    let rejection = 'empty';
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const msg = await anthropic.messages.create({
-        model,
-        max_tokens: 800,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: fullUserMessage }],
+    const generated = await generateReportCopyWithFallback({ systemPrompt, userMessage: fullUserMessage });
+    if (!generated.ok) {
+      const report = buildDeterministicReportCopy({
+        serviceType: groundingServiceType,
+        areas,
+        actions,
+        observations: obs,
+        recommendations: recs,
+        ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
       });
-      report = (msg.content?.[0]?.text || '').trim();
-      rejection = reportCopyRejection(report);
-      if (!rejection) break;
-      logger.warn(`[generate-report] attempt ${attempt} rejected (${rejection})${attempt < 2 ? '; retrying' : ''}`);
-    }
-    if (rejection) {
-      return res.status(502).json({
-        error: rejection === 'empty'
-          ? 'AI returned empty report copy. Please try again.'
-          : 'AI report copy failed safety checks. Please try again.',
-        type: 'report_copy_unsafe',
+      if (!report) {
+        logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
+          failures: generated.failures,
+        });
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
+      reportCopyCacheSet(cacheKey, report);
+      logger.warn('[generate-report] both AI providers missed; returned deterministic report copy', {
+        failures: generated.failures,
       });
+      return res.json({ report, fallback: true, deterministic: true });
     }
 
+    const { report } = generated;
     reportCopyCacheSet(cacheKey, report);
-    logger.info('[generate-report] generated', { hasGrounding: !!groundingCustomerId, ...contextSignals });
+    logger.info('[generate-report] generated', {
+      provider: generated.provider,
+      model: generated.model,
+      fallbackUsed: generated.failures.length > 0,
+      hasGrounding: !!groundingCustomerId,
+      ...contextSignals,
+    });
     res.json({ report });
   } catch (err) {
     logger.error('[generate-report] AI failed', {
@@ -6698,6 +6819,8 @@ router._test = {
   recurringTemplateTechnicianId,
   shouldPreserveParentTemplateForThisOnlyAssignment,
   reportCopyRejection,
+  generateReportCopyWithFallback,
+  buildDeterministicReportCopy,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,

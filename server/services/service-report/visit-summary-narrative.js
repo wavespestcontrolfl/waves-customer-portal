@@ -22,7 +22,7 @@
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
-const { callAnthropic } = require('../llm/call');
+const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
 const PROMPT_VERSION = 'pest_visit_summary_narrative_v1';
@@ -183,7 +183,10 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
   const callModel = deps.callModel
-    || ((payload) => callAnthropic({ model: MODELS.VOICE, jsonMode: true, maxTokens: 400, ...payload }));
+    || ((payload) => dispatchWithFallback(
+      MODELS.TEXT_POLICIES.customerCopy,
+      { jsonMode: true, maxTokens: 400, ...payload },
+    ));
 
   let value = fallback;
   try {

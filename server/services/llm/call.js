@@ -46,8 +46,15 @@ function extractOpenAIText(data) {
 function parseLooseJson(text) {
   if (!text) return null;
   const clean = String(text).replace(/```json|```/g, '').trim();
-  const match = clean.match(/\{[\s\S]*\}/);
-  try { return JSON.parse(match ? match[0] : clean); } catch { return null; }
+  try { return JSON.parse(clean); } catch { /* tolerate a short preamble */ }
+  const objectStart = clean.indexOf('{');
+  const arrayStart = clean.indexOf('[');
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  if (!starts.length) return null;
+  const start = Math.min(...starts);
+  const end = clean[start] === '[' ? clean.lastIndexOf(']') : clean.lastIndexOf('}');
+  if (end <= start) return null;
+  try { return JSON.parse(clean.slice(start, end + 1)); } catch { return null; }
 }
 
 // Per-provider image block shapes (normalized input: { data: base64, mimeType }).
@@ -59,20 +66,26 @@ const toAnthropicImage = (img) => ({ type: 'image', source: { type: 'base64', me
  * OpenAI Responses API. System is prepended into the user text (the proven #1834
  * pattern — no separate system role). jsonMode parses the reply via parseLooseJson.
  */
-async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens } = {}) {
+async function callOpenAI({ model, system, text, images = [], jsonMode = true, maxTokens, timeoutMs, reasoningEffort = 'low' } = {}) {
   if (!process.env.OPENAI_API_KEY) return { ok: false, reason: 'no_key' };
   try {
     const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
     const content = [{ type: 'input_text', text: promptText }, ...images.map(toOpenAIImage)];
     const body = { model, input: [{ role: 'user', content }] };
     if (maxTokens) body.max_output_tokens = maxTokens;
+    if (/^gpt-5(?:\.|-|$)/i.test(String(model || ''))) body.reasoning = { effort: reasoningEffort };
     const resp = await fetch(OPENAI_RESPONSES_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify(body),
+      ...(timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     if (!resp.ok) { logger.warn(`[llm] OpenAI ${resp.status}`); return { ok: false, reason: `openai_${resp.status}` }; }
     const data = await resp.json();
+    if (data?.status && data.status !== 'completed') {
+      logger.warn(`[llm] OpenAI response ${data.status}${data.incomplete_details?.reason ? ` (${data.incomplete_details.reason})` : ''}`);
+      return { ok: false, reason: 'openai_incomplete' };
+    }
     const out = extractOpenAIText(data);
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
@@ -87,7 +100,7 @@ async function callOpenAI({ model, system, text, images = [], jsonMode = true, m
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
  */
-async function callGemini({ model, system, text, images = [], jsonMode = true, maxTokens = 2048, temperature = 0.2 } = {}) {
+async function callGemini({ model, system, text, images = [], jsonMode = true, maxTokens = 2048, temperature = 0.2, timeoutMs } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
   try {
@@ -99,6 +112,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts }], generationConfig }),
+      ...(timeoutMs && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
     if (!resp.ok) { logger.warn(`[llm] Gemini ${resp.status}`); return { ok: false, reason: `gemini_${resp.status}` }; }
     const data = await resp.json();
@@ -116,10 +130,10 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, m
  * Anthropic SDK messages.create. Uses a real system param; passes tools through
  * (e.g. server web_search) for callers that need them.
  */
-async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, maxTokens = 1024 } = {}) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return { ok: false, reason: 'no_key' };
+async function callAnthropic({ model, system, text, images = [], tools, jsonMode = true, maxTokens = 1024, timeoutMs, temperature, anthropicClient } = {}) {
+  if (!anthropicClient && (!Anthropic || !process.env.ANTHROPIC_API_KEY)) return { ok: false, reason: 'no_key' };
   try {
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const content = [...images.map(toAnthropicImage)];
     if (text) content.push({ type: 'text', text });
     const req = { model, max_tokens: maxTokens, messages: [{ role: 'user', content }] };
@@ -129,8 +143,13 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
     // are silently not cached — harmless.
     if (system) req.system = [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
     if (tools) req.tools = tools;
-    const resp = await client.messages.create(req);
-    const out = (resp?.content || []).find((b) => b.type === 'text')?.text || '';
+    if (Number.isFinite(temperature)) req.temperature = temperature;
+    const resp = timeoutMs
+      ? await client.messages.create(req, { timeout: timeoutMs })
+      : await client.messages.create(req);
+    // Older SDK/test adapters may omit the explicit block type while still
+    // returning a valid text field; accept both shapes.
+    const out = (resp?.content || []).find((b) => b?.type === 'text' || (b?.type == null && typeof b?.text === 'string'))?.text || '';
     const json = jsonMode ? parseLooseJson(out) : null;
     if (jsonMode && !json) return { ok: false, reason: 'empty_json' };
     return { ok: true, text: out, json, model, response: resp };
@@ -142,7 +161,9 @@ async function callAnthropic({ model, system, text, images = [], tools, jsonMode
 
 /**
  * Dispatch a models.ROUTES entry ({ provider, model }) to the matching provider.
- * payload: { system, text, images, jsonMode, maxTokens, tools, temperature }.
+ * payload: { system, text, images, jsonMode, maxTokens, tools, temperature,
+ *            anthropicClient } (`anthropicClient` supports existing injected
+ *            clients and deterministic tests without bypassing the router).
  */
 async function dispatch(route, payload = {}) {
   if (!route || !route.provider || !route.model) return { ok: false, reason: 'no_route' };
@@ -155,11 +176,84 @@ async function dispatch(route, payload = {}) {
   }
 }
 
+/**
+ * Walk a named cross-provider policy ({ primary, fallback }). Unlike provider
+ * SDK retries, this protects against provider-wide outages, missing keys,
+ * malformed output, and caller-defined copy validation failures.
+ *
+ * validate(result, route) may return null/false for success or a short reason
+ * string for rejection. Rejected output is never returned as a success.
+ */
+async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
+  const routes = [policy?.primary, policy?.fallback].filter(Boolean);
+  if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
+  if (routes.length > 1 && routes[0].provider === routes[1].provider) {
+    logger.error(`[llm] invalid fallback policy: both routes use ${routes[0].provider}`);
+    return { ok: false, reason: 'same_provider_fallback', failures: [] };
+  }
+
+  const failures = [];
+  const timeoutBudgetMs = Number.isFinite(payload.timeoutMs) && payload.timeoutMs > 0
+    ? payload.timeoutMs
+    : null;
+  const deadline = timeoutBudgetMs === null ? null : Date.now() + timeoutBudgetMs;
+  for (let index = 0; index < routes.length; index += 1) {
+    const route = routes[index];
+    let routePayload = payload;
+    if (deadline !== null) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        failures.push({ provider: route.provider, model: route.model, reason: 'timeout_budget_exhausted' });
+        break;
+      }
+      routePayload = { ...payload, timeoutMs: remainingMs };
+    }
+    let result;
+    try {
+      result = await dispatch(route, routePayload);
+    } catch (err) {
+      logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
+      result = { ok: false, reason: 'error' };
+    }
+
+    if (!result?.ok) {
+      failures.push({ provider: route.provider, model: route.model, reason: result?.reason || 'error' });
+      continue;
+    }
+
+    let rejection = payload.jsonMode === false && !String(result.text || '').trim()
+      ? 'empty_text'
+      : null;
+    if (typeof validate === 'function') {
+      try {
+        rejection = validate(result, route) || null;
+      } catch (err) {
+        rejection = `validator_error:${err.message}`;
+      }
+    }
+    if (rejection) {
+      failures.push({ provider: route.provider, model: route.model, reason: String(rejection) });
+      continue;
+    }
+
+    return {
+      ...result,
+      provider: route.provider,
+      model: result.model || route.model,
+      fallbackUsed: index > 0,
+      failures,
+    };
+  }
+
+  return { ok: false, reason: 'all_providers_failed', failures };
+}
+
 module.exports = {
   callOpenAI,
   callGemini,
   callAnthropic,
   dispatch,
+  dispatchWithFallback,
   extractOpenAIText,
   parseLooseJson,
   OPENAI_RESPONSES_API,
