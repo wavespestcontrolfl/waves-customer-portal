@@ -442,9 +442,20 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return skip('send_outcome_uncertain');
     }
     if (!result?.sent) {
-      // A definitive not-sent RESULT (policy block, provider rejection
-      // reported as an outcome): the text never left, so the claim and
-      // the fresh pending row release — a later trigger may retry once.
+      if (result?.retryable || result?.deferred) {
+        // AMBIGUOUS provider outcome (Codex #2771 r7): the Twilio adapter
+        // classifies timeouts/5xx/429 as retryable non-sent results — the
+        // provider may already have accepted the message. Same rule as the
+        // thrown-uncertain path: keep the claim consumed and stamp the
+        // maybe-sent marker. A definitively-lost send surfaces through the
+        // office/abandonment lanes, never as a second bearer link.
+        logger.error(`[appt-card-request] send outcome RETRYABLE-ambiguous for visit ${visit.id} — keeping the one-text claim (${result?.code || 'no_code'})`);
+        await markSendOutcome();
+        return skip('send_outcome_uncertain');
+      }
+      // A definitive not-sent RESULT (policy block, hard provider
+      // rejection): the text never left, so the claim and the fresh
+      // pending row release — a later trigger may retry once.
       await releaseClaim();
       return skip(`send_blocked:${result?.code || result?.reason || 'unknown'}`);
     }
@@ -784,6 +795,40 @@ async function loadSecureCardPageData(token) {
     if (resolved?.payerId) return { state: 'closed', ...base };
   } catch (err) {
     logger.warn(`[appt-card-request] page payer re-check failed — rendering the form (completion enforces): ${err.message}`);
+  }
+
+  // Coverage re-check (Codex #2771 r7 P3): a customer who enrolled in Auto
+  // Pay or saved a consented chargeable card AFTER this link was minted is
+  // already covered — mirror the funnel's exemptions and show "secured"
+  // instead of asking for another card, healing the pending row to
+  // satisfied. Lookup failure renders the form (an extra saved card is a
+  // recoverable annoyance, a broken page is not).
+  try {
+    const { customerOnAutopay } = require('./autopay-eligibility');
+    const customerRow = await db('customers').where({ id: request.customer_id }).first();
+    let savedMethod = null;
+    let covered = !!(customerRow && await customerOnAutopay(customerRow));
+    if (!covered) {
+      const { findConsentedChargeableCard } = require('./payment-method-consents');
+      savedMethod = await findConsentedChargeableCard(request.customer_id);
+      covered = !!savedMethod;
+    }
+    if (covered) {
+      await db('appointment_card_requests')
+        .where({ id: request.id, status: 'pending' })
+        .update({
+          status: 'satisfied',
+          ...(savedMethod ? {
+            payment_method_id: savedMethod.id,
+            stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+          } : {}),
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+      return { state: 'secured', ...base };
+    }
+  } catch (err) {
+    logger.warn(`[appt-card-request] page coverage re-check failed — rendering the form: ${err.message}`);
   }
 
   const intent = await createSecureCardSetupIntent(request);

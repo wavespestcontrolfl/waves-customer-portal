@@ -270,6 +270,16 @@ app.use('/api/ai/chat/report', (req, res, next) => {
   }
   next();
 });
+// Secure-card privacy headers must survive EVERY outcome — including the
+// GLOBAL /api limiter's 429s, which fire before the router's own header
+// middleware can run (Codex #2771 r7). Scoped ahead of the limiter; the
+// route's middleware still covers everything downstream.
+app.use('/api/public/secure-card', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

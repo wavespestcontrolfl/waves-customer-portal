@@ -397,6 +397,20 @@ describe('the send', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a RETRYABLE provider outcome keeps the claim (Twilio may have accepted)', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_RETRYABLE' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_outcome_uncertain');
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(false);
+    const reqUpdates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(reqUpdates.some((p) => p.sent_at instanceof Date)).toBe(true);
+  });
+
   test('blocked send releases the claim and the pending row', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
@@ -787,6 +801,29 @@ describe('loadSecureCardPageData — page state machine', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('closed');
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('Auto Pay enrolled after the link was minted → secured, row healed, no form', async () => {
+    mockCustomerOnAutopay.mockResolvedValueOnce(true);
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+    const heal = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'satisfied');
+    expect(heal).toBeTruthy();
+  });
+
+  test('a consented saved card acquired after minting → secured with the method healed on', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-7', stripe_payment_method_id: 'pm_x7' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    const heal = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'satisfied');
+    expect(heal).toMatchObject({ payment_method_id: 'pm-row-7' });
   });
 
   test('canceled intent replays walk the generation salt forward', async () => {
