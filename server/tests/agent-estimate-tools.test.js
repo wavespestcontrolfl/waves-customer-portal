@@ -1423,7 +1423,7 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(insert.customer_id).toBeNull();
   });
 
-  test('a revision preserves authored proposal data in estimate_data', async () => {
+  test('a revision invalidates authored proposal data when engine pricing changes', async () => {
     const existing = {
       id: 'estimate-old',
       token: 'old-token',
@@ -1450,7 +1450,9 @@ describe('Agent Estimate round-6 hardening', () => {
     expect(result.success).toBe(true);
     const update = writes.find((write) => write.table === 'estimates' && write.op === 'update').payload;
     const stored = JSON.parse(update.estimate_data);
-    expect(stored.proposal).toEqual({ enabled: true, buildings: [{ name: 'Main office' }] });
+    expect(stored.proposal).toBeUndefined();
+    expect(stored.proposalDelivery).toBeUndefined();
+    expect(stored.proposalInvalidated?.reason).toMatch(/pricing was revised/i);
     expect(stored.estimatorEngine.origin).toBe('manual_agent');
   });
 });

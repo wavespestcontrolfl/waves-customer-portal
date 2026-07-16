@@ -883,6 +883,20 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     last_send_error: null,
     updated_at: db.fn.now(),
   };
+  const deliveryStatePatch = {
+    deliveryState: {
+      attemptedAt: now().toISOString(),
+      sentChannels,
+      failedChannels,
+      channels,
+    },
+  };
+  // Delivery outcomes must survive even if snapshot construction fails;
+  // partial-send retry state is operational data, not part of pricing QA.
+  updatePayload.estimate_data = db.raw(
+    "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+    [JSON.stringify(deliveryStatePatch)],
+  );
   // Persist only the send-time pricing snapshot, merged into estimate_data via
   // a jsonb || merge rather than a full overwrite, so it replaces just the
   // `sendSnapshot` (+ proposalDelivery) keys and preserves any concurrently
@@ -898,12 +912,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     // never a nested write, so the `||` merge can't drop the proposal itself.
     const mergePatch = {
       sendSnapshot: snapshot.sendSnapshot || {},
-      deliveryState: {
-        attemptedAt: now().toISOString(),
-        sentChannels,
-        failedChannels,
-        channels,
-      },
+      ...deliveryStatePatch,
     };
     if (proposalEnabledForDelivery) {
       mergePatch.proposalDelivery = {

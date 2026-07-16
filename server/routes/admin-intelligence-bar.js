@@ -374,7 +374,19 @@ function confirmationDisplayParams(toolName, params, preview) {
     reasoning: params?.reasoning || null,
     assumptions: (params?.assumptions || []).join('; ') || 'none',
     open_questions: (params?.uncertainty || []).join('; ') || 'none',
+    leadId: params?.leadId || null,
   };
+}
+
+function agentEstimatePreviewFingerprint(preview = {}) {
+  const money = preview.totals || {};
+  return JSON.stringify({
+    monthly: Number(money.monthly || 0),
+    annual: Number(money.annual || 0),
+    oneTime: Number(money.oneTime || 0),
+    lane: preview.lane || null,
+    tier: preview.waveguard_tier || preview.customer_account?.current_tier || null,
+  });
 }
 
 /**
@@ -386,10 +398,16 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL && selectedLeadId) {
+    if (params.leadId && String(params.leadId) !== String(selectedLeadId)) {
+      return { failed: true, modelResult: { error: 'Draft lead does not match the Agent Estimate lead currently open.' } };
+    }
+    params.leadId = selectedLeadId;
+  }
 
   let preview;
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
@@ -402,6 +420,9 @@ async function proposePendingWrite({ toolUse, req, context }) {
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+  }
+  if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
+    params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   }
 
   const row = await PendingActions.createPendingAction({
@@ -1252,7 +1273,12 @@ For create_customer, the route-optimization writes, and the inventory stock writ
           // Issue #1568: gated writes are proposed, never executed, from the
           // model loop. The confirmation id goes to the client only.
           try {
-            const proposed = await proposePendingWrite({ toolUse, req, context });
+            const proposed = await proposePendingWrite({
+              toolUse,
+              req,
+              context,
+              selectedLeadId: pageData?.agent_estimate_context?.lead?.id || null,
+            });
             result = proposed.modelResult;
             if (proposed.failed) {
               failed = true;
@@ -1485,6 +1511,25 @@ router.post('/confirm-action', async (req, res, next) => {
     }
 
     const execParams = { ...action.params };
+    if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
+      const approvedFingerprint = execParams._approvedPreviewFingerprint;
+      delete execParams._approvedPreviewFingerprint;
+      const livePreview = await executeToolByName(action.tool_name, execParams, null, {
+        isAdmin: req.techRole === 'admin',
+        technicianId: req.technicianId || req.technician?.id || null,
+        confirmed: false,
+      });
+      if (isToolFailure(livePreview)
+        || !approvedFingerprint
+        || approvedFingerprint !== agentEstimatePreviewFingerprint(livePreview)) {
+        const result = {
+          error: 'Agent Estimate pricing or customer context changed after preview. Build a new confirmation card before saving.',
+          preview_changed: true,
+        };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
     if (WRITE_TWO_STEP_TOOL_NAMES.has(action.tool_name)) {
       // Server-derived confirmation: the operator clicked Confirm. This is
       // the only place a confirmed flag is ever attached.

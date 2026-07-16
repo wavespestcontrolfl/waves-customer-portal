@@ -475,6 +475,7 @@ const APPROVED_REACT_SERVICE_TEMPLATES = Object.freeze({
   boraCare: 'bora_care',
   bora_care: 'bora_care',
   preSlabTermiticide: 'pre_slab_termiticide',
+  preSlabTermidor: 'pre_slab_termiticide',
   pre_slab_termiticide: 'pre_slab_termiticide',
 });
 
@@ -1256,15 +1257,25 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   const factMatchesPricingInput = (key, fact) => {
     if (!isVerifiedFact(fact)) return false;
     if (/address/i.test(key)) return sameStreetAddress(String(fact.value), input.address);
-    const candidateKeys = /lawn|turf|treatable/i.test(key)
+    const candidateKeys = /palm/i.test(key)
+      ? ['palmCount', 'services.palm.palmCount', 'services.palm.count']
+      : (/bedroom/i.test(key)
+        ? ['bedrooms', 'services.bedBug.bedrooms', 'services.bed_bug.bedrooms']
+        : (/unit|apartment/i.test(key)
+          ? ['unitCount', 'commercialUnitCount', 'services.pest.unitCount', 'services.lawn.unitCount']
+          : (/lawn|turf|treatable/i.test(key)
       ? ['measuredTurfSf', 'lawnSqFt', 'estimatedTurfSf']
       : (/building|home|unit/i.test(key)
         ? ['buildingSqFt', 'homeSqFt']
         : (/lot|outdoor/i.test(key)
           ? ['lotSqFt']
-          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : [])));
-    if (!candidateKeys.length) return true;
-    const expected = candidateKeys.map((name) => Number(input.engineInputs[name]))
+          : (/perimeter|linear/i.test(key) ? ['perimeterLF'] : []))))));
+    const getPath = (object, path) => path.split('.').reduce((value, part) => value?.[part], object);
+    if (!candidateKeys.length) {
+      return !(/count|sq\s*ft|sqft|\bsf\b|area|size|feet|\bft\b|linear/i.test(key)
+        && Number.isFinite(Number(fact.value)));
+    }
+    const expected = candidateKeys.map((name) => Number(getPath(input.engineInputs, name)))
       .find((value) => Number.isFinite(value));
     const observed = Number(fact.value);
     return Number.isFinite(expected) && Number.isFinite(observed)
@@ -1362,7 +1373,9 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     for (const reason of line.review_reasons || []) pricingLaneReasons.push(`${line.service}: ${reason}`);
   }
   for (const row of inventoryReview) {
-    if (!row?.status) {
+    if (row?.onHand == null) {
+      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: count untracked`);
+    } else if (!row?.status) {
       laneReasons.push(`${row?.productName || row?.product || 'inventory'}: status missing`);
     } else if (!['in_stock', 'ok', 'available', 'not_applicable'].includes(String(row.status).toLowerCase())) {
       laneReasons.push(`${row.productName || row.product || 'inventory'}: ${row.status}`);
@@ -1625,6 +1638,14 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     const mergedData = { ...currentData, ...payload.data };
     if (!payload.data.membershipSnapshot) delete mergedData.membershipSnapshot;
     if (!payload.data.priorQualifyingServices) delete mergedData.priorQualifyingServices;
+    if (currentData.proposal?.enabled) {
+      delete mergedData.proposal;
+      delete mergedData.proposalDelivery;
+      mergedData.proposalInvalidated = {
+        at: new Date().toISOString(),
+        reason: 'Agent Estimate pricing was revised; re-author the proposal before delivery.',
+      };
+    }
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
         estimate_data: JSON.stringify(mergedData),
