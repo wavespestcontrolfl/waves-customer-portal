@@ -7,6 +7,7 @@ const {
   technicianPestRatingAllowedForService,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
+  completionOwnershipError,
 } = adminDispatchRouter._test;
 
 function fakeAssessmentKnex(firstResult) {
@@ -23,6 +24,32 @@ function fakeAssessmentKnex(firstResult) {
 }
 
 describe('admin dispatch lawn assessment completion guard', () => {
+  test('completion is limited to the assigned technician while admins retain override access', () => {
+    expect(completionOwnershipError({
+      role: 'technician',
+      actorTechnicianId: 'tech-a',
+      assignedTechnicianId: 'tech-a',
+    })).toBeNull();
+    expect(completionOwnershipError({
+      role: 'admin',
+      actorTechnicianId: 'admin-a',
+      assignedTechnicianId: 'tech-b',
+    })).toBeNull();
+    expect(completionOwnershipError({
+      role: 'technician',
+      actorTechnicianId: 'tech-a',
+      assignedTechnicianId: 'tech-b',
+    })).toMatchObject({
+      status: 403,
+      payload: { code: 'service_not_assigned' },
+    });
+    expect(completionOwnershipError({
+      role: 'technician',
+      actorTechnicianId: 'tech-a',
+      assignedTechnicianId: null,
+    })).toMatchObject({ status: 403 });
+  });
+
   test('does not block non-lawn or incomplete visits', () => {
     expect(lawnAssessmentCompletionBlockPayload({
       reportServiceLine: 'pest',

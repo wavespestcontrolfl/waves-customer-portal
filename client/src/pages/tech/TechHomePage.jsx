@@ -50,6 +50,8 @@ import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/C
 import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
+import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
@@ -182,10 +184,12 @@ export default function TechHomePage() {
   const navigate = useNavigate();
   const [schedule, setSchedule] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
+  const [leadTarget, setLeadTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -205,17 +209,18 @@ export default function TechHomePage() {
 
   const fetchSchedule = useCallback(async () => {
     try {
+      setScheduleError('');
       const token = getAdminAuthToken();
       const today = etDateString();
       const res = await fetch(`${API}/api/admin/schedule?date=${today}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setSchedule(scheduleRowsFromResponse(data));
-      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
+      setSchedule(scheduleRowsFromResponse(data));
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
+      setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
       setLoading(false);
     }
@@ -445,6 +450,21 @@ export default function TechHomePage() {
       {/* Field Assistant */}
       <TechIntelligenceBar />
 
+      <TechTimeTrackingCard nextStop={nextStop} />
+
+      {scheduleError && (
+        <div role="alert" style={{
+          background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
+          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 13,
+        }}>
+          <div style={{ marginBottom: 8 }}>{scheduleError}</div>
+          <button type="button" onClick={fetchSchedule} style={{
+            border: '1px solid #ef4444', background: 'transparent', color: '#ef4444',
+            borderRadius: 6, padding: '6px 10px', fontWeight: 700, cursor: 'pointer',
+          }}>Retry route</button>
+        </div>
+      )}
+
       {/* Quick Actions */}
       <h2 style={{
         fontSize: 14, fontWeight: 700, color: DARK.muted, margin: '0 0 10px',
@@ -601,7 +621,9 @@ export default function TechHomePage() {
             {/* Only celebrate when every stop actually completed — a route
                 that ended on a no-show/cancelled/skipped stop has no next
                 stop but isn't a clean sweep, so don't flash the 🎉. */}
-            {total === 0
+            {scheduleError
+              ? 'Route unavailable — retry above.'
+              : total === 0
               ? 'No services scheduled today'
               : completed === total
                 ? 'All services completed! 🎉'
@@ -610,12 +632,8 @@ export default function TechHomePage() {
         </div>
       )}
 
-      {/* Today's Services — full list with Photos affordance per row.
-          Photos button hits POST /api/tech/services/:id/photos which
-          requires the service to be completed (server returns 409
-          otherwise; the modal surfaces that inline). Visible for all
-          statuses so techs can review/manage photos on any of their
-          day's stops, not just the next one. */}
+      {/* Today's Services — photos captured before completion are staged and
+          attached to the service record atomically when the visit closes. */}
       {!loading && myServices.length > 0 && (
         <>
           <h2 style={{
@@ -636,6 +654,7 @@ export default function TechHomePage() {
                   id: s.id,
                   customerName: s.customer_name || s.customerName || 'Customer',
                 })}
+                onLead={() => setLeadTarget(s)}
               />
             ))}
           </div>
@@ -726,6 +745,13 @@ export default function TechHomePage() {
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
+        />
+      )}
+
+      {leadTarget && (
+        <FieldLeadModal
+          service={leadTarget}
+          onClose={() => setLeadTarget(null)}
         />
       )}
 
@@ -1001,7 +1027,7 @@ function TimecardSignoffCard({ techName }) {
   );
 }
 
-function ServiceRow({ service, onPhotos, onProject }) {
+function ServiceRow({ service, onPhotos, onProject, onLead }) {
   const status = service.status || 'pending';
   const statusColor = {
     completed: '#22c55e',
@@ -1048,6 +1074,13 @@ function ServiceRow({ service, onPhotos, onProject }) {
           color: DARK.teal, cursor: 'pointer',
         }}>
           📷 Photos
+        </button>
+        <button onClick={onLead} aria-label="Flag opportunity" style={{
+          padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+          border: `1px solid ${DARK.border}`, background: 'transparent',
+          color: '#f59e0b', cursor: 'pointer',
+        }}>
+          🚩
         </button>
       </div>
     </div>
