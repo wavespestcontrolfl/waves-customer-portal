@@ -22,7 +22,7 @@ import { cn, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../compone
 import PendingActionsCard from "../../components/admin/PendingActionsCard";
 import { AttachIcon } from "../../components/admin/IntelligenceBarShell";
 
-const BUILD_PROMPT = "Build the estimate from all available evidence. Verify property facts, protocols, inventory, and per-line margin, then propose the draft for my confirmation.";
+const BUILD_PROMPT = "Build the estimate from all available evidence. If this is a recognized customer, preserve current services and price only requested additions using the selected lead account context. Verify property facts, protocols, inventory, presentation sections, and per-line margin, then propose the draft for my confirmation.";
 const NO_FALLBACK_ACTIONS = [];
 
 function money(value) {
@@ -32,6 +32,18 @@ function money(value) {
     currency: "USD",
     minimumFractionDigits: amount % 1 ? 2 : 0,
   }).format(amount);
+}
+
+function serviceTemplateLabel(value) {
+  return String(value || "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function spendSourceLabel(value) {
+  if (value === "last_paid_invoice") return "last paid invoice";
+  if (value === "scheduled_estimate") return "scheduled price fallback";
+  return "price unavailable";
 }
 
 function leadName(lead) {
@@ -205,7 +217,60 @@ function EvidencePanel({ context }) {
   );
 }
 
-function DraftSummary({ draft, contact, onPreview, onSend, sending, sendMessage }) {
+export function CustomerAccountPanel({ account, profile }) {
+  if (!account?.recognized) {
+    return (
+      <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3 text-[14px] leading-5 text-zinc-600">
+        No unambiguous customer account match. This will price as a new-customer estimate unless staff links the correct account.
+      </div>
+    );
+  }
+
+  const services = account.current_services || [];
+  return (
+    <div className="border-b border-zinc-200 bg-emerald-50/60 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-[14px] font-medium text-emerald-950">
+            <CheckCircle2 size={18} aria-hidden="true" /> Existing customer recognized
+          </div>
+          <p className="mt-1 text-[14px] leading-5 text-emerald-900">
+            Current services and their paid prices stay unchanged. They establish the starting tier; the estimator applies the combined tier only to requested additions.
+          </p>
+        </div>
+        <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-[14px] text-emerald-900">
+          {account.current_tier || profile?.waveguard_tier || (account.active_plan ? "Active plan" : "No active plan")}
+          {Number(account.current_discount_pct) > 0 ? ` · ${account.current_discount_pct}% current discount` : ""}
+        </span>
+      </div>
+      <div className="mt-3 overflow-hidden rounded-sm border border-emerald-200 bg-white">
+        <div className="border-b border-emerald-100 px-3 py-2 text-[14px] font-medium text-zinc-900">Current service + spend</div>
+        {services.length ? services.map((service) => (
+          <div key={service.key} className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 px-3 py-3 last:border-b-0">
+            <div>
+              <div className="text-[14px] font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
+              <div className="text-[14px] text-zinc-500">
+                {spendSourceLabel(service.spendSource)}
+                {service.lastPaidAt ? ` · ${String(service.lastPaidAt).slice(0, 10)}` : ""}
+                {service.qualifiesForWaveGuard === false ? " · not a tier service" : ""}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[16px] font-medium text-zinc-950">
+                {service.currentPerVisit == null ? "Not available" : money(service.currentPerVisit)}
+              </div>
+              <div className="text-[14px] text-zinc-500">per application</div>
+            </div>
+          </div>
+        )) : (
+          <div className="px-3 py-3 text-[14px] text-zinc-600">Account matched, but no active recurring service rows were found.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sendMessage }) {
   if (!draft) {
     return <div className="p-4 text-[14px] leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
@@ -224,6 +289,20 @@ function DraftSummary({ draft, contact, onPreview, onSend, sending, sendMessage 
         <TinyFact label="Annual" value={money(draft.annual_total)} />
         <TinyFact label="One-time" value={money(draft.onetime_total)} />
       </div>
+      {(draft.presentation_template || draft.service_template_keys?.length) && (
+        <div className="rounded-sm border border-zinc-200 p-3">
+          <div className="text-[14px] font-medium text-zinc-900">Customer presentation</div>
+          <div className="mt-1 text-[14px] text-zinc-600">
+            {serviceTemplateLabel(draft.presentation_template || "service")}
+            {draft.service_template_keys?.length
+              ? ` · ${draft.service_template_keys.map(serviceTemplateLabel).join(" + ")}`
+              : ""}
+          </div>
+          {account?.recognized && (
+            <div className="mt-1 text-[14px] text-zinc-500">Expansion estimate; current services are not duplicated in this presentation.</div>
+          )}
+        </div>
+      )}
       {draft.lane_reasons?.length > 0 && (
         <div className="rounded-sm border border-zinc-200 p-3">
           <div className="mb-1 text-[14px] font-medium text-zinc-900">Review before sending</div>
@@ -437,6 +516,8 @@ export default function AgentEstimatePage() {
       monthly_total: result.monthly_total,
       annual_total: result.annual_total,
       onetime_total: result.onetime_total,
+      presentation_template: result.presentation_template || null,
+      service_template_keys: result.service_template_keys || [],
       editable_here: true,
     }));
     loadContext();
@@ -497,7 +578,7 @@ export default function AgentEstimatePage() {
   const contact = context?.lead || null;
   const previewUrl = draft?.token ? `/estimate/${draft.token}?adminPreview=1` : null;
   const quickActions = intelligence.quickActions || [];
-  const buildDisabled = !context || contextLoading || intelligence.loading || context?.is_existing_customer;
+  const buildDisabled = !context || contextLoading || intelligence.loading;
 
   const chooseLead = (leadId) => {
     setSearchParams(leadId ? { leadId } : {});
@@ -555,7 +636,7 @@ export default function AgentEstimatePage() {
           </div>
           <h1 className="text-[28px] font-normal tracking-tight">Agent Estimate</h1>
           <p className="mt-1 max-w-3xl text-[14px] leading-6 text-zinc-600">
-            Pull a new lead’s calls, texts, and quote form into one evidence-backed estimate. AI assembles and checks; the pricing engine prices; you preview and send.
+            Pull a lead’s calls, texts, quote form, and recognized customer account into one evidence-backed estimate. Current services stay intact; the pricing engine prices additions; you preview and send.
           </p>
         </div>
         {selectedLeadId && (
@@ -567,7 +648,7 @@ export default function AgentEstimatePage() {
 
       <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.55fr)]">
         <main className="min-w-0 space-y-4">
-          <SectionCard title="1 · Choose a lead" subtitle="Open leads only; the existing Create Estimate page remains unchanged.">
+          <SectionCard title="1 · Choose a lead" subtitle="Open leads include new prospects and existing-customer expansion requests.">
             <LeadPicker
               selectedId={selectedLeadId}
               leads={leadOptions}
@@ -590,11 +671,7 @@ export default function AgentEstimatePage() {
                   <TinyFact label="Phone" value={contact?.phone} />
                   <TinyFact label="Address" value={contact?.address} />
                 </div>
-                {context.is_existing_customer && (
-                  <div className="border-b border-alert-fg bg-white px-4 py-3 text-[14px] leading-5 text-alert-fg">
-                    This contact matches an existing customer. New-lead drafting is blocked; keep it in the task/flag flow.
-                  </div>
-                )}
+                <CustomerAccountPanel account={context.customer_account} profile={context.customer_profile} />
                 <EvidencePanel context={context} />
               </SectionCard>
 
@@ -721,6 +798,7 @@ export default function AgentEstimatePage() {
             <DraftSummary
               draft={draft}
               contact={contact}
+              account={context?.customer_account}
               onPreview={() => setPreviewOpen(true)}
               onSend={sendDraft}
               sending={sending}
@@ -738,7 +816,7 @@ export default function AgentEstimatePage() {
               <div className="flex gap-2"><CheckCircle2 size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Pricing engine owns every dollar.</div>
               <div className="flex gap-2"><FileText size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Protocol and inventory affect feasibility/review, never price.</div>
               <div className="flex gap-2"><Camera size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Photo observations retain per-field confidence and occlusion notes.</div>
-              <div className="flex gap-2"><Phone size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Existing-customer contacts stay in the task/flag flow.</div>
+              <div className="flex gap-2"><Phone size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Existing accounts supply current service/spend; only requested additions are priced.</div>
             </div>
             <div className="border-t border-zinc-200">
               <LearningPanel leadId={selectedLeadId} user={user} memories={memories} onReload={loadMemories} />
