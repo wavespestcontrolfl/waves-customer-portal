@@ -76,10 +76,6 @@ const DiscountEngine = {
     if (discount.service_category_filter && discount.service_category_filter !== serviceCategory) failures.push(`category ${discount.service_category_filter}`);
     if (discount.min_subtotal && Number(subtotal) < Number(discount.min_subtotal)) failures.push(`minimum subtotal $${discount.min_subtotal}`);
     if (discount.promo_code_expiry && new Date(discount.promo_code_expiry) < new Date()) failures.push('promo code expiry');
-    if (discount.promo_code_max_uses
-      && Number(discount.promo_code_current_uses || 0) >= Number(discount.promo_code_max_uses)) {
-      failures.push('promo code usage limit');
-    }
     if (discount.payment_method_condition && discount.payment_method_condition !== paymentMethod) {
       failures.push(`payment method ${discount.payment_method_condition}`);
     }

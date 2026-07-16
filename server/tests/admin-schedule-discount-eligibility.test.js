@@ -15,6 +15,7 @@ const {
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
+  loadStoredDiscountScope,
 } = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
@@ -165,5 +166,41 @@ describe('admin schedule appointment discount eligibility', () => {
       price: 100,
       appointmentDiscountDollars: 50,
     });
+  });
+
+  test('loads immutable stored scope without rereading the discount catalog', async () => {
+    const servicesQuery = {
+      whereIn: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([
+        { id: 'primary-service', service_key: 'general_pest', category: 'pest_control' },
+      ]),
+    };
+    const database = jest.fn((table) => {
+      if (table !== 'services') throw new Error(`Unexpected table: ${table}`);
+      return servicesQuery;
+    });
+
+    const scope = await loadStoredDiscountScope(database, {
+      service_id: 'primary-service',
+      discount_service_key_filter: 'general_pest',
+      discount_service_category_filter: null,
+    });
+
+    expect(database).toHaveBeenCalledTimes(1);
+    expect(database).toHaveBeenCalledWith('services');
+    expect(scope.serviceKeyFilter).toBe('general_pest');
+    expect(scope.servicesById.get('primary-service')).toMatchObject({ service_key: 'general_pest' });
+  });
+
+  test('aborts recurring pricing when a scoped service cannot be resolved', async () => {
+    const database = jest.fn(() => ({
+      whereIn: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([]),
+    }));
+
+    await expect(loadStoredDiscountScope(database, {
+      service_id: 'missing-service',
+      discount_service_key_filter: 'general_pest',
+    })).rejects.toThrow(/catalog service is missing/);
   });
 });

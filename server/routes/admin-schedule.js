@@ -583,6 +583,8 @@ function copyAppointmentDiscountFields(target, source, cols) {
   if (cols.discount_type && source.discount_type) target.discount_type = source.discount_type;
   if (cols.discount_amount && source.discount_amount != null) target.discount_amount = source.discount_amount;
   if (cols.discount_dollars && source.discount_dollars != null) target.discount_dollars = source.discount_dollars;
+  if (cols.discount_service_key_filter) target.discount_service_key_filter = source.discount_service_key_filter || null;
+  if (cols.discount_service_category_filter) target.discount_service_category_filter = source.discount_service_category_filter || null;
 }
 
 function copyAddonDiscountFields(target, source, cols) {
@@ -1135,36 +1137,27 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
 }
 
 async function loadStoredDiscountScope(database, parent, addonRows = []) {
-  if (!parent?.discount_id) return null;
-  let discount;
-  try {
-    discount = await database('discounts')
-      .where({ id: parent.discount_id })
-      .first('service_key_filter', 'service_category_filter');
-  } catch (err) {
-    logger.error(`[schedule] recurring discount scope lookup failed: ${err.message}`);
-    return { isScoped: true, servicesById: new Map() };
-  }
-  if (!discount?.service_key_filter && !discount?.service_category_filter) return null;
+  const serviceKeyFilter = parent?.discount_service_key_filter || null;
+  const serviceCategoryFilter = parent?.discount_service_category_filter || null;
+  if (!serviceKeyFilter && !serviceCategoryFilter) return null;
 
   const serviceIds = Array.from(new Set([
     parent.service_id,
     ...(Array.isArray(addonRows) ? addonRows.map((addon) => addon.service_id) : []),
   ].filter(Boolean)));
-  let services = [];
-  try {
-    if (serviceIds.length > 0) {
-      services = await database('services')
-        .whereIn('id', serviceIds)
-        .select('id', 'service_key', 'category');
-    }
-  } catch (err) {
-    logger.error(`[schedule] recurring service scope lookup failed: ${err.message}`);
+  if (serviceIds.length === 0) {
+    throw new Error('Cannot replay a scoped recurring discount without catalog service IDs');
+  }
+  const services = await database('services')
+    .whereIn('id', serviceIds)
+    .select('id', 'service_key', 'category');
+  if (services.length !== serviceIds.length) {
+    throw new Error('Cannot replay a scoped recurring discount because a catalog service is missing');
   }
   return {
     isScoped: true,
-    serviceKeyFilter: discount.service_key_filter || null,
-    serviceCategoryFilter: discount.service_category_filter || null,
+    serviceKeyFilter,
+    serviceCategoryFilter,
     servicesById: new Map(services.map((service) => [service.id, service])),
   };
 }
@@ -2405,6 +2398,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (cols.discount_type && appointmentDiscountType) insertData.discount_type = appointmentDiscountType;
       if (cols.discount_amount && appointmentDiscountAmount != null) insertData.discount_amount = Number(appointmentDiscountAmount);
       if (pricing.appointmentDiscount && cols.discount_dollars && pricing.appointmentDiscount.discountDollars != null) insertData.discount_dollars = Number(pricing.appointmentDiscount.discountDollars);
+      if (pricing.appointmentDiscount && cols.discount_service_key_filter) insertData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+      if (pricing.appointmentDiscount && cols.discount_service_category_filter) insertData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
       if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) insertData.line_discount_id = pricing.primaryDiscount.discountId;
       if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) insertData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
       if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) insertData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2479,6 +2474,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.discount_type && appointmentDiscountType) childData.discount_type = appointmentDiscountType;
         if (cols.discount_amount && appointmentDiscountAmount != null) childData.discount_amount = Number(appointmentDiscountAmount);
         if (pricing.appointmentDiscount && cols.discount_dollars) childData.discount_dollars = childFinancials.appointmentDiscountDollars;
+        if (pricing.appointmentDiscount && cols.discount_service_key_filter) childData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+        if (pricing.appointmentDiscount && cols.discount_service_category_filter) childData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
         if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) childData.line_discount_id = pricing.primaryDiscount.discountId;
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -2542,6 +2539,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.discount_type && appointmentDiscountType) boosterData.discount_type = appointmentDiscountType;
           if (cols.discount_amount && appointmentDiscountAmount != null) boosterData.discount_amount = Number(appointmentDiscountAmount);
           if (pricing.appointmentDiscount && cols.discount_dollars) boosterData.discount_dollars = boosterFinancials.appointmentDiscountDollars;
+          if (pricing.appointmentDiscount && cols.discount_service_key_filter) boosterData.discount_service_key_filter = pricing.appointmentDiscount.serviceKeyFilter || null;
+          if (pricing.appointmentDiscount && cols.discount_service_category_filter) boosterData.discount_service_category_filter = pricing.appointmentDiscount.serviceCategoryFilter || null;
           if (pricing.primaryDiscount && cols.line_discount_id && pricing.primaryDiscount.discountId) boosterData.line_discount_id = pricing.primaryDiscount.discountId;
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
@@ -7257,6 +7256,7 @@ router._test = {
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
+  loadStoredDiscountScope,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,

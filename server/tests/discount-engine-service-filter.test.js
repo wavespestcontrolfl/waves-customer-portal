@@ -145,7 +145,7 @@ describe('discount engine service filters', () => {
     })).resolves.toEqual(['WaveGuard One-Time']);
   });
 
-  test('fails closed for expired, exhausted, or payment-restricted manual discounts', async () => {
+  test('fails closed for expired or payment-restricted manual discounts', async () => {
     const discount = serviceScopedDiscount({
       promo_code_expiry: '2020-01-01T00:00:00.000Z',
       promo_code_max_uses: 5,
@@ -157,9 +157,19 @@ describe('discount engine service filters', () => {
       subtotal: 100,
     })).resolves.toEqual([
       'promo code expiry',
-      'promo code usage limit',
       'payment method us_bank_account',
     ]);
+  });
+
+  test('does not reapply the promo claim cap during redemption', async () => {
+    const discount = serviceScopedDiscount({
+      promo_code_max_uses: 5,
+      promo_code_current_uses: 5,
+    });
+
+    await expect(DiscountEngine.manualEligibilityFailures(discount, null, {
+      subtotal: 100,
+    })).resolves.toEqual([]);
   });
 
   test('caps each applied result so recorded rows reconcile to the subtotal', async () => {
