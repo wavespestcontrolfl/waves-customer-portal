@@ -148,22 +148,27 @@ async function loadCalls(lead, sharedPhone) {
   }
 }
 
-async function loadCustomer(lead, extraction, sharedPhone) {
+async function resolveCustomer(lead, extraction, sharedPhone) {
   if (lead.customer_id) {
     try {
-      return await db('customers')
+      const linked = await db('customers')
         .where({ id: lead.customer_id })
         .whereNull('deleted_at')
         .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city',
           'state', 'zip', 'pipeline_stage', 'waveguard_tier', 'lawn_type', 'property_sqft',
           'lot_sqft', 'property_type', 'company_name');
+      return { customer: linked || null, ambiguous: false };
     } catch (err) {
       logger.warn(`[agent-estimate] linked customer load failed: ${err.message}`);
     }
   }
-  if (sharedPhone) return null;
+  if (sharedPhone) return { customer: null, ambiguous: false };
+  // A phone matching multiple customer rows is ambiguous even when no other
+  // LEAD shares the number (phoneIsShared checks leads only) — the caller
+  // must treat this exactly like a shared line and suppress phone-scoped
+  // history, or one customer's SMS/estimates leak into another lead's session.
   const match = await loadCustomerByPhone(lead.phone, extraction);
-  return match.ambiguous ? null : match.customer;
+  return { customer: match.ambiguous ? null : match.customer, ambiguous: match.ambiguous === true };
 }
 
 function suggestedPrompt(lead, currentEstimate, customerAccount = null) {
@@ -188,12 +193,26 @@ async function buildAgentEstimateContext(leadId) {
 
   const extractedData = parseJson(lead.extracted_data);
   const sharedPhone = await phoneIsShared(lead);
-  const calls = await loadCalls(lead, sharedPhone);
-  const latestExtraction = calls[0]?.extraction || null;
-  const [customer, smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
-    loadCustomer(lead, latestExtraction, sharedPhone),
-    sharedPhone ? Promise.resolve([]) : loadSmsThread(lead.phone, { limit: 60 }),
-    sharedPhone ? Promise.resolve([]) : loadPriorEstimates(lead.phone, { limit: 8 }),
+  const rawCalls = await loadCalls(lead, sharedPhone);
+  const latestExtraction = rawCalls[0]?.extraction || null;
+  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, latestExtraction, sharedPhone);
+  // Phone-scoped history fails closed on BOTH suppression signals: another
+  // lead on the number (sharedPhone) or multiple customer rows on the number
+  // (customerAmbiguous). Either way the thread/estimates may belong to a
+  // different person and must not enter this lead's evidence pack.
+  const phoneHistorySuppressed = sharedPhone || customerAmbiguous;
+  // Phone-matched call rows are equally cross-contaminated on an ambiguous
+  // number; keep only calls tied to THIS lead (its twilio_call_sid or its own
+  // transcript summary).
+  const calls = customerAmbiguous
+    ? rawCalls.filter((call) => (
+      (lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid)
+      || String(call.id).startsWith('lead-summary:')
+    ))
+    : rawCalls;
+  const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
+    phoneHistorySuppressed ? Promise.resolve([]) : loadSmsThread(lead.phone, { limit: 60 }),
+    phoneHistorySuppressed ? Promise.resolve([]) : loadPriorEstimates(lead.phone, { limit: 8 }),
     db('lead_activities').where({ lead_id: lead.id }).orderBy('created_at', 'desc').limit(30)
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
@@ -229,7 +248,9 @@ async function buildAgentEstimateContext(leadId) {
   } : {
     recognized: false,
     customer_id: null,
-    match_method: sharedPhone ? 'shared_phone_suppressed' : null,
+    match_method: sharedPhone
+      ? 'shared_phone_suppressed'
+      : (customerAmbiguous ? 'ambiguous_customer_suppressed' : null),
     active_plan: false,
     current_tier: null,
     current_discount_pct: 0,
@@ -288,6 +309,7 @@ async function buildAgentEstimateContext(leadId) {
     customer_account: customerAccount,
     is_existing_customer: profileIsExisting,
     shared_phone_history_suppressed: sharedPhone,
+    ambiguous_customer_history_suppressed: customerAmbiguous,
     prior_estimates: priorEstimates,
     current_estimate: currentEstimate ? {
       id: currentEstimate.id,

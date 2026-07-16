@@ -18,6 +18,7 @@ const {
   syncConstantsFromDB,
 } = require('../pricing-engine');
 const { deriveTotals } = require('../estimator-engine/draft-builder');
+const { sameStreetAddress } = require('../estimator-engine/address-compare');
 const { normalizeGrassType, grassTypeLabel } = require('../lawn-grass-context');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
@@ -387,6 +388,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'pricingconfig',
   'priorqualifyingservices',
   'routedriveminutes',
+  'servicespecificcredits',
   'servicespecificdiscounts',
   'targetlawngrossmargin',
   'targetmargin',
@@ -480,7 +482,20 @@ function serviceTemplateKey(rawKey) {
 
 function presentationForServices(services = {}, engineResult = null) {
   const requestedKeys = Object.keys(services).map(serviceTemplateKey).filter(Boolean);
-  const pricedKeys = (engineResult?.lineItems || []).map((line) => serviceTemplateKey(line?.service)).filter(Boolean);
+  const requestedSet = new Set(requestedKeys);
+  // The engine prices lawnPestControl under the generic one_time_lawn service
+  // key (only the display name says Lawn Pest Knockdown), so taking priced
+  // keys verbatim would demote the approved lawn-pest template whenever the
+  // engine prices successfully. Restore the requested specific template when
+  // the generic key was not itself requested.
+  const pricedKeys = (engineResult?.lineItems || [])
+    .map((line) => serviceTemplateKey(line?.service))
+    .filter(Boolean)
+    .map((key) => (
+      key === 'one_time_lawn' && !requestedSet.has('one_time_lawn') && requestedSet.has('lawn_pest_knockdown')
+        ? 'lawn_pest_knockdown'
+        : key
+    ));
   const serviceTemplateKeys = [...new Set(pricedKeys.length ? pricedKeys : requestedKeys)];
   const hasOneTime = serviceTemplateKeys.some((key) => ONE_TIME_REACT_TEMPLATES.has(key));
   const hasRecurring = serviceTemplateKeys.some((key) => !ONE_TIME_REACT_TEMPLATES.has(key));
@@ -495,18 +510,28 @@ function presentationForServices(services = {}, engineResult = null) {
 
 function accountPricingFromContext(context = {}) {
   const account = context.customer_account || {};
+  const priorQualifyingServices = Array.isArray(account.existing_service_keys)
+    ? [...new Set(account.existing_service_keys.filter(Boolean))]
+    : [];
+  // Duplicate checks must cover EVERY active recurring service, not just the
+  // WaveGuard-qualifying set — rodent_bait / palm_injection live only in
+  // current_services (loaded for spend recognition) and would otherwise be
+  // quotable again as a duplicate draft. Pricing still uses the qualifying
+  // set only.
+  const currentServiceKeys = Array.isArray(account.current_services)
+    ? account.current_services.map((row) => row?.key).filter(Boolean)
+    : [];
   return {
     customerId: account.recognized ? account.customer_id : null,
     recognized: account.recognized === true,
-    priorQualifyingServices: Array.isArray(account.existing_service_keys)
-      ? [...new Set(account.existing_service_keys.filter(Boolean))]
-      : [],
+    priorQualifyingServices,
+    activeServiceKeys: [...new Set([...priorQualifyingServices, ...currentServiceKeys])],
     customerAccount: account,
   };
 }
 
-function duplicateCurrentServices(services = {}, priorQualifyingServices = []) {
-  const current = new Set(priorQualifyingServices);
+function duplicateCurrentServices(services = {}, activeServiceKeys = []) {
+  const current = new Set(activeServiceKeys);
   return [...new Set(Object.keys(services).map(serviceTemplateKey).filter((key) => current.has(key)))];
 }
 
@@ -630,7 +655,7 @@ async function computeEstimate(input) {
     if (context?.error) return { error: 'Selected lead could not be loaded for customer recognition' };
     accountPricing = accountPricingFromContext(context);
   }
-  const duplicateServices = duplicateCurrentServices(services, accountPricing.priorQualifyingServices);
+  const duplicateServices = duplicateCurrentServices(services, accountPricing.activeServiceKeys);
   if (duplicateServices.length) {
     return {
       error: `The customer already has active ${duplicateServices.join(', ')} service. Keep current services as account context and quote only requested additions.`,
@@ -646,7 +671,13 @@ async function computeEstimate(input) {
   const summary = estimate?.summary || {};
   const monthlyTotal = Number(summary.recurringMonthlyAfterDiscount || 0);
   const annualTotal = Number(summary.recurringAnnualAfterDiscount || 0);
-  const oneTimeTotal = Number(summary.oneTimeTotal || 0);
+  // Specialty (german roach cleanout, flea, bed bug) and installation charges
+  // are upfront money the engine reports outside summary.oneTimeTotal — a
+  // standalone cleanout would otherwise read as a zero-price/manual scenario
+  // and a mixed quote would underreport onetime_total. Mirrors deriveTotals.
+  const oneTimeTotal = Number(summary.oneTimeTotal || 0)
+    + Number(summary.specialtyTotal || 0)
+    + Number(summary.installationTotal || 0);
   const waveguardTier = summary.waveGuardTier || estimate?.waveGuardTier || null;
   const waveguardSavings = Number(summary.waveGuardSavings || 0);
 
@@ -1037,7 +1068,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
 
   const duplicateServices = duplicateCurrentServices(
     input.engineInputs.services,
-    accountPricing.priorQualifyingServices,
+    accountPricing.activeServiceKeys,
   );
   if (duplicateServices.length) {
     return { error: `The customer already has active ${duplicateServices.join(', ')} service. Quote only requested additions.` };
@@ -1279,10 +1310,17 @@ function anchorAgentEstimateContact(input, lead) {
   }
   const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
   const leadAddress = [lead.address, lead.city, lead.zip].filter(Boolean).join(', ');
+  const inputAddress = String(input.address || '').trim();
   const leadAddressIdentity = addressIdentity(leadAddress);
   const inputAddressIdentity = addressIdentity(input.address);
+  // Compare the FULL normalized street line when the lead has one — a
+  // number+ZIP-only identity lets "123 Main St" draft as "123 Oak St" without
+  // the yellow-lane address flag. Number+ZIP stays as the fallback when the
+  // lead carries no street line. A false positive only flags review; a false
+  // negative persists a quote against the wrong property.
   const addressMismatch = !!(
-    (leadAddressIdentity.streetNumber && inputAddressIdentity.streetNumber
+    (lead.address && inputAddress && !sameStreetAddress(leadAddress, inputAddress))
+    || (leadAddressIdentity.streetNumber && inputAddressIdentity.streetNumber
       && leadAddressIdentity.streetNumber !== inputAddressIdentity.streetNumber)
     || (leadAddressIdentity.zip && inputAddressIdentity.zip
       && leadAddressIdentity.zip !== inputAddressIdentity.zip)
@@ -1333,7 +1371,12 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
 
 async function persistNewAgentDraft(input, preview, actionContext, accountPricing = accountPricingFromContext()) {
   const phone = input.customerPhone || null;
-  return withAutomatedEstimatePhoneLock(phone, async (trx) => {
+  const persist = async (trx) => {
+    // Lock the lead row for the whole read-check-insert-update sequence —
+    // on the email-only path there is no phone advisory lock, so two
+    // confirmation cards for the same lead could otherwise both see no
+    // estimate and create duplicate drafts.
+    await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
     const leadResult = await loadAgentEstimateLead(input.leadId, trx);
     if (leadResult.error) return leadResult;
     const lead = leadResult.lead;
@@ -1354,7 +1397,27 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
       }
     }
 
-    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
+    let duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
+    // The duplicate guard is phone-only: a shared-line / property-manager
+    // caller with several properties on one number would have the SECOND
+    // property's draft suppressed by the first property's open estimate.
+    // When both addresses are known and street-differ this is a different
+    // quote — let it through (mirrors the estimator-engine draft path).
+    // Unknown addresses keep the conservative block.
+    if (duplicateBlock?.existingEstimateId && input.address) {
+      try {
+        const existingRow = await trx('estimates')
+          .select('address')
+          .where({ id: duplicateBlock.existingEstimateId })
+          .first();
+        if (existingRow?.address && !sameStreetAddress(existingRow.address, input.address)) {
+          logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — open estimate is for a different property');
+          duplicateBlock = null;
+        }
+      } catch (dupErr) {
+        logger.warn(`[intelligence-bar:agent-estimate] duplicate address compare failed (keeping block): ${dupErr.message}`);
+      }
+    }
     if (duplicateBlock) {
       return {
         error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
@@ -1379,7 +1442,16 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     }).returning(['id', 'token']);
     await trx('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
     return { estimate, revised: false };
-  });
+  };
+
+  // withAutomatedEstimatePhoneLock runs the callback WITHOUT a transaction or
+  // advisory lock when there is no 10-digit phone key — an email-only lead
+  // still needs the sequence serialized, so open our own transaction (the
+  // lead-row lock above is the duplicate key in that case).
+  if (String(phone || '').replace(/\D/g, '').length >= 10) {
+    return withAutomatedEstimatePhoneLock(phone, persist);
+  }
+  return db.transaction(persist);
 }
 
 async function createAgentEstimateDraft(input, actionContext = {}) {
@@ -1400,7 +1472,17 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   if (accountPricing.customerId) {
     accountPricing.membershipSnapshot = await computeMembershipContext(db, {
       customerId: accountPricing.customerId,
-      estData: { lineItems: preview.engineResult?.lineItems || [] },
+      estData: {
+        lineItems: preview.engineResult?.lineItems || [],
+        // appliedRecurringRate reads this aggregate to detect margin-floor-
+        // capped WaveGuard discounts; with lineItems alone it falls back to
+        // the full tier rate and the public card can advertise a discount the
+        // stored total doesn't include.
+        recurring: {
+          annualBeforeDiscount: Number(preview.engineResult?.summary?.recurringAnnualBeforeDiscount || 0),
+          annualAfterDiscount: Number(preview.engineResult?.summary?.recurringAnnualAfterDiscount || 0),
+        },
+      },
     });
   }
 

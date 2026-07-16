@@ -256,6 +256,8 @@ class SatelliteAnalyzer {
   mergeResults(providerResults) {
     if (!providerResults.length) return { error: 'No results' };
     const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
+    const boolFields = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
+    const stringFields = ['shrub_density', 'tree_density', 'landscape_complexity', 'property_type', 'roof_condition'];
     const explicitNonNegative = (analysis, field) => {
       if (!analysis || !Object.prototype.hasOwnProperty.call(analysis, field)) return null;
       if (analysis[field] === null || analysis[field] === '') return null;
@@ -276,6 +278,22 @@ class SatelliteAnalyzer {
           values: [{ provider: only.provider, value }],
           status: 'single_source',
         };
+        fieldVerify.push(field);
+      }
+      // Boolean and string facts (has_pool, near_water, property_type, …) are
+      // just as single-source as the numbers — leaving them out of fieldVerify
+      // hides them from the admin Field Verify list even though nothing
+      // corroborated them.
+      for (const field of boolFields) {
+        const value = only.analysis?.[field];
+        if (typeof value !== 'boolean') continue;
+        confidenceDetails[field] = { values: [{ provider: only.provider, value }], status: 'single_source' };
+        fieldVerify.push(field);
+      }
+      for (const field of stringFields) {
+        const value = only.analysis?.[field];
+        if (!value) continue;
+        confidenceDetails[field] = { values: [{ provider: only.provider, value }], status: 'single_source' };
         fieldVerify.push(field);
       }
       return {
@@ -331,7 +349,6 @@ class SatelliteAnalyzer {
     }
 
     // Boolean fields — agree if same, flag if different
-    const boolFields = ['has_pool', 'has_pool_cage', 'has_large_driveway', 'near_water'];
     for (const field of boolFields) {
       const values = providerResults.map(({ analysis }) => analysis[field]).filter((v) => typeof v === 'boolean');
       const trueCount = values.filter(Boolean).length;
@@ -349,7 +366,6 @@ class SatelliteAnalyzer {
     }
 
     // String fields — prefer the first available provider result if they disagree
-    const stringFields = ['shrub_density', 'tree_density', 'landscape_complexity', 'property_type', 'roof_condition'];
     for (const field of stringFields) {
       const values = providerResults.map(({ analysis }) => analysis[field]).filter(Boolean);
       merged[field] = values[0] || null;

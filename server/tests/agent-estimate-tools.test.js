@@ -728,3 +728,196 @@ describe('neighborhood grass prior', () => {
     expect(result.warning).toMatch(/verify this property/i);
   });
 });
+
+describe('Agent Estimate review-hardening regressions', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test('rejects model-supplied service credits like the discount alias', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly' } },
+      serviceSpecificCredits: [{ service: 'pest', amount: 500 }],
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(result.error).toMatch(/serviceSpecificCredits/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('counts a specialty-only cleanout as a priced scenario with the specialty upfront total', async () => {
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 0,
+        recurringAnnualAfterDiscount: 0,
+        oneTimeTotal: 0,
+        specialtyTotal: 1200,
+      },
+      lineItems: [{ service: 'german_roach', total: 1200, costs: { total: 700 } }],
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { germanRoach: {} },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.onetime_total).toBe(1200);
+    expect(result.presentation.template).toBe('german_roach_cleanout');
+  });
+
+  test('refuses to re-quote an active non-WaveGuard recurring service', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: [],
+        current_services: [{ key: 'rodent_bait', currentPerVisit: 45 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { rodentBait: {} },
+    });
+
+    expect(result.error).toMatch(/already has active rodent_bait/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('keeps the lawn-pest template when the engine prices it under generic one_time_lawn', () => {
+    const presentation = _private.presentationForServices(
+      { lawnPestControl: {} },
+      { lineItems: [{ service: 'one_time_lawn', price: 189, name: 'Lawn Pest Knockdown' }] },
+    );
+
+    expect(presentation.template).toBe('lawn_pest_knockdown');
+    expect(presentation.serviceTemplateKeys).toEqual(['lawn_pest_knockdown']);
+    expect(presentation.selectionAuthority).toBe('priced_line_items');
+  });
+
+  test('flags a same-number different-street draft address as a lead mismatch', async () => {
+    const { database } = makeDatabase({
+      lead: {
+        id: 'lead-1', customer_id: null, estimate_id: null,
+        address: '123 Main St', city: 'Bradenton', zip: '34208',
+      },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      address: '123 Oak St, Bradenton FL 34208',
+      propertyFacts: {
+        ...INPUT.propertyFacts,
+        address: { value: '123 Oak St, Bradenton FL 34208', source: 'customer_sms', confidence: 'high' },
+      },
+    });
+
+    expect(result.lane).toBe('yellow');
+    expect(result.lane_reasons).toContain('draft service address differs from the selected lead address');
+  });
+
+  test('an email-only draft still runs inside a transaction instead of bare statements', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, email: 'road@example.com' },
+    });
+    mockDb.mockImplementation(database);
+    mockDb.transaction.mockImplementation(async (callback) => callback(database));
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      customerPhone: null,
+    }, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    expect(mockWithPhoneLock).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeTruthy();
+  });
+
+  test('phone duplicate block is bypassed when the open estimate is a different property', async () => {
+    const { database, writes } = makeDatabase({
+      estimate: { id: 'estimate-dup', address: '500 Other Rd, Venice FL 34285' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockDuplicateBlock.mockResolvedValue({
+      blocked: true,
+      existingEstimateId: 'estimate-dup',
+      message: 'An automated estimate is already open for this phone number',
+    });
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeTruthy();
+  });
+
+  test('phone duplicate block holds when the open estimate is the same street', async () => {
+    const { database, writes } = makeDatabase({
+      estimate: { id: 'estimate-dup', address: '1 Test St, Bradenton FL 34208' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+    mockDuplicateBlock.mockResolvedValue({
+      blocked: true,
+      existingEstimateId: 'estimate-dup',
+      message: 'An automated estimate is already open for this phone number',
+    });
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.error).toMatch(/already open for this phone number/i);
+    expect(result.blocked).toBe(true);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeUndefined();
+  });
+
+  test('membership snapshot sees the recurring aggregate so capped discounts are not overstated', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['pest_control'],
+        current_services: [{ key: 'pest_control', currentPerVisit: 117 }],
+      },
+      quote_form: { message_fields: [{ field: 'message', text: 'quarterly pest' }] },
+    });
+    mockGenerateEstimate.mockReturnValue({
+      summary: {
+        recurringMonthlyAfterDiscount: 70,
+        recurringAnnualAfterDiscount: 840,
+        recurringAnnualBeforeDiscount: 900,
+        oneTimeTotal: 0,
+      },
+      waveGuard: { tier: 'silver' },
+      lineItems: [{
+        service: 'lawn_care', annualAfterDiscount: 840, monthlyAfterDiscount: 70,
+        costs: { annualCost: 500 }, pricingConfidence: 'high',
+      }],
+    });
+    const { database } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', {
+      ...INPUT,
+      engineInputs: { ...INPUT.engineInputs, services: { lawn: { frequency: 'monthly' } } },
+    });
+
+    expect(result.pending_confirmation).toBe(true);
+    expect(mockComputeMembershipContext).toHaveBeenCalledWith(mockDb, {
+      customerId: 'customer-1',
+      estData: {
+        lineItems: [expect.objectContaining({ service: 'lawn_care' })],
+        recurring: { annualBeforeDiscount: 900, annualAfterDiscount: 840 },
+      },
+    });
+  });
+});
