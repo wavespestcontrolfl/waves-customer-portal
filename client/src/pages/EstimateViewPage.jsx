@@ -4589,7 +4589,10 @@ export default function EstimateViewPage() {
     return (
       <Page>
         <Header customerFirstName={null} address={null} />
-        <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => setLoadError(true))} />
+        <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
+          setLoadError(true);
+          setLoading(false);
+        })} />
       </Page>
     );
   }

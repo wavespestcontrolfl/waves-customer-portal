@@ -70,6 +70,17 @@ describe('authenticated portal partial failures', () => {
     expect(screen.queryByText('No recurring plan on file')).not.toBeInTheDocument();
   });
 
+  it('keeps current plan data available when only service history fails', async () => {
+    api.getNextService.mockResolvedValue({ next: null });
+    api.getSchedule.mockResolvedValue({ upcoming: [] });
+    api.getServices.mockRejectedValue(new Error('history unavailable'));
+
+    render(<MyPlanTab customer={customer} />);
+
+    expect(await screen.findByText('No visit scheduled')).toBeInTheDocument();
+    expect(screen.queryByText(/couldn.t load your plan/i)).not.toBeInTheDocument();
+  });
+
   it('keeps the schedule visible while property recipients are unavailable', async () => {
     api.getSchedule.mockResolvedValue({ upcoming: [] });
     api.getNotificationPrefs.mockResolvedValue({});
@@ -97,6 +108,26 @@ describe('authenticated portal partial failures', () => {
     expect(await screen.findByText('72-hour email reminder')).toBeInTheDocument();
     expect(screen.getByText('24-hour text + email reminder')).toBeInTheDocument();
     expect(screen.queryByText('72-hour SMS reminder')).not.toBeInTheDocument();
+  });
+
+  it('does not promise reminders the customer opted out of', async () => {
+    const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    api.getSchedule.mockResolvedValue({
+      upcoming: [{ id: 'svc-1', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00' }],
+    });
+    api.getNotificationPrefs.mockResolvedValue({
+      serviceReminder72h: false,
+      serviceReminder24h: false,
+      serviceReminder72hChannel: 'email',
+      serviceReminder24hChannel: 'both',
+    });
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [] });
+
+    render(<ScheduleTab customer={customer} properties={[]} onRequestVisit={() => {}} />);
+
+    expect(await screen.findByText('Tech en route')).toBeInTheDocument();
+    expect(screen.queryByText('72-hour email reminder')).not.toBeInTheDocument();
+    expect(screen.queryByText('24-hour text + email reminder')).not.toBeInTheDocument();
   });
 
   it('does not silently remove the recent-request receipt on load failure', async () => {

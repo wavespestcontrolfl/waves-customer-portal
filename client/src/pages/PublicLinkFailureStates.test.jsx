@@ -68,4 +68,17 @@ describe('public customer links distinguish temporary failures from dead links',
     expect(await screen.findByText(/expired or already been used/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
+
+  it('returns an estimate retry to the error state after a network rejection', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(503, { error: 'unavailable' }))
+      .mockRejectedValueOnce(new Error('offline'));
+    vi.stubGlobal('fetch', fetchMock);
+    renderRoute('/estimate/token-1', '/estimate/:token', <EstimateViewPage />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/couldn.t load that estimate/i)).toBeInTheDocument();
+  });
 });

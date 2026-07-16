@@ -149,46 +149,78 @@ router.post('/:id/reschedule', async (req, res, next) => {
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);
 
-    const service = await db('scheduled_services')
-      .where({ id: req.params.id, customer_id: req.customerId })
-      .whereIn('status', ['pending', 'confirmed'])
-      .first();
+    // Lock the row before deriving the appended notes and changing status.
+    // This preserves DB timestamp precision and makes an earlier staff edit
+    // finish before we read it. A separate durable service_requests row below
+    // ensures a later queued staff write cannot erase the customer's request.
+    const outcome = await db.transaction(async (trx) => {
+      const service = await trx('scheduled_services')
+        .where({ id: req.params.id, customer_id: req.customerId })
+        .whereIn('status', ['pending', 'confirmed'])
+        .forUpdate()
+        .first();
 
-    if (!service) {
-      return res.status(404).json({ error: 'Appointment not found' });
-    }
+      if (!service) {
+        return { statusCode: 404, error: 'Appointment not found' };
+      }
 
-    // Same dispatch-owned guard as list/confirm: a call-created follow-up
-    // dispatch hasn't confirmed yet is hidden from the customer, so a
-    // direct reschedule against its id must refuse too (same 404 shape,
-    // no info leak).
-    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
-      && service.status === 'pending'
-      && !service.customer_confirmed) {
-      return res.status(404).json({ error: 'Appointment not found' });
-    }
+      // Same dispatch-owned guard as list/confirm: a call-created follow-up
+      // dispatch hasn't confirmed yet is hidden from the customer, so a
+      // direct reschedule against its id must refuse too (same 404 shape,
+      // no info leak).
+      if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(service.source_action)
+        && service.status === 'pending'
+        && !service.customer_confirmed) {
+        return { statusCode: 404, error: 'Appointment not found' };
+      }
 
-    const updatedCount = await db('scheduled_services')
-      .where({
-        id: req.params.id,
+      const updatedCount = await trx('scheduled_services')
+        .where({
+          id: req.params.id,
+          customer_id: req.customerId,
+          status: service.status,
+        })
+        .update({
+          status: 'rescheduled',
+          customer_confirmed: false,
+          notes: notes
+            ? `${service.notes ? service.notes + ' | ' : ''}RESCHEDULE REQUEST: ${notes}${preferredDate ? ` (preferred: ${preferredDate})` : ''}`
+            : service.notes,
+          updated_at: new Date(),
+        });
+
+      if (!updatedCount) {
+        return {
+          statusCode: 409,
+          error: 'This appointment changed before the request was submitted. Refresh to see the latest status.',
+        };
+      }
+
+      // Keep the customer intent in the staff request queue as the durable,
+      // append-only receipt. Appointment editors have independent write paths,
+      // so status/notes alone cannot be the sole record of this request.
+      await trx('service_requests').insert({
         customer_id: req.customerId,
-        status: service.status,
-        updated_at: service.updated_at,
-      })
-      .update({
-        status: 'rescheduled',
-        customer_confirmed: false,
-        notes: notes
-          ? `${service.notes ? service.notes + ' | ' : ''}RESCHEDULE REQUEST: ${notes}${preferredDate ? ` (preferred: ${preferredDate})` : ''}`
-          : service.notes,
-        updated_at: new Date(),
+        category: 'schedule_change',
+        subject: `Reschedule request: ${normalizeServiceType(service.service_type)}`,
+        description: [
+          `Appointment ${service.id}: ${normalizeServiceType(service.service_type)} on ${service.scheduled_date}`,
+          preferredDate ? `Preferred date: ${preferredDate}` : null,
+          notes ? `Customer notes: ${notes}` : null,
+        ].filter(Boolean).join('\n'),
+        urgency: 'routine',
+        photos: JSON.stringify([]),
+        status: 'new',
+        source: 'customer_portal_reschedule',
       });
 
-    if (!updatedCount) {
-      return res.status(409).json({
-        error: 'This appointment changed before the request was submitted. Refresh to see the latest status.',
-      });
+      return { service };
+    });
+
+    if (outcome.error) {
+      return res.status(outcome.statusCode).json({ error: outcome.error });
     }
+    const { service } = outcome;
 
     logger.info(`Reschedule requested by customer: ${req.params.id}`);
 
