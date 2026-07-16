@@ -141,7 +141,10 @@ describe('admin customers route helpers', () => {
       account_id: 'account-1',
       profile_label: 'Primary',
       address_line1: '1 Algorithm Way',
+      address_line2: 'Suite 2',
       city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
       phone: '+19415550100',
       waveguard_tier: 'Gold',
       monthly_rate: '129.50',
@@ -158,7 +161,7 @@ describe('admin customers route helpers', () => {
       name: 'Ada Lovelace',
       accountId: 'account-1',
       profileLabel: 'Primary',
-      address: '1 Algorithm Way, Sarasota',
+      address: '1 Algorithm Way, Suite 2, Sarasota, FL 34236',
       monthlyRate: 129.5,
       pipelineStage: 'estimate_sent',
       stageEnteredAt: changedAt,
@@ -177,6 +180,7 @@ describe('admin customers route helpers', () => {
       phone: '+19415550100',
       city: 'Sarasota',
       address_line1: '1 Algorithm Way',
+      address_line2: 'Unit 4',
       state: 'FL',
       zip: '34236',
       waveguard_tier: 'Gold',
@@ -201,6 +205,7 @@ describe('admin customers route helpers', () => {
       serviceCount: 2,
       cardsOnFile: 1,
       tags: ['gate', 'pets'],
+      address: '1 Algorithm Way, Unit 4, Sarasota, FL 34236',
     });
   });
 

@@ -6,7 +6,7 @@ const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
-const { formatAddress } = require('../utils/address-normalizer');
+const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const PhotoService = require('../services/photos');
@@ -493,7 +493,13 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
     name: `${c.first_name || ''} ${c.last_name || ''}`.trim(),
     accountId: c.account_id,
     profileLabel: c.profile_label,
-    address: `${c.address_line1 || ''}, ${c.city || ''}`.replace(/^,\s*|\s*,\s*$/g, ''),
+    address: formatAddress({
+      line1: c.address_line1,
+      line2: c.address_line2,
+      city: c.city,
+      state: c.state,
+      zip: c.zip,
+    }),
     phone: c.phone,
     tier: c.waveguard_tier,
     monthlyRate: parseFloat(c.monthly_rate || 0),
@@ -521,7 +527,7 @@ function mapCustomerListRow(c) {
     serviceContact3Name: c.service_contact3_name,
     serviceContact3Phone: c.service_contact3_phone,
     serviceContact3Email: c.service_contact3_email,
-    address: formatAddress({ line1: c.address_line1, city: c.city, state: c.state, zip: c.zip }),
+    address: formatAddress({ line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip }),
     tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
     memberSince: c.member_since, active: c.active,
     pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
@@ -1043,7 +1049,7 @@ async function accountPropertySummary(accountId, excludeCustomerId = null) {
   let query = db('customers')
     .where({ account_id: accountId })
     .whereNull('deleted_at')
-    .select('id', 'profile_label', 'address_line1', 'city', 'state', 'zip', 'pipeline_stage', 'monthly_rate', 'is_primary_profile')
+    .select('id', 'profile_label', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'pipeline_stage', 'monthly_rate', 'is_primary_profile')
     .orderBy('is_primary_profile', 'desc')
     .orderBy('created_at', 'asc');
   if (excludeCustomerId) query = query.whereNot({ id: excludeCustomerId });
@@ -1164,7 +1170,7 @@ router.post('/backfill-review-status', requireAdmin, async (req, res, next) => {
 // POST /api/admin/customers/quick-add — minimal customer creation from appointment modal
 router.post('/quick-add', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, profileLabel, leadSource, pipelineStage, tags, notes } = req.body;
     if (!firstName || !phone) {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
@@ -1174,6 +1180,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
       phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
       address: normalizeContactStreet(cleanText(addressLine1 || address)),
+      addressLine2: normalizeUnitLine(cleanText(addressLine2)),
       city: normalizeContactCity(cleanText(city)),
       state: cleanState(state),
       zip: normalizeContactZip(cleanText(zip)),
@@ -1199,6 +1206,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         phone: normalized.phone,
         email: normalized.email,
         address_line1: normalized.address,
+        address_line2: normalized.addressLine2 || null,
         city: normalized.city,
         state: normalized.state,
         zip: normalized.zip,
@@ -1232,7 +1240,7 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
         profileLabel: customer.profile_label,
         attachedToExistingAccount: customer._attachedToExistingAccount,
         propertyCount: customer._propertyCount,
-        address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
+        address: formatAddress({ line1: customer.address_line1, line2: customer.address_line2, city: customer.city, state: customer.state, zip: customer.zip }),
         city: customer.city,
         state: customer.state,
         zip: customer.zip,
@@ -2060,7 +2068,7 @@ router.get('/:id', async (req, res, next) => {
         serviceContact3Name: c.service_contact3_name,
         serviceContact3Phone: c.service_contact3_phone,
         serviceContact3Email: c.service_contact3_email,
-        address: { line1: c.address_line1, city: c.city, state: c.state, zip: c.zip },
+        address: { line1: c.address_line1, line2: c.address_line2, city: c.city, state: c.state, zip: c.zip },
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
         memberSince: c.member_since, active: c.active,
@@ -2080,7 +2088,7 @@ router.get('/:id', async (req, res, next) => {
       accountProperties: accountProperties.map(p => ({
         id: p.id,
         profileLabel: p.profile_label,
-        address: { line1: p.address_line1, city: p.city, state: p.state, zip: p.zip },
+        address: { line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip },
         pipelineStage: p.pipeline_stage,
         monthlyRate: parseFloat(p.monthly_rate || 0),
         isPrimaryProfile: !!p.is_primary_profile,
@@ -2193,7 +2201,7 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/admin/customers — create
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, addressLine1, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalized = {
       firstName: normalizeContactName(cleanText(firstName)),
@@ -2201,6 +2209,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       phone: normalizeContactPhone(cleanText(phone)),
       email: cleanEmail(email),
       addressLine1: normalizeContactStreet(cleanText(addressLine1 || address)),
+      addressLine2: normalizeUnitLine(cleanText(addressLine2)),
       city: normalizeContactCity(cleanText(city)),
       state: cleanState(state),
       zip: normalizeContactZip(cleanText(zip)),
@@ -2228,7 +2237,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         is_primary_profile: !account.existingCustomer,
         profile_label: normalized.profileLabel || (account.existingCustomer ? 'Rental property' : 'Primary'),
         first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
-        address_line1: normalized.addressLine1 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
+        address_line1: normalized.addressLine1 || null, address_line2: normalized.addressLine2 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
@@ -2292,7 +2301,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 // PUT /api/admin/customers/:id
 router.put('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id' };
+    const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
@@ -2310,6 +2319,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'phone') { updates[v] = cleanText(req.body[k]); }
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
         else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
+        else if (v === 'address_line2') { updates[v] = normalizeUnitLine(cleanText(req.body[k])) || null; }
         else { updates[v] = req.body[k]; }
       }
     }
@@ -2349,7 +2359,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id'];
+      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id'];
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path
