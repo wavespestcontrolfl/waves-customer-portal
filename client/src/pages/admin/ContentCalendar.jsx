@@ -167,6 +167,9 @@ export default function ContentCalendar() {
       date,
       blogPostId: "",
       title: "",
+      // Opt-in resets per schedule: one opted-in post must not silently
+      // opt in the NEXT post scheduled from the remembered form state.
+      autoShare: false,
     }));
     setShowSchedule(true);
   };

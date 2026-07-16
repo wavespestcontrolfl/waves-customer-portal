@@ -259,16 +259,18 @@ async function executeContentTool(toolName, input) {
 
     case 'schedule_content': {
       const ContentScheduler = getService('ContentScheduler');
+      // Opt-IN only (owner rule): an omitted auto_share_social must never
+      // silently share — only an explicit true does.
       await ContentScheduler.scheduleBlogPost(
         input.post_id,
         input.publish_at,
-        input.auto_share_social !== false
+        input.auto_share_social === true
       );
 
       return {
         post_id: input.post_id,
         scheduled_for: input.publish_at,
-        auto_share_social: input.auto_share_social !== false,
+        auto_share_social: input.auto_share_social === true,
         status: 'scheduled',
       };
     }

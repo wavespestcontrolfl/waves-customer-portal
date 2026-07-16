@@ -96,12 +96,12 @@ const ContentAgent = {
    * @param {string} [opts.city] — Target city (optional — agent will pick if not specified)
    * @param {string} [opts.angle] — Specific angle or differentiation (optional)
    * @param {boolean} [opts.publishDraft=true] — Whether to save the post as a portal draft
-   * @param {boolean} [opts.distributeSocial=true] — Whether to queue social distribution
+   * @param {boolean} [opts.distributeSocial=false] — Whether to queue social distribution (opt-IN: customer-facing sends are never a silent default)
    * @param {function} [opts.onProgress] — Callback for progress updates: (stage, detail) => void
    *
    * @returns {object} { postId, title, wordCount, qaScore, publishedUrl, socialStatus, report, sessionId }
    */
-  async run({ topic, city, angle, publishDraft = true, distributeSocial = true, onProgress }) {
+  async run({ topic, city, angle, publishDraft = true, distributeSocial = false, onProgress }) {
     if (!ANTHROPIC_API_KEY || !CONTENT_AGENT_ID) {
       throw new Error('Missing ANTHROPIC_API_KEY or CONTENT_AGENT_ID');
     }
@@ -182,7 +182,18 @@ const ContentAgent = {
 
         let toolResult;
         try {
-          toolResult = await executeContentTool(toolName, toolInput);
+          // Opt-in is ENFORCED at execution, not just in the prompt: a model
+          // that calls distribute_to_social anyway gets a refusal, and a
+          // schedule_content call can't smuggle auto_share_social=true into
+          // a run that never opted in.
+          if (!distributeSocial && toolName === 'distribute_to_social') {
+            toolResult = { skipped: true, reason: 'Social distribution was not requested for this run (opt-in only).' };
+          } else {
+            if (!distributeSocial && toolName === 'schedule_content') {
+              toolInput.auto_share_social = false;
+            }
+            toolResult = await executeContentTool(toolName, toolInput);
+          }
 
           // Track post ID when it's created
           if (toolName === 'create_blog_post' && toolResult.post_id) {

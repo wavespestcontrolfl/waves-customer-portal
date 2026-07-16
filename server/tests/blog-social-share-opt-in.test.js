@@ -71,3 +71,19 @@ describe('ContentScheduler.scheduleBlogPost default', () => {
     expect(written.auto_share_social).toBe(true);
   });
 });
+
+// Agent lane: opt-in must be enforced at TOOL EXECUTION, not just prompt
+// text — a model that calls distribute_to_social anyway gets a refusal, and
+// schedule_content can't smuggle auto_share_social=true into a non-opted run.
+describe('content-agent tool-level enforcement', () => {
+  test('schedule_content tool treats omitted auto_share_social as FALSE', async () => {
+    jest.resetModules();
+    jest.doMock('../services/content-scheduler', () => ({ scheduleBlogPost: jest.fn().mockResolvedValue({}) }));
+    const tools = require('../services/content/content-agent-tools');
+    const scheduler = require('../services/content-scheduler');
+    const exec = tools.executeContentTool || tools.executeTool;
+    const r = await exec('schedule_content', { post_id: 'p1', publish_at: '2026-07-20T09:00:00Z' });
+    expect(scheduler.scheduleBlogPost).toHaveBeenCalledWith('p1', '2026-07-20T09:00:00Z', false);
+    expect(r.auto_share_social).toBe(false);
+  });
+});
