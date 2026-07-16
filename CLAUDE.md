@@ -23,7 +23,7 @@ Three interfaces:
 - **Database:** PostgreSQL on Railway
 - **Payments:** Stripe (Payment Element — card/Apple Pay/Google Pay/ACH)
 - **SMS/Voice:** Twilio (Programmable Messaging, Voice with recording + transcription, Lookup)
-- **AI:** Anthropic Claude API. **Never hardcode model IDs** — import `DEEP` / `FLAGSHIP` / `WORKHORSE` / `FAST` / `VOICE` / `VISION` from `server/config/models.js`. These are **quality tiers, not cost tiers** (owner directive: best model regardless of cost). `DEEP` resolves to `claude-fable-5` — deepest reasoning for latency-tolerant, low-volume lanes (agronomic wiki/KB stack, SMS draft verifier, shadow judge, blog fact-check gate). **Every DEEP call site MUST go through `server/services/llm/deep.js` (`createDeepMessage`)** — fable-5 always emits thinking blocks ahead of the text block (the helper strips them so `content[0].text` parsing works) and can refuse benign pesticide-adjacent content (the helper retries once on FLAGSHIP). DEEP call sites also need generous `max_tokens` (≥4096) because thinking spends from the same budget. The general reasoning tiers (FLAGSHIP / WORKHORSE / FAST) resolve to `claude-opus-4-8`. `VOICE` resolves to `claude-sonnet-4-6` — customer-facing copy (SMS replies, service recaps, social posts) where a warm, natural voice beats raw reasoning; high-stakes messages (cancellations, complaints) escalate to FLAGSHIP at the call site. `VISION` also resolves to `claude-sonnet-4-6` because the Opus line removed the `temperature` parameter and image scoring needs it. Tiers can be swapped via `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` env vars with no code change. **Cross-provider routing (owner directive 2026-06-17: best model = live model):** some features route to OpenAI/Gemini via the `ROUTES` map in `models.js`, dispatched through the shared `server/services/llm/call.js` (one fail-closed place for OpenAI Responses / Gemini generateContent / Anthropic SDK). The best model is the **LIVE** model directly — no shadow/competing-model machinery — and every call site keeps an **automatic fallback to Claude** so a provider issue never causes a gap. GPT-5.5 is live for lead-triage classification (`lead-triage.js`), knowledge-base Q&A (`knowledge-bridge.js`), and the estimate assistant (`estimate-assistant.js`); Gemini 3.5 Flash is the live vision scorer for `lawn-assessment.js` + `satellite-analyzer.js`. Cross-provider model defaults: `MODEL_OPENAI_BEST` (gpt-5.5), `MODEL_GEMINI_VISION` (gemini-3.5-flash); the per-service vision model is overridable via `GEMINI_VISION_MODEL`. The 9 managed agents stay on Anthropic (Managed Agents API has no OpenAI equivalent). **Call transcription + call extraction are unchanged** — they keep their own providers/models in `call-recording-processor.js` (transcription `gpt-4o-transcribe-diarize`, extraction `gemini-2.5-pro`); this is the one place competing/parallel models still make sense, so they are intentionally NOT routed through `ROUTES`.
+- **AI:** Anthropic Claude API + cross-provider routing (OpenAI/Gemini). Two ambient rules, both enforced by `npm run check:domain-rules`: (1) **Never hardcode model IDs** — import a quality tier (`DEEP` / `FLAGSHIP` / `WORKHORSE` / `FAST` / `VOICE` / `VISION`) from `server/config/models.js`; cross-provider features go through the `ROUTES` map + `server/services/llm/call.js` and keep an automatic fallback to Claude. (2) **Every DEEP call site MUST go through `server/services/llm/deep.js` (`createDeepMessage`)** — fable-5 thinking-block stripping + refusal fallback live there; DEEP sites need `max_tokens` ≥4096. Everything else — tier semantics and resolution, which features are live on GPT-5.5 / Gemini 3.5 Flash, fallback rules, env overrides, the call-recording and managed-agents exceptions — lives in the **`waves-llm` skill**: use it when adding or modifying any LLM call site.
 - **Deployment:** Railway (portal server + client + PostgreSQL). Spoke fleet (15 sites) = Astro on Cloudflare Pages/Workers.
 
 ## Key Team Members
@@ -42,106 +42,24 @@ Three interfaces:
 7. **Keep the Intelligence Bar pattern.** Tool modules export `TOOLS` + `executeTool`; wire 6 lines into the route file. Don't invent a new architecture. See `server/services/intelligence-bar/README.md` for the template.
 8. **Stripe is the payment processor. Square is fully phased out.** Do not reference Square in new code.
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
+10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code (use Plan mode). A misunderstanding caught at the plan stage costs minutes; caught after the code is written, it costs the rework.
+11. **When a mistake is caught, record the rule.** Run `/lesson` (or follow `.claude/commands/lesson.md`) so the correction lands in AGENTS.md, the matching skill, or here — in the same PR as the fix. Rules belong in skills or AGENTS.md by default; this file stays lean.
 
-## Admin UI: V2 is the default
+## Admin UI & Design Systems
 
-Authoritative specs:
-- `docs/design/waves-portal-ui-redesign-spec.md` — full monochrome admin spec
-- `docs/design/waves-customer-facing-design-brief.md` — customer-surface warm tone (do NOT apply admin spec to customer surfaces)
-- `docs/design/DECISIONS.md` — architectural decisions log + full PR history; append new entries at bottom, never edit old ones
+**Dual style system:** Tier 1 V2 admin pages use `components/ui` primitives + Tailwind zinc ramp; legacy/Tier 2 pages use inline styles + the `D` dark palette. Match what the file you're editing already uses; never mix them in one component (rule 4). Ambient hard lines: `alert-fg` red is for genuine alerts only (Customers V2 status indicators are the one sanctioned exception); 14px minimum readable text; never apply customer-facing brand styling inside `/admin/*` — admin stays monochrome; visual-refresh PRs are strict 1:1 on data and behavior.
 
-The Tier 1 V2 redesign for Dashboard, Dispatch, Customers + Detail, Estimates + `/new`, Communications, and the admin shell has shipped and is now the default for everyone. The V1 page components, the corresponding per-flag gates (`DashboardGate` / `DispatchGate` / `CustomersGate` / `EstimatesGate` / `CommunicationsGate` / `AdminLayoutGate`), and the V1-only `MobileAdminShell` have been deleted. `/admin/dashboard|customers|estimates|communications` route directly to `*PageV2`; `/admin/dispatch` is `AdminDispatchPage` (Board tab + DispatchPageV2 under tabs); `/admin/schedule` redirects to `/admin/dispatch?tab=schedule`. The admin shell is `AdminLayoutV2`.
-
-**Retained V1 modules (named-export only, no V1 page route):** `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`, `CommunicationsPage.jsx` are kept as shared-utility modules — they still export constants and sub-components consumed by V2 (`CompletionPanel` / `RescheduleModal` / `EditServiceModal` / `ProtocolPanel` / `MONTH_NAMES` / `STAGES` / `STAGE_MAP` / `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` / `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` / `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` / `detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`). The `export default function ...Page()` component has been gone from each.
-
-**Rules for Tier 1 V2 work (still in effect):**
-- Visual-refresh PRs are **strict 1:1** on data, endpoints, metrics, and behavior. Content changes and visual changes never share a PR.
-- Use `components/ui` primitives + Tailwind zinc ramp + `border-hairline` chrome.
-- `alert-fg` (red) is reserved for genuine alerts only — never decoration.
-
-**Exception — Customers V2 status indicators (`/admin/customers` Directory + Customer 360):** colored decoration is intentional on the customers surface for at-a-glance triage. Specifically allowed:
-- **Health score** (HealthDot, HealthCircle, "Score: NN/100" label): green `#10B981` (≥70), amber `#F59E0B` (40–69), red `#C8312F` (<40).
-- **Tier badge** (Customer 360): metal-coded — Platinum `#E5E7EB`, Gold `#D4A017`, Silver `#9CA3AF`, Bronze `#A16207`.
-- **Stage badge** (Customer 360): green `#10B981` for `active_customer`/`won`; red `#C8312F` for everything else.
-
-Other admin surfaces still follow strict zinc + alert-fg-for-alerts-only rules.
-
-**Feature flag system:** `useFeatureFlag('<key>')` from `client/src/hooks/useFeatureFlag.js`. DB-backed via `user_feature_flags` table, session-cached in memory, fails closed (returns `false` if API unreachable). No localStorage persistence, no percentage rollouts, no environment variants — the schema is intentionally minimal. The retired V2 keys (`dashboard-v2`, `dispatch-v2`, `customers-v2`, `estimates-v2`, `comms-v2`, `mobile-shell-v2`, `admin-shell-v2`) are no longer read by the client; stale rows in `user_feature_flags` are inert.
-
-Full per-PR detail (endpoints touched, subcomponents shipped, alert-fg rules per page): `docs/design/DECISIONS.md`.
-
-## Design System Quick Reference
-
-**Legacy / V1 / Tier 2** — use inline styles + the `D` dark palette:
-```js
-const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b',
-  red: '#ef4444', purple: '#a855f7',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff'
-};
-```
-Fonts: DM Sans (body), JetBrains Mono (numbers/code), Montserrat (tech portal headings).
-
-**Tier 1 V2** — `import { Button, Badge, Card, ... } from 'components/ui'`. 13 primitives in `client/src/components/ui/`. Tailwind tokens live in `client/tailwind.config.js` (zinc ramp, alert red, type scale 11–28, `border-hairline`, letterSpacing `label`/`tight`/`display`). `darkMode: false`; `fontWeight` restricted to 400/500 — do not add weight 600/700. Reference page at `/admin/_design-system` (dev-gated; excluded from robots.txt).
-
-Both systems: 14px minimum for readable text (Virginia uses this 8 hours a day). Never apply the customer-facing brand styling (Luckiest Guy / Baloo 2 / gold pill / mascot) inside `/admin/*` — admin stays monochrome.
-
----
+Everything else — which pages are V2 and their routes, the retained V1 shared-export modules (do NOT delete or resurrect them), palettes/tokens/fonts, the Customers-colored-indicators spec, the feature-flag system — lives in the **`waves-design` skill**: use it for ANY UI work on any portal surface. Authoritative specs: `docs/design/waves-portal-ui-redesign-spec.md` (admin), `docs/design/waves-customer-facing-design-brief.md` (customer), `docs/design/DECISIONS.md` (append-only log).
 
 # Intelligence Bar System
 
-Natural-language AI command center embedded across admin + tech portals. Replaces rigid UI elements (buttons, tabs, static panels) with conversational queries powered by Claude.
+Natural-language AI command center embedded across admin + tech portals — one Express route (`server/routes/admin-intelligence-bar.js`), many contexts; tool modules in `server/services/intelligence-bar/{context}-tools.js` export `TOOLS` + `executeTool` (see rule 7). Three ambient rules:
 
-## Architecture
+1. **Write tools go through the UI-confirm trust boundary** (`write-gates.js` + its mirror contract test) — use the **`ib-write-tools` skill** for any tool that creates, updates, sends, or schedules.
+2. **Every tool must pass the contract gate** (`npm run test:contracts` — schema, DB columns incl. raw SQL, execute smoke, response shape; runs in CI, warnings block). Write tools flag `sideEffects`, Claude-spawning tools flag `sonnetBacked`, UUID params declare `format: 'uuid'`.
+3. **Tech portal is isolated** — `tech-tools` only, read-only, low max_tokens.
 
-```
-⌘K (any admin page) or embedded bar
-    ↓
-POST /api/admin/intelligence-bar/query
-    ↓
-context param loads: base tools (admin only) + context tools
-                   + context system prompt + pageData (live UI state)
-    ↓
-Claude (FLAGSHIP default; env-overridable via INTELLIGENCE_BAR_MODEL
-        and INTELLIGENCE_BAR_TECH_MODEL) → up to 8 tool-use rounds
-```
-
-One Express route serves everything: `server/routes/admin-intelligence-bar.js`. Tool modules live in `server/services/intelligence-bar/{context}-tools.js`, one file per context. The `context` parameter drives which tools load and which system-prompt extension applies — no page-specific endpoints.
-
-## Context → Tools Mapping
-
-| Context | Route(s) | Extra tool module |
-|---|---|---|
-| `customers` | `/admin/customers`, `/admin/health` | — (base only) |
-| `leads` | `/admin/leads` | `leads-tools` |
-| `schedule` / `dispatch` | `/admin/schedule`, `/admin/dispatch` | `schedule-tools` |
-| `dashboard` | `/admin/dashboard`, `/admin` | `dashboard-tools` |
-| `seo` / `blog` | `/admin/seo`, `/admin/ppc`, `/admin/social-media` | `seo-tools` |
-| `procurement` | `/admin/inventory` | `procurement-tools` |
-| `revenue` | `/admin/revenue`, `/admin/invoices` | `revenue-tools` |
-| `reviews` | `/admin/reviews`, `/admin/referrals` | `review-tools` |
-| `comms` | `/admin/communications` | `comms-tools` |
-| `tax` | `/admin/tax` | `tax-tools` |
-| `banking` | (via IB) | `banking-tools` |
-| `email` | (via IB) | `email-tools` |
-| `estimate` | `/admin/estimates` | `estimate-tools` |
-| `tech` | `/tech/*` | `tech-tools` ONLY — no base tools, read-only, max_tokens 1024 |
-
-All admin contexts get base tools from `tools.js` (customers incl. `create_customer` / revenue / scheduling / SMS) plus the read-only comms subset (`COMMS_READ_TOOLS`: conversation threads, message search, SMS stats, call log) and the email read+reply subset (`EMAIL_SHARED_TOOLS`: inbox summary, email search, threads, draft/send reply, reply-via-SMS — the reply writes stay UI-confirm gated) so message history and the inbox are visible from any page. Tech portal is isolated — no base tools, strictly read-only, lower max_tokens for field speed.
-
-## Key Design Decisions
-
-- **One route, many contexts.** No page-specific API endpoints.
-- **Base tools always loaded on admin contexts.** Any admin page can answer "how many active customers?" even if it's the SEO page.
-- **Tech portal is isolated.** Only `tech-tools` loads. All read-only. Field-speed max_tokens.
-- **Write operations require UI confirmation (issue #1568).** With `GATE_IB_UI_CONFIRM=true` (prod default), write tools never execute from the model loop: the call returns a preview, the route persists a pending action (`ib_pending_actions` — actor-bound, 10-min expiry, payload hash, single-use), and the client renders a Confirm/Cancel card (`PendingActionsCard`). Only the operator's click commits, via `/confirm-action` — never a model tool, and the pending id is never model-visible. The gated tool list lives in `services/intelligence-bar/write-gates.js`, mirrored by `tests/intelligence-bar-write-gate-contract.test.js`. New write tools MUST be added to those sets. With the gate off (local dev), the legacy conversational `confirmed: true` two-step applies.
-- **`SEOIntelligenceBar` is the generic reusable wrapper.** Pass a `context` prop. Only build a custom wrapper if you need to inject page-specific React state as `pageData`.
-- **Some tools spawn their own Claude calls.** `run_price_lookup`, `draft_sms_reply` — they call Claude internally for content generation.
-
-## Adding a new tool module
-
-See `server/services/intelligence-bar/README.md` for the full template + 6-line route-wiring checklist.
+Everything else — architecture, the context→tools mapping, design decisions, the add-a-tool checklist — lives in the **`waves-ib` skill**: use it when adding or modifying any IB tool, context, or wrapper.
 
 ---
 

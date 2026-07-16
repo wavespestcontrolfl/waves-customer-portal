@@ -203,6 +203,45 @@ finding and warns on P1. Reviewers must return JSON matching
 - **Twilio `From`/`MessagingServiceSid` hardcoded.** Numbers per GBP
   location come from config; hardcoded `+1…` literals in route code drift
   when numbers move.
+- **Permission-allowlist entries must account for npm lifecycle hooks,
+  wildcard sweep, and destructive flag variants.** `.claude/settings.json`
+  `permissions.allow` (and command-frontmatter `allowed-tools`) entries
+  auto-approve every variant the pattern matches. Flag any addition of:
+  (a) an npm wrapper script whose `pre`/`post` hooks (check `package.json`)
+  write to the DB, call external APIs, or spend money — root `predev` runs
+  `db:migrate`, so `npm run dev` auto-approves a DB write;
+  (b) a wildcard over a script family that mixes safe and spending
+  commands — `npm run check:*` swept in `check:lawn-models`, which POSTs
+  live prompts to three LLM providers;
+  (c) a prefix rule over a command with destructive flags or subcommands —
+  `git branch:*` includes `-D`/`-M`, `git push:*` includes
+  `--no-verify`/`-f`/`-d` (bypasses the Codex pre-push gate),
+  `git fetch:*` accepts ref-moving refspecs, `gh api:*` can POST.
+  Prefer exact command forms (`dev:client` not `dev`; `check:portal-brand`
+  not `check:*`; `git branch --show-current` not `git branch:*`).
+  Syntax trap: a trailing `:*` (equivalent to ` *`) enforces a word
+  boundary — `npm run test:*` matches `npm run test -x` but NOT
+  `npm run test:contracts`; colon-named scripts need exact entries.
+  Known sharp edges already ruled on: `git ls-remote:*` allows
+  `--upload-pack=<exec>` (arbitrary code execution), `gh pr create` can
+  itself push an unpushed branch, `gh pr comment:*` includes
+  `--delete-last`, and `npm run dev:server` boots `initScheduledJobs()`
+  with `cronJobs` defaulting ON outside prod; `npm ci` executes dependency
+  lifecycle scripts (`hasInstallScript` packages = remote code on a
+  lockfile change); `npm run models:check` sends `ANTHROPIC_API_KEY` to
+  api.anthropic.com; `npm run test:contracts` runs `execute-smoke` by
+  default, calling IB ops tools that make authenticated
+  Stripe/Twilio/GitHub/Cloudflare requests when secrets are loaded
+  (`test:contracts:list` is the safe variant) — none of these may be
+  pre-approved.
+  *Accepted residual risk (owner ruling 2026-07-16, PR #2768):*
+  high-frequency LOCAL read/stage commands stay as prefix rules
+  (`git status/diff/log/show/add/commit:*`) despite write-capable flags
+  (`--output`, `-A`, `--amend`) — damage is local, reversible, and
+  visible in `git status`/`git diff` before push, and the containment
+  boundary is the always-prompting `git push`. Do not re-flag these
+  specific prefix rules; DO flag any new prefix rule whose abuse is
+  remote, irreversible, or invisible.
 - **`ops/agents/` convention violations.** Scripts in that folder must
   declare READ-ONLY or MUTATES in their header, default to dry-run when
   they mutate (write only under `--execute`), and contain no secrets,

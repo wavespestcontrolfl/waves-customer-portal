@@ -1,32 +1,19 @@
 /**
  * Response-shape validator — runs only after execute-smoke succeeds.
- * Confirms the result is JSON-serializable and carries at least one of
- * the conventional keys (results | data | summary | error | rows | total).
+ * Confirms the result is something the model loop can actually read:
+ * JSON-serializable, not an un-awaited Knex builder, not an empty object.
+ *
+ * (This used to require a key from a fixed "conventional" list — 82 of 202
+ * tools returned perfectly good domain-keyed objects and carried a
+ * permanent warning, which made warnings meaningless. Real failure modes
+ * only.)
  *
  * Sharing execute-smoke's result would require coordination; for simplicity
  * this validator re-invokes the tool with the same minimal input when
  * skipping conditions don't apply.
  */
 
-const CONVENTIONAL_KEYS = ['results', 'data', 'summary', 'error', 'rows', 'total', 'items', 'count', 'success', 'found'];
-
-function buildMinimalInput(schema) {
-  const out = {};
-  const required = Array.isArray(schema?.required) ? schema.required : [];
-  const props = schema?.properties || {};
-  for (const r of required) {
-    const p = props[r] || {};
-    const t = Array.isArray(p.type) ? p.type[0] : p.type;
-    if (p.enum?.length) out[r] = p.enum[0];
-    else if (t === 'string') out[r] = 'test';
-    else if (t === 'number' || t === 'integer') out[r] = 0;
-    else if (t === 'boolean') out[r] = false;
-    else if (t === 'array') out[r] = [];
-    else if (t === 'object') out[r] = {};
-    else out[r] = null;
-  }
-  return out;
-}
+const { buildMinimalInput } = require('../minimal-input');
 
 function safeStringify(v) {
   try { JSON.stringify(v); return true; } catch { return false; }
@@ -50,9 +37,9 @@ async function run(tool) {
 
   if (result && typeof result === 'object') {
     if (!safeStringify(result)) errors.push('result is not JSON-serializable (circular ref or BigInt)');
-    const keys = Object.keys(result);
-    if (!keys.some(k => CONVENTIONAL_KEYS.includes(k))) {
-      errors.push(`result has no conventional key (${CONVENTIONAL_KEYS.join(', ')})`);
+    if (typeof result.toSQL === 'function') errors.push('result looks like an un-awaited Knex builder (has .toSQL)');
+    else if (!Array.isArray(result) && Object.keys(result).length === 0) {
+      errors.push('result is an empty object — the model loop gets nothing to read');
     }
   }
 
@@ -61,7 +48,7 @@ async function run(tool) {
     tool: tool.name,
     surface: tool.surface,
     pass: errors.length === 0,
-    severity: errors.length ? 'warning' : 'info',
+    severity: errors.length ? 'critical' : 'info',
     errors,
   };
 }

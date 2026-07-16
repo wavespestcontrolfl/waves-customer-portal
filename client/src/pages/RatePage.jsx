@@ -5,6 +5,7 @@ import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
 import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
+import PublicLoadError from '../components/PublicLoadError';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -82,7 +83,8 @@ export default function RatePage() {
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(null); // null | notfound | temporary
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [score, setScore] = useState(null);
   const [scoreHover, setScoreHover] = useState(0);
   const [screen, setScreen] = useState('rating'); // rating, highlights, ai-review, feedback, success, redirect
@@ -112,15 +114,21 @@ export default function RatePage() {
   const submittingRef = useRef(false);
 
   useEffect(() => {
+    setLoading(true);
+    setError(null);
     fetch(`${API_BASE}/rate/${token}`)
-      .then(r => { if (!r.ok) throw new Error('Invalid link'); return r.json(); })
+      .then(r => {
+        if (r.status === 404 || r.status === 410) { const err = new Error('notfound'); err.notFound = true; throw err; }
+        if (!r.ok) throw new Error('temporary');
+        return r.json();
+      })
       .then(d => {
         setData(d);
         if (d?.alreadySubmitted) setScreen('success');
         setLoading(false);
       })
-      .catch(e => { setError(e.message); setLoading(false); });
-  }, [token]);
+      .catch(e => { setError(e.notFound ? 'notfound' : 'temporary'); setLoading(false); });
+  }, [token, loadAttempt]);
 
   const getKnownServices = () => (
     data?.hasServiceType ? getServiceSelection(data.serviceType) : []
@@ -347,7 +355,11 @@ export default function RatePage() {
     </Page>
   );
 
-  if (error) return (
+  if (error === 'temporary') return (
+    <Page><PublicLoadError resource="feedback request" onRetry={() => setLoadAttempt(a => a + 1)} /></Page>
+  );
+
+  if (error === 'notfound') return (
     <Page>
       <div role="alert" style={{ textAlign: 'center', padding: 36, color: BODY, fontSize: 15, lineHeight: 1.5 }}>
         <p>This link may have expired or already been used.</p>

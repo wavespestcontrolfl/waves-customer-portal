@@ -8,8 +8,7 @@
 //
 // Submits to the existing /admin/customers/quick-add endpoint. That endpoint
 // accepts first/last name, phone, email, address (line 1), city, state, zip,
-// and profile label. Line 2 is collected in the UI for parity with the mobile
-// layout but not sent (no column exists yet; add a migration if needed).
+// and profile label, including the optional unit/apartment line.
 
 import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
@@ -32,7 +31,7 @@ function formFromInitialValues(initialValues = null) {
     phone: initialValues?.phone || "",
     email: initialValues?.email || "",
     addressLine1: initialValues?.address || "",
-    addressLine2: "",
+    addressLine2: initialValues?.addressLine2 || "",
     city: initialValues?.city || "",
     state: initialValues?.state || "FL",
     zip: initialValues?.zip || "",
@@ -86,6 +85,7 @@ export default function MobileNewCustomerSheet({
           phone: form.phone.trim(),
           email: form.email.trim() || undefined,
           address: form.addressLine1.trim() || undefined,
+          addressLine2: form.addressLine2.trim() || undefined,
           city: form.city.trim() || undefined,
           state: form.state.trim() || undefined,
           zip: form.zip.trim() || undefined,
@@ -99,7 +99,10 @@ export default function MobileNewCustomerSheet({
           notes: form.notes.trim() || undefined,
         }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message || body.error || `HTTP ${r.status}`);
+      }
       const data = await r.json();
       onCreated?.(data.customer);
       onClose?.();
@@ -278,6 +281,7 @@ export default function MobileNewCustomerSheet({
               setForm((p) => ({
                 ...p,
                 addressLine1: parts.line1 || parts.formatted || p.addressLine1,
+                addressLine2: parts.line2 || "",
                 city: parts.city || p.city,
                 state: parts.state || p.state || "FL",
                 zip: parts.zip || p.zip,

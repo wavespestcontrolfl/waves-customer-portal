@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run dev:client)",
+      "Bash(npm test)",
+      "Bash(npm run test:contracts:list)",
+      "Bash(npm run check:portal-brand)",
+      "Bash(npm run check:domain-rules)",
+      "Bash(npm run lint:staged)",
+      "Bash(npm run verify:blog-schema)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch --show-current)",
+      "Bash(git fetch origin)",
+      "Bash(git fetch origin main)"
+    ]
+  }
+}

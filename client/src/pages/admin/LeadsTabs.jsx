@@ -2149,30 +2149,102 @@ export function LeadsSection() {
                                     small
                                     color={C.green}
                                     onClick={() => {
-                                      const interest = (
-                                        lead.service_interest || ""
-                                      )
-                                        .trim()
-                                        .toLowerCase();
-                                      const match = interest
-                                        ? services.find((s) =>
-                                            [s.name, s.short_name, s.service_key]
-                                              .filter(Boolean)
-                                              .some((v) =>
-                                                v
-                                                  .toLowerCase()
-                                                  .includes(interest),
-                                              ),
-                                          )
-                                        : null;
+                                      // Multi-service call leads persist a
+                                      // composed label ("A + B + C") whose
+                                      // PRIMARY may itself be a catalog row
+                                      // containing " + " ("Lawn + Tree &
+                                      // Shrub"). Try the longest prefix
+                                      // first, shedding one " + " segment at
+                                      // a time, so a plus-named combo row
+                                      // still matches before falling back to
+                                      // the bare first segment.
+                                      const segs = (lead.service_interest || "")
+                                        .split(" + ")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean);
+                                      const candidates = segs.map((_, i) =>
+                                        segs
+                                          .slice(0, segs.length - i)
+                                          .join(" + ")
+                                          .toLowerCase(),
+                                      );
+                                      let match = null;
+                                      for (const cand of candidates) {
+                                        match = services.find((s) =>
+                                          [s.name, s.short_name, s.service_key]
+                                            .filter(Boolean)
+                                            .some((v) => {
+                                              const name = v.toLowerCase();
+                                              // Two-way containment: stored
+                                              // labels can be LONGER than the
+                                              // catalog row ("Bee / Wasp Nest
+                                              // Removal Service" vs seeded
+                                              // "Bee / Wasp Nest Removal") —
+                                              // but reverse containment only
+                                              // on SINGLE-segment candidates,
+                                              // or a composite would match a
+                                              // secondary's row before the
+                                              // loop sheds to the primary.
+                                              return (
+                                                name.includes(cand) ||
+                                                (!cand.includes(" + ") &&
+                                                  name.length >= 8 &&
+                                                  cand.includes(name))
+                                              );
+                                            }),
+                                        );
+                                        if (match) break;
+                                      }
                                       setApptForm({
                                         leadId: lead.id,
                                         date: "",
                                         time: "",
                                         serviceId: match ? match.id : "",
+                                        // No catalog match: prefill the
+                                        // primary by stripping only KNOWN
+                                        // composed tails (mirror of
+                                        // primaryServiceInterest in
+                                        // server/utils/lead-service-interest)
+                                        // — a bare " + " split would chop a
+                                        // plus-named primary like "Lawn +
+                                        // Tree & Shrub" down to "Lawn".
                                         serviceType: match
                                           ? match.name
-                                          : lead.service_interest || "",
+                                          : (() => {
+                                              const tails = new Set([
+                                                "pest control service",
+                                                "lawn care service",
+                                                "tree & shrub care service",
+                                                "mosquito control service",
+                                                "termite service",
+                                                "termite inspection",
+                                                "rodent control service",
+                                                "wildlife control service",
+                                                "wdo inspection service",
+                                                "bed bug treatment",
+                                                "palm injection",
+                                                "bee / wasp nest removal service",
+                                                "rodent exclusion",
+                                                "flea control service",
+                                              ]);
+                                              let label = (
+                                                lead.service_interest || ""
+                                              ).trim();
+                                              for (;;) {
+                                                const at =
+                                                  label.lastIndexOf(" + ");
+                                                if (at === -1) break;
+                                                const tail = label
+                                                  .slice(at + 3)
+                                                  .trim()
+                                                  .toLowerCase();
+                                                if (!tails.has(tail)) break;
+                                                label = label
+                                                  .slice(0, at)
+                                                  .trim();
+                                              }
+                                              return label;
+                                            })(),
                                         technicianId: "",
                                         notes: "",
                                       });

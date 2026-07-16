@@ -116,6 +116,7 @@ export default function PublicBookingPage() {
   const [searchResult, setSearchResult] = useState(null);
   const [browseDays, setBrowseDays] = useState(null);
   const [browseLoading, setBrowseLoading] = useState(false);
+  const [browseError, setBrowseError] = useState('');
   const [pickedDate, setPickedDate] = useState(null);
   // Day the customer has drilled into to see its 1-hour openings (null = day list)
   const [openDay, setOpenDay] = useState(null);
@@ -150,6 +151,7 @@ export default function PublicBookingPage() {
     setError('');
     setSearchResult(null);
     setBrowseDays(null);
+    setBrowseError('');
     setPickedDate(null);
     setOpenDay(null);
   }, []);
@@ -463,6 +465,7 @@ export default function PublicBookingPage() {
     setSearchResult(null);
     setPickedDate(date);
     setBrowseDays(null);
+    setBrowseError('');
     setSelectedDate(null);
     setSelectedSlot(null);
     if (!date) {
@@ -481,20 +484,22 @@ export default function PublicBookingPage() {
       });
       if (coords?.lat && coords?.lng) { params.set('lat', String(coords.lat)); params.set('lng', String(coords.lng)); }
       const res = await fetch(`${API_BASE}/booking/availability?${params}`);
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Could not check that date');
       if (latestPickedDateRef.current !== date) return;
       if (data.capture_token) captureTokenRef.current = data.capture_token;
       setBrowseDays(data.days || []);
     } catch {
       if (latestPickedDateRef.current !== date) return;
-      setBrowseDays([]);
+      setBrowseDays(null);
+      setBrowseError("We couldn't check that date right now. Try again in a moment.");
     } finally {
       if (latestPickedDateRef.current === date) setBrowseLoading(false);
     }
   };
 
   const pickedDayObj = pickedDate && browseDays ? browseDays.find((d) => d.date === pickedDate) : null;
-  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !pickedDayObj;
+  const pickedDateHasNoOpenTimes = pickedDate && browseDays && !browseLoading && !browseError && !pickedDayObj;
 
   // Label for the selected day's recap — resilient to selections made via the
   // day list, the 90-day date picker, or the Waves AI search.
@@ -787,10 +792,11 @@ export default function PublicBookingPage() {
             {!loading && !openDay && (
               <>
                 <div data-glass="soft" style={{ position: 'relative', background: COLORS.white, border: `1px solid ${COLORS.slate200}`, borderRadius: 12, padding: 14, marginTop: 16 }}>
-                  <label style={{ ...labelStyle, color: COLORS.glassNavy, fontWeight: 700 }}>
+                  <label htmlFor="booking-custom-date" style={{ ...labelStyle, color: COLORS.glassNavy, fontWeight: 700 }}>
                     Need a date further out? Pick any day that works.
                   </label>
                   <input
+                    id="booking-custom-date"
                     type="date"
                     min={browseMin}
                     max={browseMax}
@@ -806,6 +812,18 @@ export default function PublicBookingPage() {
 
                 {browseLoading && (
                   <div style={{ textAlign: 'center', padding: 20, color: COLORS.slate600, fontSize: 14 }}>Loading times…</div>
+                )}
+                {browseError && !browseLoading && (
+                  <div role="alert" style={{ marginTop: 14, fontSize: 14, color: '#991B1B', lineHeight: 1.45 }}>
+                    {browseError}{' '}
+                    <button
+                      type="button"
+                      onClick={() => onPickDate(pickedDate)}
+                      style={{ border: 0, padding: 0, background: 'none', color: COLORS.wavesBlue, font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
+                    >
+                      Try again
+                    </button>
+                  </div>
                 )}
                 {pickedDayObj && (
                   <div style={{ marginTop: 14 }}>

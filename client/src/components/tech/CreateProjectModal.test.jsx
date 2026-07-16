@@ -14,7 +14,7 @@
  * column is treated lawn area, not the building footprint (Codex P1).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, cleanup, waitFor } from '@testing-library/react';
+import { render, cleanup, screen, waitFor } from '@testing-library/react';
 
 vi.mock('./WdoIntelligenceBar', () => ({ default: () => null }));
 vi.mock('./DictationButton', () => ({ default: () => null }));
@@ -86,6 +86,13 @@ const field = (key) => document.querySelector(`#create-project-wdo_inspection-${
 const dateInput = () => document.querySelector('input[type="date"]');
 
 describe('CreateProjectModal WDO inspection date', () => {
+  it('exposes a named Complete Service dialog', async () => {
+    renderWdoSheet();
+    expect(
+      await screen.findByRole('dialog', { name: 'Complete Service Report' }),
+    ).toBeTruthy();
+  });
+
   it('shows the visit date passed as YYYY-MM-DD', async () => {
     renderWdoSheet();
     await waitFor(() => expect(dateInput()).toBeTruthy());

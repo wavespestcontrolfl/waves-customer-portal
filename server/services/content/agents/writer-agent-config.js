@@ -129,7 +129,10 @@ PAGE-TYPE OUTPUT STANDARDS:
     1+ pro-tip callout. UNLESS the FAQ POLICY below blocks it, include a
     visible "Frequently Asked Questions" section with 2–3 question-style
     H3s and direct answers. Include an early CTA within
-    the first 25% of the post and a final CTA near the end. For pest,
+    the first 25% of the post and a final CTA near the end; at least one
+    CTA must be a markdown link to a conversion path — the
+    /pest-control-calculator/ or /contact/ URL from internal_links_to_add
+    satisfies this (a phone mention alone does not pass the gate). For pest,
     termite, mosquito, rodent, lawn-pest, WDO/WDI, and Florida pest ID
     topics, include practical homeowner guidance: identify what the issue
     likely is, why it happens in Southwest Florida, safe checks the

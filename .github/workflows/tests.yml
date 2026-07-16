@@ -69,16 +69,23 @@ jobs:
         working-directory: server
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        # --forceExit: all 9 suites pass and fully report in ~2s, but a
-        # module-level handle (timer/second pool) keeps jest alive afterward —
-        # the first run hung here until the 40-min job timeout. Results are
-        # flushed before exit, so forcing it is safe. (Open-handle hunt via
-        # --detectOpenHandles is a known follow-up, not a gate.)
+        # --forceExit removed 2026-07-16: the open handle was the shared app
+        # pool (models/db) pulled at module scope by lawn-intelligence in
+        # lawn-assessment-drift-sweep.test.js — that suite now destroys it in
+        # afterAll, and the full serial run exits cleanly on its own.
         run: |
           grep -l 'const SKIP = !process.env.DATABASE_URL' tests/*.test.js \
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
-            | xargs npx jest --ci --silent --runInBand --forceExit
+            | xargs npx jest --ci --silent --runInBand
+      - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
+        # Blocks on critical only (schema drift, missing tables/columns);
+        # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
+        # reported but never fail the job — same policy as the local runner.
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        working-directory: .
+        run: npm run test:contracts
 
   client:
     runs-on: ubuntu-latest
@@ -93,3 +100,44 @@ jobs:
       - name: Client tests (vitest)
         working-directory: client
         run: npx vitest run --silent
+
+  # The prebuild gates + errors-only lint, moved off deploy-time/local-hook
+  # enforcement so a violation fails the PR instead of killing every Railway
+  # build (brand/domain/blog gates) or slipping through a bypassed pre-commit
+  # hook (lint — `git commit -n` is a documented escape hatch).
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the changed-files lint diffs against the PR base's
+          # merge-base, which a shallow clone doesn't have.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Blog schema vendor check
+        run: npm run verify:blog-schema
+      - name: Portal brand gate
+        run: npm run check:portal-brand
+      - name: Domain rules gate
+        run: npm run check:domain-rules
+      - name: Lint changed files (errors-only, same scope as the pre-commit hook)
+        # Changed-files-only is deliberate — the repo has no lint history and
+        # eslint.config.js encodes that decision. Full-repo lint would flag
+        # untouched legacy code. PR events only: a push to main already ran
+        # this on its PR.
+        if: github.event_name == 'pull_request'
+        run: |
+          files=$(git diff --name-only --diff-filter=ACMR \
+            "origin/${{ github.base_ref }}...HEAD" -- \
+            '*.js' '*.jsx' '*.cjs' '*.mjs')
+          if [ -n "$files" ]; then
+            echo "$files"
+            echo "$files" | xargs npx eslint --no-warn-ignored
+          else
+            echo "No JS/JSX changes to lint."
+          fi

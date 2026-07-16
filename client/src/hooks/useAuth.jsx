@@ -39,6 +39,7 @@ function authErrorCopy(err) {
 export function AuthProvider({ children }) {
   const [customer, setCustomer] = useState(null);
   const [properties, setProperties] = useState([]);
+  const [propertiesError, setPropertiesError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
@@ -74,8 +75,17 @@ export function AuthProvider({ children }) {
       const data = await api.getMe();
       customerRef.current = data;
       setCustomer(data);
-      const propertyData = await api.getAuthProperties().catch(() => ({ properties: [] }));
-      setProperties(propertyData.properties || []);
+      try {
+        const propertyData = await api.getAuthProperties();
+        setProperties(propertyData.properties || []);
+        setPropertiesError(null);
+      } catch (propertyErr) {
+        // The active customer is still valid. Preserve any property list we
+        // already have instead of collapsing a multi-property account to a
+        // single property, and surface a retry in the account menu.
+        console.error('Failed to load service properties:', propertyErr);
+        setPropertiesError('Other service properties are temporarily unavailable.');
+      }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
       // app only; no-op on web). See native/nativePush.js.
@@ -89,6 +99,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        setPropertiesError(null);
         setLoading(false);
         return;
       }
@@ -133,6 +144,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        setPropertiesError(null);
         setError(null);
         setLoading(false);
         return;
@@ -149,6 +161,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        setPropertiesError(null);
         setError(null);
         setLoading(true);
       }
@@ -175,6 +188,7 @@ export function AuthProvider({ children }) {
       const data = await api.verifyCode(phone, code);
       api.setTokens(data.token, data.refreshToken);
       setProperties(data.properties || []);
+      setPropertiesError(null);
       await loadCustomer();
       return true;
     } catch (err) {
@@ -203,6 +217,20 @@ export function AuthProvider({ children }) {
     customerRef.current = null;
     setCustomer(null);
     setProperties([]);
+    setPropertiesError(null);
+  };
+
+  const refreshProperties = async () => {
+    try {
+      const data = await api.getAuthProperties();
+      setProperties(data.properties || []);
+      setPropertiesError(null);
+      return true;
+    } catch (err) {
+      console.error('Failed to reload service properties:', err);
+      setPropertiesError('Other service properties are temporarily unavailable.');
+      return false;
+    }
   };
 
   const switchProperty = async (customerId) => {
@@ -220,6 +248,7 @@ export function AuthProvider({ children }) {
       customerRef.current = null;
       setLoading(true);
       setProperties(data.properties || []);
+      setPropertiesError(null);
       await loadCustomer();
       return true;
     } catch (err) {
@@ -232,12 +261,14 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider value={{
       customer,
       properties,
+      propertiesError,
       loading,
       error,
       isAuthenticated: !!customer,
       sendCode,
       verifyCode,
       switchProperty,
+      refreshProperties,
       logout,
       refreshCustomer: loadCustomer,
     }}>

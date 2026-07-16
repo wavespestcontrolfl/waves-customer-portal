@@ -70,7 +70,7 @@ afterEach(() => {
 // URL-aware fetch stub: the page also fetches /public/ui-flags on mount
 // (portal glass release rider), so response queues keyed by call order would
 // be consumed by the wrong request.
-function stubFetch({ post, findSlots } = {}) {
+function stubFetch({ get, post, findSlots } = {}) {
   const fetchMock = vi.fn((url, opts = {}) => {
     const u = String(url);
     if (u.includes('/public/ui-flags')) {
@@ -82,11 +82,28 @@ function stubFetch({ post, findSlots } = {}) {
     if (opts.method === 'POST') {
       return Promise.resolve(post || jsonResponse({ error: 'unexpected POST' }, 500));
     }
-    return Promise.resolve(jsonResponse(reschedulablePayload()));
+    return Promise.resolve(get || jsonResponse(reschedulablePayload()));
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
 }
+
+describe('ReschedulePage load failures', () => {
+  it('keeps a valid link distinct from a temporary outage and lets the customer retry', async () => {
+    const fetchMock = stubFetch({ get: jsonResponse({ error: 'unavailable' }, 503) });
+
+    renderPage();
+
+    expect(await screen.findByText("We couldn't load that appointment")).toBeInTheDocument();
+    expect(screen.queryByText("We couldn't find that appointment")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => {
+      const loads = fetchMock.mock.calls.filter(([url]) => String(url).includes('/public/reschedule/'));
+      expect(loads).toHaveLength(2);
+    });
+  });
+});
 
 describe('ReschedulePage arrival windows', () => {
   it('shows the current visit as a 2-hour arrival window, not the job block', async () => {

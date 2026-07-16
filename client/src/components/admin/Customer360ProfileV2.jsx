@@ -4140,7 +4140,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 // the deposit at face value, email the customer), or explains why the run is
 // blocked. The server re-checks eligibility on confirm.
 // ============================================================================
-function CancelSignupModal({ customer, onClose, onDone }) {
+export function CancelSignupModal({ customer, onClose, onDone }) {
   const [preview, setPreview] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [running, setRunning] = useState(false);
@@ -4164,7 +4164,13 @@ function CancelSignupModal({ customer, onClose, onDone }) {
         body: JSON.stringify({ reason: "requested_by_customer" }),
       });
       setResult(r);
-      onDone?.();
+      try {
+        await onDone?.();
+      } catch (refreshError) {
+        setRunErr(
+          `Cancellation succeeded, but the customer profile could not refresh: ${refreshError.message || "Refresh failed"}`,
+        );
+      }
     } catch (e) {
       setRunErr(e.message || "Cancellation failed");
     }
@@ -4209,7 +4215,16 @@ function CancelSignupModal({ customer, onClose, onDone }) {
           )}
           {preview && preview.eligible && !result && (
             <div>
-              <div className="mb-3">This will, in order:</div>
+              {/* First-run lesson (2026-07-15): the preview reads "done"
+                  enough that the owner closed it here thinking the run had
+                  fired. State the not-yet-ness explicitly. */}
+              <div className="mb-3 px-2.5 py-1.5 bg-zinc-50 border-hairline border-zinc-200 rounded-xs text-13 text-zinc-900">
+                <span className="font-medium">Preview only — nothing has happened yet.</span>{" "}
+                <span className="text-ink-secondary">
+                  No refund is issued and nothing is cancelled until you press the red button below.
+                </span>
+              </div>
+              <div className="mb-3">Pressing it will, in order:</div>
               <ul className="list-disc pl-5 mb-3">
                 {preview.invoices.length > 0 && (
                   <li>
@@ -4279,11 +4294,11 @@ function CancelSignupModal({ customer, onClose, onDone }) {
         </div>
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-hairline border-zinc-200">
           <Button variant="secondary" onClick={onClose} disabled={running}>
-            {result ? "Close" : "Keep customer"}
+            {result ? "Close" : "Close without cancelling"}
           </Button>
           {preview?.eligible && !result && (
             <Button variant="danger" onClick={confirm} disabled={running}>
-              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)}`}
+              {running ? "Working…" : `Cancel & refund ${fmtCurrency(preview.refundTotal)} now`}
             </Button>
           )}
         </div>
@@ -4305,6 +4320,9 @@ export default function Customer360ProfileV2({
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [profileLoadError, setProfileLoadError] = useState("");
+  const [profileReloadKey, setProfileReloadKey] = useState(0);
+  const [profileActionErr, setProfileActionErr] = useState("");
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
@@ -4342,12 +4360,18 @@ export default function Customer360ProfileV2({
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
+  const profileSeqRef = useRef(0);
+  const profileAbortRef = useRef(null);
+  const customerIdRef = useRef(customerId);
+  customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
 
   const reloadCustomer = () =>
     adminFetch(`/admin/customers/${customerId}`)
-      .then(setData)
-      .catch(() => {});
+      .then((detail) => {
+        if (String(customerIdRef.current) === String(customerId)) setData(detail);
+        return detail;
+      });
 
   useEffect(() => {
     adminFetch("/admin/payers")
@@ -4357,20 +4381,25 @@ export default function Customer360ProfileV2({
 
   const savePayer = async (payerId) => {
     setPayerSaving(true);
+    setProfileActionErr("");
     try {
       await adminFetch(`/admin/customers/${customerId}`, {
         method: "PUT",
         body: JSON.stringify({ payerId: payerId || "" }),
       });
       await reloadCustomer();
-    } catch {
-      /* reload reflects truth */
+    } catch (err) {
+      setProfileActionErr(err.message || "Bill-To failed to save");
     } finally {
       setPayerSaving(false);
     }
   };
 
   const handlePayerSelect = (value) => {
+    if (!isAdmin) {
+      setProfileActionErr("Admin access is required to change Bill-To.");
+      return;
+    }
     if (value === "__new__") {
       setNewPayerError("");
       setNewPayerNotice("");
@@ -4434,15 +4463,36 @@ export default function Customer360ProfileV2({
   useEffect(() => {
     commsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
+    const seq = profileSeqRef.current + 1;
+    profileSeqRef.current = seq;
+    if (profileAbortRef.current) profileAbortRef.current.abort();
+    const ctrl = new AbortController();
+    profileAbortRef.current = ctrl;
     setLoading(true);
+    setData(null);
+    setProfileLoadError("");
+    setProfileActionErr("");
     setCommsLoading(false);
+    setMenuOpen(false);
+    setEditOpen(false);
+    setEditForm({});
+    setEditErr("");
+    setSavingEdit(false);
+    setDeletingCustomer(false);
+    setAnnualPrepayOpen(false);
+    setAnnualPrepayInvoiceOpen(false);
+    setCancelSignupOpen(false);
     Promise.all([
-      adminFetch(`/admin/customers/${customerId}`),
-      adminFetch(`/admin/customers/${customerId}/timeline`).catch(() => ({
-        timeline: [],
-      })),
+      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
+      adminFetch(`/admin/customers/${customerId}/timeline`, {
+        signal: ctrl.signal,
+      }).catch((err) => {
+        if (err.name === "AbortError") throw err;
+        return { timeline: [] };
+      }),
     ])
       .then(([detail, tl]) => {
+        if (seq !== profileSeqRef.current) return;
         setData(detail);
         setTimeline(tl.timeline || []);
         setComms([]);
@@ -4450,8 +4500,13 @@ export default function Customer360ProfileV2({
         setCommsErr("");
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  }, [customerId]);
+      .catch((err) => {
+        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
+        setProfileLoadError(err.message || "Failed to load customer");
+        setLoading(false);
+      });
+    return () => ctrl.abort();
+  }, [customerId, profileReloadKey]);
 
   useEffect(() => {
     if (activeTab !== "comms" || commsLoaded || commsLoading) return;
@@ -4481,6 +4536,7 @@ export default function Customer360ProfileV2({
   useEffect(
     () => () => {
       if (commsAbortRef.current) commsAbortRef.current.abort();
+      if (profileAbortRef.current) profileAbortRef.current.abort();
     },
     [],
   );
@@ -4520,7 +4576,10 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_email,
   ]);
 
-  if (loading)
+  const loadedCustomerMatches = data?.customer
+    && String(data.customer.id) === String(customerId);
+
+  if (loading || (data?.customer && !loadedCustomerMatches))
     return (
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
@@ -4551,8 +4610,21 @@ export default function Customer360ProfileV2({
           onClick={(e) => e.stopPropagation()}
         >
           {" "}
-          <div className="text-alert-fg text-center py-16 text-13">
-            Failed to load customer
+          <div className="flex-1 flex items-center justify-center p-6">
+            <div className="text-center max-w-sm">
+              <div className="text-alert-fg text-14 mb-2">
+                Failed to load customer
+              </div>
+              <div className="text-14 text-ink-secondary mb-5">
+                {profileLoadError || "The customer profile could not be loaded."}
+              </div>
+              <div className="flex items-center justify-center gap-2">
+                <Button variant="secondary" onClick={onClose}>Close</Button>
+                <Button onClick={() => setProfileReloadKey((key) => key + 1)}>
+                  Retry
+                </Button>
+              </div>
+            </div>
           </div>{" "}
         </div>{" "}
       </div>
@@ -4599,6 +4671,10 @@ export default function Customer360ProfileV2({
     || null;
 
   const updateNotificationPrefs = async (patch) => {
+    if (!isAdmin) {
+      setProfileActionErr("Admin access is required to change notification routing.");
+      return;
+    }
     const previous = data.notificationPrefs || {};
     const patchKeys = Object.keys(patch);
     setData((prev) =>
@@ -4613,6 +4689,7 @@ export default function Customer360ProfileV2({
         : prev,
     );
     try {
+      setProfileActionErr("");
       const response = await adminFetch(
         `/admin/customers/${customerId}/notification-prefs`,
         {
@@ -4625,7 +4702,7 @@ export default function Customer360ProfileV2({
           prev ? { ...prev, notificationPrefs: response.notificationPrefs } : prev,
         );
       }
-    } catch {
+    } catch (err) {
       setData((prev) => {
         if (!prev) return prev;
         const notificationPrefs = { ...(prev.notificationPrefs || {}) };
@@ -4638,10 +4715,15 @@ export default function Customer360ProfileV2({
         });
         return { ...prev, notificationPrefs };
       });
+      setProfileActionErr(err.message || "Notification preference failed to save");
     }
   };
 
   const saveRecipientPrefs = async () => {
+    if (!isAdmin) {
+      setRecipientPrefsErr("Admin access is required to change recipients");
+      return;
+    }
     setRecipientPrefsSaving(true);
     setRecipientPrefsErr("");
     try {
@@ -4990,6 +5072,7 @@ export default function Customer360ProfileV2({
               {(() => {
                 const parts = [
                   c.address?.line1,
+                  c.address?.line2,
                   c.address?.city,
                   c.address?.state,
                   c.address?.zip,
@@ -5083,6 +5166,7 @@ export default function Customer360ProfileV2({
                       phone: c.phone || "",
                       profileLabel: c.profileLabel || "",
                       addressLine1: c.address?.line1 || "",
+                      addressLine2: c.address?.line2 || "",
                       city: c.address?.city || "",
                       state: c.address?.state || "",
                       zip: c.address?.zip || "",
@@ -5117,6 +5201,7 @@ export default function Customer360ProfileV2({
               (() => {
                 const parts = [
                   c.address?.line1,
+                  c.address?.line2,
                   c.address?.city,
                   c.address?.state,
                   c.address?.zip,
@@ -5240,6 +5325,11 @@ export default function Customer360ProfileV2({
         </div>
         {/* TAB CONTENT */}
         <div className="p-6 flex-1">
+          {profileActionErr && (
+            <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
+              {profileActionErr}
+            </div>
+          )}
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div>
@@ -5258,6 +5348,7 @@ export default function Customer360ProfileV2({
                     {accountProperties.map((p) => {
                       const addr = [
                         p.address?.line1,
+                        p.address?.line2,
                         p.address?.city,
                         p.address?.state,
                         p.address?.zip,
@@ -5325,6 +5416,7 @@ export default function Customer360ProfileV2({
                 <Switch
                   id="has-left-review-v2"
                   checked={!!c.hasLeftGoogleReview}
+                  disabled={!isAdmin}
                   onChange={async (val) => {
                     const previousHasLeftGoogleReview = !!c.hasLeftGoogleReview;
                     const previousReviewMarkedAt = c.reviewMarkedAt || null;
@@ -5347,7 +5439,7 @@ export default function Customer360ProfileV2({
                         method: "PUT",
                         body: JSON.stringify({ hasLeftGoogleReview: val }),
                       });
-                    } catch {
+                    } catch (err) {
                       setData((prev) =>
                         prev
                           ? {
@@ -5360,6 +5452,7 @@ export default function Customer360ProfileV2({
                             }
                           : prev,
                       );
+                      setProfileActionErr(err.message || "Review status failed to save");
                     }
                   }}
                 />{" "}
@@ -6101,7 +6194,7 @@ export default function Customer360ProfileV2({
                   <div className="flex items-center gap-2 flex-wrap">
                     <select
                       value={c.payerId ? String(c.payerId) : ""}
-                      disabled={payerSaving}
+                      disabled={payerSaving || !isAdmin}
                       onChange={(e) => handlePayerSelect(e.target.value)}
                       className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
                     >
@@ -6261,6 +6354,7 @@ export default function Customer360ProfileV2({
                       id="c360-billing-contact-name"
                       name="billingContactName"
                       value={recipientPrefsDraft.billingContactName}
+                      disabled={!isAdmin}
                       onChange={(e) =>
                         setRecipientPrefsDraft((prev) => ({
                           ...prev,
@@ -6279,6 +6373,7 @@ export default function Customer360ProfileV2({
                       id="c360-billing-recipient-email"
                       name="billingEmail"
                       value={recipientPrefsDraft.billingEmail}
+                      disabled={!isAdmin}
                       onChange={(e) =>
                         setRecipientPrefsDraft((prev) => ({
                           ...prev,
@@ -6299,7 +6394,7 @@ export default function Customer360ProfileV2({
                   </div>
                   <Button
                     onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving}
+                    disabled={recipientPrefsSaving || !isAdmin}
                     className="shrink-0"
                   >
                     {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
@@ -6316,6 +6411,7 @@ export default function Customer360ProfileV2({
                     id="c360-appointment-notify-primary"
                     name="appointmentNotifyPrimary"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={notificationPrefs.appointment_notify_primary === true}
                     onChange={(e) =>
@@ -6343,6 +6439,7 @@ export default function Customer360ProfileV2({
                     id="c360-service-report-notify-primary"
                     name="serviceReportNotifyPrimary"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={notificationPrefs.service_report_notify_primary === true}
                     onChange={(e) =>
@@ -6369,6 +6466,7 @@ export default function Customer360ProfileV2({
                     id="c360-service-report-notify-billing"
                     name="serviceReportNotifyBilling"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={notificationPrefs.service_report_notify_billing === true}
                     onChange={(e) =>
@@ -6396,6 +6494,7 @@ export default function Customer360ProfileV2({
                     id="c360-auto-flip-en-route"
                     name="autoFlipEnRoute"
                     type="checkbox"
+                    disabled={!isAdmin}
                     className="mt-0.5"
                     checked={
                       notificationPrefs.auto_flip_en_route !== false
@@ -6888,6 +6987,7 @@ export default function Customer360ProfileV2({
                         email: c.email || "",
                         phone: c.phone || "",
                         addressLine1: c.address?.line1 || "",
+                        addressLine2: c.address?.line2 || "",
                         city: c.address?.city || "",
                         state: c.address?.state || "",
                         zip: c.address?.zip || "",
@@ -6938,16 +7038,18 @@ export default function Customer360ProfileV2({
                 >
                   Add note
                 </button>{" "}
-                <button
-                  role="menuitem"
-                  onClick={() => {
-                    onAddProperty?.(c);
-                    setMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-                >
-                  Add property
-                </button>{" "}
+                {isAdmin && (
+                  <button
+                    role="menuitem"
+                    onClick={() => {
+                      onAddProperty?.(c);
+                      setMenuOpen(false);
+                    }}
+                    className="w-full text-left px-3 py-2 text-13 text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Add property
+                  </button>
+                )}{" "}
               </div>
             )}
           </div>{" "}
@@ -6961,7 +7063,7 @@ export default function Customer360ProfileV2({
           firstName: c.firstName,
           lastName: c.lastName,
           address: c.address
-            ? [c.address.line1, c.address.city, c.address.state, c.address.zip]
+            ? [c.address.line1, c.address.line2, c.address.city, c.address.state, c.address.zip]
                 .filter(Boolean)
                 .join(", ")
             : "",
@@ -7027,6 +7129,7 @@ export default function Customer360ProfileV2({
                 { key: "phone", label: "Phone", type: "tel" },
                 { key: "profileLabel", label: "Property label", full: true },
                 { key: "addressLine1", label: "Address", full: true },
+                { key: "addressLine2", label: "Address line 2", full: true },
                 { key: "city", label: "City" },
                 { key: "state", label: "State" },
                 { key: "zip", label: "ZIP" },

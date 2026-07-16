@@ -1159,7 +1159,7 @@ export default function TimeGridDay({
     setOptimistic(allServices.filter((s) => !ids.includes(s.id)));
     setBusy(true);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         toMove.map((svc) => {
           const startMin = parseHHMM(svc.windowStart) ?? DAY_START_HOUR * 60;
           const dur = effectiveDuration(svc);
@@ -1177,14 +1177,21 @@ export default function TimeGridDay({
           });
         }),
       );
+      const failed = results.filter((result) => result.status === 'rejected');
+      if (failed.length > 0) {
+        alert(
+          failed.length === results.length
+            ? `Bulk reschedule failed for all ${results.length} appointments.`
+            : `Bulk reschedule partially completed: ${results.length - failed.length} moved, ${failed.length} failed. The schedule has been refreshed.`,
+        );
+      }
       clearSelection();
-      setOptimistic(null);
-      onChange?.();
     } catch (err) {
       alert('Bulk reschedule failed: ' + err.message);
-      setOptimistic(null);
     } finally {
+      setOptimistic(null);
       setBusy(false);
+      onChange?.();
     }
   }, [selection, allServices, date, onChange, clearSelection]);
 
@@ -1196,20 +1203,27 @@ export default function TimeGridDay({
     ));
     setBusy(true);
     try {
-      await Promise.all(
+      const results = await Promise.allSettled(
         ids.map((id) => adminFetch(`/admin/schedule/${id}/assign`, {
           method: 'PUT',
           body: JSON.stringify({ technicianId: null }),
         })),
       );
+      const failed = results.filter((result) => result.status === 'rejected');
+      if (failed.length > 0) {
+        alert(
+          failed.length === results.length
+            ? `Bulk unassign failed for all ${results.length} appointments.`
+            : `Bulk unassign partially completed: ${results.length - failed.length} unassigned, ${failed.length} failed. The schedule has been refreshed.`,
+        );
+      }
       clearSelection();
-      setOptimistic(null);
-      onChange?.();
     } catch (err) {
       alert('Bulk unassign failed: ' + err.message);
-      setOptimistic(null);
     } finally {
+      setOptimistic(null);
       setBusy(false);
+      onChange?.();
     }
   }, [selection, allServices, onChange, clearSelection]);
 

@@ -180,6 +180,7 @@ export default function ReceiptPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   // ── ?fresh=1 animation — fires ONCE on first mount, then strips the param
   // from the URL so cmd-R refresh doesn't re-trigger the badge animation.
@@ -209,14 +210,22 @@ export default function ReceiptPage() {
   }, []);
 
   useEffect(() => {
-    fetch(`${API_BASE}/receipt/${token}`)
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetch(`${API_BASE}/receipt/${token}`, { signal: controller.signal })
       .then((r) => {
-        if (!r.ok) throw new Error(r.status === 404 ? 'Receipt not found' : 'Failed to load');
+        if (!r.ok) {
+          const loadError = new Error(r.status === 404 ? 'Receipt not found' : 'Failed to load');
+          loadError.status = r.status;
+          throw loadError;
+        }
         return r.json();
       })
-      .then((d) => { setData(d); setLoading(false); })
-      .catch((e) => { setError(e.message); setLoading(false); });
-  }, [token]);
+      .then((d) => { if (!controller.signal.aborted) { setData(d); setLoading(false); } })
+      .catch((e) => { if (!controller.signal.aborted) { setError({ message: e.message, status: e.status }); setLoading(false); } });
+    return () => controller.abort();
+  }, [token, loadAttempt]);
 
   const refundState = useMemo(() => {
     if (!data?.payment) return null;
@@ -238,7 +247,7 @@ export default function ReceiptPage() {
     );
   }
 
-  if (error || !data) {
+  if (error?.status === 404) {
     return (
       <WavesShell variant="customer" topBar="solid">
         <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
@@ -247,6 +256,28 @@ export default function ReceiptPage() {
             <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
               The link may be mistyped. Give us a call and we'll pull up your records — <HelpPhoneLink tone="dark" inline />.
             </p>
+          </BrandCard>
+        </div>
+      </WavesShell>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
+          <BrandCard>
+            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't load that receipt</SerifHeading>
+            <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
+              This looks temporary. Your link is still valid—try again in a moment.
+            </p>
+            <button
+              type="button"
+              onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+              style={{ border: 0, borderRadius: RADIUS.input, padding: '11px 16px', background: DOC.ink, color: '#fff', font: 'inherit', fontWeight: FW.bold, cursor: 'pointer' }}
+            >
+              Try again
+            </button>
           </BrandCard>
         </div>
       </WavesShell>

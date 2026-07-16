@@ -274,3 +274,41 @@ describe('detectHardcodedPrice / detectPii parity (regression)', () => {
     expect(detectPii('Call (941) 318-7612 ext 2 for the office.')).toBe(false);
   });
 });
+
+describe('autonomous-lane draft shape (no seo_contract) — breadcrumb false positive regression', () => {
+  test('a draft without seo_contract/breadcrumbs gets no breadcrumb findings', () => {
+    const bare = baseDraft();
+    delete bare.seo_contract;
+
+    const result = SeoCompletionGate.evaluate({
+      draft: bare,
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+
+    const codes = result.findings.map((f) => f.code);
+    // The writer cannot legally emit breadcrumbs (emit_draft has no
+    // seo_contract field; the blog schema rejects a breadcrumbs key) and the
+    // Astro layout renders the trail unconditionally — these two codes fired
+    // on EVERY autonomous draft before the layout-default fallback.
+    expect(codes).not.toContain('P1_MISSING_BREADCRUMBS');
+    expect(codes).not.toContain('P2_CONTRACT_BREADCRUMB_SCHEMA_WITHOUT_BREADCRUMBS');
+  });
+
+  test('conversion CTA still P1s when the body has no conversion link', () => {
+    const bare = baseDraft({
+      body: baseDraft().body
+        .replaceAll('[Request a pest control quote](/contact/)', 'Request a pest control quote today')
+        .replaceAll('[Contact Waves](/contact/)', 'Contact Waves'),
+    });
+    delete bare.seo_contract;
+
+    const result = SeoCompletionGate.evaluate({
+      draft: bare,
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+
+    expect(result.findings.map((f) => f.code)).toContain('P1_MISSING_CONVERSION_CTA');
+  });
+});
