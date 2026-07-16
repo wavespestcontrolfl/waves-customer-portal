@@ -85,57 +85,57 @@ beforeEach(() => {
 });
 
 test('increase_budget resolves the campaign by name and applies', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20, budget_mode: 'base' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, budget_mode: 'base' }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
   expect(mockIncrement).toHaveBeenCalledTimes(1);
 });
 
 const UUID_A = '11111111-2222-4333-8444-555555555555';
 
 test('campaignId is preferred over the name lookup', async () => {
-  mockCampaignById = { id: UUID_A, campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 };
+  mockCampaignById = { id: UUID_A, campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 };
   // A conflicting name match must not win when an id is present.
-  mockNameMatches = [{ id: 'c-other', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-other', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 25, googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignId: UUID_A, campaignName: 'Pest Bradenton', value: 25 });
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true });
+  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
 });
 
 test('a malformed (non-UUID) campaign_id falls back to the name lookup instead of a 500', async () => {
   mockCampaignById = null; // the uuid lookup must never run
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'increase_budget', campaignId: 'c-not-a-uuid', campaignName: 'Pest Bradenton', value: 30 });
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
 });
 
 test('change_mode applies via setMode', async () => {
-  mockNameMatches = [{ id: 'c-9', campaign_name: 'Lawn Sarasota', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-9', campaign_name: 'Lawn Sarasota', platform: 'google_ads', status: 'active' }];
   mockSetMode.mockResolvedValue({ campaign: 'Lawn Sarasota', newMode: 'stop', googleAdsUpdated: true, livePushAttempted: true });
 
   const res = await apply({ action: 'change_mode', campaignName: 'Lawn Sarasota', value: 'stop' });
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true });
+  expect(mockSetMode).toHaveBeenCalledWith('c-9', 'stop', expect.any(String), { requireLivePush: true, trigger: 'advisor' });
 });
 
 test('unlinked campaign (no live push attempted) still counts as applied', async () => {
-  mockNameMatches = [{ id: 'c-9', campaign_name: 'Lawn Sarasota', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-9', campaign_name: 'Lawn Sarasota', platform: 'google_ads', status: 'active' }];
   mockSetMode.mockResolvedValue({ campaign: 'Lawn Sarasota', newMode: 'stop', googleAdsUpdated: false, livePushAttempted: false });
 
   const res = await apply({ action: 'change_mode', campaignName: 'Lawn Sarasota', value: 'stop' });
@@ -145,7 +145,7 @@ test('unlinked campaign (no live push attempted) still counts as applied', async
 });
 
 test('a refused live Google push is NOT applied and not counted', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', platform_campaign_id: 'g-1', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', platform_campaign_id: 'g-1', daily_budget_base: 20 }];
   // requireLivePush pushes FIRST and throws before persisting anything.
   mockSetBudget.mockRejectedValue(Object.assign(new Error('Google Ads refused the budget update for "Pest Bradenton" — nothing was changed.'), { code: 'live_push_failed' }));
 
@@ -158,7 +158,7 @@ test('a refused live Google push is NOT applied and not counted', async () => {
 });
 
 test('linked campaign whose push never ran is NOT applied (unconfigured client / no base)', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', platform_campaign_id: 'g-1' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', platform_campaign_id: 'g-1' }];
   mockSetMode.mockRejectedValue(Object.assign(new Error('"Pest Bradenton" is linked to a live Google Ads campaign, but the live push can\'t run — nothing was changed.'), { code: 'live_push_unavailable' }));
 
   const res = await apply({ action: 'change_mode', campaignName: 'Pest Bradenton', value: 'stop' });
@@ -170,7 +170,7 @@ test('linked campaign whose push never ran is NOT applied (unconfigured client /
 });
 
 test('a mode the campaign is already in is a no-op → 422, manager never called', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', budget_mode: 'stop' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', budget_mode: 'stop' }];
 
   const res = await apply({ action: 'change_mode', campaignName: 'Pest Bradenton', value: 'stop' });
 
@@ -182,7 +182,7 @@ test('a mode the campaign is already in is a no-op → 422, manager never called
 });
 
 test('campaign id resolving to a different name than the card shows → 422', async () => {
-  mockCampaignById = { id: UUID_A, campaign_name: 'Lawn Venice', platform: 'google_ads' };
+  mockCampaignById = { id: UUID_A, campaign_name: 'Lawn Venice', platform: 'google_ads', status: 'active' };
 
   const res = await apply({ action: 'increase_budget', campaignId: UUID_A, campaignName: 'Pest Bradenton', value: 30 });
 
@@ -193,7 +193,7 @@ test('campaign id resolving to a different name than the card shows → 422', as
 });
 
 test('AI budget more than 3× from the base is refused', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 3000 });
 
@@ -204,18 +204,18 @@ test('AI budget more than 3× from the base is refused', async () => {
 });
 
 test('a sane budget within 3× of the base still applies', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: false, livePushAttempted: false });
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
 });
 
 test('budget bound falls back to the current daily budget when no base exists', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: null, daily_budget_current: 10 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: null, daily_budget_current: 10 }];
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 3000 });
 
@@ -225,7 +225,7 @@ test('budget bound falls back to the current daily budget when no base exists', 
 });
 
 test('no recorded budget at all → manual-only, nothing to bound against', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: null, daily_budget_current: null }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: null, daily_budget_current: null }];
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
 
@@ -235,7 +235,7 @@ test('no recorded budget at all → manual-only, nothing to bound against', asyn
 });
 
 test('budget apply on a throttled (spent/stop) campaign is refused — the target would not go live', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20, budget_mode: 'spent' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, budget_mode: 'spent' }];
 
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
 
@@ -245,8 +245,66 @@ test('budget apply on a throttled (spent/stop) campaign is refused — the targe
   expect(mockIncrement).not.toHaveBeenCalled();
 });
 
+test('paused campaign → 422, manager never called', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'paused', daily_budget_base: 20 }];
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(422);
+  expect(res.body.applied).toBe(false);
+  expect(res.body.error).toMatch(/paused/);
+  expect(mockSetBudget).not.toHaveBeenCalled();
+  expect(mockIncrement).not.toHaveBeenCalled();
+});
+
+test('budget already at the target (base AND current) → no-op 422', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 30, daily_budget_current: 30 }];
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(422);
+  expect(res.body.error).toMatch(/already at \$30\/day/);
+  expect(mockSetBudget).not.toHaveBeenCalled();
+});
+
+test('same-base apply with drifted current is allowed (reconciles live budget)', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 30, daily_budget_current: 18 }];
+  mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(200);
+  expect(res.body.applied).toBe(true);
+});
+
+test('concurrent mode change surfaces as 409, not a false applied', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20, budget_mode: 'base' }];
+  mockSetBudget.mockRejectedValue(Object.assign(new Error('"Pest Bradenton" switched to "spent" mode — the new daily budget wouldn\'t take effect, so nothing was changed.'), { code: 'mode_conflict' }));
+
+  const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+
+  expect(res.status).toBe(409);
+  expect(res.body.applied).toBe(false);
+  expect(mockIncrement).not.toHaveBeenCalled();
+});
+
+test('persist-failure-after-push outcomes (rolled back / ambiguous) surface as 502 not applied', async () => {
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
+  mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('rolled back'), { code: 'live_push_rolled_back' }));
+
+  let res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+  expect(res.status).toBe(502);
+  expect(res.body.applied).toBe(false);
+
+  mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('ambiguous'), { code: 'live_push_ambiguous' }));
+  res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 30 });
+  expect(res.status).toBe(502);
+  expect(res.body.applied).toBe(false);
+  expect(mockIncrement).not.toHaveBeenCalled();
+});
+
 test('applied_count increment failure does not flip a completed apply to an error', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', daily_budget_base: 20 }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active', daily_budget_base: 20 }];
   mockSetBudget.mockResolvedValue({ campaign: 'Pest Bradenton', newBudget: 30, googleAdsUpdated: true, livePushAttempted: true });
   mockIncrement.mockRejectedValueOnce(new Error('db hiccup'));
 
@@ -270,7 +328,7 @@ test('non-Google campaign → 422 manual, budget manager never called', async ()
 
 test('name matching more than one campaign → 422, nothing mutated', async () => {
   mockNameMatches = [
-    { id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads' },
+    { id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active' },
     { id: 'c-2', campaign_name: 'Pest Bradenton', platform: 'facebook' },
   ];
 
@@ -293,7 +351,7 @@ test('unresolvable campaign → 422 applied:false, not counted', async () => {
 });
 
 test('budget rec with no concrete value → 422 applied:false', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active' }];
   const res = await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton' });
 
   expect(res.status).toBe(422);
@@ -302,7 +360,7 @@ test('budget rec with no concrete value → 422 applied:false', async () => {
 });
 
 test('change_mode with an invalid mode → 422 applied:false', async () => {
-  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads' }];
+  mockNameMatches = [{ id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active' }];
   const res = await apply({ action: 'change_mode', campaignName: 'Pest Bradenton', value: 'turbo' });
 
   expect(res.status).toBe(422);
@@ -323,7 +381,7 @@ describe('rule-based fallback recommendations are executable', () => {
   const advisor = require('../services/ads/campaign-advisor');
 
   const summary = (over = {}) => ({
-    id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads',
+    id: 'c-1', name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
     dailyBudgetBase: 20, dailyBudgetCurrent: 20,
     last7d: { roas: 6, lostISBudget: 30 }, last30d: {}, trending: 'flat',
     ...over,
@@ -345,6 +403,14 @@ describe('rule-based fallback recommendations are executable', () => {
     expect(rec).toBeDefined();
     expect(rec.apply_action).toBeUndefined();
     expect(rec.apply_value).toBeUndefined();
+  });
+
+  test('fallback recs for a paused campaign stay advisory (apply would 422)', () => {
+    const advice = advisor.generateFallbackAdvice(
+      [summary({ status: 'paused' })], { min_roas: 4 });
+    const rec = advice.recommendations[0];
+    expect(rec).toBeDefined();
+    expect(rec.apply_action).toBeUndefined();
   });
 
   test('increase_budget fallback on a throttled (spent/stop) campaign stays advisory', () => {

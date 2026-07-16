@@ -523,5 +523,53 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockCampaignUpdate).toHaveBeenCalled();
       expect(result.googleAdsUpdated).toBe(false);
     });
+
+    test('persist failure AFTER a successful push rolls the live budget back', async () => {
+      campaignFirstRow = baseCampaign(); // current '40'
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ ok: true }); // push + rollback both accepted
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_rolled_back' });
+
+      // First call pushed the new amount; second restored the prior current.
+      expect(mockUpdateBudget).toHaveBeenCalledTimes(2);
+      expect(mockUpdateBudget).toHaveBeenLastCalledWith('1234567890', 40);
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('persist failure with a failed rollback reports live_push_ambiguous', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget
+        .mockResolvedValueOnce({ ok: true })  // push accepted
+        .mockResolvedValueOnce(null);         // rollback refused
+      mockCampaignUpdate.mockRejectedValueOnce(new Error('db down'));
+
+      await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_ambiguous' });
+    });
+
+    test('setBudget requireBaseMode: a throttled row re-read inside the call throws mode_conflict before any push', async () => {
+      campaignFirstRow = { ...baseCampaign(), budget_mode: 'spent' };
+      mockIsConfigured.mockReturnValue(true);
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test', { requireLivePush: true, requireBaseMode: true }))
+        .rejects.toMatchObject({ code: 'mode_conflict' });
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    });
+
+    test('opts.trigger lands in the ad_budget_log row', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ ok: true });
+
+      await BudgetManager.setBudget('c-1', 50, 'test', { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' });
+
+      expect(mockLogInsert).toHaveBeenCalledWith(expect.objectContaining({ trigger: 'advisor' }));
+    });
   });
 });

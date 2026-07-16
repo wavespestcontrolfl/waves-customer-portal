@@ -540,8 +540,12 @@ async function applyLive(fn, res) {
       res.status(422).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (err.code === 'live_push_failed') {
+    if (err.code === 'live_push_failed' || err.code === 'live_push_rolled_back' || err.code === 'live_push_ambiguous') {
       res.status(502).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'mode_conflict') {
+      res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
     throw err;
@@ -587,6 +591,12 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
     if (campaign.platform !== 'google_ads') {
       return res.status(422).json({ applied: false, manual: true, error: `"${campaign.campaign_name}" is a ${campaign.platform} campaign managed outside this dashboard — apply this in its own Ads Manager.` });
     }
+    // The advisor sees every non-removed status; a paused campaign must not
+    // take a budget/mode change that would silently revive it later with an
+    // advisor-selected value.
+    if (campaign.status !== 'active') {
+      return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before applying advisor changes.` });
+    }
     // The id is model output too: a rec can carry campaign A's id under
     // campaign B's name. The card shows the NAME, so a mismatch means the
     // click would mutate a different campaign than the admin approved.
@@ -625,7 +635,14 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount > boundRef * 3 || amount < boundRef / 3) {
         return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${boundRef}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true }), res);
+      // Known no-op (stale report / re-apply after success): base AND current
+      // already match the target — counting it as applied would be the same
+      // false green. A same-base apply with DRIFTED current stays allowed:
+      // that push reconciles the live budget back to the recorded base.
+      if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
@@ -638,7 +655,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (value === campaign.budget_mode) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`, { requireLivePush: true }), res);
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`, { requireLivePush: true, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     }
 

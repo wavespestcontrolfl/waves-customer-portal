@@ -107,6 +107,7 @@ class CampaignAdvisor {
         id: c.id,
         name: c.campaign_name,
         platform: c.platform,
+        status: c.status,
         type: c.campaign_type,
         area: c.target_area,
         serviceLine: c.service_line,
@@ -248,7 +249,9 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     // throttled (spent/stop) campaign can't take effect — either would render
     // an Apply button that is guaranteed to 422.
     for (const c of summaries) {
-      const controllable = c.platform === 'google_ads';
+      // Mirrors /advisor/apply: only active Google campaigns take one-click
+      // changes (a paused campaign's apply would 422).
+      const controllable = c.platform === 'google_ads' && c.status === 'active';
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
         recommendations.push({
           priority: 'high', campaign: c.name,

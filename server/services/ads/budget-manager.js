@@ -348,8 +348,14 @@ class BudgetManager {
    * write — otherwise the reconcile cron would retry the recorded target
    * later and silently apply a change the caller reported as failed.
    * Unlinked campaigns are unaffected (DB-only intent is their real outcome).
+   * If the DB write fails AFTER a successful push, a compensating push
+   * restores the prior live budget ('live_push_rolled_back'); if even that
+   * fails, 'live_push_ambiguous' says so honestly (local rows still hold the
+   * OLD state, so the reconcile cron converges Google back to it).
+   * opts.trigger: ad_budget_log.trigger attribution (default 'manual';
+   * the advisor route passes 'advisor').
    */
-  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false } = {}) {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false, trigger = 'manual' } = {}) {
     // Now that setMode can mutate real Google Ads spend, an unknown mode
     // must be rejected up front — calculateBudget's default case would
     // silently price a typo as the full base budget AND persist the invalid
@@ -394,21 +400,32 @@ class BudgetManager {
       }
     }
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      budget_mode: mode,
-      daily_budget_current: newBudget,
-    });
+    try {
+      await db('ad_campaigns').where({ id: campaignId }).update({
+        budget_mode: mode,
+        daily_budget_current: newBudget,
+      });
 
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: mode,
-      previous_budget: campaign.daily_budget_current,
-      new_budget: newBudget,
-      reason,
-      trigger: 'manual',
-    });
+      await db('ad_budget_log').insert({
+        campaign_id: campaignId,
+        campaign_name: campaign.campaign_name,
+        previous_mode: campaign.budget_mode,
+        new_mode: mode,
+        previous_budget: campaign.daily_budget_current,
+        new_budget: newBudget,
+        reason,
+        trigger,
+      });
+    } catch (persistErr) {
+      // requireLivePush already moved the LIVE budget — a local write failure
+      // here must not fall through as an ordinary "not applied" while Google
+      // runs the new amount. Roll the live budget back (or say the state is
+      // ambiguous) instead.
+      if (requireLivePush && googleAdsUpdated) {
+        throw await this.rollbackAfterLivePush(campaign, persistErr);
+      }
+      throw persistErr;
+    }
 
     // Legacy (no requireLivePush) callers keep the mirror of the manual
     // /campaigns/:id/budget route: DB first, then best-effort live push,
@@ -429,14 +446,44 @@ class BudgetManager {
   }
 
   /**
+   * A requireLivePush caller's DB write failed AFTER Google accepted the
+   * push. Try a compensating push restoring the prior live budget so "not
+   * applied" stays true; report honestly either way. The local rows still
+   * hold the OLD state, so the budget reconcile converges Google back to it
+   * even in the ambiguous case.
+   */
+  async rollbackAfterLivePush(campaign, persistErr) {
+    const previousLive = Number(campaign.daily_budget_current);
+    let restored = false;
+    if (Number.isFinite(previousLive) && previousLive > 0) {
+      try {
+        restored = Boolean(await getGoogleAds().updateBudget(campaign.platform_campaign_id, previousLive));
+      } catch { restored = false; }
+    }
+    logger.error(`[budget-manager] persist failed after live push for ${campaign.id} (${persistErr.message}); live rollback ${restored ? 'succeeded' : 'FAILED'}`);
+    const err = new Error(restored
+      ? 'Recording the change failed after Google accepted it — the live budget was rolled back and nothing was changed. Try again.'
+      : 'Google accepted the change but recording it locally failed, and the rollback push also failed — the live campaign may be running the new amount. Local records still hold the previous state (the budget reconcile restores it within ~2 hours); check the campaign in Google Ads.');
+    err.code = restored ? 'live_push_rolled_back' : 'live_push_ambiguous';
+    return err;
+  }
+
+  /**
    * Manually update a campaign's base daily budget.
    *
    * opts.requireLivePush: same contract as setMode — on a LINKED campaign a
    * refused or unrunnable push throws ('live_push_failed' /
    * 'live_push_unavailable') BEFORE the new base is persisted, so a failed
-   * apply leaves no local intent for the reconcile cron to re-push later.
+   * apply leaves no local intent for the reconcile cron to re-push later;
+   * a post-push persist failure rolls the live budget back (or reports
+   * 'live_push_ambiguous').
+   * opts.requireBaseMode: reject ('mode_conflict') if the row re-read inside
+   * this call is no longer in base mode — the advisor route's honesty guard
+   * would otherwise race a concurrent mode change (cron/other admin) and
+   * report the target as applied while a throttled amount went live.
+   * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false } = {}) {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, trigger = 'manual' } = {}) {
     // Validate the amount up front — a non-positive / NaN / non-finite base would
     // be written locally and pushed to Google as garbage micros (or, at 0,
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep
@@ -453,6 +500,14 @@ class BudgetManager {
     if (!campaign) throw new Error('Campaign not found');
     if (campaign.platform !== 'google_ads') {
       throw new Error(`Budget control is not supported for ${campaign.platform} campaigns (managed in Ads Manager)`);
+    }
+    // Re-checked HERE (not just at the route) so a mode transition between
+    // the caller's guard and this read can't push a mode-derived amount
+    // while the caller reports the raw target as applied.
+    if (requireBaseMode && campaign.budget_mode && campaign.budget_mode !== 'base') {
+      const err = new Error(`"${campaign.campaign_name}" switched to "${campaign.budget_mode}" mode — the new daily budget wouldn't take effect, so nothing was changed.`);
+      err.code = 'mode_conflict';
+      throw err;
     }
 
     // What Google should actually run given the campaign's CURRENT mode: editing
@@ -491,21 +546,30 @@ class BudgetManager {
       ? campaign.daily_budget_current   // push failed → Google still runs the old amount
       : effectiveBudget;
 
-    await db('ad_campaigns').where({ id: campaignId }).update({
-      daily_budget_base: base,
-      daily_budget_current: newCurrent,
-    });
+    try {
+      await db('ad_campaigns').where({ id: campaignId }).update({
+        daily_budget_base: base,
+        daily_budget_current: newCurrent,
+      });
 
-    await db('ad_budget_log').insert({
-      campaign_id: campaignId,
-      campaign_name: campaign.campaign_name,
-      previous_mode: campaign.budget_mode,
-      new_mode: campaign.budget_mode,
-      previous_budget: campaign.daily_budget_base,
-      new_budget: base,
-      reason,
-      trigger: 'manual',
-    });
+      await db('ad_budget_log').insert({
+        campaign_id: campaignId,
+        campaign_name: campaign.campaign_name,
+        previous_mode: campaign.budget_mode,
+        new_mode: campaign.budget_mode,
+        previous_budget: campaign.daily_budget_base,
+        new_budget: base,
+        reason,
+        trigger,
+      });
+    } catch (persistErr) {
+      // Same contract as setMode: the live budget already moved, so a local
+      // write failure must not read as an ordinary "not applied".
+      if (requireLivePush && googleAdsUpdated) {
+        throw await this.rollbackAfterLivePush(campaign, persistErr);
+      }
+      throw persistErr;
+    }
 
     return {
       campaign: campaign.campaign_name,
