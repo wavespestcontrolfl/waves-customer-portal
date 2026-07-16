@@ -255,9 +255,39 @@ class SatelliteAnalyzer {
    */
   mergeResults(providerResults) {
     if (!providerResults.length) return { error: 'No results' };
+    const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
+    const explicitNonNegative = (analysis, field) => {
+      if (!analysis || !Object.prototype.hasOwnProperty.call(analysis, field)) return null;
+      if (analysis[field] === null || analysis[field] === '') return null;
+      const value = Number(analysis[field]);
+      return Number.isFinite(value) && value >= 0 ? value : null;
+    };
     if (providerResults.length === 1) {
       const only = providerResults[0];
-      return { ...only.analysis, confidence: 'single_model', source: only.provider, fieldVerify: Object.keys(only.analysis) };
+      const confidenceDetails = {};
+      const fieldVerify = [];
+      for (const field of numericFields) {
+        const value = explicitNonNegative(only.analysis, field);
+        if (value === null) {
+          confidenceDetails[field] = { values: [], status: 'missing' };
+          continue;
+        }
+        confidenceDetails[field] = {
+          values: [{ provider: only.provider, value }],
+          status: 'single_source',
+        };
+        fieldVerify.push(field);
+      }
+      return {
+        ...only.analysis,
+        confidence: 'single_model',
+        agreementPct: null,
+        confidenceDetails,
+        source: only.provider,
+        aiSources: [only.provider],
+        _sources: [only.provider],
+        fieldVerify,
+      };
     }
 
     const merged = {};
@@ -265,17 +295,31 @@ class SatelliteAnalyzer {
     const confidenceDetails = {};
 
     // Numeric fields — average if within 15%, flag if > 15% apart
-    const numericFields = ['lot_sqft', 'lawn_sqft', 'house_footprint_sqft', 'bed_area_sqft', 'driveway_sqft', 'palm_count', 'tree_count', 'perimeter_linear_ft'];
     for (const field of numericFields) {
-      const values = providerResults.map(({ provider, analysis }) => ({ provider, value: Number(analysis[field]) || 0 })).filter((v) => v.value > 0);
+      // Zero is a real observation for count/area fields (no palms, no lawn,
+      // vacant parcel). The previous `value > 0` filter erased it, turning a
+      // two-model 0/0 agreement into "missing" and a 0/4 disagreement into a
+      // falsely confident single-source 4.
+      const values = providerResults
+        .map(({ provider, analysis }) => ({ provider, value: explicitNonNegative(analysis, field) }))
+        .filter((v) => v.value !== null);
 
-      if (!values.length) { merged[field] = 0; continue; }
-      if (values.length === 1) { merged[field] = values[0].value; fieldVerify.push(field); continue; }
+      if (!values.length) {
+        merged[field] = 0;
+        confidenceDetails[field] = { values: [], status: 'missing' };
+        continue;
+      }
+      if (values.length === 1) {
+        merged[field] = values[0].value;
+        fieldVerify.push(field);
+        confidenceDetails[field] = { values, status: 'single_source' };
+        continue;
+      }
 
       const avg = Math.round(values.reduce((sum, v) => sum + v.value, 0) / values.length);
       const min = Math.min(...values.map((v) => v.value));
       const max = Math.max(...values.map((v) => v.value));
-      const pctDiff = (max - min) / max;
+      const pctDiff = max === 0 ? 0 : (max - min) / max;
 
       merged[field] = avg;
       if (pctDiff > 0.15) {
@@ -317,8 +361,10 @@ class SatelliteAnalyzer {
     merged.notes = notes.join(' | ');
 
     // Overall confidence
-    const agreeCount = Object.values(confidenceDetails).filter(d => d.status === 'agree').length;
-    const totalChecked = Object.keys(confidenceDetails).length;
+    const checkedDetails = Object.values(confidenceDetails)
+      .filter((detail) => detail.status === 'agree' || detail.status === 'disagree');
+    const agreeCount = checkedDetails.filter(d => d.status === 'agree').length;
+    const totalChecked = checkedDetails.length;
     const agreePct = totalChecked > 0 ? Math.round(agreeCount / totalChecked * 100) : 0;
 
     merged.confidence = agreePct >= 80 ? 'high' : agreePct >= 60 ? 'medium' : 'low';

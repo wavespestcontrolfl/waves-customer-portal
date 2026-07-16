@@ -1503,26 +1503,44 @@ function generateEstimate(input) {
         }
         item.annualAfterDiscount = guarded.finalAnnual;
       } else if (item.service === 'lawn_care') {
-        // Lawn program minimum (owner directive 2026-07-09) holds POST-
-        // WaveGuard: a floor-priced lawn line must not leave the engine
-        // below the floor after Silver/Gold/Platinum. Never raise
-        // a line above its own pre-discount price (min() keeps legacy
-        // below-floor lines merely undiscounted, not repriced upward here).
+        // Lawn's customer price is already built from BOTH the program
+        // minimum and the 35% collected-margin floor. WaveGuard must not undo
+        // either one. The old guard protected only the $50/mo program floor,
+        // which let a line whose real cost floor was higher (for example
+        // $630.82/yr) discount all the way to $600 and silently miss margin.
+        // Never raise above the pre-discount line: a stale/legacy floor that
+        // exceeds the authored price merely makes the line undiscountable.
         const minMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
-        const floorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
-          ? Math.min(Math.round(minMonthly * 12 * 100) / 100, item.annualBeforeDiscount)
+        const programFloorAnnual = Number.isFinite(minMonthly) && minMonthly > 0
+          ? Math.round(minMonthly * 12 * 100) / 100
           : 0;
+        const rawMarginFloorAnnual = Number(
+          item.minimumCollectedAnnualPrice ?? item.costFloorAnnual,
+        );
+        const marginFloorAnnual = Number.isFinite(rawMarginFloorAnnual) && rawMarginFloorAnnual > 0
+          ? Math.round(rawMarginFloorAnnual * 100) / 100
+          : 0;
+        const floorAnnual = Math.min(
+          Math.max(programFloorAnnual, marginFloorAnnual),
+          item.annualBeforeDiscount,
+        );
         if (floorAnnual > 0 && discountedAnnual < floorAnnual) {
           if (logger) {
-            logger.info('[pricing-engine] lawn post-discount program-minimum guard applied', {
+            logger.info('[pricing-engine] lawn post-discount floor guard applied', {
               annualBeforeDiscount: item.annualBeforeDiscount,
               discountedAnnual,
               floorAnnual,
+              programFloorAnnual,
+              marginFloorAnnual,
             });
           }
           item.annualAfterDiscount = floorAnnual;
           item.discountCapped = true;
-          item.programMinimumGuardApplied = true;
+          item.programMinimumGuardApplied = programFloorAnnual > 0
+            && floorAnnual <= programFloorAnnual;
+          item.marginFloorGuardApplied = marginFloorAnnual > programFloorAnnual
+            && floorAnnual <= marginFloorAnnual;
+          item.postDiscountFloorAnnual = floorAnnual;
           item.requestedDiscountPct = discount.effectiveDiscount || 0;
           item.actualDiscountPct = item.annualBeforeDiscount > 0
             ? Math.round((1 - floorAnnual / item.annualBeforeDiscount) * 1000) / 1000

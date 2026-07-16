@@ -311,5 +311,17 @@ async function buildCallContext(callLogId) {
 module.exports = {
   buildCallContext,
   existingDraftForCall,
-  _private: { extractionFromCall, last10, loadSmsThread, pickCustomerMatch },
+  // Origin-specific context builders reuse these reads so call, web-lead,
+  // and SMS sessions all resolve contacts/history with the same shared-line
+  // safeguards. They are reads only; callers still own temporal bounds.
+  loadCustomerByPhone,
+  loadPriorEstimates,
+  loadSmsThread,
+  _private: {
+    extractionFromCall,
+    firstExternalPhone,
+    last10,
+    loadLeadForCall,
+    pickCustomerMatch,
+  },
 };

@@ -4,14 +4,21 @@
  *
  * Lets the operator delegate edge-case quoting to Claude. Agent enriches the
  * address, calls the v1 pricing engine, gathers calibration context, then
- * writes a draft estimate (status='draft', source='ai_agent') with structured
- * reasoning in notes. Never sends. Admin reviews + sends through the normal
- * EstimatePage flow.
+ * writes a draft estimate for operator review. Agent Estimate drafts keep all
+ * reasoning in estimate_data (estimates.notes is customer-visible), never
+ * send, and can only be committed by the server-backed confirmation flow.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { generateEstimate } = require('../pricing-engine');
+const crypto = require('crypto');
+const {
+  generateEstimate,
+  needsSync,
+  syncConstantsFromDB,
+} = require('../pricing-engine');
+const { deriveTotals } = require('../estimator-engine/draft-builder');
+const { normalizeGrassType, grassTypeLabel } = require('../lawn-grass-context');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 const {
@@ -19,6 +26,7 @@ const {
   withAutomatedEstimatePhoneLock,
 } = require('../estimate-automation-duplicates');
 const { performPropertyLookup } = require('../../routes/property-lookup-v2');
+const { buildAgentEstimateContext } = require('../agent-estimate-context');
 
 const ESTIMATE_TOOLS = [
   {
@@ -42,12 +50,27 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
       properties: {
         homeSqFt: { type: 'number', description: 'Home interior square footage' },
         lotSqFt: { type: 'number', description: 'Lot size in square feet (defaults to ~4× homeSqFt if unknown)' },
+        buildingSqFt: { type: 'number', description: 'Verified commercial building/treatment footprint square footage.' },
+        buildingSizeMeasured: { type: 'boolean', description: 'True only when buildingSqFt is supported by a record, measurement, or operator confirmation.' },
+        measuredTurfSf: { type: 'number', description: 'Verified treatable lawn/turf area. This is not the parcel area.' },
+        estimatedTurfSf: { type: 'number', description: 'Estimated treatable turf when no verified measurement exists; requires a review flag.' },
+        turfSource: { type: 'string', description: 'Source for turf area, such as measured, satellite_vision, county_prior, or operator_confirmed.' },
         stories: { type: 'number', description: 'Number of stories (1, 2, or 3). Default 1.' },
         propertyType: { type: 'string', description: 'Property type (e.g. "Single Family", "Townhouse", "Condo"). Default "Single Family".' },
+        isCommercial: { type: 'boolean' },
+        commercialSubtype: { type: 'string' },
+        commercialRiskType: { type: 'string' },
         footprintSqFt: { type: 'number', description: 'Optional termite bait footprint sqft override' },
         perimeterLF: { type: 'number', description: 'Optional trenching/termite perimeter linear-foot override' },
         atticSqFt: { type: 'number', description: 'Optional Bora-Care attic/raw wood sqft override' },
         slabSqFt: { type: 'number', description: 'Optional Pre-Slab Termiticide slab sqft override' },
+        buildingSlabSqFt: { type: 'number', description: 'Verified commercial/new-construction slab area.' },
+        estimatedBedAreaSf: { type: 'number', description: 'Estimated ornamental bed area for services that use it.' },
+        imperviousSurfacePercent: { type: 'number', description: 'Verified or satellite-estimated non-turf share of the lot, 0-100.' },
+        palmCount: { type: 'number', description: 'Operator-confirmed treated palm count; an image count remains an observation until confirmed.' },
+        yearBuilt: { type: 'number' },
+        pool: { type: 'boolean' },
+        poolCage: { type: 'boolean' },
         services: {
           type: 'object',
               description: 'Which services to include. Each key optional. Pest: { frequency: "quarterly"|"bimonthly"|"monthly" }. Lawn: { track: "st_augustine"|"bermuda"|"zoysia"|"bahia", tier: "basic"|"standard"|"enhanced"|"premium", lawnFreq: 4|6|9|12 }. Mosquito: { tier: "seasonal9"|"monthly12" }. Termite bait: { system, monitoringTier, measurements: { footprintSqFt, perimeterLF } }. Trenching: { productKey, applicationRate, trenchDepthFt, warrantyTier, labelConfirmed, measurements: { perimeterLF, concreteLF, dirtLF, concretePct } }. Bora-Care: { measurements: { atticSqFt } }. Pre-Slab Termiticide: { productKey, measurements: { slabSqFt }, volumeDiscount, includeWarrantyExtended, labelConfirmed }.',
@@ -66,7 +89,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
           },
         },
       },
-      required: ['homeSqFt', 'services'],
+      required: ['services'],
     },
   },
   {
@@ -126,6 +149,18 @@ Use for: explaining the discount applied, or telling the operator what tier the 
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'get_neighborhood_grass_profile',
+    description: `Return an aggregate, privacy-safe grass-type distribution for active customer turf profiles in one ZIP code. This is only a neighborhood prior, never property truth: use a close turf photo, a verified profile, or operator confirmation for the estimate. A small or mixed sample must be described as weak evidence.
+Use for: "what grass is typical in this neighborhood?" before asking the operator to verify the actual lawn.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        postal_code: { type: 'string', description: 'Five-digit service-address ZIP code.' },
+      },
+      required: ['postal_code'],
+    },
+  },
+  {
     name: 'create_pending_estimate',
     description: `Write a draft estimate to the database. status='draft', source='ai_agent'. Structured notes are auto-generated from the inputs you pass — DO NOT pre-format the notes string yourself. Returns the new estimate's id and admin URL. ALWAYS confirm with the operator ("Draft this estimate? y/n") before calling.
 NEVER call this without first calling compute_estimate. NEVER call this if the engine returned zero or the scenario is outside scope — instead, report back to the operator that manual quoting is required.`,
@@ -154,6 +189,65 @@ NEVER call this without first calling compute_estimate. NEVER call this if the e
         uncertainty: { type: 'array', items: { type: 'string' }, description: 'Things you flagged as unsure (empty array if none)' },
       },
       required: ['customerName', 'address', 'engineInputs', 'engineResult', 'sqftSource', 'reasoning'],
+    },
+  },
+  {
+    name: 'create_agent_estimate_draft',
+    description: `Preview a new Agent Estimate draft or a revision to the current Agent Estimate draft. The server re-runs generateEstimate from engineInputs; never pass or invent prices. The first call only creates a confirmation card. Only the operator's Confirm click writes. If estimateId points to an existing draft created by this tool, confirmation revises that same row/token in place. Never sends.
+Use for: the final step on the Agent Estimate page, after lookup_property, protocol/stock checks, and compute_estimate. Use it again after the operator asks for a change, passing the revised engineInputs and current estimateId.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        leadId: { type: 'string', description: 'Selected lead UUID. Keeps the draft linked to the lead.' },
+        estimateId: { type: 'string', description: 'Existing Agent Estimate draft UUID when revising in place.' },
+        customerName: { type: 'string' },
+        customerPhone: { type: 'string' },
+        customerEmail: { type: 'string' },
+        address: { type: 'string', description: 'Full service address.' },
+        engineInputs: { type: 'object', description: 'Exact engine_input returned by the latest compute_estimate call.' },
+        reasoning: { type: 'string', description: 'Short operator-facing basis for service selections; stored internally, never in customer notes.' },
+        assumptions: { type: 'array', items: { type: 'string' } },
+        uncertainty: { type: 'array', items: { type: 'string' } },
+        evidence: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              source: { type: 'string' },
+              quote: { type: 'string' },
+              decision: { type: 'string' },
+            },
+          },
+        },
+        propertyFacts: { type: 'object', description: 'Per-field selected values, sources, confidence, and conflicts. Lawn drafts must include the verified treatable-turf fact; commercial drafts must include the verified treated building/unit area.' },
+        protocolReview: {
+          type: 'array',
+          description: 'One row per selected service after reading the complete protocol.',
+          items: {
+            type: 'object',
+            properties: {
+              serviceKey: { type: 'string' },
+              programKey: { type: 'string' },
+              visitCount: { type: 'number' },
+              warning: { type: 'string' },
+            },
+          },
+        },
+        inventoryReview: {
+          type: 'array',
+          description: 'Products named by the selected protocols. A null count must be reported as untracked, never in stock.',
+          items: {
+            type: 'object',
+            properties: {
+              serviceKey: { type: 'string' },
+              productName: { type: 'string' },
+              status: { type: 'string' },
+              onHand: { type: ['number', 'null'] },
+            },
+          },
+        },
+      },
+      required: ['leadId', 'customerName', 'address', 'engineInputs', 'reasoning'],
     },
   },
   {
@@ -186,7 +280,7 @@ Use for: customers who explicitly want to weigh both recurring and one-time. Rev
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeEstimateTool(toolName, input) {
+async function executeEstimateTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'lookup_property': return await lookupProperty(input);
@@ -196,7 +290,9 @@ async function executeEstimateTool(toolName, input) {
       case 'find_similar_estimates': return await findSimilarEstimates(input);
       case 'match_existing_customer': return await matchExistingCustomer(input);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
+      case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
       case 'create_pending_estimate': return await createPendingEstimate(input);
+      case 'create_agent_estimate_draft': return await createAgentEstimateDraft(input, actionContext);
       case 'toggle_estimate_v2_view': return await toggleEstimateV2View(input);
       case 'toggle_show_one_time_option': return await toggleShowOneTimeOption(input);
       default: return { error: `Unknown estimate tool: ${toolName}` };
@@ -230,8 +326,7 @@ async function lookupProperty({ address }) {
     const satellite = lookup.satellite ? {
       lat: lookup.satellite.lat,
       lng: lookup.satellite.lng,
-      imageUrl: lookup.satellite.superCloseUrl || lookup.satellite.closeUrl,
-      microCloseUrl: lookup.satellite.microCloseUrl || null,
+      imageAvailable: !!(lookup.satellite.superCloseUrl || lookup.satellite.closeUrl || lookup.satellite.microCloseUrl),
       inServiceArea: lookup.satellite.inServiceArea,
       aiSources: lookup.aiAnalysis?._sources || [],
     } : null;
@@ -255,16 +350,129 @@ function extractStatusCode(err) {
   return message.match(/\b(\d{3})\b/)?.[1] || null;
 }
 
-async function computeEstimate(input) {
-  const homeSqFt = Math.max(500, Math.min(20000, Number(input.homeSqFt) || 0));
-  if (!homeSqFt) return { error: 'homeSqFt required and must be 500-20000' };
+const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
+  'allowwarrantyoverride',
+  'customcontaineroz',
+  'customdiscount',
+  'custommanageroverride',
+  'customprice',
+  'custompriceoverride',
+  'customproductcost',
+  'customproductozperfinishedgallon',
+  'discountoverride',
+  'fixedprice',
+  'lawnlaborminutesbase',
+  'lawnlaborminutesperk',
+  'lawnmaterialcostperk',
+  'manageroverride',
+  'manualdiscount',
+  'margindivisor',
+  'priceoverride',
+  'pricingconfig',
+  'routedriveminutes',
+  'servicespecificdiscounts',
+  'targetlawngrossmargin',
+  'targetmargin',
+  'uselawncostfloor',
+]);
 
-  const lotSqFt = Math.max(500, Math.min(200000, Number(input.lotSqFt) || homeSqFt * 4));
+function findForbiddenAgentPricingInputs(value, path = [], found = []) {
+  if (!value || typeof value !== 'object') return found;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => findForbiddenAgentPricingInputs(item, [...path, index], found));
+    return found;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)) {
+      found.push([...path, key].join('.'));
+    } else {
+      findForbiddenAgentPricingInputs(nested, [...path, key], found);
+    }
+  }
+  return found;
+}
+
+function forbiddenPricingInputError(input) {
+  const forbidden = [...new Set(findForbiddenAgentPricingInputs(input))];
+  if (!forbidden.length) return null;
+  return `Agent Estimate cannot set price, cost, discount, margin, or manager-override inputs (${forbidden.slice(0, 8).join(', ')}). Remove them and let generateEstimate use DB-authoritative pricing.`;
+}
+
+function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < min || number > max) return null;
+  return number;
+}
+
+function validateAgentEngineInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'engineInputs must be an object';
+  if (!input.services || typeof input.services !== 'object' || Array.isArray(input.services)
+    || !Object.keys(input.services).length) {
+    return 'engineInputs.services must contain at least one service';
+  }
+  const home = optionalBoundedNumber(input.homeSqFt, { min: 500, max: 10000000 });
+  const building = optionalBoundedNumber(input.buildingSqFt, { min: 500, max: 10000000 });
+  if (home === null || building === null || (home === undefined && building === undefined)) {
+    return 'engineInputs requires homeSqFt or buildingSqFt between 500 and 10000000';
+  }
+  const lot = optionalBoundedNumber(input.lotSqFt, { min: 500, max: 10000000 });
+  if (lot === null) return 'engineInputs.lotSqFt must be 500-10000000 when provided';
+  const turf = optionalBoundedNumber(input.measuredTurfSf ?? input.lawnSqFt, { min: 0, max: 10000000 });
+  if (turf === null) return 'engineInputs measured turf must be 0-10000000 when provided';
+  const stories = optionalBoundedNumber(input.stories, { min: 1, max: 20 });
+  if (stories === null) return 'engineInputs.stories must be 1-20 when provided';
+  return null;
+}
+
+function normalizeEvidenceText(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function verifyAgentEvidenceQuotes(evidence, context) {
+  const haystack = normalizeEvidenceText([
+    ...(context?.quote_form?.message_fields || []).map((row) => row.text),
+    ...(context?.calls || []).flatMap((call) => [call.transcript, call.transcript_summary]),
+    ...(context?.sms_thread || []).map((message) => message.body),
+    ...(context?.activities || []).map((activity) => activity.description),
+  ].filter(Boolean).join(' '));
+  const quotedRows = (Array.isArray(evidence) ? evidence : [])
+    .map((row, index) => ({ index, quote: row?.quote }))
+    .filter((row) => String(row.quote || '').trim());
+  const unverifiedIndexes = quotedRows.filter(({ quote }) => {
+    const needle = normalizeEvidenceText(quote);
+    return needle.length < 8 || !haystack.includes(needle);
+  }).map(({ index }) => index);
+  return {
+    quoted: quotedRows.length,
+    verified: quotedRows.length - unverifiedIndexes.length,
+    unverified: unverifiedIndexes.length,
+    unverifiedIndexes,
+  };
+}
+
+async function computeEstimate(input) {
+  const forbiddenError = forbiddenPricingInputError(input);
+  if (forbiddenError) return { error: forbiddenError };
+
+  const rawBuildingSqFt = optionalBoundedNumber(input.buildingSqFt, { min: 500, max: 10000000 });
+  if (rawBuildingSqFt === null) return { error: 'buildingSqFt must be 500-10000000 when provided' };
+  const rawHomeSqFt = optionalBoundedNumber(input.homeSqFt, { min: 500, max: 10000000 });
+  if (rawHomeSqFt === null) return { error: 'homeSqFt must be 500-10000000 when provided' };
+  const homeSqFt = rawHomeSqFt ?? rawBuildingSqFt;
+  if (!homeSqFt) return { error: 'homeSqFt or buildingSqFt is required and must be at least 500' };
+
+  const suppliedLotSqFt = optionalBoundedNumber(input.lotSqFt, { min: 500, max: 10000000 });
+  if (suppliedLotSqFt === null) return { error: 'lotSqFt must be 500-10000000 when provided' };
+  const lotSqFt = suppliedLotSqFt ?? Math.min(10000000, homeSqFt * 4);
   // Assert lot provenance: true only when a REAL lot was supplied, false when we
   // synthesized homeSqFt*4. Commercial mosquito reads this and stays a manual
   // quote rather than auto-pricing off the synthetic default.
-  const lotSizeMeasured = Number(input.lotSqFt) > 0;
-  const stories = Number(input.stories) || 1;
+  const lotSizeMeasured = suppliedLotSqFt !== undefined;
+  const suppliedStories = optionalBoundedNumber(input.stories, { min: 1, max: 20 });
+  if (suppliedStories === null) return { error: 'stories must be 1-20 when provided' };
+  const stories = suppliedStories || 1;
   const propertyType = input.propertyType || 'Single Family';
   const services = input.services || {};
 
@@ -272,18 +480,39 @@ async function computeEstimate(input) {
     return { error: 'At least one service is required in services object' };
   }
 
-  const engineInput = {
+  const measuredTurfSf = optionalBoundedNumber(input.measuredTurfSf ?? input.lawnSqFt, { min: 0, max: 10000000 });
+  if (measuredTurfSf === null) return { error: 'measuredTurfSf must be 0-10000000 when provided' };
+  const estimatedTurfSf = optionalBoundedNumber(input.estimatedTurfSf, { min: 0, max: 10000000 });
+  if (estimatedTurfSf === null) return { error: 'estimatedTurfSf must be 0-10000000 when provided' };
+
+  const engineInput = Object.fromEntries(Object.entries({
     homeSqFt,
     lotSqFt,
     lotSizeMeasured,
     stories,
     propertyType,
+    isCommercial: input.isCommercial,
+    commercialSubtype: input.commercialSubtype,
+    commercialRiskType: input.commercialRiskType,
+    buildingSqFt: rawBuildingSqFt,
+    buildingSizeMeasured: input.buildingSizeMeasured === true,
+    measuredTurfSf,
+    estimatedTurfSf,
+    turfSource: input.turfSource,
     services,
     footprintSqFt: input.footprintSqFt,
     perimeterLF: input.perimeterLF,
     atticSqFt: input.atticSqFt,
     slabSqFt: input.slabSqFt,
-  };
+    buildingSlabSqFt: input.buildingSlabSqFt,
+    estimatedBedAreaSf: input.estimatedBedAreaSf,
+    palmCount: input.palmCount,
+    imperviousSurfacePercent: input.imperviousSurfacePercent,
+    yearBuilt: input.yearBuilt,
+    pool: input.pool,
+    poolCage: input.poolCage,
+  }).filter(([, value]) => value !== undefined));
+  if (needsSync()) await syncConstantsFromDB(db);
   const estimate = generateEstimate(engineInput);
 
   const summary = estimate?.summary || {};
@@ -301,6 +530,11 @@ async function computeEstimate(input) {
     };
   }
 
+  const compactLines = (estimate.lineItems || []).map(compactAgentLine);
+  const pricedLines = compactLines.filter((line) => line.annual != null || line.one_time != null);
+  const verifiedMarginLines = pricedLines.filter((line) => line.collected_margin != null);
+  const belowTargetLines = verifiedMarginLines.filter((line) => line.margin_floor_ok === false);
+
   return {
     engine_input: engineInput,
     monthly_total: Math.round(monthlyTotal * 100) / 100,
@@ -310,6 +544,19 @@ async function computeEstimate(input) {
     waveguard_savings: Math.round(waveguardSavings * 100) / 100,
     annual_before_discount: Number(summary.recurringAnnualBeforeDiscount || 0),
     year1_total: Number(summary.year1Total || 0),
+    line_items: compactLines,
+    margin_check: {
+      loaded_labor_rate_per_hour: 35,
+      target_collected_margin: 0.35,
+      all_recurring_lines_at_or_above_target: compactLines
+        .filter((line) => line.annual != null && line.collected_margin != null)
+        .every((line) => line.margin_floor_ok),
+      all_priced_lines_verified_and_at_or_above_target:
+        pricedLines.length > 0 && verifiedMarginLines.length === pricedLines.length && belowTargetLines.length === 0,
+      verified_line_count: verifiedMarginLines.length,
+      unverified_line_count: pricedLines.length - verifiedMarginLines.length,
+      below_target_services: belowTargetLines.map((line) => line.service),
+    },
     full_summary: summary,
   };
 }
@@ -414,6 +661,49 @@ async function getWaveGuardTiers() {
     .select('config_key', 'name', 'data', 'description')
     .orderBy('sort_order', 'asc');
   return { count: rows.length, tiers: rows };
+}
+
+async function getNeighborhoodGrassProfile({ postal_code: postalCode }) {
+  const zip = String(postalCode || '').match(/\b\d{5}\b/)?.[0] || null;
+  if (!zip) return { error: 'A five-digit postal_code is required' };
+
+  const rows = await db('customers as c')
+    .leftJoin('customer_turf_profiles as tp', function activeProfileJoin() {
+      this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
+    })
+    .where('c.zip', zip)
+    .whereNull('c.deleted_at')
+    .select('tp.grass_type', 'c.lawn_type')
+    .limit(250);
+
+  const counts = {};
+  for (const row of rows) {
+    const key = normalizeGrassType(row.grass_type) || normalizeGrassType(row.lawn_type);
+    if (key && key !== 'unknown') counts[key] = (counts[key] || 0) + 1;
+  }
+  const distribution = Object.entries(counts)
+    .map(([grass, count]) => ({ grass, label: grassTypeLabel(grass), count }))
+    .sort((a, b) => b.count - a.count);
+  const knownSamples = distribution.reduce((sum, row) => sum + row.count, 0);
+  const dominantShare = knownSamples ? (distribution[0]?.count || 0) / knownSamples : 0;
+  const confidence = knownSamples >= 20 && dominantShare >= 0.75
+    ? 'strong_prior'
+    : knownSamples >= 8 && dominantShare >= 0.6
+      ? 'moderate_prior'
+      : 'weak_prior';
+
+  return {
+    postal_code: zip,
+    sample_size: rows.length,
+    known_grass_samples: knownSamples,
+    distribution: distribution.map((row) => ({
+      ...row,
+      share: knownSamples ? Math.round((row.count / knownSamples) * 1000) / 1000 : 0,
+    })),
+    typical_grass: distribution[0]?.grass || null,
+    confidence,
+    warning: 'Neighborhood aggregate only. Verify this property from a close turf photo, a verified profile, or the operator before pricing lawn care.',
+  };
 }
 
 function buildAgentNotes({ engineInputs, engineResult, sqftSource, reasoning, assumptions, uncertainty, address }) {
@@ -544,6 +834,448 @@ async function createPendingEstimate(input) {
   };
 }
 
+function parseStoredJson(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function titleWaveGuardTier(value) {
+  const labels = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
+  return labels[String(value || '').toLowerCase()] || null;
+}
+
+function compactAgentLine(line) {
+  const annual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
+  const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
+  const priceBasis = annual > 0 ? annual : oneTime;
+  const rawCost = annual > 0
+    ? (line.costs?.annualCost ?? line.annualCost)
+    : (line.costs?.oneTimeCost ?? line.costs?.total ?? line.oneTimeCost ?? line.estimatedCost);
+  const cost = Number(rawCost);
+  const hasCostBasis = Number.isFinite(cost) && cost >= 0;
+  const collectedMargin = priceBasis > 0 && hasCostBasis
+    ? Math.round(((priceBasis - cost) / priceBasis) * 1000) / 1000
+    : (Number.isFinite(Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin))
+      ? Number(line.manualFinalMargin ?? line.finalMargin ?? line.margin)
+      : null);
+  return {
+    service: line.service || line.name || 'unknown',
+    monthly: Number(line.monthlyAfterDiscount ?? line.finalMonthly ?? line.monthly ?? 0) || null,
+    annual: annual || null,
+    one_time: oneTime || null,
+    estimated_cost: hasCostBasis ? cost : null,
+    estimated_annual_cost: annual > 0 && hasCostBasis ? cost : null,
+    collected_margin: collectedMargin,
+    margin_floor_ok: collectedMargin == null ? null : collectedMargin >= 0.35,
+    pricing_confidence: line.pricingConfidence || null,
+    review_reasons: line.manualReviewReasons || [],
+  };
+}
+
+async function computeAgentDraftPreview(input) {
+  if (!input?.engineInputs || typeof input.engineInputs !== 'object' || Array.isArray(input.engineInputs)) {
+    return { error: 'engineInputs must be the exact engine_input returned by compute_estimate' };
+  }
+  const forbiddenError = forbiddenPricingInputError(input.engineInputs);
+  if (forbiddenError) return { error: forbiddenError };
+  const validationError = validateAgentEngineInput(input.engineInputs);
+  if (validationError) return { error: validationError };
+  if (!input.leadId || !input.customerName || !input.address) {
+    return { error: 'leadId, customerName, and address are required' };
+  }
+  if (!input.engineInputs.services || !Object.keys(input.engineInputs.services).length) {
+    return { error: 'engineInputs.services must contain at least one service' };
+  }
+
+  if (needsSync()) await syncConstantsFromDB(db);
+  const engineResult = generateEstimate(input.engineInputs);
+  const totals = deriveTotals(engineResult);
+  if (!totals.monthly && !totals.annual && !totals.oneTime) {
+    return { error: 'Pricing engine returned zero — keep this as a manual quote instead of drafting' };
+  }
+
+  const lines = (engineResult.lineItems || []).map(compactAgentLine);
+  const laneReasons = [];
+  const serviceKeys = Object.keys(input.engineInputs.services || {});
+  const propertyFacts = input.propertyFacts && typeof input.propertyFacts === 'object'
+    ? input.propertyFacts
+    : {};
+  const propertyFactEntries = Object.entries(propertyFacts);
+  const protocolReview = Array.isArray(input.protocolReview) ? input.protocolReview : [];
+  const inventoryReview = Array.isArray(input.inventoryReview) ? input.inventoryReview : [];
+  const evidence = Array.isArray(input.evidence) ? input.evidence : [];
+
+  if (!evidence.some((row) => row && (row.source || row.quote || row.decision))) {
+    laneReasons.push('source evidence was not attached to the draft');
+  }
+  if (input.evidenceVerification?.unverified > 0) {
+    laneReasons.push(`${input.evidenceVerification.unverified} evidence quote(s) could not be verified against the selected lead`);
+  }
+  if (!propertyFactEntries.length) {
+    laneReasons.push('property facts were not verified');
+  }
+  if (!propertyFactEntries.some(([key]) => /address/i.test(key))) {
+    laneReasons.push('service address was not recorded as a verified property fact');
+  }
+  if (input.contactVerification?.addressMismatch) {
+    laneReasons.push('draft service address differs from the selected lead address');
+  }
+  for (const [key, fact] of propertyFactEntries) {
+    const confidence = String(fact?.confidence || '').toLowerCase();
+    if (['low', 'weak', 'unknown', 'unverified'].includes(confidence)) {
+      laneReasons.push(`${key} has ${confidence} confidence`);
+    }
+    if (fact?.conflict === true || (Array.isArray(fact?.conflicts) && fact.conflicts.length)) {
+      laneReasons.push(`${key} has conflicting source values`);
+    }
+  }
+  const hasLawnService = serviceKeys.some((key) => /lawn|turf/i.test(key));
+  if (hasLawnService && !propertyFactEntries.some(([key]) => /lawn|turf|treatable/i.test(key))) {
+    laneReasons.push('treatable lawn area was not recorded as a verified property fact');
+  }
+  const isCommercial = input.engineInputs.isCommercial === true
+    || String(input.engineInputs.propertyType || '').toLowerCase().includes('commercial');
+  if (isCommercial && !propertyFactEntries.some(([key]) => /commercial|building|unit/i.test(key))) {
+    laneReasons.push('commercial treated building or unit area was not verified');
+  }
+  if (serviceKeys.some((key) => /mosquito/i.test(key))
+    && !propertyFactEntries.some(([key]) => /lot|outdoor|treatable|lawn|turf/i.test(key))) {
+    laneReasons.push('mosquito treatable outdoor area was not verified');
+  }
+  if (serviceKeys.some((key) => /trench/i.test(key))
+    && !propertyFactEntries.some(([key]) => /perimeter|concrete|dirt|linear/i.test(key))) {
+    laneReasons.push('trenching perimeter and concrete/dirt measurements were not verified');
+  }
+  if (serviceKeys.some((key) => /termite|bait/i.test(key))
+    && !propertyFactEntries.some(([key]) => /perimeter|footprint|building/i.test(key))) {
+    laneReasons.push('termite footprint or perimeter measurement was not verified');
+  }
+  if (serviceKeys.some((key) => /palm/i.test(key))
+    && !propertyFactEntries.some(([key]) => /palm.*count|treated.*palm/i.test(key))) {
+    laneReasons.push('treated palm count was not operator-confirmed');
+  }
+  if (!protocolReview.length) {
+    laneReasons.push('complete protocols were not checked for the selected services');
+  } else {
+    const covered = new Set(protocolReview.map((row) => String(row?.serviceKey || '').toLowerCase()));
+    for (const serviceKey of serviceKeys) {
+      if (!covered.has(serviceKey.toLowerCase())) {
+        laneReasons.push(`protocol review does not cover ${serviceKey}`);
+      }
+    }
+    for (const row of protocolReview) {
+      if (!row?.programKey || !Number.isFinite(Number(row?.visitCount)) || Number(row.visitCount) <= 0) {
+        laneReasons.push(`protocol review for ${row?.serviceKey || 'a selected service'} lacks program/cadence metadata`);
+      }
+    }
+  }
+  if (!inventoryReview.length) {
+    laneReasons.push('protocol product inventory was not checked');
+  } else {
+    const covered = new Set(inventoryReview.map((row) => String(row?.serviceKey || '').toLowerCase()));
+    for (const serviceKey of serviceKeys) {
+      if (!covered.has(serviceKey.toLowerCase())) {
+        laneReasons.push(`inventory review does not cover ${serviceKey}`);
+      }
+    }
+  }
+  for (const text of input.assumptions || []) laneReasons.push(`assumption: ${text}`);
+  for (const text of input.uncertainty || []) laneReasons.push(`open question: ${text}`);
+  for (const line of lines) {
+    if (line.margin_floor_ok === false) laneReasons.push(`${line.service} collected margin is below 35%`);
+    if (line.margin_floor_ok == null) laneReasons.push(`${line.service} collected margin could not be independently verified`);
+    if (line.pricing_confidence && String(line.pricing_confidence).toLowerCase() !== 'high') {
+      laneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
+    }
+    for (const reason of line.review_reasons || []) laneReasons.push(`${line.service}: ${reason}`);
+  }
+  for (const row of inventoryReview) {
+    if (!row?.status) {
+      laneReasons.push(`${row?.productName || row?.product || 'inventory'}: status missing`);
+    } else if (!['in_stock', 'ok', 'available', 'not_applicable'].includes(String(row.status).toLowerCase())) {
+      laneReasons.push(`${row.productName || row.product || 'inventory'}: ${row.status}`);
+    }
+  }
+  for (const row of protocolReview) {
+    if (row?.warning) laneReasons.push(`protocol: ${row.warning}`);
+  }
+
+  return {
+    preview: true,
+    action: input.estimateId ? 'revise_agent_draft' : 'create_or_update_lead_agent_draft',
+    totals,
+    lines,
+    lane: laneReasons.length ? 'yellow' : 'green',
+    lane_reasons: [...new Set(laneReasons)].slice(0, 30),
+    engineResult,
+  };
+}
+
+function agentEstimatePayload(input, preview, existingData = {}) {
+  const previousEngine = existingData.estimatorEngine || {};
+  const priorRevisions = Array.isArray(previousEngine.revisions)
+    ? previousEngine.revisions
+    : [];
+  const previousSnapshot = existingData.engineInputs ? {
+    revised_at: new Date().toISOString(),
+    engine_inputs: existingData.engineInputs,
+    totals: existingData.engineResult ? deriveTotals(existingData.engineResult) : null,
+    reasoning: previousEngine.reasoning || null,
+  } : null;
+  const revisions = previousSnapshot
+    ? [...priorRevisions, previousSnapshot].slice(-5)
+    : priorRevisions.slice(-5);
+  const serviceKeys = Object.keys(input.engineInputs.services || {});
+  const isCommercial = String(input.engineInputs.propertyType || '').toLowerCase() === 'commercial'
+    || (preview.engineResult?.lineItems || []).some((line) => String(line.service || '').startsWith('commercial_'));
+
+  return {
+    data: {
+      engineInputs: input.engineInputs,
+      engineResult: preview.engineResult,
+      agentDraft: true,
+      lead_id: input.leadId,
+      estimatorEngine: {
+        version: 3,
+        origin: 'manual_agent',
+        origins: ['lead', 'manual_agent'],
+        lane: preview.lane,
+        laneReasons: preview.lane_reasons,
+        evidence: Array.isArray(input.evidence) ? input.evidence.slice(0, 30) : [],
+        evidenceVerification: input.evidenceVerification || null,
+        propertyFacts: input.propertyFacts || {},
+        contactVerification: input.contactVerification || null,
+        protocolReview: Array.isArray(input.protocolReview) ? input.protocolReview.slice(0, 30) : [],
+        inventoryReview: Array.isArray(input.inventoryReview) ? input.inventoryReview.slice(0, 50) : [],
+        reasoning: String(input.reasoning || '').slice(0, 5000),
+        assumptions: Array.isArray(input.assumptions) ? input.assumptions.slice(0, 30) : [],
+        uncertainty: Array.isArray(input.uncertainty) ? input.uncertainty.slice(0, 30) : [],
+        pricingAuthority: 'generateEstimate',
+        loadedLaborRate: 35,
+        targetCollectedMargin: 0.35,
+        revisions,
+      },
+    },
+    fields: {
+      address: input.address,
+      customer_name: input.customerName,
+      customer_phone: input.customerPhone || null,
+      customer_email: input.customerEmail || null,
+      monthly_total: preview.totals.monthly,
+      annual_total: preview.totals.annual,
+      onetime_total: preview.totals.oneTime,
+      waveguard_tier: titleWaveGuardTier(preview.engineResult?.waveGuard?.tier),
+      service_interest: serviceKeys.map((key) => key.replace(/([A-Z])/g, ' $1').trim())
+        .map((key) => key.charAt(0).toUpperCase() + key.slice(1)).join(' + '),
+      category: isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL',
+    },
+  };
+}
+
+async function loadAgentEstimateLead(leadId, database = db) {
+  const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at').first();
+  if (!lead) return { error: 'Lead not found' };
+  if (lead.customer_id) {
+    return { error: 'Existing-customer contacts stay in the task/flag flow; Agent Estimate drafting is for new leads only.' };
+  }
+  return { lead };
+}
+
+function normalizeContactPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : digits;
+}
+
+function addressIdentity(value) {
+  const text = String(value || '').trim();
+  return {
+    streetNumber: text.match(/\b\d{1,7}\b/)?.[0] || null,
+    zip: text.match(/\b\d{5}(?:-\d{4})?\b/)?.[0]?.slice(0, 5) || null,
+  };
+}
+
+function anchorAgentEstimateContact(input, lead) {
+  const leadPhone = String(lead.phone || '').trim();
+  const inputPhone = String(input.customerPhone || '').trim();
+  if (leadPhone && inputPhone && normalizeContactPhone(leadPhone) !== normalizeContactPhone(inputPhone)) {
+    return { error: 'Draft phone does not match the selected lead. Refresh the lead evidence before drafting.' };
+  }
+  const leadEmail = String(lead.email || '').trim();
+  const inputEmail = String(input.customerEmail || '').trim();
+  if (leadEmail && inputEmail && leadEmail.toLowerCase() !== inputEmail.toLowerCase()) {
+    return { error: 'Draft email does not match the selected lead. Refresh the lead evidence before drafting.' };
+  }
+  const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
+  const leadAddress = [lead.address, lead.city, lead.zip].filter(Boolean).join(', ');
+  const leadAddressIdentity = addressIdentity(leadAddress);
+  const inputAddressIdentity = addressIdentity(input.address);
+  const addressMismatch = !!(
+    (leadAddressIdentity.streetNumber && inputAddressIdentity.streetNumber
+      && leadAddressIdentity.streetNumber !== inputAddressIdentity.streetNumber)
+    || (leadAddressIdentity.zip && inputAddressIdentity.zip
+      && leadAddressIdentity.zip !== inputAddressIdentity.zip)
+  );
+  return {
+    input: {
+      ...input,
+      customerName: leadName || input.customerName,
+      customerPhone: leadPhone || input.customerPhone,
+      customerEmail: leadEmail || input.customerEmail,
+      contactVerification: {
+        addressMismatch,
+        selectedLeadHasAddress: !!leadAddress,
+      },
+    },
+  };
+}
+
+async function reviseOwnedAgentDraft(estimateId, input, preview) {
+  return db.transaction(async (trx) => {
+    const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+    if (!estimate) return { error: 'Agent Estimate draft not found' };
+    if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
+      return { error: 'Only an unsent estimator_engine draft can be revised from Agent Estimate' };
+    }
+    const currentData = parseStoredJson(estimate.estimate_data);
+    if (currentData?.estimatorEngine?.origin !== 'manual_agent') {
+      return { error: 'This draft was created by another estimator flow and will not be overwritten' };
+    }
+    if (currentData.lead_id && String(currentData.lead_id) !== String(input.leadId)) {
+      return { error: 'This Agent Estimate draft belongs to a different lead and will not be overwritten' };
+    }
+    const payload = agentEstimatePayload(input, preview, currentData);
+    const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
+      .update({
+        estimate_data: JSON.stringify(payload.data),
+        ...payload.fields,
+        notes: null,
+        updated_at: trx.fn.now(),
+      })
+      .returning(['id', 'token']);
+    if (!updated) return { error: 'Draft changed while revising; refresh and try again' };
+    await trx('leads').where({ id: input.leadId }).update({ estimate_id: updated.id });
+    return { estimate: updated, revised: true };
+  });
+}
+
+async function persistNewAgentDraft(input, preview, actionContext) {
+  const phone = input.customerPhone || null;
+  return withAutomatedEstimatePhoneLock(phone, async (trx) => {
+    const leadResult = await loadAgentEstimateLead(input.leadId, trx);
+    if (leadResult.error) return leadResult;
+    const lead = leadResult.lead;
+
+    if (lead.estimate_id) {
+      const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
+      if (existing?.status === 'draft' && existing?.source === 'estimator_engine') {
+        const existingData = parseStoredJson(existing.estimate_data);
+        if (existingData?.estimatorEngine?.origin === 'manual_agent') {
+          // Leave the phone-lock transaction before revising the row in its
+          // own transaction; nesting a second transaction here can wait on
+          // the lead/estimate locks held by this one.
+          return { useExistingEstimateId: existing.id };
+        }
+      }
+      if (existing && !existing.archived_at) {
+        return { error: 'This lead is already linked to another active estimate; it was not overwritten.' };
+      }
+    }
+
+    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
+    if (duplicateBlock) {
+      return {
+        error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
+        blocked: true,
+        existing_estimate_id: duplicateBlock.existingEstimateId,
+      };
+    }
+
+    const payload = agentEstimatePayload(input, preview);
+    const token = crypto.randomBytes(16).toString('hex');
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const [estimate] = await trx('estimates').insert({
+      estimate_data: JSON.stringify(payload.data),
+      ...payload.fields,
+      customer_id: lead.customer_id || null,
+      notes: null,
+      token,
+      expires_at: expiresAt,
+      status: 'draft',
+      source: 'estimator_engine',
+      created_by_technician_id: actionContext.technicianId || null,
+    }).returning(['id', 'token']);
+    await trx('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
+    return { estimate, revised: false };
+  });
+}
+
+async function createAgentEstimateDraft(input, actionContext = {}) {
+  const leadResult = await loadAgentEstimateLead(input?.leadId);
+  if (leadResult.error) return leadResult;
+  const anchored = anchorAgentEstimateContact(input, leadResult.lead);
+  if (anchored.error) return anchored;
+  const leadContext = await buildAgentEstimateContext(input.leadId);
+  if (leadContext?.error) return { error: 'Selected lead evidence could not be loaded' };
+  if (leadContext?.is_existing_customer) {
+    return { error: 'Existing-customer contacts stay in the task/flag flow; Agent Estimate drafting is for new leads only.' };
+  }
+  const anchoredInput = {
+    ...anchored.input,
+    evidenceVerification: verifyAgentEvidenceQuotes(anchored.input.evidence, leadContext),
+  };
+  const preview = await computeAgentDraftPreview(anchoredInput);
+  if (preview.error) return preview;
+
+  if (actionContext.confirmed !== true) {
+    const { engineResult: _engineResult, ...safePreview } = preview;
+    return {
+      ...safePreview,
+      pending_confirmation: true,
+      note: 'No draft has been written. Confirm the action card to create or revise it.',
+    };
+  }
+
+  let persisted = input.estimateId
+    ? await reviseOwnedAgentDraft(input.estimateId, anchoredInput, preview)
+    : await persistNewAgentDraft(anchoredInput, preview, actionContext);
+  if (persisted.useExistingEstimateId) {
+    persisted = await reviseOwnedAgentDraft(
+      persisted.useExistingEstimateId,
+      { ...anchoredInput, estimateId: persisted.useExistingEstimateId },
+      preview,
+    );
+  }
+  if (persisted.error) return persisted;
+
+  const { estimate, revised } = persisted;
+  logger.info('[intelligence-bar:agent-estimate] draft persisted', {
+    estimateId: estimate.id,
+    revised,
+    lane: preview.lane,
+  });
+  return {
+    success: true,
+    revised,
+    estimate_id: estimate.id,
+    token: estimate.token,
+    lane: preview.lane,
+    lane_reasons: preview.lane_reasons,
+    monthly_total: preview.totals.monthly,
+    annual_total: preview.totals.annual,
+    onetime_total: preview.totals.oneTime,
+    admin_preview_url: `/estimate/${estimate.token}?adminPreview=1`,
+    note_for_admin: revised
+      ? 'Draft revised in place. Preview it before sending.'
+      : 'Draft created. Preview it before sending.',
+  };
+}
+
 // ─── toggle_estimate_v2_view ───────────────────────────────────
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -633,4 +1365,16 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled }) {
   };
 }
 
-module.exports = { ESTIMATE_TOOLS, executeEstimateTool };
+module.exports = {
+  ESTIMATE_TOOLS,
+  executeEstimateTool,
+  _private: {
+    agentEstimatePayload,
+    compactAgentLine,
+    computeAgentDraftPreview,
+    getNeighborhoodGrassProfile,
+    anchorAgentEstimateContact,
+    validateAgentEngineInput,
+    verifyAgentEvidenceQuotes,
+  },
+};

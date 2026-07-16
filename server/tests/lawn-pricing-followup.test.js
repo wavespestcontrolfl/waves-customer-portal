@@ -868,6 +868,25 @@ describe('lawn pricing production follow-up', () => {
     });
   });
 
+  test('WaveGuard cannot discount lawn below its 35% collected-margin floor', () => {
+    const estimate = generateEstimate(baseInput({
+      measuredTurfSf: 5012,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', lawnFreq: 9 },
+      },
+    }));
+    const lawn = estimate.lineItems.find(i => i.service === 'lawn_care');
+
+    expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThan(600);
+    expect(lawn.annualAfterDiscount).toBeCloseTo(lawn.minimumCollectedAnnualPrice, 2);
+    expect(lawn.marginFloorGuardApplied).toBe(true);
+    expect(lawn.discountCapped).toBe(true);
+    const collectedMargin = (lawn.annualAfterDiscount - lawn.costs.total)
+      / lawn.annualAfterDiscount;
+    expect(collectedMargin).toBeGreaterThanOrEqual(0.35 - 0.0001);
+  });
+
   test('manual recurring discounts include WaveGuard-discounted Lawn V2 pricing', () => {
     const estimate = generateEstimate(baseInput({
       measuredTurfSf: 4250,
