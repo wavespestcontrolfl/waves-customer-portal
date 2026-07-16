@@ -928,7 +928,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         ? matchingLines.reduce((sum, line) => sum + line.amount, 0)
         : subtotal;
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscount, customer, {
-        subtotal,
+        subtotal: appointmentDiscountBase,
         serviceKey: eligibilityContext.serviceKey || null,
         serviceCategory: eligibilityContext.serviceCategory || null,
       });

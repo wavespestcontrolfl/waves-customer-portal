@@ -608,6 +608,11 @@ const DISCOUNT_TYPES = [
 
 function DiscountEditPanel({ discount, onCancel, onSaved }) {
   const isNew = !discount?.id;
+  const availableDiscountTypes = DISCOUNT_TYPES.filter(
+    (type) =>
+      type.value !== "free_service" ||
+      discount?.discount_type === "free_service",
+  );
   const [name, setName] = useState(discount?.name || "");
   const [discountType, setDiscountType] = useState(
     discount?.discount_type || "percentage",
@@ -692,7 +697,7 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
             value={discountType}
             onChange={(e) => setDiscountType(e.target.value)}
           >
-            {DISCOUNT_TYPES.map((t) => (
+            {availableDiscountTypes.map((t) => (
               <option key={t.value} value={t.value}>
                 {t.label}
               </option>

@@ -669,6 +669,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
   if (!svc) return { ok: false, reason: 'not_found' };
   if (svc.status === 'completed') return { ok: false, reason: 'cannot_cancel_complete' };
   if (svc.status === 'skipped') return { ok: false, reason: 'cannot_cancel_skipped' };
+  if (svc.status === 'no_show') return { ok: false, reason: 'cannot_cancel_no_show' };
   if (svc.track_state === 'cancelled') {
     // Continue below when an older writer advanced only track_state; the
     // canonical status transition will repair it and append history.

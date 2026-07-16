@@ -760,4 +760,20 @@ describe('future-scheduled-date stale-attempt guard', () => {
     expect(transitionJobStatus).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
   });
+
+  test('returns a conflict result for no-show cancellation attempts', async () => {
+    db.mockReturnValueOnce(query({
+      id: 'job-1',
+      customer_id: 'cust-1',
+      technician_id: null,
+      status: 'no_show',
+      track_state: 'scheduled',
+    }));
+
+    const result = await trackTransitions.cancel('job-1', { reason: 'stale request' });
+
+    expect(result).toEqual({ ok: false, reason: 'cannot_cancel_no_show' });
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
 });

@@ -84,4 +84,34 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(pricing.appointmentDiscount.discountDollars).toBe(150);
     expect(pricing.finalPrice).toBe(50);
   });
+
+  test('checks scoped minimum subtotal against matching lines only', async () => {
+    const discount = {
+      id: 'discount-1',
+      name: 'General pest minimum',
+      discount_type: 'percentage',
+      amount: 10,
+      service_key_filter: 'general_pest',
+      min_subtotal: 100,
+    };
+    db
+      .mockReturnValueOnce(discountQuery({ service_key: 'termite_addon', category: 'termite' }))
+      .mockReturnValueOnce(discountQuery(discount));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue(['minimum subtotal $100']);
+
+    await expect(buildAppointmentPricing({
+      serviceRecord: { service_key: 'general_pest', category: 'pest_control', base_price: 50 },
+      estimatedPrice: 50,
+      serviceAddons: [{ serviceId: 'addon-1', name: 'Termite add-on', price: 100 }],
+      discountId: discount.id,
+      discountType: discount.discount_type,
+      customer: { id: 'customer-1' },
+    })).rejects.toMatchObject({ status: 400 });
+
+    expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
+      discount,
+      expect.objectContaining({ id: 'customer-1' }),
+      expect.objectContaining({ subtotal: 50 })
+    );
+  });
 });
