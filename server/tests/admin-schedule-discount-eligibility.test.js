@@ -11,7 +11,11 @@ jest.mock('../services/discount-engine', () => ({
 
 const db = require('../models/db');
 const DiscountEngine = require('../services/discount-engine');
-const { buildAppointmentPricing } = require('../routes/admin-schedule')._test;
+const {
+  buildAppointmentPricing,
+  calculateVisitFinancialsForAddons,
+  calculateStoredVisitFinancials,
+} = require('../routes/admin-schedule')._test;
 
 function discountQuery(discount) {
   return {
@@ -113,5 +117,53 @@ describe('admin schedule appointment discount eligibility', () => {
       expect.objectContaining({ id: 'customer-1' }),
       expect.objectContaining({ subtotal: 50 })
     );
+  });
+
+  test('preserves service scope when pricing recurring child add-ons', () => {
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 50,
+      primaryServiceKey: 'general_pest',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'free_service',
+        discountAmount: 0,
+        serviceKeyFilter: 'general_pest',
+        serviceCategoryFilter: null,
+      },
+    }, [{
+      price: 100,
+      serviceKey: 'termite_addon',
+      serviceCategory: 'termite',
+    }]);
+
+    expect(financials).toEqual({
+      price: 100,
+      appointmentDiscountDollars: 50,
+    });
+  });
+
+  test('reapplies stored scope when auto-extending a recurring visit', () => {
+    const parent = {
+      service_id: 'primary-service',
+      primary_line_price: 50,
+      line_discount_dollars: 0,
+      discount_type: 'free_service',
+      discount_amount: 0,
+    };
+    const addons = [{ service_id: 'addon-service', estimated_price: 100 }];
+    const scope = {
+      isScoped: true,
+      serviceKeyFilter: 'general_pest',
+      serviceCategoryFilter: null,
+      servicesById: new Map([
+        ['primary-service', { id: 'primary-service', service_key: 'general_pest', category: 'pest_control' }],
+        ['addon-service', { id: 'addon-service', service_key: 'termite_addon', category: 'termite' }],
+      ]),
+    };
+
+    expect(calculateStoredVisitFinancials(parent, addons, addons, scope)).toEqual({
+      price: 100,
+      appointmentDiscountDollars: 50,
+    });
   });
 });

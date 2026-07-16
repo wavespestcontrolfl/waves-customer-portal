@@ -894,6 +894,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
+      serviceKey: addonService?.service_key || null,
+      serviceCategory: addonService?.category || null,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
@@ -944,6 +946,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       finalPrice,
       primaryBase,
       primaryNet,
+      primaryServiceKey: serviceRecord?.service_key || null,
+      primaryServiceCategory: serviceRecord?.category || null,
       primaryDiscount,
       addonLines,
       appointmentDiscount: appointmentDiscount ? {
@@ -952,6 +956,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
         discountDollars: resolvedAppointmentDiscount.dollars,
+        serviceKeyFilter: appointmentDiscount.service_key_filter || null,
+        serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
       } : null,
     };
   }
@@ -960,6 +966,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     finalPrice,
     primaryBase,
     primaryNet,
+    primaryServiceKey: serviceRecord?.service_key || null,
+    primaryServiceCategory: serviceRecord?.category || null,
     primaryDiscount,
     addonLines,
     appointmentDiscount: null,
@@ -1038,19 +1046,32 @@ function calculateAppointmentDiscountDollars(discount, subtotal) {
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
+  const addons = Array.isArray(addonLines) ? addonLines : [];
   const subtotal = (pricing.primaryNet || 0)
-    + (Array.isArray(addonLines) ? addonLines : []).reduce((sum, line) => sum + (line.price || 0), 0);
+    + addons.reduce((sum, line) => sum + (line.price || 0), 0);
   if (!(subtotal > 0)) {
     return { price: null, appointmentDiscountDollars: null };
   }
-  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(pricing.appointmentDiscount, subtotal);
+  const discount = pricing.appointmentDiscount;
+  const isServiceScoped = Boolean(discount?.serviceKeyFilter || discount?.serviceCategoryFilter);
+  const matchesScope = (serviceKey, serviceCategory) => (
+    (!discount?.serviceKeyFilter || discount.serviceKeyFilter === serviceKey)
+    && (!discount?.serviceCategoryFilter || discount.serviceCategoryFilter === serviceCategory)
+  );
+  const discountBase = isServiceScoped
+    ? (matchesScope(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
+      + addons.reduce((sum, line) => (
+        matchesScope(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
+      ), 0)
+    : subtotal;
+  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
   return {
     price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
+function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope = null) {
   const addons = Array.isArray(addonRows) ? addonRows : [];
   const addonNetTotal = addons.reduce((sum, addon) => {
     const n = Number(addon.estimated_price);
@@ -1072,19 +1093,36 @@ function calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows) {
       : 0;
   }
   const subtotal = Math.round((primaryNet + addonNetTotal) * 100) / 100;
+  let discountBase = subtotal;
+  if (discountScope?.isScoped) {
+    const servicesById = discountScope.servicesById || new Map();
+    const matchesScope = (serviceId) => {
+      const service = servicesById.get(serviceId) || {};
+      return (!discountScope.serviceKeyFilter || discountScope.serviceKeyFilter === service.service_key)
+        && (!discountScope.serviceCategoryFilter || discountScope.serviceCategoryFilter === service.category);
+    };
+    discountBase = matchesScope(parent?.service_id) ? primaryNet : 0;
+    discountBase += addons.reduce((sum, addon) => {
+      const amount = Number(addon.estimated_price);
+      return matchesScope(addon.service_id) && Number.isFinite(amount) && amount > 0
+        ? sum + amount
+        : sum;
+    }, 0);
+    discountBase = Math.round(discountBase * 100) / 100;
+  }
   const appointmentDiscountDollars = calculateAppointmentDiscountDollars({
     discountType: parent?.discount_type,
     discountAmount: parent?.discount_amount,
-  }, subtotal);
+  }, discountBase);
   return {
     price: subtotal > 0 ? Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100) : null,
     appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
   };
 }
 
-function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows) {
+function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAddonRows, discountScope = null) {
   if (!target || !cols) return;
-  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows);
+  const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
   // Re-service callbacks must stay flagged on every cloned visit (ongoing
@@ -1094,6 +1132,41 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   // billing a free callback — and drop it from callback reporting — once the
   // seeded visits are exhausted.
   if (cols.is_callback && parent?.is_callback) target.is_callback = true;
+}
+
+async function loadStoredDiscountScope(database, parent, addonRows = []) {
+  if (!parent?.discount_id) return null;
+  let discount;
+  try {
+    discount = await database('discounts')
+      .where({ id: parent.discount_id })
+      .first('service_key_filter', 'service_category_filter');
+  } catch (err) {
+    logger.error(`[schedule] recurring discount scope lookup failed: ${err.message}`);
+    return { isScoped: true, servicesById: new Map() };
+  }
+  if (!discount?.service_key_filter && !discount?.service_category_filter) return null;
+
+  const serviceIds = Array.from(new Set([
+    parent.service_id,
+    ...(Array.isArray(addonRows) ? addonRows.map((addon) => addon.service_id) : []),
+  ].filter(Boolean)));
+  let services = [];
+  try {
+    if (serviceIds.length > 0) {
+      services = await database('services')
+        .whereIn('id', serviceIds)
+        .select('id', 'service_key', 'category');
+    }
+  } catch (err) {
+    logger.error(`[schedule] recurring service scope lookup failed: ${err.message}`);
+  }
+  return {
+    isScoped: true,
+    serviceKeyFilter: discount.service_key_filter || null,
+    serviceCategoryFilter: discount.service_category_filter || null,
+    servicesById: new Map(services.map((service) => [service.id, service])),
+  };
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -4062,6 +4135,7 @@ router.put('/:id/update-details', async (req, res, next) => {
           try {
             parentAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: parent.id });
           } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+          const storedDiscountScope = await loadStoredDiscountScope(trx, parent, parentAddons);
           // Dedupe shifted child dates — same rationale as the POST spawn:
           // skip-weekends can collapse consecutive recurrences onto the
           // same weekday.
@@ -4111,7 +4185,7 @@ router.put('/:id/update-details', async (req, res, next) => {
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
               const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr);
-              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons);
+              applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               const inv = createInvoice !== undefined ? !!createInvoice : !!parent.create_invoice_on_complete;
               if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = inv;
               // Inherit the (freshly-updated) parent's third-party Bill-To so
@@ -5572,8 +5646,9 @@ router.put('/:id/status', async (req, res, next) => {
                   parentAddons = await db('scheduled_service_addons')
                     .where({ scheduled_service_id: parentId });
                 } catch { parentAddons = []; }
+                const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
                 const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr);
-                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons);
+                applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
                 const [autoExtRow] = await db('scheduled_services').insert(nextData).returning('*');
                 // Post-insert re-check closes the remaining race: a
                 // cancellation can stop the series between the pre-insert
@@ -6881,6 +6956,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
     try {
       parentAddons = await db('scheduled_service_addons').where({ scheduled_service_id: parentId });
     } catch (e) { /* table may not exist pre-migration — non-blocking */ }
+    const storedDiscountScope = await loadStoredDiscountScope(db, parent, parentAddons);
 
     // Boosters share recurring_parent_id but have is_recurring=false;
     // exclude them so the next-date math keys off the true cadence.
@@ -6969,7 +7045,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -7028,7 +7104,7 @@ router.post('/recurring-alerts/:id/action', async (req, res, next) => {
         copyLineDiscountFields(data, parent, cols);
         copyAppointmentDiscountFields(data, parent, cols);
         const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd);
-        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons);
+        applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.skip_weekends) data.skip_weekends = skipParent;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await db('scheduled_services').insert(data).returning('*');
@@ -7179,6 +7255,8 @@ router._test = {
   shouldPreserveParentTemplateForThisOnlyAssignment,
   reportCopyRejection,
   buildAppointmentPricing,
+  calculateVisitFinancialsForAddons,
+  calculateStoredVisitFinancials,
   resolveScheduledServiceCharge,
   shouldAttemptPrepaidReceipt,
   voidConversionInvoicesRestoringCredits,
