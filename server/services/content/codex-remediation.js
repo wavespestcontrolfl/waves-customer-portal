@@ -763,22 +763,21 @@ async function markPrTerminal(prNumber, status, injectedDb = null) {
   try {
     const n = Number(prNumber);
     if (!Number.isInteger(n) || !TERMINAL_REMEDIATION_STATES.includes(status)) return { updated: 0 };
-    const stamp = () => dbc('codex_remediation_state')
-      .where({ pr_number: n })
-      .whereNotIn('status', TERMINAL_REMEDIATION_STATES)
-      .update({ status, updated_at: new Date() });
-    let updated = await stamp();
-    if (!updated) {
-      await dbc('codex_remediation_state')
-        .insert({ pr_number: n, status, rounds: 0, created_at: new Date(), updated_at: new Date() })
-        .onConflict('pr_number')
-        .ignore();
-      // A live row can appear between the failed stamp and the ignored
-      // insert (the round's saveState racing us) — stamp once more so the
-      // terminal state wins in that interleaving too.
-      updated = await stamp();
-    }
-    return { updated };
+    // ONE atomic statement: tombstone a missing row, flip a live one, leave
+    // a terminal one untouched. A separate update-then-insert had a window
+    // where a racing round's first saveState could land a live row (and pass
+    // its pre-push guard) between the two — with the upsert, whichever of
+    // the stamp and the first save commits first wins, and saveState's
+    // status-guarded update then sees the terminal row and aborts the round.
+    const res = await dbc.raw(
+      `INSERT INTO codex_remediation_state (pr_number, status, rounds, created_at, updated_at)
+       VALUES (?, ?, 0, NOW(), NOW())
+       ON CONFLICT (pr_number) DO UPDATE
+         SET status = EXCLUDED.status, updated_at = NOW()
+       WHERE codex_remediation_state.status NOT IN ('merged', 'closed')`,
+      [n, status],
+    );
+    return { updated: res?.rowCount ?? 0 };
   } catch (err) {
     logger.warn(`[codex-remediation] terminal stamp failed for PR #${prNumber}: ${err.message}`);
     return { updated: 0, error: err.message };

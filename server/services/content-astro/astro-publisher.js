@@ -1749,6 +1749,12 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
+      // Closed without merging (operator closed it on GitHub): pages-poll has
+      // no finalizeClosed equivalent, so this retry path is the scheduler
+      // lane's only observation of the closed PR — retire its remediation
+      // row here or it reads as a live park forever.
+      const { markPrTerminal } = require('../content/codex-remediation');
+      await markPrTerminal(pr.number, 'closed');
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
     // Callers that gated on an EXTERNAL signal (pages-poll: "the branch's

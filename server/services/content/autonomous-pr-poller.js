@@ -1043,6 +1043,24 @@ async function pollPending() {
         && queueRow.skip_reason === pendingSkipReasonForRun(run);
       if (!stillParked) {
         const r = await supersedeRun(run, queueRow);
+        // This run leaves the poller's selection WITHOUT ever fetching its
+        // PR — if that PR already merged/closed, no finalize path will ever
+        // stamp its remediation row. Best-effort: observe the PR state once
+        // and retire the row; an OPEN PR is deliberately left alone (a
+        // stamp would be a lie — nothing has terminated it yet).
+        try {
+          const prNumber = prNumberFromUrl(run.astro_pr_url);
+          if (prNumber) {
+            const gh = require('../content-astro/github-client');
+            const pr = await gh.getPr(prNumber);
+            if (pr && (pr.merged || pr.merged_at || pr.state !== 'open')) {
+              const { markPrTerminal } = require('./codex-remediation');
+              await markPrTerminal(prNumber, (pr.merged || pr.merged_at) ? 'merged' : 'closed');
+            }
+          }
+        } catch (err) {
+          logger.warn(`[autonomous-pr-poller] terminal stamp on supersede failed for run ${run.id}: ${err.message}`);
+        }
         results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
         continue;
       }

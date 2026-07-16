@@ -160,6 +160,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
     };
     return q;
   });
+  // markPrTerminal's atomic upsert — record it like a normal
+  // codex_remediation_state update so stamp assertions read one shape.
+  db.raw = jest.fn(async (sql, params) => {
+    updates.push({ table: 'codex_remediation_state', filters: { pr_number: params[0] }, updates: { status: params[1] } });
+    return { rowCount: 1 };
+  });
   return updates;
 }
 
@@ -810,8 +816,9 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    // the PR is never even looked up — the run is out of lifecycle tracking
-    expect(gh.getPr).not.toHaveBeenCalled();
+    // lifecycle actions never run; the single getPr is the best-effort
+    // terminal-stamp observation added for tick-start supersedes (codex r2)
+    expect(gh.getPr).toHaveBeenCalledTimes(1);
     expect(indexNow.submit).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
 
@@ -841,7 +848,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
     const annotate = runUpdates(updates)[0];
     expect(annotate.updates).not.toMatchObject({ outcome: 'failed' });
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
@@ -854,7 +861,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
   });
 
   test('run with no opportunity_id has nothing to cross-check and reconciles normally', async () => {
@@ -935,7 +942,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).not.toHaveBeenCalled();
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
   });
 });
 
@@ -1511,5 +1518,48 @@ describe('closed-PR terminal stamp ordering', () => {
     const stamp = updates.find((u) => u.table === 'codex_remediation_state');
     expect(stamp).toBeDefined();
     expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+});
+
+// codex r2: a run superseded at TICK-START (queue moved on before pollRun
+// ever fetched the PR) previously left a merged/closed PR's remediation row
+// unstamped forever — the poller now observes the PR once, best-effort.
+describe('tick-start supersede terminal stamp', () => {
+  test('closed PR is stamped when the run is superseded before pollRun', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+
+  test('an OPEN PR is deliberately left unstamped on supersede', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'open', merged: false });
+
+    await poller.pollPending();
+
+    expect(updates.find((u) => u.table === 'codex_remediation_state')).toBeUndefined();
+  });
+
+  test('a GitHub error during the best-effort stamp never breaks the supersede', async () => {
+    const updates = setupDb({
+      pending: [makeRun()],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockRejectedValue(new Error('gh 502'));
+
+    const res = await poller.pollPending();
+    expect(res.count).toBe(1);
+    expect(runUpdates(updates).find((u) => u.updates.skip_reason)).toBeDefined();
   });
 });

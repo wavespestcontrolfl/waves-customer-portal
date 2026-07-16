@@ -107,22 +107,27 @@ describe('sweepRecentlyPublished', () => {
   // crash between claim and patch left it blank forever (prod: runs for astro
   // PRs #371/#376). The sweep already (re)submits via runForUrl — it now also
   // backfills the run row so blank status stops reading as "never submitted".
-  test('backfills blank indexnow_status from the sweep submission (success-ish only)', async () => {
+  test('backfills blank AND transient-failure indexnow_status from the sweep submission (success-ish only)', async () => {
     mockState.rows.autonomous_runs = [
       { id: 'run-blank', published_url: 'https://x/a/', indexnow_status: null },
-      { id: 'run-err', published_url: 'https://x/b/', indexnow_status: null },
+      { id: 'run-err-swept', published_url: 'https://x/b/', indexnow_status: null },
       { id: 'run-set', published_url: 'https://x/c/', indexnow_status: 'ok' },
+      { id: 'run-stale-error', published_url: 'https://x/d/', indexnow_status: 'error' },
     ];
     const runUrl = jest.fn()
       .mockResolvedValueOnce({ ok: true, snapshot: { indexnow_status: 'ok' } })
       .mockResolvedValueOnce({ ok: true, snapshot: { indexnow_status: 'error' } })
+      .mockResolvedValueOnce({ ok: true, snapshot: { indexnow_status: 'ok' } })
       .mockResolvedValueOnce({ ok: true, snapshot: { indexnow_status: 'ok' } });
 
     await worker.sweepRecentlyPublished({ runPost: jest.fn(), runUrl });
 
+    // run-blank backfilled; run-err-swept left blank (failed submit retries
+    // tomorrow); run-set untouched; run-stale-error REPAIRED (codex r2 —
+    // a recorded transient failure was previously permanent).
     const backfills = mockState.updates.filter((u) => u.table === 'autonomous_runs');
-    expect(backfills).toHaveLength(1);
-    expect(backfills[0].updates).toMatchObject({ indexnow_status: 'ok' });
+    expect(backfills).toHaveLength(2);
+    expect(backfills.every((u) => u.updates.indexnow_status === 'ok')).toBe(true);
   });
 });
 

@@ -64,6 +64,21 @@ function makeDb(initial = {}) {
       },
     };
   }
+  // Emulates markPrTerminal's atomic upsert — the only raw statement these
+  // tests reach (insert-or-flip, terminal rows untouched).
+  db.raw = async (sql, params) => {
+    const [n, status] = params;
+    tables.codex_remediation_state = tables.codex_remediation_state || [];
+    const t = tables.codex_remediation_state;
+    const row = t.find((x) => x.pr_number === n);
+    if (!row) {
+      t.push({ pr_number: n, status, rounds: 0 });
+      return { rowCount: 1 };
+    }
+    if (['merged', 'closed'].includes(row.status)) return { rowCount: 0 };
+    row.status = status;
+    return { rowCount: 1 };
+  };
   db._tables = tables;
   return db;
 }
@@ -1426,6 +1441,7 @@ describe('markPrTerminal', () => {
     expect((await rem.markPrTerminal('not-a-number', 'merged', db)).updated).toBe(0);
     expect((await rem.markPrTerminal(1, 'exploded', db)).updated).toBe(0);
     const throwingDb = () => { throw new Error('db down'); };
+    throwingDb.raw = async () => { throw new Error('db down'); };
     await expect(rem.markPrTerminal(1, 'merged', throwingDb)).resolves.toMatchObject({ updated: 0 });
   });
 });

@@ -188,15 +188,20 @@ async function sweepRecentlyPublished({
       // finalizeMerged persists indexnow_status in a separate post-claim
       // patch, so a crash between claim and patch left it blank forever and
       // the run has already left the poller's selection (prod: runs for
-      // astro PRs #371/#376). runForUrl just (re)submitted the URL — backfill
-      // success-ish statuses onto the run; on error leave blank so
-      // tomorrow's sweep retries while the run is inside the window.
+      // astro PRs #371/#376) — and a transient failure it DID record
+      // ('error'/'rate_limited'/'rejected') was equally permanent. runForUrl
+      // just (re)submitted the URL — repair blank AND failure statuses on a
+      // success-ish result; a failed sweep submit writes nothing so the next
+      // sweep retries while the run is inside the window.
       const sweptIndexNow = r?.snapshot?.indexnow_status;
-      if (!run.indexnow_status && ['ok', 'skipped'].includes(sweptIndexNow)) {
+      const repairable = !run.indexnow_status
+        || ['error', 'rate_limited', 'rejected'].includes(run.indexnow_status);
+      if (repairable && ['ok', 'skipped'].includes(sweptIndexNow)) {
         try {
           await db('autonomous_runs')
             .where('id', run.id)
-            .where((q) => q.whereNull('indexnow_status').orWhere('indexnow_status', ''))
+            .where((q) => q.whereNull('indexnow_status')
+              .orWhereIn('indexnow_status', ['', 'error', 'rate_limited', 'rejected']))
             .update({ indexnow_status: sweptIndexNow, updated_at: new Date() });
         } catch (err) {
           logger.warn(`[post-publish-visibility] indexnow backfill failed for run ${run.id}: ${err.message}`);
