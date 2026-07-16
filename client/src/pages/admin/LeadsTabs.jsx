@@ -1283,7 +1283,8 @@ export function LeadsSection() {
                 borderRadius: 8,
                 padding: "6px 12px",
                 color: C.text,
-                fontSize: 13,
+                height: isMobile ? 44 : undefined,
+                fontSize: isMobile ? 16 : 13,
               }}
             >
               {" "}
@@ -1308,8 +1309,10 @@ export function LeadsSection() {
               borderRadius: 8,
               padding: "8px 12px",
               color: C.text,
-              fontSize: 14,
-              minWidth: 200,
+              height: isMobile ? 44 : undefined,
+              fontSize: isMobile ? 16 : 14,
+              minWidth: isMobile ? 0 : 200,
+              width: isMobile ? "100%" : undefined,
             }}
           />
           {pipelineView === "table" && (
@@ -1324,7 +1327,8 @@ export function LeadsSection() {
                 borderRadius: 8,
                 padding: "6px 12px",
                 color: C.text,
-                fontSize: 13,
+                height: isMobile ? 44 : undefined,
+                fontSize: isMobile ? 16 : 13,
               }}
             >
               {" "}

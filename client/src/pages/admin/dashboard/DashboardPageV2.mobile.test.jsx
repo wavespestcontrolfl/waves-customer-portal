@@ -144,6 +144,7 @@ describe("DashboardPageV2 mobile scorecard tabs", () => {
     fireEvent.click(navButton("Retention"));
     const select = screen.getByLabelText("Period");
     expect(select.tagName).toBe("SELECT");
+    expect(select).toHaveClass("h-11", "text-16");
     const labels = Array.from(select.querySelectorAll("option")).map((o) => o.textContent);
     expect(labels).toContain("Month to date");
     expect(labels).toContain("Quarter to date");
