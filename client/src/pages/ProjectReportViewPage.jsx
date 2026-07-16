@@ -10,6 +10,7 @@ import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
 import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
+import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
 import { WAVES_FDACS_LICENSE_NUMBER } from '../constants/business';
 import { INTERNAL_FINDING_KEYS } from '../lib/wdoReportFields';
@@ -482,9 +483,11 @@ export default function ProjectReportViewPage() {
   const firstName = String(data.customerName || '').trim().split(/\s+/)[0] || 'there';
   // The certificate headline mirrors the full type label (owner directive
   // 2026-07-04) — same wording as the kicker, not the bare short form.
+  // Owner ruling 2026-07-16: every report headline starts "Hi" and ends "!".
+  // Acronyms survive the lowercase (WDO, not "wdo").
   const headline = isCertificate
-    ? `Hey ${firstName}, here's your ${typeLabel}.`
-    : `Hey ${firstName}, here's your ${typeLabel.toLowerCase()} report.`;
+    ? `Hi ${firstName}, here's your ${typeLabel}!`
+    : `Hi ${firstName}, here's your ${typeLabel.toLowerCase().replace(/\bwdo\b/g, 'WDO')} report!`;
   // The address line of the hero contact block. Document types use the
   // REPORT's own recorded address, never the live customer row: a
   // certificate's treatment address (a pre-construction lot may differ from
@@ -497,15 +500,25 @@ export default function ProjectReportViewPage() {
     : data.projectType === 'wdo_inspection'
       ? (String(findings.property_address || '').trim() || data.customerAddress || data.cityState || '')
       : (data.customerAddress || data.cityState || '');
-  // Mirrors the customer estimate hero (owner directive 2026-07-04): the
-  // recipient's own contact lines — name, email, phone, address — under the
-  // headline, same uppercase treatment as EstimateViewPage's Header.
+  // Identity block under the headline — owner ruling 2026-07-16: every
+  // report shows the same block in the same order and format: name, email,
+  // phone, address, MIXED-CASE ("William Carter", never "WILLIAM CARTER" —
+  // supersedes the uppercase treatment). ALL-CAPS records title-case for
+  // display only, same rule as ReportViewPage's contact block.
+  const displayContactLine = (raw) => {
+    const s2 = String(raw || '').trim();
+    if (!s2 || s2 !== s2.toUpperCase()) return s2;
+    if (s2.includes('@')) return s2.toLowerCase();
+    return s2.toLowerCase()
+      .replace(/\b([a-z])(\w*)/g, (m, a, rest) => a.toUpperCase() + rest)
+      .replace(/\b([A-Za-z]{2}) (\d{5}(?:-\d{4})?)$/, (m, st, zip) => `${st.toUpperCase()} ${zip}`);
+  };
   const heroContactLines = [
     data.customerName,
     data.customerEmail,
     formatCustomerPhone(data.customerPhone),
     heroAddressLine,
-  ].map((line) => String(line || '').trim()).filter(Boolean);
+  ].map(displayContactLine).filter(Boolean);
 
   return (
     <div className="project-report-page" style={{
@@ -544,6 +557,20 @@ export default function ProjectReportViewPage() {
           wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+        {/* Owner rules 2026-07-16: the four-box bar (Download PDF / Share /
+            Print / Portal Login) sits at the TOP of every report, above the
+            header. A filed WDO report downloads the real FDACS PDF;
+            everything else falls back to the print dialog (Save as PDF). */}
+        <DocumentActionBar
+          shareTitle="Waves project report"
+          pdfUrl={data?.fdacsPdfAvailable ? `${API_BASE}/reports/project/${token}/fdacs-pdf` : null}
+          pdfFileName="FDACS-13645-WDO-Inspection-Report.pdf"
+          printFallbackDownload
+        />
+        {/* Waves AI on every report EXCEPT the WDO / pre-treat paper
+            documents (owner 2026-07-16); sits tight under the tools card
+            like the service report. */}
+        {!isPaperDocument && <ProjectAskWaves token={token} />}
         <div style={{ padding: '8px 0 24px' }}>
           {/* The kicker carries what the project is FOR (its title) when one
               is recorded — the bare type alone reads generic; the type still
@@ -566,23 +593,11 @@ export default function ProjectReportViewPage() {
           {heroContactLines.length ? (
             <div style={{ marginTop: 16, display: 'grid', gap: 4 }}>
               {heroContactLines.map((line) => (
-                <div key={line} style={{ ...eyebrowStyle, lineHeight: 1.5 }}>{line}</div>
+                <div key={line} style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, fontWeight: 600 }}>{line}</div>
               ))}
             </div>
           ) : null}
         </div>
-
-        {/* No generic project-report PDF render exists server-side (the FDACS
-            form link below covers WDO certificates) — Share + Print only. */}
-        {/* Owner rule 2026-07-16: every report shows the same four boxes.
-            A filed WDO report downloads the real FDACS PDF; everything else
-            falls back to the print dialog (Save as PDF). */}
-        <DocumentActionBar
-          shareTitle="Waves project report"
-          pdfUrl={data?.fdacsPdfAvailable ? `${API_BASE}/reports/project/${token}/fdacs-pdf` : null}
-          pdfFileName="FDACS-13645-WDO-Inspection-Report.pdf"
-          printFallbackDownload
-        />
 
         {/* Summary card — no "Report details" block (owner directive
             2026-07-03): the hero already carries the address, the At-a-glance
@@ -668,6 +683,12 @@ export default function ProjectReportViewPage() {
         </div>
         )}
 
+        {/* "How did today's visit go?" — every report except the WDO /
+            pre-treat paper documents (owner 2026-07-16), in the slot right
+            below the summary card (the service report's below-weather slot).
+            Self-suppresses once a review is recorded. */}
+        {!isPaperDocument && <ProjectReviewAsk data={data} />}
+
         {data.projectType === 'wdo_inspection' && (
           <div data-glass="card" style={{ ...cardStyle, marginTop: 16 }}>
             <div data-gt="eyebrow" style={{ ...eyebrowStyle, marginBottom: 8 }}>
@@ -737,18 +758,12 @@ export default function ProjectReportViewPage() {
           </div>
         )}
 
-        {/* CTA */}
-        <div style={{ textAlign: 'center', marginTop: 20, padding: '16px 0' }}>
-          <div style={{ fontSize: 14, color: ESTIMATE_BODY }}>Questions about this report?</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'center', marginTop: 12 }}>
-            <a data-glass-accent="" href={`sms:${WAVES_PHONE_TEL}`} style={{
-              ...primaryButtonStyle,
-            }}><Icon name="message" size={16} strokeWidth={2} /> Text Us</a>
-            <a data-glass="chip" href={`tel:${WAVES_PHONE_TEL}`} style={{
-              ...secondaryButtonStyle,
-            }}><Icon name="phone" size={16} strokeWidth={2} /> Call Us</a>
-          </div>
-        </div>
+        {/* Closing strip — owner ruling 2026-07-16: every report ends with the
+            service report's footer line, not the Text Us / Call Us CTA. */}
+        <footer style={{ marginTop: 20, padding: '16px 0', fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.6, textAlign: 'center' }}>
+          Questions about today&apos;s service? Ask Waves in your portal or call {WAVES_PHONE_DISPLAY}.
+          {' '}This report is provided for your records.
+        </footer>
 
       </div>
       {/* Newsletter signup lives only on the newsletter pages (owner

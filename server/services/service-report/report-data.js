@@ -1927,6 +1927,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
+  // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
+  // row's service_type (the catalog name) wins over the record's snapshot
+  // when the visit is linked; unlinked/legacy records keep the snapshot.
+  const scheduledServiceRow = service.scheduled_service_id
+    ? await knex('scheduled_services')
+      .where({ id: service.scheduled_service_id })
+      .first('service_type')
+      .catch(() => null)
+    : null;
+  const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
+    || serviceDisplayName(service);
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -2443,7 +2455,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceDate: service.service_date,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
@@ -2765,7 +2777,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   ) {
     visitSummary = await applyVisitSummaryNarrative({
       recap: visitSummary,
-      serviceTypeDisplay: serviceDisplayName(service),
+      serviceTypeDisplay: linkedServiceName,
       areasServiced: areaLabels,
       pestPressure,
       findings,
@@ -2779,7 +2791,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     token,
     serviceRecordId: service.id,
     serviceType: service.service_type,
-    serviceDisplayName: serviceDisplayName(service),
+    serviceDisplayName: linkedServiceName,
     serviceLine,
     serviceLineDisplay: config.displayName,
     serviceDate: service.service_date,
