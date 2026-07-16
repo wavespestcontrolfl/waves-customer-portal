@@ -5825,15 +5825,25 @@ const CallRecordingProcessor = {
           // requested families it doesn't cover ("pest and lawn" must not
           // price as pest-only). Fill-if-empty semantics unchanged.
           // When the V2 gate approved this call, compose the extras from the
-          // V2-APPROVED requested_service: the appended families come from
-          // that field, and a V1-hallucinated family V2 rejected must not
-          // leak onto the lead label (codex r9). matched_service stays V1
-          // here — the recurring-default backfill below re-asserts it
-          // against the merged fields.
-          const v2FlatForCompose = v2ApprovedExtraction ? flatView(v2ApprovedExtraction) : null;
+          // V2-APPROVED service categories (primary + secondary_categories),
+          // mapped to scannable legacy service words: a V1-hallucinated
+          // family V2 rejected must not leak onto the lead label (codex r9),
+          // and flatView's requested_service is the raw primary category
+          // token ("pest_general"), which drops V2's secondaries and scans
+          // as nothing (codex r10). matched_service stays V1 here — the
+          // recurring-default backfill below re-asserts it post-merge.
+          const v2RequestedForCompose = (() => {
+            const sr = v2ApprovedExtraction?.service_request;
+            if (!sr) return null;
+            const { mapServiceCategoryToLegacy } = require('../utils/extraction-compat');
+            const cats = [sr.primary_service_category,
+              ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : [])];
+            const words = cats.map((c) => mapServiceCategoryToLegacy(c)).filter(Boolean);
+            return words.length ? words.join(' and ') : null;
+          })();
           const serviceInterestLabel = composeServiceInterest(
-            v2FlatForCompose?.requested_service
-              ? { ...extracted, requested_service: v2FlatForCompose.requested_service }
+            v2RequestedForCompose
+              ? { ...extracted, requested_service: v2RequestedForCompose }
               : extracted,
           );
           if (serviceInterestLabel && isEmpty(current?.service_interest)) {

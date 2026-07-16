@@ -558,6 +558,32 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Termite Service');
   });
 
+  test('termite control/protection/monitoring wording labels as work (codex r10)', () => {
+    for (const phrase of ['termite control', 'termite protection', 'termite monitoring']) {
+      expect(composeServiceInterest({
+        matched_service: 'Quarterly Pest Control Service',
+        requested_service: `pest control plus ${phrase}`,
+      })).toBe('Quarterly Pest Control Service + Termite Service');
+    }
+  });
+
+  test('except after "without" rescues the positive (codex r10)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'without any add-ons except lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('V2 legacy category words compose scannable families (codex r10 shape)', () => {
+    // Mirrors the enrichment path's mapped-category string
+    // ("General Pest Control and Lawn Care") built from V2's
+    // primary + secondary_categories.
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'General Pest Control and Lawn Care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
