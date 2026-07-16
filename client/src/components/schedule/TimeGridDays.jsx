@@ -632,6 +632,8 @@ export default function TimeGridDays({
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [optimistic, setOptimistic] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(null);
@@ -640,12 +642,25 @@ export default function TimeGridDays({
   const monday = useMemo(() => startOfWeek(date), [date]);
 
   useEffect(() => {
+    let active = true;
     setLoading(true);
+    setLoadError(null);
+    setData(null);
     setOptimistic(null);
     adminFetch(`/admin/schedule/week?start=${monday}`)
-      .then((j) => { setData(j); setLoading(false); })
-      .catch((err) => { console.error(err); setLoading(false); });
-  }, [monday, refreshKey]);
+      .then((j) => {
+        if (!active) return;
+        setData(j);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (!active) return;
+        console.error(err);
+        setLoadError(err);
+        setLoading(false);
+      });
+    return () => { active = false; };
+  }, [monday, refreshKey, retryKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
@@ -869,6 +884,16 @@ export default function TimeGridDays({
 
   if (loading) {
     return <div className="py-10 text-center text-13 text-ink-secondary">Loading…</div>;
+  }
+  if (loadError) {
+    return (
+      <div className="py-10 text-center text-13 text-alert-fg">
+        <div>Failed to load this week: {loadError.message || String(loadError)}</div>
+        <button type="button" className="underline mt-2" onClick={() => setRetryKey((key) => key + 1)}>
+          Retry
+        </button>
+      </div>
+    );
   }
   if (!days.length) {
     return (
