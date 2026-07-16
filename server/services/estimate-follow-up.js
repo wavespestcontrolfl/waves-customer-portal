@@ -38,6 +38,47 @@ const { customerConvertedSince } = require("./estimate-conversion-guard");
 
 const TERMINAL_STATUSES = new Set(["declined", "accepted", "expired", "void"]);
 
+const LEGACY_STAGE_TEMPLATES = Object.freeze({
+  unviewed: { sms: "estimate_followup_unviewed", email: "estimate.unviewed_followup" },
+  viewed: { sms: "estimate_followup_viewed", email: "estimate.viewed_followup" },
+  final: { sms: "estimate_followup_final", email: "estimate.followup_final" },
+  expiring: { sms: "estimate_followup_expiring", email: "estimate.expiring_notice" },
+});
+
+async function legacyStageDeliveryAvailability(stage, templates) {
+  let smsEnabled = true;
+  let emailEnabled = true;
+
+  try {
+    smsEnabled = await smsTemplatesRouter.isTemplateActive(templates.sms);
+  } catch (err) {
+    // Lookup uncertainty must not silently disable a customer channel. The
+    // normal renderer will audit/log the underlying defect if it persists.
+    logger.warn(`[est-followup] ${stage} SMS template status unavailable: ${err.message}`);
+  }
+
+  try {
+    const loaded = await EmailTemplateLibrary.loadTemplateByKey(templates.email);
+    // A missing row is a real configuration defect, not an operator kill
+    // switch. Leave it enabled so sendTemplate records the existing audit.
+    if (loaded?.template) {
+      emailEnabled = String(loaded.template.status || "active").toLowerCase() === "active";
+    }
+  } catch (err) {
+    logger.warn(`[est-followup] ${stage} email template status unavailable: ${err.message}`);
+  }
+
+  return { smsEnabled, emailEnabled, anyEnabled: smsEnabled || emailEnabled };
+}
+
+async function loadLegacyStageDelivery() {
+  const entries = await Promise.all(Object.entries(LEGACY_STAGE_TEMPLATES).map(async ([stage, templates]) => [
+    stage,
+    await legacyStageDeliveryAvailability(stage, templates),
+  ]));
+  return Object.fromEntries(entries);
+}
+
 // Engagement signal: if the customer opened the estimate within the last N
 // hours (default 2), skip the scheduled nudge. They're thinking about it
 // right now and don't need a poke.
@@ -333,9 +374,16 @@ async function sendDualChannel(est, { sms, email }) {
         attempted = true;
       }
     } catch (e) {
-      logger.error(
-        `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${EmailTemplateLibrary.redactEmailAddresses(e.message)}`,
-      );
+      const message = EmailTemplateLibrary.redactEmailAddresses(e.message);
+      if (e.code === "EMAIL_TEMPLATE_DISABLED") {
+        logger.info(
+          `[est-followup] Email skipped for estimate ${est.id} (${email.stage}): ${message}`,
+        );
+      } else {
+        logger.error(
+          `[est-followup] Email failed for estimate ${est.id} (${email.stage}): ${message}`,
+        );
+      }
     }
   }
   return attempted;
@@ -949,9 +997,14 @@ const EstimateFollowUp = {
       logger.warn(`[est-followup] global counter heal failed (continuing): ${e.message}`);
     }
 
+    const delivery = await loadLegacyStageDelivery();
+
     // 1. Sent but NOT viewed after 24 hours
     try {
-      const unviewed = await db("estimates")
+      if (!delivery.unviewed.anyEnabled) {
+        logger.info("[est-followup] Unviewed stage disabled — SMS and email templates inactive");
+      }
+      const unviewed = delivery.unviewed.anyEnabled ? await db("estimates")
         .where({ status: "sent" })
         .whereNull("archived_at")
         .whereNull("viewed_at")
@@ -974,7 +1027,7 @@ const EstimateFollowUp = {
             .from("estimate_followup_sends")
             .whereRaw("estimate_followup_sends.estimate_id = estimates.id")
             .where("estimate_followup_sends.rule_key", "delivery_unopened_24h");
-        });
+        }) : [];
 
       for (const est of unviewed) {
         let claimed = false;
@@ -995,26 +1048,26 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_unviewed");
-          const smsBody = await renderTemplate("estimate_followup_unviewed", {
+          const smsBody = delivery.unviewed.smsEnabled ? await renderTemplate("estimate_followup_unviewed", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.unviewed.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_unviewed template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.unviewed.emailEnabled ? {
               templateKey: "estimate.unviewed_followup",
               stage: "unviewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -1047,7 +1100,10 @@ const EstimateFollowUp = {
 
     // 2. Viewed but NOT accepted after 48 hours
     try {
-      const viewedNotAccepted = await db("estimates")
+      if (!delivery.viewed.anyEnabled) {
+        logger.info("[est-followup] Viewed stage disabled — SMS and email templates inactive");
+      }
+      const viewedNotAccepted = delivery.viewed.anyEnabled ? await db("estimates")
         .where({ status: "viewed" })
         .whereNull("archived_at")
         .whereNotNull("viewed_at")
@@ -1060,7 +1116,7 @@ const EstimateFollowUp = {
           q
             .where("followup_viewed_sent", false)
             .orWhereNull("followup_viewed_sent"),
-        );
+        ) : [];
 
       for (const est of viewedNotAccepted) {
         let claimed = false;
@@ -1077,26 +1133,26 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_viewed");
-          const smsBody = await renderTemplate("estimate_followup_viewed", {
+          const smsBody = delivery.viewed.smsEnabled ? await renderTemplate("estimate_followup_viewed", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.viewed.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_viewed template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.viewed.emailEnabled ? {
               templateKey: "estimate.viewed_followup",
               stage: "viewed",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -1130,7 +1186,10 @@ const EstimateFollowUp = {
 
     // 3. Viewed but NOT accepted after 5 days (final nudge)
     try {
-      const finalNudge = await db("estimates")
+      if (!delivery.final.anyEnabled) {
+        logger.info("[est-followup] Final stage disabled — SMS and email templates inactive");
+      }
+      const finalNudge = delivery.final.anyEnabled ? await db("estimates")
         .where({ status: "viewed" })
         .whereNull("archived_at")
         .whereNotNull("viewed_at")
@@ -1143,7 +1202,7 @@ const EstimateFollowUp = {
           q
             .where("followup_final_sent", false)
             .orWhereNull("followup_final_sent"),
-        );
+        ) : [];
 
       for (const est of finalNudge) {
         let claimed = false;
@@ -1160,26 +1219,26 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_final");
-          const smsBody = await renderTemplate("estimate_followup_final", {
+          const smsBody = delivery.final.smsEnabled ? await renderTemplate("estimate_followup_final", {
             first_name: firstName,
             estimate_url: smsUrl,
           }, {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.final.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_final template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.final.emailEnabled ? {
               templateKey: "estimate.followup_final",
               stage: "final",
               payload: estimateEmailPayload(est, firstName, emailUrl),
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -1209,7 +1268,10 @@ const EstimateFollowUp = {
 
     // 4. Expiring in 1-3 days
     try {
-      const expiring = await db("estimates")
+      if (!delivery.expiring.anyEnabled) {
+        logger.info("[est-followup] Expiring stage disabled — SMS and email templates inactive");
+      }
+      const expiring = delivery.expiring.anyEnabled ? await db("estimates")
         .whereIn("status", ["sent", "viewed"])
         .whereNull("archived_at")
         .whereNotNull("expires_at")
@@ -1236,7 +1298,7 @@ const EstimateFollowUp = {
               "expiring_engaged",
               "expiring_never_viewed",
             ]);
-        });
+        }) : [];
 
       for (const est of expiring) {
         let claimed = false;
@@ -1263,7 +1325,7 @@ const EstimateFollowUp = {
             year: "numeric",
             timeZone: "America/New_York",
           });
-          const smsBody = await renderTemplate("estimate_followup_expiring", {
+          const smsBody = delivery.expiring.smsEnabled ? await renderTemplate("estimate_followup_expiring", {
             first_name: firstName,
             estimate_url: smsUrl,
             expires_at: expDate,
@@ -1271,22 +1333,22 @@ const EstimateFollowUp = {
             workflow: "estimate_follow_up",
             entity_type: "estimate",
             entity_id: est.id,
-          });
-          if (!smsBody) {
+          }) : null;
+          if (delivery.expiring.smsEnabled && !smsBody) {
             logger.warn(
               `[est-followup] estimate_followup_expiring template missing/disabled — continuing without SMS for est ${est.id}`,
             );
           }
           const ok = await sendDualChannel(est, {
             sms: smsBody,
-            email: {
+            email: delivery.expiring.emailEnabled ? {
               templateKey: "estimate.expiring_notice",
               stage: "expiring",
               payload: {
                 ...estimateEmailPayload(est, firstName, emailUrl),
                 expires_at: expDate,
               },
-            },
+            } : null,
           });
           if (ok) {
             await db("estimates")
@@ -1351,6 +1413,9 @@ module.exports._private = {
   safetyGate,
   claimStage,
   repairAllFollowupCounters,
+  legacyStageDeliveryAvailability,
+  loadLegacyStageDelivery,
+  LEGACY_STAGE_TEMPLATES,
   mintStageLinks,
   hasRepliedRecently,
   wasRecentlyOpened,
