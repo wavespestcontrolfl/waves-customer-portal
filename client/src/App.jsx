@@ -257,7 +257,6 @@ const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
-const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
 const AdminDuplicateCustomersPage = lazyWithRetry(() => import('./pages/admin/DuplicateCustomersPage'));
 const AdminEquipmentPage = lazyWithRetry(() => import('./pages/admin/EquipmentPage'));
@@ -506,7 +505,7 @@ export default function App() {
             <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingHubPage /></Suspense>} />
             <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
-            <Route path="auto-dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading auto-dispatch...</div>}><AdminAutoDispatchPage /></Suspense>} />
+            <Route path="auto-dispatch" element={<AdminTabRedirect to="/admin/dispatch" tab="automation" />} />
             <Route path="price-match" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price match...</div>}><AdminPriceMatchPage /></Suspense>} />
             <Route path="price-change" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="notices" />} />
             <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />

@@ -8,7 +8,7 @@ Scope: the authenticated `/admin/*` application shell, routes, and navigation
 
 ## Executive finding
 
-The admin has 34 visible destinations, 65 mounted child paths, and 24 compatibility redirects. The gap is not a large body of provably dead pages. It is a set of specialist pages, duplicate entry routes, and already-retired URLs that are presented inconsistently.
+The admin has 34 visible destinations, 65 mounted child paths, and 25 compatibility redirects. The gap is not a large body of provably dead pages. It is a set of specialist pages, duplicate entry routes, and already-retired URLs that are presented inconsistently.
 
 Static code evidence cannot prove that a production page has no users. No mounted page should be deleted based only on this audit. Removal requires route telemetry or an owner-confirmed replacement, followed by a redirect window.
 
@@ -55,6 +55,7 @@ Keep these compatibility routes while old bookmarks, notifications, or server-ge
 | `/admin/credentials` | `/admin/compliance?tab=credentials` |
 | `/admin/pricing` | `/admin/pricing-logic?area=strategy` |
 | `/admin/price-change` | `/admin/pricing-logic?area=notices` |
+| `/admin/auto-dispatch` | `/admin/dispatch?tab=automation` |
 
 These redirect routes are compatibility infrastructure, not dead sections. Removing them would break deep links without improving navigation.
 
@@ -77,10 +78,9 @@ These pages are active and must not be classified as dead. They should become ta
 | Current page | Why it is active | Recommended parent |
 | --- | --- | --- |
 | Lawn Protocol (`/admin/lawn-protocol`) | Inventory and readiness alerts deep-link to it; it owns publishing, readiness, product assignment, and substitutions. | Operations → Protocol & Readiness |
-| Auto Dispatch (`/admin/auto-dispatch`) | Owns dispatch runs, decisions, locks, exclusions, and manual triggers. | Schedule → Automation/Audit tab, with role restrictions retained |
 | Wiki (`/admin/knowledge`) and Knowledge Base (`/admin/kb`) | Both are implemented and use separate APIs, but their labels describe overlapping concepts. | One Resources hub with Wiki and Knowledge Base tabs |
 
-Until those hubs exist, retain the direct routes. Hiding them now would make active alert-driven workflows harder to recover.
+Until those remaining hubs exist, retain their direct routes. Hiding them now would make active alert-driven workflows harder to recover.
 
 ## Intentional non-navigation routes
 
@@ -103,7 +103,7 @@ The old page file should be deleted only in a cleanup-only change after confirmi
 1. Add route-reachability regression coverage for every navigation destination.
 2. Completed: redirect Leads, Estimates, and Equipment Calibration to their existing canonical tabs while preserving query parameters and fragments.
 3. Completed: Compliance + Credentials and the Pricing hub now remove the largest conceptual duplicates without deleting capabilities.
-4. Add Protocol & Readiness and Auto Dispatch inside Operations/Schedule.
+4. In progress: Auto Dispatch is now the Schedule Automation tab; Protocol & Readiness remains to be consolidated inside Operations.
 5. Build the Resources hub for Wiki and Knowledge Base.
 6. Collect route telemetry for at least one normal operating cycle before deleting retired page components.
 7. Apply the UI consistency contract one completed hub at a time.

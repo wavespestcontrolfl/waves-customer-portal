@@ -368,7 +368,7 @@ export function isAdminNavItemActive(item, pathname, search = "") {
   if (pathname === itemPathname) return true;
   if (item.id === "dashboard" && pathname === "/admin") return true;
   if (item.id === "schedule" && pathname === "/admin/dispatch") {
-    return new URLSearchParams(search).get("tab") === "schedule";
+    return true;
   }
   return pathname.startsWith(`${itemPathname}/`);
 }

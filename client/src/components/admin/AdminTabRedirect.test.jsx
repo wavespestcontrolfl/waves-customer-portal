@@ -121,4 +121,17 @@ describe("AdminTabRedirect", () => {
       "/admin/pricing-logic?campaign=spring&area=strategy#offers",
     );
   });
+
+  it("moves Auto-Dispatch deep links into the Schedule workspace", () => {
+    const destination = renderRedirect({
+      entry: "/admin/auto-dispatch?run=run-123#audit",
+      source: "/admin/auto-dispatch",
+      to: "/admin/dispatch",
+      tab: "automation",
+    });
+
+    expect(destination).toBe(
+      "/admin/dispatch?run=run-123&tab=automation#audit",
+    );
+  });
 });

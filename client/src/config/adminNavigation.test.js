@@ -167,14 +167,21 @@ describe("isAdminNavItemActive", () => {
     ).toBe(true);
   });
 
-  it("does not mark unrelated or non-schedule dispatch views active", () => {
+  it("keeps Schedule active across its dispatch workspace", () => {
     expect(
       isAdminNavItemActive(
         ADMIN_NAV_ITEMS.schedule,
         "/admin/dispatch",
         "?tab=board",
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      isAdminNavItemActive(
+        ADMIN_NAV_ITEMS.schedule,
+        "/admin/dispatch",
+        "?tab=automation",
+      ),
+    ).toBe(true);
     expect(isAdminNavItemActive(ADMIN_NAV_ITEMS.customers, "/admin/customer"))
       .toBe(false);
   });
