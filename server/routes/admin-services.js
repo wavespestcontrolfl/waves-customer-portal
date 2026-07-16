@@ -25,8 +25,6 @@ const router = express.Router();
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const serviceLibrary = require('../services/service-library');
 const trackTransitions = require('../services/track-transitions');
-const db = require('../models/db');
-const logger = require('../services/logger');
 const { ipFromReq, uaFromReq } = require('../services/audit-log');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -98,10 +96,15 @@ router.post('/', async (req, res, next) => {
 // PUT /packages/:id — update package (must be before /:id to avoid being shadowed)
 router.put('/packages/:id', async (req, res, next) => {
   try {
-    const pkg = await serviceLibrary.updatePackage(req.params.id, req.body);
+    const pkg = await serviceLibrary.updatePackage(req.params.id, req.body, {
+      audit: auditFromReq(req),
+    });
     if (!pkg) return res.status(404).json({ error: 'Package not found' });
     res.json(pkg);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // PUT /:id — update service
@@ -151,15 +154,6 @@ router.post('/:id/cancel', async (req, res, next) => {
       const status = result.reason === 'not_found' ? 404 : 409;
       return res.status(status).json({ error: result.reason });
     }
-
-    // Also update the legacy `status` column so the dispatch board, schedule
-    // page, and other consumers that read `status` reflect the cancellation.
-    // track_state remains the customer-visible truth; status keeps internal
-    // tooling in sync.
-    await db('scheduled_services')
-      .where({ id: req.params.id })
-      .update({ status: 'cancelled', updated_at: new Date() })
-      .catch((e) => logger.warn(`[admin-services] legacy status update failed: ${e.message}`));
 
     res.json({
       state: result.state,
