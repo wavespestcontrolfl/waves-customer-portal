@@ -719,6 +719,10 @@ async function computeEstimate(input) {
   if (Object.keys(services).length === 0) {
     return { error: 'At least one service is required in services object' };
   }
+  const inactiveServices = Object.entries(services).filter(([, value]) => value === false || value == null);
+  if (inactiveServices.length) {
+    return { error: `Remove inactive services from the pricing request: ${inactiveServices.map(([key]) => key).join(', ')}` };
+  }
   const unknownServices = unknownServiceKeysError(services);
   if (unknownServices) return { error: unknownServices };
 
@@ -1481,8 +1485,6 @@ function anchorAgentEstimateContact(input, lead) {
       && leadAddressIdentity.streetNumber !== inputAddressIdentity.streetNumber)
     || (leadAddressIdentity.zip && inputAddressIdentity.zip
       && leadAddressIdentity.zip !== inputAddressIdentity.zip)
-    || (leadAddressIdentity.normalizedStreet && inputAddressIdentity.normalizedStreet
-      && leadAddressIdentity.normalizedStreet !== inputAddressIdentity.normalizedStreet)
   );
   return {
     input: {

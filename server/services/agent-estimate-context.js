@@ -76,7 +76,6 @@ async function phoneIsShared(lead) {
       .whereNull('deleted_at')
       .whereNot('id', lead.id)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .limit(10)
       .select('first_name', 'last_name');
     if (!rows.length) return false;
     // A REPEAT lead for the same person is not a shared line — suppressing

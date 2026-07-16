@@ -26,6 +26,7 @@ const PROTOCOL_KEY_ALIASES = Object.freeze({
   pest: 'pest',
   pest_control: 'pest',
   one_time_pest: 'pest',
+  one_time_lawn: 'lawn',
   tree: 'tree_shrub',
   tree_shrub: 'tree_shrub',
   mosquito: 'mosquito',
