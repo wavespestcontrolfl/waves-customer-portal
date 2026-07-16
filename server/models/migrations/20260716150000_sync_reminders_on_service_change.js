@@ -87,6 +87,37 @@ exports.up = async function up(knex) {
     AFTER UPDATE OF scheduled_date, window_start, status ON scheduled_services
     FOR EACH ROW EXECUTE FUNCTION sync_appointment_reminder_on_service_change()
   `);
+
+  // One-time backfill: heal reminder rows that drifted BEFORE the trigger
+  // existed (moves that skipped handleReschedule). Same formula and flag
+  // semantics as the trigger. Scoped to future, active appointments whose
+  // reminder clock disagrees with the live row — 12 rows in prod at time of
+  // writing. Rows already in sync (including deliberately-suppressed ones)
+  // are untouched by the IS DISTINCT FROM guard.
+  await knex.raw(`
+    UPDATE appointment_reminders ar
+       SET appointment_time = sync.correct_time,
+           reminder_72h_sent = (sync.correct_time > NOW()
+                                AND sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes'),
+           reminder_72h_sent_at = CASE
+             WHEN sync.correct_time > NOW()
+                  AND sync.correct_time <= NOW() + INTERVAL '72 hours 15 minutes' THEN NOW()
+             ELSE NULL END,
+           reminder_24h_sent = false,
+           reminder_24h_sent_at = NULL,
+           updated_at = NOW()
+      FROM (
+        SELECT ss.id AS service_id,
+               ((ss.scheduled_date + COALESCE(ss.window_start, TIME '08:00'))::timestamp
+                AT TIME ZONE 'America/New_York') AS correct_time
+          FROM scheduled_services ss
+         WHERE ss.status IN ('pending','confirmed','rescheduled')
+           AND ss.scheduled_date >= CURRENT_DATE
+      ) sync
+     WHERE sync.service_id = ar.scheduled_service_id
+       AND ar.cancelled = false
+       AND ar.appointment_time IS DISTINCT FROM sync.correct_time
+  `);
 };
 
 exports.down = async function down(knex) {
