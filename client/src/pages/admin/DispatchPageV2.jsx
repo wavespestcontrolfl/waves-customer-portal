@@ -1277,6 +1277,13 @@ export default function DispatchPageV2({
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
   const [completionDetourPhotos, setCompletionDetourPhotos] = useState(null);
+  const handleCompletionDetourPhotosChange = useCallback((serviceId, photos) => {
+    setCompletionDetourPhotos((current) =>
+      String(current?.serviceId) === String(serviceId)
+        ? { ...current, photos: Array.isArray(photos) ? photos : [] }
+        : current,
+    );
+  }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -2446,6 +2453,7 @@ export default function DispatchPageV2({
               : []
           }
           onDiscardBillingDetour={() => setCompletionDetourPhotos(null)}
+          onBillingDetourPhotosChange={handleCompletionDetourPhotosChange}
           onClose={(completed) => {
             setCompletingService(null);
             if (completed) setCompletionDetourPhotos(null);

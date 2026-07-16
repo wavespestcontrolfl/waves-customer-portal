@@ -7589,6 +7589,7 @@ export function CompletionPanel({
   onScheduleFollowup,
   billingDetourPhotos = [],
   onDiscardBillingDetour,
+  onBillingDetourPhotosChange,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -8076,6 +8077,9 @@ export function CompletionPanel({
   useEffect(() => {
     servicePhotosRef.current = servicePhotos;
   }, [servicePhotos]);
+  useEffect(() => {
+    onBillingDetourPhotosChange?.(service.id, servicePhotos);
+  }, [onBillingDetourPhotosChange, service.id, servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -8878,7 +8882,13 @@ export function CompletionPanel({
         clientPestRating,
       }) ||
       visitOutcome !== "completed";
-    if (!hasDraftContent) return;
+    if (!hasDraftContent) {
+      // A field can return to its default after an earlier debounced write.
+      // Remove both copies so a billing 409 cannot flush stale preferences.
+      draftSnapshotRef.current = null;
+      localStorage.removeItem(completionDraftKey(service.id));
+      return;
+    }
 
     const draft = {
         serviceId: service.id,
