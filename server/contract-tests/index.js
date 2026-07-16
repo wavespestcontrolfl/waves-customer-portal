@@ -60,7 +60,14 @@ const DRY = process.env.CONTRACT_DRY_RUN === 'true';
     }
   }
 
-  const summary = consoleR.print(results, { verbose: FLAG.verbose });
+  consoleR.print(results, { verbose: FLAG.verbose });
+  // The gate counts from the raw results, not the reporter — presentation
+  // must never decide what blocks. severity is authoritative: a validator
+  // can return pass:true with severity:'warning' (e.g. dynamic raw SQL).
+  const gate = {
+    critical: results.filter(r => r.severity === 'critical').length,
+    warning: results.filter(r => r.severity === 'warning').length,
+  };
   if (FLAG.json) {
     jsonR.write(results, FLAG.json);
     console.log(`\nJSON report → ${FLAG.json}`);
@@ -71,19 +78,19 @@ const DRY = process.env.CONTRACT_DRY_RUN === 'true';
   try { await require('../models/db').destroy(); } catch { /* ignore */ }
 
   if (DRY) {
-    console.log(`[dry-run] ${summary.critical} critical, ${summary.warning} warnings — NOT blocking`);
+    console.log(`[dry-run] ${gate.critical} critical, ${gate.warning} warnings — NOT blocking`);
     process.exit(0);
   }
-  if (summary.critical > 0) {
-    console.error(`[contract] ${summary.critical} critical failures — blocking deploy`);
+  if (gate.critical > 0) {
+    console.error(`[contract] ${gate.critical} critical failures — blocking deploy`);
     process.exit(1);
   }
   // Warnings block too (2026-07-16): the suite reached 0 warnings, so any
   // new one is a regression demanding an explicit decision — fix it, flag
   // sideEffects, or declare the contract in overrides/manual-contracts.js.
   // CONTRACT_ALLOW_WARNINGS=true is the local escape hatch while iterating.
-  if (summary.warning > 0 && process.env.CONTRACT_ALLOW_WARNINGS !== 'true') {
-    console.error(`[contract] ${summary.warning} warnings — blocking (fix, flag sideEffects, or declare in manual-contracts.js; CONTRACT_ALLOW_WARNINGS=true to bypass locally)`);
+  if (gate.warning > 0 && process.env.CONTRACT_ALLOW_WARNINGS !== 'true') {
+    console.error(`[contract] ${gate.warning} warnings — blocking (fix, flag sideEffects, or declare in manual-contracts.js; CONTRACT_ALLOW_WARNINGS=true to bypass locally)`);
     process.exit(1);
   }
   console.log('[contract] all tools pass');

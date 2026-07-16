@@ -34,7 +34,7 @@ const PATTERNS = [
   { label: '.groupBy',       re: /\.groupBy\(\s*['"]([a-z_][a-z0-9_.]*)['"]/gi, mode: 'col' },
   { label: '.increment',     re: /\.(?:increment|decrement)\(\s*['"]([a-z_][a-z0-9_]*)['"]/gi, mode: 'col' },
   { label: '.join',          re: /\.(?:join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\(\s*['"]([a-z_][a-z0-9_]*)(?:\s+as\s+([a-z_][a-z0-9_]*))?['"]\s*,\s*['"]([a-z_][a-z0-9_.]*)['"]\s*,\s*['"]([a-z_][a-z0-9_.]*)['"]/gi, mode: 'join' },
-  { label: 'db.raw',         re: /\bdb\.raw\(/g, mode: 'raw-flag' },
+  { label: 'db.raw',         re: /\b(?:db|trx|knex)\s*\.raw\(/g, mode: 'raw-flag' },
   // Object-alias form: db({ p: 'payments' }) / .from({ c: 'customers' }) /
   // .leftJoin({ e: 'estimates' }, ...). Group 1 = alias, group 2 = table.
   { label: 'obj-alias',      re: /\b(?:db\(|\.(?:from|into|join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\()\s*\{\s*([a-z_][\w]*)\s*:\s*['"]([a-z_][a-z0-9_]*)['"]\s*\}/gi, mode: 'obj-table' },

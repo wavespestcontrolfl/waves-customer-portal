@@ -22,6 +22,7 @@ const SONNET_BACKED = new Set([
   'run_price_lookup',
   'draft_sms_reply',
   'draft_review_reply',
+  'triage_lead', // spawns the lead-triage LLM call (ROUTES) — smoke must not spend model calls
 ]);
 
 function safeRequire(p) {

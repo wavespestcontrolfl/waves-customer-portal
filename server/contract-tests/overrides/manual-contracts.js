@@ -42,4 +42,5 @@ module.exports = {
   send_lead_response: { sideEffects: true, reason: 'sends SMS via Twilio, inserts lead_activities' },
   update_lead_pipeline: { sideEffects: true, reason: 'updates leads.pipeline stage, inserts lead_activities' },
   queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
+  save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
 };
