@@ -270,6 +270,16 @@ app.use('/api/ai/chat/report', (req, res, next) => {
   }
   next();
 });
+// Secure-card privacy headers must survive EVERY outcome — including the
+// GLOBAL /api limiter's 429s, which fire before the router's own header
+// middleware can run (Codex #2771 r7). Scoped ahead of the limiter; the
+// route's middleware still covers everything downstream.
+app.use('/api/public/secure-card', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex');
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -484,6 +494,9 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// "Secure your appointment" card-on-file capture page (appointment-card-
+// request funnel). Token-gated; unreachable until the funnel sends links.
+app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));

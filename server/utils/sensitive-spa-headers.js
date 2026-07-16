@@ -51,6 +51,14 @@ function isCardPath(reqPath = '') {
   return /^\/card\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public "secure your appointment" card-capture page — 64-hex bearer token
+// (appointment_card_requests.token) on a payment-adjacent surface, so the
+// shell must never be indexed/archived and must not leak the token via
+// Referer (matches the API route's headers in secure-card-public.js).
+function isSecureCardPath(reqPath = '') {
+  return /^\/secure\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 // Public tokened price-change notice page — 32-hex bearer token
 // (price_change_notices.notice_token) showing the customer's name and
 // billing amounts, so the shell must never be indexed/cached and must not
@@ -66,7 +74,7 @@ function applySensitiveSpaHeaders(reqPath, res) {
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -81,5 +89,6 @@ module.exports = {
   isServiceReportPath,
   isEstimatePath,
   isCardPath,
+  isSecureCardPath,
   isPriceChangeNoticePath,
 };
