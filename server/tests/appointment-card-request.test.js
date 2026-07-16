@@ -369,7 +369,7 @@ describe('the send', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('a failed sent marker escalates to the office instead of being swallowed', async () => {
+  test('a failed sent marker PARKS the claim and escalates to the office', async () => {
     mockTableHandlers.appointment_card_requests.update = (chain, patch) => {
       if (patch.sent_at) throw new Error('db down');
       return 1;
@@ -377,14 +377,29 @@ describe('the send', () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     // The send itself succeeded — the customer has the link.
     expect(res.action).toBe('sent');
-    // But the marker never landed, so a human is told before the lease
-    // could re-text a second bearer link.
+    // The claim is parked far in the future so the stale lease can never
+    // adopt it and re-text a second bearer link.
+    const parked = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.card_link_sent_at instanceof Date && p.card_link_sent_at.getTime() > Date.now() + 365 * 24 * 3600 * 1000);
+    expect(parked).toBeTruthy();
     expect(mockNotifyAdmin).toHaveBeenCalledWith(
       'billing',
       expect.stringContaining('marker failed'),
-      expect.anything(),
+      expect.stringContaining('parked'),
       expect.anything(),
     );
+  });
+
+  test('the template dark lever gates auto-secure enrollment too', async () => {
+    mockGetTemplate.mockResolvedValueOnce(null);
+    mockFindConsentedChargeableCard.mockResolvedValue({ id: 'pm-row-1', stripe_payment_method_id: 'pm_x' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('template_inactive');
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    expect(mockFindConsentedChargeableCard).not.toHaveBeenCalled();
+    mockFindConsentedChargeableCard.mockResolvedValue(null);
   });
 
   test('a FRESH claim (not stale) never gets adopted', async () => {
@@ -815,15 +830,29 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(heal).toBeTruthy();
   });
 
-  test('a consented saved card acquired after minting → secured with the method healed on', async () => {
+  test('a consented saved card acquired after minting → ENROLLED, then secured with the row healed', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-7', stripe_payment_method_id: 'pm_x7' });
+    // The request row already exists → the auto-secure insert conflicts and
+    // the heal path flips it to satisfied.
+    mockTableHandlers.appointment_card_requests.returning = () => [];
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
+    // Enrollment is the coverage, not the row (completion auto-charge reads
+    // active Auto Pay) — it MUST run before the heal.
+    expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-row-7' }));
     const heal = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
       .map(([, patch]) => patch)
       .find((p) => p.status === 'satisfied');
     expect(heal).toMatchObject({ payment_method_id: 'pm-row-7' });
+  });
+
+  test('a saved card whose enrollment is refused renders the form instead of lying', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValueOnce({ id: 'pm-row-7', stripe_payment_method_id: 'pm_x7' });
+    mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'ach_blocked' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    expect(mockCreateAppointmentCardSetupIntent).toHaveBeenCalled();
   });
 
   test('canceled intent replays walk the generation salt forward', async () => {

@@ -52,6 +52,12 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // older than this with no durable outcome marker belongs to a dead worker
 // and may be adopted by exactly one retrier (age-guarded atomic UPDATE).
 const STALE_CLAIM_MS = 10 * 60 * 1000;
+// Far-future sentinel that PARKS a send claim when the maybe-sent marker
+// cannot be written after a provider-accepted dispatch: staleness is an
+// age check, so a future stamp is permanently fresh and no lease can
+// re-text the visit. A parked claim is an office exception, not a state
+// the code ever un-parks.
+const CLAIM_PARK_DATE = new Date('2200-01-01T00:00:00Z');
 
 function isAppointmentCardRequestEnabled() {
   const flag = process.env.APPOINTMENT_CARD_REQUEST;
@@ -201,6 +207,15 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     if (!LIVE_VISIT_STATUSES.includes(visit.status)) return skip(`visit_not_live:${visit.status}`);
     const dateOnly = callBookingDateOnly(visit.scheduled_date);
     if (dateOnly && dateOnly < etDateString(new Date())) return skip('visit_in_past');
+
+    // The template is the second dark lever, and it gates EVERY side
+    // effect of this funnel — auto-secure enrollment included, not just
+    // the customer-visible text/link (Codex #2771 r8). Probe with fully-
+    // resolved dummy vars (getTemplate returns null when the row is
+    // missing or inactive); the real body renders later with the live
+    // token.
+    const templateActive = !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x' }));
+    if (!templateActive) return skip('template_inactive');
 
     // 1. Policy exemption.
     const exemption = await resolveExemption({ customerId: visit.customer_id, scheduledServiceId: visit.id });
@@ -401,13 +416,28 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visit.id}: ${err.message}`);
         }
       }
-      logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visit.id} — the send lease could re-text; alerting office`);
+      // PARK the claim so the stale lease can never adopt it (Codex #2771
+      // r8): staleness is an AGE check on card_link_sent_at, so pushing
+      // the stamp far into the future makes the claim permanently fresh —
+      // no retrier can re-text this visit even though the marker never
+      // landed. Best-effort (a different table than the failed write);
+      // the office alert below is the human backstop either way.
+      let parked = false;
+      try {
+        await db('scheduled_services')
+          .where({ id: visit.id, card_link_sent_at: stamp })
+          .update({ card_link_sent_at: CLAIM_PARK_DATE, updated_at: new Date() });
+        parked = true;
+      } catch (parkErr) {
+        logger.warn(`[appt-card-request] claim park failed for visit ${visit.id}: ${parkErr.message}`);
+      }
+      logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visit.id} (claim ${parked ? 'parked' : 'NOT parked'}) — alerting office`);
       try {
         await require('./notification-service').notifyAdmin(
           'billing',
           'Card-link sent marker failed',
-          'A secure-card SMS was dispatched but its sent marker could not be written — investigate this visit before the send lease expires (~10 min) or the customer may receive a second link.',
-          { link: '/admin/dispatch', metadata: { scheduled_service_id: visit.id } },
+          `A secure-card SMS was dispatched but its sent marker could not be written${parked ? ' (the send claim is parked — no automatic retry will re-text)' : ' AND the claim could not be parked — investigate before the send lease expires (~10 min) or the customer may receive a second link'}.`,
+          { link: '/admin/dispatch', metadata: { scheduled_service_id: visit.id, claim_parked: parked } },
         );
       } catch (alertErr) {
         logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
@@ -800,32 +830,34 @@ async function loadSecureCardPageData(token) {
   // Coverage re-check (Codex #2771 r7 P3): a customer who enrolled in Auto
   // Pay or saved a consented chargeable card AFTER this link was minted is
   // already covered — mirror the funnel's exemptions and show "secured"
-  // instead of asking for another card, healing the pending row to
-  // satisfied. Lookup failure renders the form (an extra saved card is a
-  // recoverable annoyance, a broken page is not).
+  // instead of asking for another card. Lookup failure renders the form
+  // (an extra saved card is a recoverable annoyance, a broken page is not).
   try {
     const { customerOnAutopay } = require('./autopay-eligibility');
     const customerRow = await db('customers').where({ id: request.customer_id }).first();
-    let savedMethod = null;
-    let covered = !!(customerRow && await customerOnAutopay(customerRow));
-    if (!covered) {
-      const { findConsentedChargeableCard } = require('./payment-method-consents');
-      savedMethod = await findConsentedChargeableCard(request.customer_id);
-      covered = !!savedMethod;
-    }
-    if (covered) {
+    if (customerRow && await customerOnAutopay(customerRow)) {
+      // Already enrolled with a chargeable method — heal and show secured.
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
-        .update({
-          status: 'satisfied',
-          ...(savedMethod ? {
-            payment_method_id: savedMethod.id,
-            stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
-          } : {}),
-          completed_at: new Date(),
-          updated_at: new Date(),
-        });
+        .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
       return { state: 'secured', ...base };
+    }
+    const { findConsentedChargeableCard } = require('./payment-method-consents');
+    const savedMethod = await findConsentedChargeableCard(request.customer_id);
+    if (savedMethod) {
+      // A consented saved card is only coverage once it's ENROLLED (Codex
+      // #2771 r8): completion auto-charge reads active Auto Pay, not this
+      // table — a satisfied row without enrollment would complete the
+      // visit with no charge while the page claims it's secured. Run the
+      // same enroll-first auto-secure the funnel uses; its conflict path
+      // heals this pending row to satisfied. A refused/failed enrollment
+      // falls through and renders the form.
+      const secured = await autoSecureFromSavedMethod({
+        visit: { id: request.scheduled_service_id, customer_id: request.customer_id },
+        savedMethod,
+        trigger: 'secure_page_coverage',
+      });
+      if (secured.action === 'auto_secured') return { state: 'secured', ...base };
     }
   } catch (err) {
     logger.warn(`[appt-card-request] page coverage re-check failed — rendering the form: ${err.message}`);
