@@ -78,7 +78,7 @@ const ENV_LABEL = IS_LOCAL_DB ? 'local' : 'remote';
 // public-quote.js, and any future customer-facing signup endpoint.
 const POST_BEEHIIV_CONSENT_SOURCES = new Set([
   'quote_wizard',           // public-quote.js /calculate consent dual-write
-  'quote_wizard_deferred',  // QuotePage.jsx result-other CTA
+  'quote_wizard_deferred',  // legacy quote-wizard result-other CTA
   'public_form',            // public-newsletter.js /subscribe default
   'website',                // newsletter.js legacy /subscribe default
   'public_subscribe',       // forward-looking

@@ -15,7 +15,7 @@ export const COLORS = {
   wavesBlue: '#009CDE',    // PMS 2925 — van body, section bg, links
   blueDark: '#065A8C',     // interstitial
   blueDeeper: '#1B2C5B',   // PMS 2766 marketing-site navy — RESERVED for the marketing-mirror
-                           // surfaces only (QuotePage funnel, admin ProjectsPage, .btn specs below).
+                           // surfaces only (admin ProjectsPage and .btn specs below).
   glassNavy: '#04395E',    // THE customer-surface navy (owner ruling 2026-07-12): glass navy is
                            // authoritative everywhere on `/` customer pages. New customer code
                            // uses glassNavy, never blueDeeper.

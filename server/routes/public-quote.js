@@ -534,8 +534,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // sees a ±5% range (variance_low/high below) so AI misclassification has
     // headroom. Zero retroactive impact: no quote_wizard leads existed when
     // this landed.
-    // The confirm step seeds homeSqFt to a synthetic 2,000 default when the
-    // lookup didn't measure the building (QuotePage.jsx). Commercial PEST prices
+    // The website estimator's confirm step seeds homeSqFt to a synthetic 2,000 default when the
+    // lookup didn't measure the building. Commercial PEST prices
     // off the BUILDING footprint (not lot-derivable), so flag whether we have a
     // MEASURED building size — priceCommercialPest falls back to a manual quote
     // when false rather than auto-pricing off the synthetic default. (Residential
@@ -1378,8 +1378,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       } catch (e) { logger.error(`[public-quote] Customer SMS failed: ${e.message}`); }
     }
 
-    // Newsletter enrollment — gated on explicit opt-in checkbox from the quote
-    // wizard (QuotePage.jsx). Public quote emails are user-provided and
+    // Newsletter enrollment — gated on explicit opt-in from a public quote
+    // client. Public quote emails are user-provided and
     // unverified, so they go through the same double-opt-in path as the
     // public newsletter form. The promotional new_lead automation is queued
     // only after the subscriber confirms.
@@ -1506,8 +1506,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
   }
 });
 
-// Upsell labels: client sends IDs, server owns the copy that hits the lead row
-// and the admin SMS. Keep in sync with UPSELL_OPTIONS in QuotePage.jsx.
+// Upsell labels: legacy clients send IDs; the server owns the copy that hits
+// the lead row and admin SMS while already-open portal sessions age out.
 const UPSELL_LABELS = {
   mosquito: 'Mosquito & No-See-Um Control',
   lawn_care: 'Lawn Care',
