@@ -14,11 +14,21 @@
  * column is treated lawn area, not the building footprint (Codex P1).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, cleanup, screen, waitFor } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
 
 vi.mock('./WdoIntelligenceBar', () => ({ default: () => null }));
 vi.mock('./DictationButton', () => ({ default: () => null }));
 vi.mock('../AddressAutocomplete', () => ({ default: () => null }));
+// jsdom has no canvas — the real pad's initCanvas would throw. The mock
+// exposes the wiring the sign-step tests pin: which project it signs, the
+// prefill, and the onChanged refresh hook.
+vi.mock('./WdoSignaturePad', () => ({
+  default: (props) => (
+    <div data-testid="sign-pad" data-project-id={props.projectId} data-signer={props.defaultSignerName} data-idcard={props.defaultSignerIdCard}>
+      <button type="button" onClick={props.onChanged}>mock-sign-saved</button>
+    </div>
+  ),
+}));
 
 import CreateProjectModal, { wdoFeeSeedFromVisit } from './CreateProjectModal';
 import * as projectTypesModule from '../../../../server/services/project-types.js';
@@ -171,5 +181,93 @@ describe('wdoFeeSeedFromVisit', () => {
 
   it('passes an explicit $0 booking through as numeric 0 (no-charge)', () => {
     expect(wdoFeeSeedFromVisit({ estimatedPrice: 0, serviceAddons: [] })).toBe(0);
+  });
+});
+
+describe('CreateProjectModal WDO one-page create-and-sign', () => {
+  let detailPayload;
+
+  beforeEach(() => {
+    detailPayload = {
+      wdo_applicator: { name: 'Adam Benetti', idCardNo: 'JE362022' },
+      wdo_signature: null,
+    };
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'p-1', project_type: 'wdo_inspection' } });
+      }
+      if (u.includes('/admin/projects/p-1')) return jsonResponse({ project: detailPayload });
+      return jsonResponse({});
+    }));
+  });
+
+  async function saveIntoSignStep(callbacks) {
+    renderWdoSheet(callbacks);
+    await waitFor(() => expect(field('inspection_fee')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Save Report' }));
+    await screen.findByText('✓ Report draft saved');
+  }
+
+  it('holds the sheet open on the signature step after save — callbacks deferred', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    // The parent (which unmounts the modal from onCreated) must not have
+    // been told yet — the tech is still signing.
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The pad signs the just-created project with the report page's prefill.
+    const pad = screen.getByTestId('sign-pad');
+    expect(pad.getAttribute('data-project-id')).toBe('p-1');
+    expect(pad.getAttribute('data-signer')).toBe('Adam Benetti');
+    expect(pad.getAttribute('data-idcard')).toBe('JE362022');
+  });
+
+  it('"Sign later" leaves the saved draft and reports the project to the parent', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    expect(screen.getByText("Unsigned reports can’t be sent yet.")).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign later' }));
+
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a saved signature flips the exit to Done via the refetched metadata', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    // The pad saved a signature server-side; its onChanged triggers the
+    // metadata refetch, which now reports signed.
+    detailPayload = {
+      wdo_applicator: { name: 'Adam Benetti', idCardNo: 'JE362022' },
+      wdo_signature: { signed: true, signer_name: 'Adam Benetti' },
+    };
+    fireEvent.click(screen.getByText('mock-sign-saved'));
+
+    const done = await screen.findByRole('button', { name: 'Done' });
+    expect(screen.queryByText("Unsigned reports can’t be sent yet.")).toBeNull();
+    fireEvent.click(done);
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closing from the sign step still reports the created project', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
