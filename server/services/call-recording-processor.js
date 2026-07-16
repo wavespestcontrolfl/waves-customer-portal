@@ -2025,7 +2025,18 @@ function attachCandidateMatchesProperty(candidate, linkage) {
     // Same street ≠ same unit (Codex #2771 r2): a multi-unit address must
     // agree on line2 too — Apt A's booking is not evidence for a call
     // about Apt B, and a one-sided unit can't confirm the match.
-    return norm(candidate?.service_address_line2) === norm(linkage?.address?.line2);
+    if (norm(candidate?.service_address_line2) !== norm(linkage?.address?.line2)) return false;
+    // Same street name ≠ same property (Codex #2771 r3): "123 Main St"
+    // exists in Bradenton AND Venice — city and ZIP must agree wherever
+    // both sides carry them (both-empty passes; a conflict refuses).
+    const candCity = norm(candidate?.service_address_city);
+    const linkCity = norm(linkage?.address?.city);
+    if (candCity && linkCity && candCity !== linkCity) return false;
+    const zip5 = (v) => String(v || '').trim().slice(0, 5);
+    const candZip = zip5(candidate?.service_address_zip);
+    const linkZip = zip5(linkage?.address?.zip);
+    if (candZip && linkZip && candZip !== linkZip) return false;
+    return true;
   }
   return !candProp && !linkProp && !candAddr && !linkAddr;
 }
@@ -6757,7 +6768,25 @@ const CallRecordingProcessor = {
                 const attachable = await findAttachableCallAppointment({
                   customerId, scheduledDate, serviceType, trx,
                 });
-                if (attachable.row && attachCandidateMatchesProperty(attachable.row, propertyLinkage)) {
+                const attachMatch = attachable.row && attachCandidateMatchesProperty(attachable.row, propertyLinkage)
+                  ? attachable.row
+                  : null;
+                if (attachMatch && attachMatch.status !== 'confirmed') {
+                  // A matching PENDING row is an office hold/tentative slot
+                  // (Codex #2771 r3): attaching would mark the call handled
+                  // while the visit stays unconfirmed and unarmed (the reuse
+                  // path skips confirmation + reminder side effects), and
+                  // inserting would double-book it. A human decides.
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: attachMatch.id,
+                      existingStatus: attachMatch.status,
+                      existingService: attachMatch.service_type,
+                    },
+                  };
+                }
+                if (attachMatch) {
                   const attachNote = `Attached from phone call — Call SID: ${callSid}.`;
                   // Claim-based attach (Codex #2771): two concurrent calls
                   // can both read this row while source_call_log_id is still

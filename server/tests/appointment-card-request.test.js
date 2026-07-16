@@ -501,9 +501,46 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
       paymentMethodId: 'pm-row-9',
       source: 'save_card_consent',
     }));
-    const update = touches('appointment_card_requests')
-      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))[0];
-    expect(update[1]).toMatchObject({ status: 'completed', stripe_payment_method_id: 'pm_stripe_9', payment_method_id: 'pm-row-9' });
+    const updates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    // Claimed pending → completing BEFORE the side effects, completed after.
+    expect(updates[0]).toMatchObject({ status: 'completing' });
+    expect(updates.find((p) => p.status === 'completed')).toMatchObject({
+      stripe_payment_method_id: 'pm_stripe_9',
+      payment_method_id: 'pm-row-9',
+    });
+  });
+
+  test('lost completion claim (webhook overlap) → no side effects, retryable', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'completion_in_progress' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+  });
+
+  test('lost claim whose winner already finished → idempotent alreadyCompleted', async () => {
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      return reads === 1 ? { ...REQUEST } : { ...REQUEST, status: 'completed' };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  test('a side-effect failure reverts the claim so retries can complete', async () => {
+    mockSavePaymentMethod.mockRejectedValueOnce(new Error('stripe down'));
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'completion_failed' });
+    const updates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(updates.some((p) => p.status === 'completing')).toBe(true);
+    expect(updates.some((p) => p.status === 'pending')).toBe(true);
   });
 
   test('already completed → idempotent ok, nothing re-runs', async () => {
@@ -535,9 +572,10 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
     expect(res).toEqual({ ok: true });
     expect(mockNotifyAdmin).toHaveBeenCalled();
-    const update = touches('appointment_card_requests')
-      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))[0];
-    expect(update[1].status).toBe('completed');
+    const updates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(updates.some((p) => p.status === 'completed')).toBe(true);
   });
 
   test('unverifiable intent never writes anything', async () => {
@@ -574,6 +612,14 @@ describe('completeSecureCardCaptureFromWebhook — durability backstop', () => {
     mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completed' });
     const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
     expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  test('a mid-completion row is retryable, never acked (the retry is durable)', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing' });
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: false, code: 'completion_in_progress' });
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 

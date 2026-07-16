@@ -1408,6 +1408,27 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
     )).toBe(true);
   });
 
+  test('same street line in a different city/ZIP refuses (multi-property, no unit)', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_city: 'Bradenton' },
+      { address: { line1: '123 Main St', city: 'Venice' } },
+    )).toBe(false);
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_zip: '34205' },
+      { address: { line1: '123 Main St', zip: '34293-1234' } },
+    )).toBe(false);
+    // ZIP+4 vs 5-digit of the SAME zip agrees; matching city agrees.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_city: 'Venice', service_address_zip: '34293' },
+      { address: { line1: '123 Main St', city: 'venice', zip: '34293-1234' } },
+    )).toBe(true);
+    // City/ZIP missing on one side is unrecorded data, not a conflict.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '123 Main St', city: 'Venice' } },
+    )).toBe(true);
+  });
+
   test('no evidence on either side = both resolve to the primary property', () => {
     expect(attachCandidateMatchesProperty({}, { propertyId: null, address: null })).toBe(true);
   });

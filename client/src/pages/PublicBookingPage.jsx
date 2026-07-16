@@ -1067,6 +1067,13 @@ export default function PublicBookingPage() {
                 </div>
                 <a
                   href={secureCardUrl}
+                  // _top, not self (Codex #2771 r3): /book embeds in the
+                  // marketing-site iframe under the embeddable helmet policy,
+                  // but /secure/:token serves under strictHelmet and is
+                  // refused inside a frame — the CTA must break out to the
+                  // top window (a no-op when not embedded).
+                  target="_top"
+                  rel="noopener"
                   data-glass-accent=""
                   style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'center',

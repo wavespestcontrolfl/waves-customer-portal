@@ -477,6 +477,10 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
   if (!requestId) return { ok: false, code: 'no_request_id' };
   const request = await db('appointment_card_requests').where({ id: requestId }).first();
   if (!request) return { ok: false, code: 'not_found' };
+  // A row mid-completion (the page POST holds the claim) is NOT done —
+  // ack-and-dropping here would burn the durable retry if that attempt
+  // then fails and reverts. Report retryable; the webhook branch throws.
+  if (request.status === 'completing') return { ok: false, code: 'completion_in_progress' };
   if (request.status !== 'pending') return { ok: true, alreadyCompleted: true };
   if (!secureCardIntentMatchesRequest(setupIntent, request.id)) {
     return { ok: false, code: 'intent_mismatch' };
@@ -526,6 +530,35 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     return { ok: false, code: 'completion_failed' };
   }
 
+  // Claim the request BEFORE the side effects run (Codex #2771 r3): the
+  // page POST and the setup_intent.succeeded webhook can overlap — the
+  // save is idempotent, but recordConsent / enrollConsentedMethod would
+  // duplicate consent+autopay audit rows (and enrollment emails when that
+  // gate is on). pending → completing is the mutex; the loser sees the
+  // fresh status and either acks (already done) or retries
+  // (completion_in_progress → the webhook branch throws so Stripe's retry
+  // schedule re-runs it; the page returns a retryable 409).
+  const claimed = await db('appointment_card_requests')
+    .where({ id: request.id, status: 'pending' })
+    .update({ status: 'completing', updated_at: new Date() });
+  if (claimed !== 1) {
+    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status');
+    if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
+    return { ok: false, code: 'completion_in_progress' };
+  }
+  // Any failure below puts the row back so a retry (page re-POST or
+  // webhook redelivery) can complete — a stranded 'completing' would ack
+  // the webhook forever while nothing was saved.
+  const revertClaim = async () => {
+    try {
+      await db('appointment_card_requests')
+        .where({ id: request.id, status: 'completing' })
+        .update({ status: 'pending', updated_at: new Date() });
+    } catch (revertErr) {
+      logger.warn(`[appt-card-request] completion claim revert failed for request ${request.id}: ${revertErr.message}`);
+    }
+  };
+
   try {
     // Idempotent save: stripe_payment_method_id is unique — a retry after a
     // partial first attempt continues with the existing row.
@@ -533,6 +566,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     if (saved && String(saved.customer_id) !== String(request.customer_id)) {
       logger.warn(`[appt-card-request] pm ownership mismatch: pm ${stripePaymentMethodId} belongs to ${saved.customer_id}, request customer ${request.customer_id}`);
       await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: 'pm_ownership_mismatch' });
+      await revertClaim();
       return { ok: false, code: 'pm_ownership_mismatch' };
     }
     if (!saved) {
@@ -576,7 +610,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     }
 
     await db('appointment_card_requests')
-      .where({ id: request.id, status: 'pending' })
+      .where({ id: request.id, status: 'completing' })
       .update({
         status: 'completed',
         stripe_setup_intent_id: setupIntentId,
@@ -590,6 +624,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   } catch (err) {
     logger.error(`[appt-card-request] capture completion failed for request ${request.id}: ${err.message}`);
     await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: err.message });
+    await revertClaim();
     return { ok: false, code: 'completion_failed' };
   }
 }

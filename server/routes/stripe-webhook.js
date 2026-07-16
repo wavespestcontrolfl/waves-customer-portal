@@ -2557,8 +2557,8 @@ async function handleSetupIntentSucceeded(setupIntent) {
   if (setupIntent.metadata?.purpose === 'appointment_card_request') {
     const AppointmentCardRequests = require('../services/appointment-card-request');
     const result = await AppointmentCardRequests.completeSecureCardCaptureFromWebhook(setupIntent);
-    if (result?.code === 'completion_failed') {
-      throw new Error(`appointment card capture ${setupIntent.id} completion failed — retry`);
+    if (result?.code === 'completion_failed' || result?.code === 'completion_in_progress') {
+      throw new Error(`appointment card capture ${setupIntent.id} ${result.code} — retry`);
     }
     return;
   }
