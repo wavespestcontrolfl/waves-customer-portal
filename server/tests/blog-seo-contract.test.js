@@ -270,4 +270,22 @@ describe('blog SEO contract helpers', () => {
     expect(practices.whenToCallPro).toBeTruthy();
     expect(practices.wavesApproach).toBeTruthy();
   });
+
+  test('"whenever" does not satisfy the what-not-to-do bucket (codex r1)', () => {
+    const { extractPestPractices } = require('../services/content/blog-seo-contract')._internals;
+    const noAvoidance = extractPestPractices('Call whenever activity returns and schedule a visit.');
+    expect(noAvoidance.whatNotToDo).toHaveLength(0);
+    const realNever = extractPestPractices('Never spray baseboards blindly.');
+    expect(realNever.whatNotToDo).toContain('never');
+  });
+
+  test('default Home breadcrumb keeps the root URL as "/" (codex r1)', () => {
+    const bare = draft();
+    delete bare.seo_contract;
+    const { contract } = buildBlogSeoContract({
+      draft: bare,
+      brief: { page_type: 'supporting-blog', service: 'pest' },
+    });
+    expect(contract.breadcrumbs[0]).toEqual({ name: 'Home', url: '/' });
+  });
 });

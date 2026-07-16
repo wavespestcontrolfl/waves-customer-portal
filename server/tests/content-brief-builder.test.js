@@ -441,6 +441,12 @@ describe('_internalLinksFor conversion link', () => {
     expect(builder._internalLinksFor({ city: null, service: 'tree-shrub' }, 'supporting-blog')).toContain('/contact/');
   });
 
+  test('verbatim facts-bank service ids get the conversion link too (codex r1)', () => {
+    expect(builder._internalLinksFor({ city: null, service: 'pest-control' }, 'supporting-blog')).toContain('/pest-control-calculator/');
+    expect(builder._internalLinksFor({ city: null, service: 'lawn-care' }, 'supporting-blog')).toContain('/contact/');
+    expect(builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog')).toContain('/contact/');
+  });
+
   test('non-blog page types keep their existing link shape', () => {
     const links = builder._internalLinksFor({ city: 'Bradenton', service: 'pest' }, 'customer-question');
     expect(links).not.toContain('/pest-control-calculator/');

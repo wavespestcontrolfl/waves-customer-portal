@@ -355,7 +355,12 @@ function extractPestPractices(markdown = '') {
     identification: matchSection(body, /\b(what you'?re seeing|identify|identification|signs of|what this means|how to tell|what (?:it|they) looks? like|telltale|recognize)\b/),
     swflContext: matchSection(body, /\b(swfl|southwest florida|sarasota|bradenton|lakewood ranch|venice|parrish|palmetto|north port|afternoon storms?|sandy soil|humidity)\b/),
     homeownerChecks: collectSignals(body, ['check', 'look for', 'inspect', 'confirm', 'watch for', 'walk the', 'shine a flashlight']),
-    whatNotToDo: collectSignals(body, ['avoid', 'do not', "don't", 'what not to do', 'never ', 'skip the', 'resist the']),
+    // 'never' needs a word boundary — a plain substring term would be
+    // satisfied by "whenever", filling the bucket with no avoidance guidance.
+    whatNotToDo: [
+      ...collectSignals(body, ['avoid', 'do not', "don't", 'what not to do', 'skip the', 'resist the']),
+      ...(/\bnever\b/.test(body) ? ['never'] : []),
+    ],
     whenToCallPro: matchSection(body, /\b(when to call|call waves|call a pro|professional|schedule|inspection|exterminator|pest control company)\b/),
     wavesApproach: matchSection(body, /\b(waves pest control|waves can|our approach|we inspect|we treat|we start|our technicians?)\b/),
   };
@@ -476,11 +481,17 @@ function normalizeSlug(value) {
 function normalizeUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
+  let normalized;
   if (/^https?:\/\//i.test(raw)) {
-    try { return normalizeSlug(new URL(raw).pathname); } catch { return ''; }
+    try { normalized = normalizeSlug(new URL(raw).pathname); } catch { return ''; }
+  } else if (!raw.startsWith('/')) {
+    return '';
+  } else {
+    normalized = normalizeSlug(raw);
   }
-  if (!raw.startsWith('/')) return '';
-  return normalizeSlug(raw);
+  // normalizeSlug('/') yields '//' (strip-then-rewrap) — keep the site root
+  // as '/' so the default Home breadcrumb matches the layout's visible link.
+  return normalized === '//' ? '/' : normalized;
 }
 
 function urlPath(value) {

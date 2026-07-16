@@ -327,6 +327,12 @@ const SERVICE_CONVERSION_LINK = {
   specialty: '/pest-control-calculator/',
   lawn: '/contact/',
   'tree-shrub': '/contact/',
+  // Verbatim facts-bank service ids the miner may emit unmapped
+  // (facts-sufficiency KNOWN_SERVICE_IDS) — without these aliases those
+  // opportunities would keep missing the conversion link.
+  'pest-control': '/pest-control-calculator/',
+  'lawn-care': '/contact/',
+  'tree-shrub-care': '/contact/',
 };
 
 // ── main API ────────────────────────────────────────────────────────
