@@ -141,6 +141,7 @@ PAID ADS RULES:
 - Flag campaigns where ROAS is declining week-over-week
 - Identify opportunities where impression share is being lost on profitable campaigns
 - Consider capacity — don't recommend scaling ads in areas that are already at 90%+ utilization
+- For an auto-applicable action, "campaign" MUST be the EXACT campaign_name from CAMPAIGN PERFORMANCE, and "apply_value" MUST be set so the change can be applied with one click: for increase_budget/decrease_budget it is the new daily budget in dollars (a number, e.g. 30); for change_mode it is one of "base"|"spent"|"stop". Omit apply_action (or use a non-budget action) when you can't tie the recommendation to a specific campaign and value.
 
 SEO/GSC RULES:
 - Distinguish branded (people already searching "Waves") from non-branded (real organic market capture)
@@ -160,7 +161,7 @@ BUSINESS CONTEXT:
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}
 - Competes with Turner, Nozzle Nolen, HomeTeam in SWFL market
 
-Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "name or page/query", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
+Return JSON: { "date": "YYYY-MM-DD", "overall_assessment": "2-3 sentence summary covering both paid and organic", "grade": "A/B/C/D/F", "recommendations": [{"priority": "high/medium/low", "campaign": "EXACT campaign_name for budget/mode actions, else page/query", "action": "specific action", "reasoning": "why", "estimated_impact": "$X/week or X% improvement", "apply_action": "increase_budget|decrease_budget|add_negative|change_mode|adjust_bid|review_landing_page|expand_keywords|optimize_content|update_meta|add_schema|gbp_action", "apply_value": "REQUIRED for increase_budget/decrease_budget (new daily budget in dollars, a number) and change_mode (base|spent|stop); omit otherwise"}], "waste_alerts": [{"search_term": "", "spend": 0, "conversions": 0, "action": "add_negative"}], "scaling_opportunities": [{"campaign": "", "current_budget": 0, "suggested_budget": 0, "headroom_reason": ""}], "capacity_warnings": [{"area": "", "utilization": 0, "recommendation": ""}], "insights": ["insight1", "insight2"], "seo_insights": [{"type": "opportunity|decline|technical|gbp", "detail": "specific finding", "action": "what to do"}] }`,
 
         messages: [{
           role: 'user',
@@ -243,6 +244,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
           action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
           reasoning: 'Underperforming campaign burning budget',
           apply_action: 'change_mode',
+          apply_value: 'stop',
         });
       } else if (c.last7d.lostISBudget > 20 && c.last7d.roas >= minRoas) {
         recommendations.push({

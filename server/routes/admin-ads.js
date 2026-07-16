@@ -522,33 +522,54 @@ router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/admin/ads/advisor/apply — apply a recommendation
+// Only budget/mode recommendations map to an automated change; everything else
+// (add_negative, bid/keyword/SEO/GBP actions) is advisory and returns
+// applied:false so the UI never claims an action it didn't take. Applies only
+// when the campaign resolves and a concrete value is present; increments the
+// day's applied_count only on a genuine apply.
 router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
 
-    let result;
-    switch (action) {
-      case 'increase_budget':
-      case 'decrease_budget':
-        result = await getBudgetManager().setBudget(campaignId, value, reason || `Advisor: ${action}`);
-        break;
-      case 'change_mode':
-        result = await getBudgetManager().setMode(campaignId, value, reason || `Advisor: set ${value}`);
-        break;
-      case 'add_negative':
-        // Store the negative keyword request (actual Google Ads API integration later)
-        result = { action: 'add_negative', terms: value, status: 'queued', note: 'Add these as negative keywords in Google Ads' };
-        break;
-      default:
-        result = { action, status: 'noted', note: 'Manual action required' };
+    async function resolveCampaign() {
+      if (campaignId) return db('ad_campaigns').where({ id: campaignId }).first();
+      if (campaignName) {
+        return db('ad_campaigns').whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()]).first();
+      }
+      return null;
     }
 
-    // Increment applied count for today's report
+    let result;
+    if (action === 'increase_budget' || action === 'decrease_budget') {
+      const campaign = await resolveCampaign();
+      if (!campaign) {
+        return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
+      }
+      const amount = toFiniteNumber(value);
+      if (!(amount > 0)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete target budget — set the budget manually.' });
+      }
+      result = await getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`);
+    } else if (action === 'change_mode') {
+      const campaign = await resolveCampaign();
+      if (!campaign) {
+        return res.status(422).json({ applied: false, error: `Couldn't find a campaign named "${campaignName || ''}" to apply this to — adjust it manually.` });
+      }
+      if (!['base', 'spent', 'stop'].includes(value)) {
+        return res.status(422).json({ applied: false, error: 'This recommendation has no concrete mode (base/spent/stop) — set the mode manually.' });
+      }
+      result = await getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`);
+    } else {
+      // add_negative / adjust_bid / SEO / GBP / etc. — no automated action yet.
+      return res.json({ applied: false, manual: true, note: 'This recommendation needs a manual change (no automated action for it yet).' });
+    }
+
+    // Count only genuinely-applied actions against today's report.
     await db('ad_advisor_reports')
       .where({ date: etDateString() })
       .increment('applied_count', 1);
 
-    res.json({ success: true, result });
+    res.json({ applied: true, result });
   } catch (err) { next(err); }
 });
 
