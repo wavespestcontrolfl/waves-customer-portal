@@ -769,12 +769,15 @@ async function markPrTerminal(prNumber, status, injectedDb = null) {
     // its pre-push guard) between the two — with the upsert, whichever of
     // the stamp and the first save commits first wins, and saveState's
     // status-guarded update then sees the terminal row and aborts the round.
+    // 'merged' is permanent (merges are irreversible); 'closed' may only be
+    // UPGRADED to 'merged' (a closed PR can be reopened and later merged).
     const res = await dbc.raw(
       `INSERT INTO codex_remediation_state (pr_number, status, rounds, created_at, updated_at)
        VALUES (?, ?, 0, NOW(), NOW())
        ON CONFLICT (pr_number) DO UPDATE
          SET status = EXCLUDED.status, updated_at = NOW()
-       WHERE codex_remediation_state.status NOT IN ('merged', 'closed')`,
+       WHERE codex_remediation_state.status <> 'merged'
+         AND (codex_remediation_state.status <> 'closed' OR EXCLUDED.status = 'merged')`,
       [n, status],
     );
     return { updated: res?.rowCount ?? 0 };
@@ -836,6 +839,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+
+  if (state.status === 'closed') {
+    // A 'closed' tombstone can go stale: PRs can be REOPENED, and this code
+    // only ever runs for a merge-blocked OPEN PR — so the observation in
+    // hand contradicts the tombstone. Re-arm with a direct CAS ('merged'
+    // stays permanent; saveState's terminal guard is deliberately bypassed
+    // here because this is the one sanctioned closed→live transition).
+    await db('codex_remediation_state')
+      .where({ pr_number: prNumber, status: 'closed' })
+      .update({ status: 'active', rounds: 0, park_reason: null, parked_head_sha: null, updated_at: new Date() });
+    state.status = 'active';
+    state.rounds = 0;
+    logger.info(`[codex-remediation] re-armed closed-tombstoned PR #${prNumber}: PR observed open again (reopened)`);
+  }
 
   if (state.status === 'parked') {
     // A park is a verdict on the head it was rendered against. If the branch

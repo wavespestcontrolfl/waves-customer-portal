@@ -75,7 +75,9 @@ function makeDb(initial = {}) {
       t.push({ pr_number: n, status, rounds: 0 });
       return { rowCount: 1 };
     }
-    if (['merged', 'closed'].includes(row.status)) return { rowCount: 0 };
+    // merged permanent; closed only upgradeable to merged
+    if (row.status === 'merged') return { rowCount: 0 };
+    if (row.status === 'closed' && status !== 'merged') return { rowCount: 0 };
     row.status = status;
     return { rowCount: 1 };
   };
@@ -1427,9 +1429,13 @@ describe('markPrTerminal', () => {
     expect(r1.updated).toBe(1);
     expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 377).status).toBe('merged');
 
+    // closed → merged is the one sanctioned terminal upgrade (a reopened
+    // PR can merge); merged stays permanent.
     const r2 = await rem.markPrTerminal(375, 'merged', db);
-    expect(r2.updated).toBe(0);
-    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 375).status).toBe('closed');
+    expect(r2.updated).toBe(1);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 375).status).toBe('merged');
+    expect((await rem.markPrTerminal(377, 'closed', db)).updated).toBe(0);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 377).status).toBe('merged');
   });
 
   test('tombstones a missing row so an in-flight round cannot recreate live telemetry', async () => {
@@ -1569,5 +1575,22 @@ describe('post-push PR revalidation', () => {
     expect(row.status).toBe('parked');
     // Parked on the PUSHED head so our own commit can't self-re-arm the loop.
     expect(row.parked_head_sha).toBe('newcommit999aaa');
+  });
+});
+
+// PRs can be REOPENED: a 'closed' tombstone must not permanently disable
+// remediation for a PR that is verifiably open again (codex r-local).
+describe('closed-tombstone reopen re-arm', () => {
+  test('a remediation round on a reopened PR re-arms the closed row and proceeds', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: CTX.prNumber, status: 'closed', rounds: 2, park_reason: 'x' }],
+    });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
+    expect(r.round).toBe(1); // fresh rounds after re-arm
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('remediating');
   });
 });
