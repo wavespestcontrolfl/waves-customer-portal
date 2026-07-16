@@ -65,8 +65,8 @@ const SERVICE_FAMILIES = [
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
   // palm(?! rat| injection): "palm rats" are roof rats (rodent) and palm
   // injection is its own project type — neither is tree & shrub care.
-  { key: 'palm_injection', label: 'Palm Injection', re: /\bpalm\s+injections?\b|\btrunk\s+injections?\b/i },
-  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+(?:rats?|injections?))/i },
+  { key: 'palm_injection', label: 'Palm Injection', re: /\bpalm(?:\s+tree)?\s+injections?\b|\btrunk\s+injections?\b/i },
+  { key: 'tree_shrub', label: 'Tree & Shrub Care Service', re: /\btrees?\b(?!\s+injections?)|\bshrubs?\b|\bornamentals?\b|\bpalms?\b(?!\s+(?:rats?|injections?|tree\s+injections?))/i },
   // midges / no-see-ums are treated by the mosquito program in this repo
   { key: 'mosquito', label: 'Mosquito Control Service', re: /\bmosquito(?:es|s)?\b|\bmidges?\b|\bno[-\s]?see[-\s]?ums?\b/i },
   { key: 'termite', label: 'Termite Service', re: /\btermites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b/i },
@@ -83,7 +83,7 @@ const SERVICE_FAMILIES = [
 // "liquid termite …", "treat the termites", product/method names) — loose
 // proximity windows made "pest treatment plus a termite inspection" read as
 // termite work (codex P1).
-const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage|bonds?|warrant(?:y|ies))\b/i;
+const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid|spot)\s+termite\b|\btermite\s+(?:bait(?:ing|s)?|trench\w*|foam\w*|fumigat\w*|tent\w*|barrier|perimeter)\b|\bbait\s+stations?\s+for\s+(?:the\s+)?(?:\w+\s+){0,2}termites?\b|\btermites?\s+\w+\s+bait\s+stations?\b|\b(?:treat(?:ing|ment)?s?|kill(?:ing)?|get\s+rid\s+of)\s+(?:for\s+)?(?:the\s+)?(?:(?:drywood|subterranean|formosan|dampwood|flying|swarming)\s+)?termites?\b|\btent\w*\s+(?:for\s+)?termites?\b|\btermidor\b|\btermiticide\b|\bpre[-\s]?slab\b|\bpreslab\b|\btermite\s+service\b|\bbora[-\s]?care\b|\bborate\b|\bwood\s+treatment\b|\btermites?\s+(?:control|protection|monitor\w*|prevention|program|plan|coverage|bonds?|warrant(?:y|ies))\b|\btermites?\s+inspections?\s*(?:and|&|\+|plus|\/)\s*treat\w*/i;
 // ("termite service" — incl. the canonical "+ Termite Service" tail the V2
 // backfill carries forward — counts as work: it only ever got composed
 // because treatment wording passed this gate on the original scan, and a
@@ -107,7 +107,7 @@ const TERMITE_TREATMENT_RE = /\btermites?\s+(?:pre[-\s]?)?treat\w*\b|\b(?:liquid
 const LOC_ARTICLE = '(?:(?:the|my|our|his|her|their|a|an|some)\\s+)?';
 const LOC_NOUN = '(?:front\\s+|back\\s+)?(?:palm\\s+)?(?:lawns?|yards?|grass|gardens?|kitchens?|houses?|homes?|garages?|attics?|bathrooms?|bedrooms?|lanais?|porch(?:es)?|patios?|walls?|ceilings?|crawl\\s?spaces?|trees?|shrubs?|bush(?:es)?|palms?)';
 const LOCATION_PHRASE_RE = new RegExp(
-  `\\b(?:in|on|around|near|under|inside|behind|throughout)\\s+${LOC_ARTICLE}${LOC_NOUN}`
+  `\\b(?:in|on|around|near|by|from|under|inside|behind|throughout)\\s+${LOC_ARTICLE}${LOC_NOUN}`
   + `(?:\\s+(?:and|or|&)\\s+${LOC_ARTICLE}${LOC_NOUN})*\\b`,
   'gi',
 );
@@ -160,7 +160,7 @@ function stripLocationPhrases(s) {
 // bare comma does NOT end the negation (that's how lists were leaking), but
 // a comma followed by a non-list continuation like "just …" reads as a new
 // segment via the contrast split below.
-const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
+const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just|sure)\b)|without|never|don['’]?t\s+(?:want|need)|doesn['’]?t\s+(?:want|need)|no\s+longer\s+(?:wants?|needs?)|not\s+interested\s+in|skip(?:ping)?|declined?)\b/i; // no(?!-see): "no-see-ums" is a pest; not(?! only|just): "not only/just X but also Y" requests BOTH
 
 // Comparison declines ("instead of lawn care", "rather than mosquito
 // service") scope only to their own clause — a comma ends them, so
@@ -182,7 +182,7 @@ function stripComparedAway(s) {
 }
 // `except` is NOT here: it EXCLUDES what follows (handled by
 // COMPARED_AWAY_RE), unlike but/however which rescue a positive (codex r8).
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:needs?|wants?|do)|needs?|wants?)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)
@@ -200,13 +200,13 @@ function stripNegatedClauses(s) {
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
 const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|ticks?|roach(?:es)?|ants?|(?:wasps?|bees?|hornets?|yellow\s?jackets?)(?:\s+nests?)?|stinging\s+insects?|wdo)\s+exterminat\w*/gi;
-const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b|stinging\s+insects?\b)/gi;
+const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b|stinging\s+insects?\b|fleas?\b|ticks?\b|roach(?:es)?\b|ants?\b)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
 // "palm injection for my palms" / "trunk injection into the palms" — the
 // trailing target noun is part of the SAME injection request, not a second
 // tree & shrub service (codex r7). Collapse the target phrase before scanning.
-const PALM_INJECTION_TARGET_RE = /\b((?:palm|trunk)\s+injections?)\s+(?:for|on|in|into)\s+(?:the\s+|my\s+|our\s+)?palms?\b/gi;
+const PALM_INJECTION_TARGET_RE = /\b((?:palm(?:\s+tree)?|trunk)\s+injections?)\s+(?:for|on|in|into)\s+(?:the\s+|my\s+|our\s+)?palms?\b/gi;
 const normalizePalmInjection = (s) => s.replace(PALM_INJECTION_TARGET_RE, '$1');
 
 // Turf pests are a LAWN problem, not a second pest-control service: "chinch
@@ -280,7 +280,9 @@ function composeServiceInterest(extracted = {}, opts = {}) {
     // And a "Rodent Exclusion" label covers EXCLUSION only — the word
     // "rodent" inside it must not mark rodent-control covered, or explicit
     // "rat treatment and exclusion" text gets swallowed (codex r17).
-    const coverageSource = String(source || '').replace(/\brodent\s+exclusion\b/gi, 'exclusion');
+    // (not when trapping rides in the same row name — "Rodent Exclusion &
+    // Trapping" covers rodent control too, codex r19)
+    const coverageSource = String(source || '').replace(/\brodent\s+exclusion\b(?!\s*(?:&|and|\+|\/)\s*trap)/gi, 'exclusion');
     for (const fam of familiesIn(normalizeLawnPests(coverageSource))) covered.add(fam.key);
   }
 

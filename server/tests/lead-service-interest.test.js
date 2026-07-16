@@ -817,6 +817,56 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + Lawn Care Service + Mosquito Control Service');
   });
 
+  test('coordinated inspection-and-treatment wording is work (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control plus termite inspection and treatment',
+    })).toBe('Quarterly Pest Control Service + Termite Service');
+  });
+
+  test('a Rodent Exclusion & Trapping primary covers rodent control (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Rodent Exclusion & Trapping',
+      requested_service: 'rodent trapping and exclusion',
+    })).toBe('Rodent Exclusion & Trapping');
+  });
+
+  test('by/from vegetation phrases are locations (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants by the palm tree',
+    })).toBe('Quarterly Pest Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'ants coming from the lawn',
+    })).toBe('Quarterly Pest Control Service');
+  });
+
+  test('palm tree injection is Palm Injection (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control and palm tree injections',
+    })).toBe('Quarterly Pest Control Service + Palm Injection');
+  });
+
+  test('non-decline negations do not eat the request (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not a customer, needs lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'not sure if I need lawn care',
+    })).toBe('Quarterly Pest Control Service + Lawn Care Service');
+  });
+
+  test('exterminator-for-fleas is one flea job (codex r19)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and an exterminator for fleas',
+    })).toBe('Quarterly Lawn Care Service + Flea Control Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
