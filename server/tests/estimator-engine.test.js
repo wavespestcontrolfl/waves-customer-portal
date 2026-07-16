@@ -386,6 +386,15 @@ describe('review fixes', () => {
     expect(unmatched.ambiguous).toBe(true);
   });
 
+  test('shared phone: same first name with a DIFFERENT last name is ambiguous, not a match', () => {
+    const rows = [
+      { id: 'a', first_name: 'Sam', last_name: 'Landlord' },
+      { id: 'b', first_name: 'Sam', last_name: 'Tenant' },
+    ];
+    const result = ctxPriv.pickCustomerMatch(rows, { caller: { first_name: 'Sam', last_name: 'Visitor' } });
+    expect(result.ambiguous).toBe(true);
+  });
+
   test('property type resolves from lookup record, then extraction', () => {
     const fromRecord = resolvePropertyFacts({
       extraction: { property: { property_type: 'condo' } },
@@ -424,5 +433,23 @@ describe('review fixes', () => {
     expect(idxPriv.sameStreetAddress('123 Example St, Testville FL', '123 Example Street')).toBe(true);
     expect(idxPriv.sameStreetAddress('123 Example St', '456 Other Rd')).toBe(false);
     expect(idxPriv.sameStreetAddress('123 Example St', null)).toBe(false);
+  });
+
+  test('street comparison catches suffix and directional corrections', () => {
+    expect(idxPriv.sameStreetAddress('123 Palm St', '123 Palm Ave')).toBe(false);
+    expect(idxPriv.sameStreetAddress('123 N Palm Ave', '123 North Palm Avenue')).toBe(true);
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL', '123 Palm Avenue, Sarasota FL')).toBe(true);
+  });
+
+  test('existing-customer address beats a stale phone-matched lead', () => {
+    const context = {
+      extraction: null,
+      isExistingCustomer: true,
+      customer: { address_line1: '10 Current Home Rd', city: 'Testville', state: 'FL', zip: '34200' },
+      lead: { address: '99 Old Lead Property Ln', city: 'Elsewhere', zip: '34999' },
+    };
+    expect(idxPriv.addressFromContext(context)).toMatch(/Current Home/);
+    context.isExistingCustomer = false;
+    expect(idxPriv.addressFromContext(context)).toMatch(/Old Lead Property/);
   });
 });

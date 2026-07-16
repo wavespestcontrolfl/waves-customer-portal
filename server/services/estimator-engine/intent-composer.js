@@ -145,7 +145,7 @@ function buildUserContent(context, propertyFacts) {
     }),
     '',
     '## CALLER PROFILE',
-    JSON.stringify({ customer: profile, lead, prior_estimates: priorEstimates }),
+    JSON.stringify({ caller_id_phone: context.phone || null, customer: profile, lead, prior_estimates: priorEstimates }),
     '',
     '## RECENT SMS THREAD (oldest first; empty if none)',
     sms || '(none)',

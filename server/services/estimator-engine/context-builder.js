@@ -12,10 +12,23 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const TWILIO_NUMBERS = require('../../config/twilio-numbers');
 
 function last10(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+// First candidate that is a real EXTERNAL number. Forwarded inbound calls can
+// carry a Waves/DNI tracking line in from_phone — keying context loads on it
+// would feed another customer's SMS thread into the composer (mirrors
+// firstExternalPhone in the call processor).
+function firstExternalPhone(...candidates) {
+  for (const candidate of candidates) {
+    const v = candidate && String(candidate).trim();
+    if (v && last10(v) && !TWILIO_NUMBERS.isInternalNumber(v)) return v;
+  }
+  return null;
 }
 
 function parseMaybeJson(value) {
@@ -51,10 +64,14 @@ function pickCustomerMatch(rows, extraction) {
   if (rows.length === 1) return { customer: rows[0], ambiguous: false };
   const callerLast = String(extraction?.caller?.last_name || '').trim().toLowerCase();
   const callerFirst = String(extraction?.caller?.first_name || '').trim().toLowerCase();
+  // FULL-name agreement: the last name must match, and when both sides carry
+  // a first name it must match too — a same-first-name-different-last-name
+  // row on a shared line is a different person, not a confident match.
   const byName = rows.find((r) => {
     const last = String(r.last_name || '').trim().toLowerCase();
     const first = String(r.first_name || '').trim().toLowerCase();
-    return (callerLast && last === callerLast) || (callerFirst && callerLast && first === callerFirst);
+    if (!callerLast || last !== callerLast) return false;
+    return !callerFirst || !first || first === callerFirst;
   });
   if (byName) return { customer: byName, ambiguous: false };
   return { customer: rows[0], ambiguous: true };
@@ -95,14 +112,16 @@ async function loadLeadByPhone(phone) {
   }
 }
 
-// Recent two-way SMS with this caller — service requests arrive across
-// channels ("I texted you the photos"), and the thread often carries the
-// address or sqft the call lacked.
-async function loadSmsThread(phone, { limit = 20 } = {}) {
+// Two-way SMS with this caller UP TO the call — service requests arrive
+// across channels ("I texted you the photos"), and the thread often carries
+// the address or sqft the call lacked. Bounded to the call timestamp so a
+// reprocessed old call (or a later text about a different property) can't
+// leak post-call messages into the composer's evidence.
+async function loadSmsThread(phone, { limit = 20, before = null } = {}) {
   const digits = last10(phone);
   if (!digits) return [];
   try {
-    const rows = await db('sms_log')
+    let q = db('sms_log')
       .select('from_phone', 'to_phone', 'message_body', 'created_at')
       .where(function whereEitherDirection() {
         this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
@@ -110,6 +129,8 @@ async function loadSmsThread(phone, { limit = 20 } = {}) {
       })
       .orderBy('created_at', 'desc')
       .limit(limit);
+    if (before) q = q.where('created_at', '<=', before);
+    const rows = await q;
     return rows.reverse().map((r) => ({
       direction: last10(r.from_phone) === digits ? 'inbound' : 'outbound',
       body: String(r.message_body || '').slice(0, 500),
@@ -159,19 +180,38 @@ async function buildCallContext(callLogId) {
 
   const { extraction, source: extractionSource } = extractionFromCall(call);
   // On OUTBOUND calls from_phone is the Waves line and the customer is the
-  // dialed party — keying on from_phone would load SMS/profile data for our
-  // own number (mirrors resolveCallContactPhone in the call processor).
+  // dialed party; forwarded INBOUND calls can carry a Waves/DNI line in
+  // from_phone too — internal numbers never key the context loads (mirrors
+  // resolveCallContactPhone in the call processor).
   const outbound = String(call.direction || '').toLowerCase() === 'outbound';
-  const phone = (outbound ? call.to_phone : call.from_phone)
-    || extraction?.caller?.phone_e164
-    || null;
+  const phone = outbound
+    ? firstExternalPhone(call.to_phone, extraction?.caller?.phone_e164, call.from_phone)
+    : firstExternalPhone(call.from_phone, extraction?.caller?.phone_e164, call.to_phone);
 
-  const [customerMatch, lead, smsThread, priorEstimates] = await Promise.all([
-    loadCustomerByPhone(phone, extraction),
+  // The processor's own shared-phone/slot/address disambiguation already ran
+  // — when it resolved a customer for this call, that beats a phone rematch.
+  let customerMatch = { customer: null, ambiguous: false };
+  if (call.customer_id) {
+    try {
+      const resolved = await db('customers')
+        .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
+          'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
+          'property_type', 'company_name')
+        .where({ id: call.customer_id })
+        .first();
+      if (resolved) customerMatch = { customer: resolved, ambiguous: false };
+    } catch (err) {
+      logger.warn(`[estimator-engine] resolved-customer load failed: ${err.message}`);
+    }
+  }
+
+  const [phoneMatch, lead, smsThread, priorEstimates] = await Promise.all([
+    customerMatch.customer ? Promise.resolve(customerMatch) : loadCustomerByPhone(phone, extraction),
     loadLeadByPhone(phone),
-    loadSmsThread(phone),
+    loadSmsThread(phone, { before: call.created_at }),
     loadPriorEstimates(phone),
   ]);
+  if (!customerMatch.customer) customerMatch = phoneMatch;
   const customer = customerMatch.customer;
 
   return {

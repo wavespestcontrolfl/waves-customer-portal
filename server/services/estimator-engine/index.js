@@ -46,14 +46,18 @@ function addressFromContext(context) {
     return [sa.street_line_1, sa.city, [sa.state, sa.postal_code].filter(Boolean).join(' ')]
       .filter(Boolean).join(', ');
   }
-  if (context.lead?.address) {
-    return [context.lead.address, context.lead.city, context.lead.zip].filter(Boolean).join(', ');
-  }
-  if (context.customer?.address_line1) {
-    return [context.customer.address_line1, context.customer.city, [context.customer.state, context.customer.zip].filter(Boolean).join(' ')]
-      .filter(Boolean).join(', ');
-  }
-  return null;
+  const leadAddress = context.lead?.address
+    ? [context.lead.address, context.lead.city, context.lead.zip].filter(Boolean).join(', ')
+    : null;
+  const customerAddress = context.customer?.address_line1
+    ? [context.customer.address_line1, context.customer.city, [context.customer.state, context.customer.zip].filter(Boolean).join(' ')]
+      .filter(Boolean).join(', ')
+    : null;
+  // An established customer's service address beats a phone-matched lead —
+  // leads.loadByPhone returns the NEWEST lead on the line, which on shared or
+  // long-lived numbers can be a stale record for a different property.
+  if (context.isExistingCustomer) return customerAddress || leadAddress;
+  return leadAddress || customerAddress;
 }
 
 function commercialHint(context) {
@@ -61,15 +65,28 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
-// House number + first street token — enough to tell "same property" from
-// "the caller asked about a different address than the matched profile".
+// Compare the full first address segment (house number + entire street
+// line), normalizing the common suffix/directional abbreviations, so a
+// spelled-out correction like "123 Palm St" → "123 Palm Ave" is treated as a
+// DIFFERENT property. False negatives here are cheap (an extra re-lookup);
+// a false positive prices the wrong parcel.
+const STREET_TOKEN_ALIASES = {
+  street: 'st', avenue: 'ave', road: 'rd', drive: 'dr', lane: 'ln', court: 'ct',
+  boulevard: 'blvd', place: 'pl', circle: 'cir', terrace: 'ter', parkway: 'pkwy',
+  highway: 'hwy', north: 'n', south: 's', east: 'e', west: 'w',
+  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
 function sameStreetAddress(a, b) {
-  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const norm = (s) => String(s || '')
+    .split(',')[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => STREET_TOKEN_ALIASES[t] || t)
+    .join(' ');
   const [na, nb] = [norm(a), norm(b)];
-  if (!na || !nb) return false;
-  const tokens = (s) => s.split(' ');
-  const [ta, tb] = [tokens(na), tokens(nb)];
-  return ta[0] === tb[0] && ta[1] === tb[1];
+  return !!na && !!nb && na === nb;
 }
 
 // Property lookup + (when the county roll is unassessed) the
@@ -222,28 +239,36 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     result.intent = intent;
 
     // The composer establishes the FINAL service address (spelled-out
-    // corrections, quote-for-a-different-property). When it differs from the
-    // address the property signals were gathered for, re-gather — otherwise
-    // the draft is priced off the wrong parcel's sqft/lot.
+    // corrections, quote-for-a-different-property, transcript-only addresses
+    // the extraction missed). When it differs from — or fills in — the
+    // address the property signals were gathered for, re-gather; otherwise
+    // the draft is priced off the wrong (or no) parcel.
     let effectiveSignals = { propertyRecord, parcelView, subdivisionMedian };
-    if (intent.address && address && !sameStreetAddress(intent.address, address)) {
-      logger.info('[estimator-engine] composer address differs from profile address — re-gathering property signals');
+    let addressRegathered = false;
+    if (intent.address && (!address || !sameStreetAddress(intent.address, address))) {
+      logger.info('[estimator-engine] composer-final address differs from gathered address — re-gathering property signals');
       const regathered = await gatherPropertySignals(
         { ...context, extraction: null, lead: { address: intent.address }, customer: null },
         { refreshLookup },
       );
       effectiveSignals = regathered;
+      addressRegathered = true;
       result.addressUsed = regathered.address;
     }
 
     // The composer may also reclassify commercial vs the pre-intent hint —
     // the tenant/building arbitration rules depend on it. Re-run (pure) off
-    // the effective signals either way to keep one code path.
+    // the effective signals either way to keep one code path. After an
+    // address re-gather the matched profile's saved measurements describe the
+    // OLD property — they must not backfill the new one.
     propertyFacts = resolvePropertyFacts({
+      // Caller-stated facts (extraction) describe the property discussed on
+      // THIS call — they stay. Only the matched profile's saved measurements
+      // belong to the old property.
       extraction: context.extraction,
       propertyRecord: effectiveSignals.propertyRecord,
       parcelView: effectiveSignals.parcelView,
-      customer: context.customer,
+      customer: addressRegathered ? null : context.customer,
       isCommercial: intent.is_commercial,
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
@@ -320,7 +345,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, comps, calibration, model, call: context.call, context,
-      membershipSnapshot,
+      membershipSnapshot, priorQualifyingServices,
     });
 
     if (draft.blocked) {

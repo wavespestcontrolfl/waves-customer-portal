@@ -66,9 +66,12 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     services: intent.services || {},
     isCommercial,
     category: intent.category || (isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL'),
+    // Freshly-resolved type (lookup/extraction) beats the profile's saved
+    // type — a stale "Single Family" on the customer row must not re-price a
+    // condo/townhome as detached.
     propertyType: isCommercial
       ? 'commercial'
-      : (context?.customer?.property_type || propertyFacts?.propertyType || 'Single Family'),
+      : (propertyFacts?.propertyType || context?.customer?.property_type || 'Single Family'),
     // Existing-customer WaveGuard context: qualifying recurring services the
     // caller already has, so an add-on quote gets the combined tier discount
     // and recurring-customer perks (same key the admin save path feeds).
@@ -304,7 +307,7 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 }
 
 // ── Draft row ─────────────────────────────────────────────────
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [] }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -325,6 +328,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
         // keys off membershipSnapshot.isExistingCustomer).
         ...(membershipSnapshot ? { membershipSnapshot } : {}),
+        // Top-level copy matches the admin save path —
+        // reconcileFrozenMembershipSnapshot clears THIS key when a stale
+        // snapshot is invalidated; buried-in-engineInputs copies would
+        // survive the reconcile and re-apply a revoked tier discount.
+        ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
         estimatorEngine: {
           version: 1,
           callLogId: call?.id || null,
@@ -343,6 +351,12 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       customer_name: intent.customer_name || 'Unknown caller',
       customer_phone: customerPhone,
       customer_email: intent.customer_email || null,
+      // A confident profile match rides the draft — snapshot revalidation
+      // (reconcileFrozenMembershipSnapshot) returns early without it, and
+      // downstream accept/convert links need it. Ambiguous matches stay null.
+      customer_id: (context?.customer?.id && !context?.customerPhoneAmbiguous)
+        ? context.customer.id
+        : null,
       monthly_total: totals.monthly,
       annual_total: totals.annual,
       onetime_total: totals.oneTime,
