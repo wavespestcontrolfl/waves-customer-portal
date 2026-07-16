@@ -3486,8 +3486,9 @@ function renderMembershipBlockHtml(membership) {
       Adding ${escapeHtml(membership.upgrade.addedServiceLabels.join(' & ') || 'this service')}
       bumps your membership from <strong>${escapeHtml(membership.upgrade.fromLabel)}</strong>
       up to <strong>${escapeHtml(membership.upgrade.toLabel)}</strong>
-      &mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service,
-      including the ones you already have.
+      ${membership.discountAppliesTo === 'new_services_only'
+        ? `for this estimate. That tier discounts the new services by up to ${Number(membership.tierDiscountPct) || 0}%; your current service prices stay unchanged.`
+        : `&mdash; an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
     </div>` : '';
 
   const existingHtml = existing.length ? `

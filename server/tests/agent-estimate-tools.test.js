@@ -315,7 +315,9 @@ describe('Agent Estimate draft tool', () => {
     mockComputeMembershipContext.mockResolvedValueOnce({
       isExistingCustomer: true,
       existingServiceKeys: ['pest_control'],
+      discountAppliesTo: 'new_services_only',
       currentServices: [{ key: 'pest_control', currentPerVisit: 117 }],
+      existingServices: [],
       newServices: [{ key: 'lawn_care' }, { key: 'tree_shrub' }],
     });
 
@@ -340,11 +342,18 @@ describe('Agent Estimate draft tool', () => {
       priorQualifyingServices: ['pest_control'],
       services: expect.objectContaining({ lawn: expect.any(Object), treeShrub: expect.any(Object) }),
     }));
+    const pricedInput = mockGenerateEstimate.mock.calls.at(-1)[0];
+    expect(pricedInput.services).not.toHaveProperty('pest');
     const insert = writes.find((write) => write.table === 'estimates' && write.op === 'insert').payload;
     expect(insert.customer_id).toBe('customer-1');
     const stored = JSON.parse(insert.estimate_data);
     expect(stored.priorQualifyingServices).toEqual(['pest_control']);
-    expect(stored.membershipSnapshot).toEqual(expect.objectContaining({ isExistingCustomer: true }));
+    expect(stored.membershipSnapshot).toEqual(expect.objectContaining({
+      isExistingCustomer: true,
+      discountAppliesTo: 'new_services_only',
+      currentServices: [expect.objectContaining({ key: 'pest_control', currentPerVisit: 117 })],
+      existingServices: [],
+    }));
     expect(stored.estimatorEngine).toEqual(expect.objectContaining({
       existingCustomerExpansion: true,
       presentationTemplate: 'multi_service_bundle',
