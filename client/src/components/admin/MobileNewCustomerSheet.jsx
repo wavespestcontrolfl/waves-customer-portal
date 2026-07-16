@@ -130,7 +130,7 @@ export default function MobileNewCustomerSheet({
           onClick={onClose}
           aria-label="Close"
           className="flex items-center justify-center rounded-full bg-zinc-100 u-focus-ring text-zinc-900"
-          style={{ width: 36, height: 36 }}
+          style={{ width: 44, height: 44 }}
         >
           {" "}
           <X size={20} strokeWidth={1.75} />{" "}
@@ -143,6 +143,7 @@ export default function MobileNewCustomerSheet({
           className="rounded-full font-medium u-focus-ring"
           style={{
             padding: "8px 18px",
+            minHeight: 44,
             fontSize: 15,
             background: canSave ? "#18181B" : "#F4F4F5",
             color: canSave ? "#FFFFFF" : "#A1A1AA",

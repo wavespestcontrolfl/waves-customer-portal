@@ -39,8 +39,14 @@ export function Sheet({ open, onClose, children, width = 'md', className }) {
       <div
         ref={panelRef}
         tabIndex={-1}
+        style={{
+          height: '100dvh',
+          maxHeight: '100dvh',
+          paddingTop: 'env(safe-area-inset-top, 0px)',
+          paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        }}
         className={cn(
-          'absolute top-0 right-0 h-full w-full bg-white',
+          'absolute top-0 right-0 w-full bg-white box-border',
           'border-l border-hairline border-zinc-200',
           'outline-none flex flex-col',
           widthClass,
@@ -58,7 +64,7 @@ export function SheetHeader({ className, children, ...rest }) {
   return (
     <div
       className={cn(
-        'px-5 py-4 border-b border-hairline border-zinc-200 flex items-center justify-between',
+        'px-5 py-4 border-b border-hairline border-zinc-200 flex items-center justify-between shrink-0',
         className
       )}
       {...rest}
@@ -80,7 +86,7 @@ export function SheetFooter({ className, children, ...rest }) {
   return (
     <div
       className={cn(
-        'px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end gap-2',
+        'px-5 py-3 border-t border-hairline border-zinc-200 flex flex-wrap justify-end gap-2 shrink-0',
         className
       )}
       {...rest}

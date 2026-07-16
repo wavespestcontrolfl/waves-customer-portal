@@ -943,8 +943,8 @@ function MobileSheet({
             onClick={close}
             aria-label="Close"
             style={{
-              width: 36,
-              height: 36,
+              width: 44,
+              height: 44,
               borderRadius: 8,
               border: "none",
               background: "#F4F4F5",
@@ -999,13 +999,13 @@ function MobileSheet({
                 <AttachButton
                   onClick={() => fileInputRef.current?.click()}
                   color="#A1A1AA"
-                  size={38}
+                  size={44}
                   disabled={attachmentsLoading}
                 />{" "}
                 <DictationButton
                   onAppend={appendTranscript}
                   title="Tap to talk"
-                  size={38}
+                  size={44}
                   palette={{ accent: accentColor, muted: "#A1A1AA", red: "#EF4444", card: "#fff" }}
                 />{" "}
               </div>
@@ -1038,6 +1038,7 @@ function MobileSheet({
               style={{
                 flex: 1,
                 padding: "12px 16px",
+                minHeight: 44,
                 borderRadius: 10,
                 border: "none",
                 background: prompt.trim() && !loading && !attachmentsLoading ? "#18181B" : "#E4E4E7",

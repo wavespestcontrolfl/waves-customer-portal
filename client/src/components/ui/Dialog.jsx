@@ -34,7 +34,13 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
-      style={style}
+      style={{
+        paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
+        paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
+        paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
+        ...style,
+      }}
     >
       <div
         className="absolute inset-0 bg-zinc-900/30"
@@ -45,7 +51,7 @@ export function Dialog({ open, onClose, children, size = 'md', className, style 
         tabIndex={-1}
         className={cn(
           'relative w-full bg-white rounded-md border-hairline border-zinc-200',
-          'outline-none',
+          'outline-none max-h-full flex flex-col',
           sizeClass,
           className
         )}
@@ -61,7 +67,7 @@ export function DialogHeader({ className, children, ...rest }) {
   return (
     <div
       className={cn(
-        'px-5 py-4 border-b border-hairline border-zinc-200',
+        'px-5 py-4 border-b border-hairline border-zinc-200 shrink-0',
         className
       )}
       {...rest}
@@ -84,7 +90,7 @@ export function DialogTitle({ className, children, ...rest }) {
 
 export function DialogBody({ className, children, ...rest }) {
   return (
-    <div className={cn('p-5', className)} {...rest}>
+    <div className={cn('p-5 min-h-0 overflow-y-auto overscroll-contain', className)} {...rest}>
       {children}
     </div>
   );
@@ -94,7 +100,7 @@ export function DialogFooter({ className, children, ...rest }) {
   return (
     <div
       className={cn(
-        'px-5 py-3 border-t border-hairline border-zinc-200 flex justify-end gap-2',
+        'px-5 py-3 border-t border-hairline border-zinc-200 flex flex-wrap justify-end gap-2 shrink-0',
         className
       )}
       {...rest}

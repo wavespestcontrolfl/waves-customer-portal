@@ -56,6 +56,47 @@ export default function AdminLayoutV2() {
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
+  // Give Safari home-screen bookmarks the admin app identity and launch URL.
+  // index.html defaults to the customer portal, so without this swap an admin
+  // bookmark can be installed as "Waves" with start_url "/". The html hook
+  // also lets portaled admin dialogs inherit the mobile form safeguards even
+  // though they render outside .admin-shell-v2.
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const root = document.documentElement;
+    const manifest = document.querySelector('link[rel="manifest"]');
+    const appTitle = document.querySelector(
+      'meta[name="apple-mobile-web-app-title"]',
+    );
+    const description = document.querySelector('meta[name="description"]');
+    const previous = {
+      manifest: manifest?.getAttribute("href"),
+      appTitle: appTitle?.getAttribute("content"),
+      description: description?.getAttribute("content"),
+      documentTitle: document.title,
+    };
+
+    root.classList.add("admin-app");
+    manifest?.setAttribute("href", "/admin-manifest.json");
+    appTitle?.setAttribute("content", "Waves Admin");
+    description?.setAttribute(
+      "content",
+      "Waves Pest Control admin portal — dispatch, customers, billing, and reports.",
+    );
+    document.title = "Waves Admin";
+
+    return () => {
+      root.classList.remove("admin-app");
+      if (manifest && previous.manifest != null)
+        manifest.setAttribute("href", previous.manifest);
+      if (appTitle && previous.appTitle != null)
+        appTitle.setAttribute("content", previous.appTitle);
+      if (description && previous.description != null)
+        description.setAttribute("content", previous.description);
+      document.title = previous.documentTitle;
+    };
+  }, []);
+
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
   // See lib/tapToPayReturn.js.
