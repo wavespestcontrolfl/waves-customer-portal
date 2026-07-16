@@ -10,7 +10,7 @@
  * match no row, so smoke runs exercise the query path and return empty.
  */
 
-function defaultFor(prop) {
+function defaultFor(prop, name = '') {
   const t = Array.isArray(prop.type) ? prop.type[0] : prop.type;
   if (prop.enum && prop.enum.length) return prop.enum[0];
   switch (t) {
@@ -19,6 +19,12 @@ function defaultFor(prop) {
       if (prop.format === 'uuid') return '00000000-0000-0000-0000-000000000000';
       if (prop.format === 'date') return '1970-01-01';
       if (prop.format === 'date-time') return '1970-01-01T00:00:00Z';
+      // Undeclared id params ("customer_id", "id", "estimate_uuid"): most
+      // feed uuid-typed columns where 'test' throws before the query path
+      // runs — and the tool's catch turns that into a green-looking
+      // { error } object. The nil UUID is safe for text columns too
+      // (matches no row). Declaring format:'uuid' is still preferred.
+      if (/(^|_)(id|uuid)$/i.test(name)) return '00000000-0000-0000-0000-000000000000';
       return 'test';
     case 'number':
     case 'integer': return prop.default ?? 0;
@@ -35,7 +41,7 @@ function buildMinimalInput(schema) {
   const required = Array.isArray(schema.required) ? schema.required : [];
   const props = schema.properties || {};
   for (const r of required) {
-    out[r] = defaultFor(props[r] || {});
+    out[r] = defaultFor(props[r] || {}, r);
   }
   return out;
 }

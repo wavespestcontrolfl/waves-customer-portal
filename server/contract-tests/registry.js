@@ -120,7 +120,7 @@ function buildRecord(tool, ctx) {
     execute: ctx.execute,
     manualContract: override || inlineContract,
     sideEffects: !!(override?.sideEffects || tool._sideEffects),
-    sonnetBacked: SONNET_BACKED.has(tool.name),
+    sonnetBacked: !!(override?.sonnetBacked || tool._sonnetBacked || SONNET_BACKED.has(tool.name)),
   };
 }
 

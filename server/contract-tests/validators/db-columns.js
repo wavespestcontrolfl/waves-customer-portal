@@ -37,7 +37,10 @@ const PATTERNS = [
   { label: 'db.raw',         re: /\b(?:db|trx|knex)\s*\.raw\(/g, mode: 'raw-flag' },
   // Object-alias form: db({ p: 'payments' }) / .from({ c: 'customers' }) /
   // .leftJoin({ e: 'estimates' }, ...). Group 1 = alias, group 2 = table.
-  { label: 'obj-alias',      re: /\b(?:db\(|\.(?:from|into|join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\()\s*\{\s*([a-z_][\w]*)\s*:\s*['"]([a-z_][a-z0-9_]*)['"]\s*\}/gi, mode: 'obj-table' },
+  // NOTE: the \b guards only the db( alternative — a leading \b before the
+  // .method( alternative would reject chained calls at start-of-line or
+  // after ')' (".leftJoin(" preceded by whitespace/paren has no boundary).
+  { label: 'obj-alias',      re: /(?:\bdb\(|\.(?:from|into|join|leftJoin|rightJoin|innerJoin|fullOuterJoin|crossJoin)\()\s*\{\s*([a-z_][\w]*)\s*:\s*['"]([a-z_][a-z0-9_]*)['"]\s*\}/gi, mode: 'obj-table' },
 ];
 
 // ── Raw-SQL table extraction ─────────────────────────────────────────────
@@ -71,7 +74,7 @@ function analyzeSqlString(sql, rawTables, rawAliases) {
   const bare = /^\s*([a-z_][a-z0-9_]*)(?:\s+(?:as\s+)?([a-z_][\w]*))?\s*$/i.exec(sql);
   if (bare && !NOT_TABLES.has(bare[1].toLowerCase())) {
     rawTables.add(bare[1].toLowerCase());
-    if (bare[2]) rawAliases.add(bare[2].toLowerCase());
+    if (bare[2]) rawAliases.push([bare[2].toLowerCase(), bare[1].toLowerCase()]);
     return false;
   }
   const ctes = new Set();
@@ -90,11 +93,11 @@ function analyzeSqlString(sql, rawTables, rawAliases) {
     const rest = sql.slice(t.index + t[0].length);
     if (rest.startsWith('(')) continue; // function call
     rawTables.add(table);
-    // "FROM customers c" / "JOIN x AS y" — record the alias so qualifier
-    // refs like "c.name" aren't misread as tables.
+    // "FROM customers c" / "JOIN x AS y" — record the alias→table pair so
+    // qualifier refs like "c.name" validate against the aliased table.
     const a = /^\s+(?:as\s+)?([a-z_][\w]*)/i.exec(rest);
     if (a && !NOT_TABLES.has(a[1].toLowerCase()) && !['on', 'where', 'group', 'order', 'left', 'right', 'inner', 'join', 'using', 'set', 'limit', 'having', 'union', 'cross', 'full'].includes(a[1].toLowerCase())) {
-      rawAliases.add(a[1].toLowerCase());
+      rawAliases.push([a[1].toLowerCase(), table]);
     }
   }
   return dynamic;
@@ -102,7 +105,7 @@ function analyzeSqlString(sql, rawTables, rawAliases) {
 
 function extractRawSql(src) {
   const rawTables = new Set();
-  const rawAliases = new Set();
+  const rawAliases = []; // [alias, table] pairs
   let dynamic = false;
   let literalCalls = 0;
   let m;
@@ -133,7 +136,7 @@ function extractRawSql(src) {
   const numericCalls = (src.match(/\b(?:db|trx|knex)\s*\.raw\(\s*\d+(?:\.\d+)?\s*[,)]/g) || []).length;
   const totalRawCalls = (src.match(/\b(?:db|trx|knex)\s*\.raw\(/g) || []).length;
   if (totalRawCalls > literalCalls + identCalls + numericCalls) dynamic = true;
-  return { rawTables: [...rawTables], rawAliases: [...rawAliases], dynamic };
+  return { rawTables: [...rawTables], rawAliases, dynamic };
 }
 
 function stripAs(ref) {
@@ -144,7 +147,15 @@ function stripAs(ref) {
 function extractFromSource(src) {
   const sourceTables = new Set();   // tables used as real query sources (db, from, into, join's first arg)
   const qualifierTables = new Set(); // tables that appear only as "table.col" qualifiers (likely join aliases)
-  const knownAliases = new Set();    // declared "as alias" names (knex + raw SQL) — never tables
+  // alias → Set of tables it stands for (same letter can alias different
+  // tables in different queries within one file) — columns qualified by an
+  // alias are validated against the union of its candidate tables.
+  const aliasTables = new Map();
+  const addAlias = (alias, table) => {
+    const k = alias.toLowerCase();
+    if (!aliasTables.has(k)) aliasTables.set(k, new Set());
+    if (table) aliasTables.get(k).add(table.toLowerCase());
+  };
   const columns = new Set();         // entries like "table.column" (filtered against actual tables later)
   const warnings = [];
   let rawFlagged = false;
@@ -154,10 +165,10 @@ function extractFromSource(src) {
     while ((m = p.re.exec(src)) !== null) {
       if (p.mode === 'table') {
         sourceTables.add(m[1]);
-        if (m[2]) knownAliases.add(m[2].toLowerCase());
+        if (m[2]) addAlias(m[2], m[1]);
       }
       else if (p.mode === 'obj-table') {
-        knownAliases.add(m[1].toLowerCase());
+        addAlias(m[1], m[2]);
         sourceTables.add(m[2]);
       }
       else if (p.mode === 'col') {
@@ -172,7 +183,7 @@ function extractFromSource(src) {
         // bare column refs — skip (can't validate without knowing the table)
       } else if (p.mode === 'join') {
         sourceTables.add(m[1]);
-        if (m[2]) knownAliases.add(m[2].toLowerCase());
+        if (m[2]) addAlias(m[2], m[1]);
         for (const rawRef of [m[3], m[4]]) {
           const ref = stripAs(rawRef);
           if (ref.includes('.')) {
@@ -191,15 +202,17 @@ function extractFromSource(src) {
   if (rawFlagged) {
     const raw = extractRawSql(src);
     rawTables = raw.rawTables;
-    for (const a of raw.rawAliases) knownAliases.add(a);
+    for (const [a, t] of raw.rawAliases) addAlias(a, t);
     if (raw.dynamic) {
       warnings.push('dynamic db.raw SQL (interpolated/bound table position or unresolvable arg) — declare its tables in manual-contracts.js');
     }
   }
+  const aliasMap = {};
+  for (const [a, ts] of aliasTables) aliasMap[a] = [...ts];
   return {
     sourceTables: [...sourceTables],
     qualifierTables: [...qualifierTables],
-    knownAliases: [...knownAliases],
+    aliasMap,
     rawTables,
     columns: [...columns],
     warnings,
@@ -231,7 +244,7 @@ async function loadSchema() {
 async function run(tool) {
   const schemaMap = await loadSchema();
 
-  let sourceTables, qualifierTables, knownAliases = [], rawTables = [], columns, warnings = [];
+  let sourceTables, qualifierTables, aliasMap = {}, rawTables = [], columns, warnings = [];
   if (tool.manualContract?.tables || tool.manualContract?.columns) {
     sourceTables = [...(tool.manualContract.tables || [])];
     qualifierTables = [];
@@ -248,7 +261,7 @@ async function run(tool) {
       }
       fileCache.set(tool.sourcePath, extractFromSource(fs.readFileSync(tool.sourcePath, 'utf8')));
     }
-    ({ sourceTables, qualifierTables, knownAliases = [], rawTables = [], columns, warnings } = fileCache.get(tool.sourcePath));
+    ({ sourceTables, qualifierTables, aliasMap = {}, rawTables = [], columns, warnings } = fileCache.get(tool.sourcePath));
   }
 
   const errors = [];
@@ -270,10 +283,9 @@ async function run(tool) {
     }
   }
   const sourceSet = new Set(sourceTables);
-  const aliasSet = new Set(knownAliases);
   for (const t of qualifierTables) {
     if (sourceSet.has(t)) continue; // already covered
-    if (aliasSet.has(t)) continue;  // declared "as <alias>" — never a table
+    if (aliasMap[t]) continue;      // declared "as <alias>" — resolved in the column pass
     if (!schemaMap.has(t)) {
       if (toolOptionalTables.has(t)) continue;
       demoted.push(`alias "${t}" not a real table (likely a join alias) — declare in manual-contracts.js if this is a real table`);
@@ -283,12 +295,27 @@ async function run(tool) {
     const [t, c] = ref.split('.');
     if (c === '*') continue;
     if (toolOptionalTables.has(t)) continue;
-    const cols = schemaMap.get(t);
-    if (!cols) continue; // table-level error or aliased — don't double-report
+    let cols = schemaMap.get(t);
+    let label = t;
+    if (!cols && aliasMap[t]) {
+      // Alias-qualified ref: validate against the UNION of its candidate
+      // tables (one letter can alias different tables across queries in a
+      // file) — a column existing in any candidate passes; in none, fails.
+      const candidates = aliasMap[t].filter((ct) => schemaMap.has(ct));
+      if (candidates.length === 0) continue; // candidate tables already errored at table level
+      if (candidates.some((ct) => schemaMap.get(ct).has(c))) continue;
+      if (candidates.some((ct) => (toolOptionalColumns[ct] || []).includes(c))) {
+        notes.push(`optional column "${t}.${c}" missing — tolerated`);
+        continue;
+      }
+      cols = new Set(); // fall through to report with the alias expansion
+      label = `${t} → ${candidates.join('|')}`;
+    }
+    if (!cols) continue; // table-level error — don't double-report
     if (!cols.has(c)) {
       const optCols = toolOptionalColumns[t] || [];
       if (optCols.includes(c)) notes.push(`optional column "${t}.${c}" missing — tolerated`);
-      else errors.push(`column "${t}.${c}" does not exist`);
+      else errors.push(`column "${label}.${c}" does not exist`);
     }
   }
 
