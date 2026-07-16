@@ -149,9 +149,11 @@ const NEGATOR_RE = /\b(?:no(?![-\s]?see)|not(?!\s+(?:only|just)\b)|without|never
 // service") scope only to their own clause — a comma ends them, so
 // "pest control instead of lawn care, mosquito service too" keeps the
 // mosquito request (codex r6). Stripped BEFORE segment-based negation.
-const COMPARED_AWAY_RE = /\b(?:instead\s+of|rather\s+than|in\s+lieu\s+of)\b[^,.;!?]*/gi;
+const COMPARED_AWAY_RE = /\b(?:instead\s+of|rather\s+than|in\s+lieu\s+of|except(?:\s+for)?)\b[^,.;!?]*/gi;
 const stripComparedAway = (s) => s.replace(COMPARED_AWAY_RE, ' ');
-const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|except|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
+// `except` is NOT here: it EXCLUDES what follows (handled by
+// COMPARED_AWAY_RE), unlike but/however which rescue a positive (codex r8).
+const SEGMENT_SPLIT_RE = /[.;!?]|—|–|\s--\s|\b(?:but|however|although|though)\b|,\s*(?=(?:just|only|plus|also|and\s+(?:also|then)|(?:i|we)\s+(?:need|want|do)|need|want)\b)|,\s*(?=[^,.;!?]{0,60}\b(?:too|as\s+well)\b)/gi;
 function stripNegatedClauses(s) {
   return s
     .split(SEGMENT_SPLIT_RE)

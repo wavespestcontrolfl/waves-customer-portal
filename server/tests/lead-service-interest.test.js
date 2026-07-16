@@ -520,6 +520,17 @@ describe('composeServiceInterest', () => {
     })).toBe('Quarterly Pest Control Service + WDO Inspection Service');
   });
 
+  test('"except" excludes the following service (codex r8)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'pest control except lawn care',
+    })).toBe('Quarterly Pest Control Service');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'full lawn program except for mosquito service',
+    })).toBe('Quarterly Lawn Care Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
