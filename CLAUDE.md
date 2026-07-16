@@ -42,6 +42,8 @@ Three interfaces:
 7. **Keep the Intelligence Bar pattern.** Tool modules export `TOOLS` + `executeTool`; wire 6 lines into the route file. Don't invent a new architecture. See `server/services/intelligence-bar/README.md` for the template.
 8. **Stripe is the payment processor. Square is fully phased out.** Do not reference Square in new code.
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
+10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code (use Plan mode). A misunderstanding caught at the plan stage costs minutes; caught after the code is written, it costs the rework.
+11. **When a mistake is caught, record the rule.** Run `/lesson` (or follow `.claude/commands/lesson.md`) so the correction lands in AGENTS.md, the matching skill, or here — in the same PR as the fix. Rules belong in skills or AGENTS.md by default; this file stays lean.
 
 ## Admin UI & Design Systems
 
