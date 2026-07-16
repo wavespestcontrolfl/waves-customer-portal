@@ -47,7 +47,34 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    return this.create({ recipientType: 'customer', recipientId: customerId, category, title, body, ...opts });
+    const notification = await this.create({
+      recipientType: 'customer',
+      recipientId: customerId,
+      category,
+      title,
+      body,
+      ...opts,
+    });
+    if (!notification || notification.suppressed) return notification;
+
+    // The in-app row and native alert are one customer event. Dispatch only
+    // after the durable row exists; native delivery remains best-effort so an
+    // APNs/FCM outage can never roll back the service/payment operation that
+    // created the notification.
+    try {
+      const PushService = require('./push-notifications');
+      Promise.resolve(PushService.sendToCustomer(customerId, {
+        title,
+        body: body || '',
+        url: opts.link || '/',
+        category,
+      })).catch((err) => {
+        logger.warn(`[notifications] Customer native push failed for ${customerId}: ${err.message}`);
+      });
+    } catch (err) {
+      logger.warn(`[notifications] Customer native push failed for ${customerId}: ${err.message}`);
+    }
+    return notification;
   },
 
   // Get notifications for admin

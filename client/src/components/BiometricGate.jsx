@@ -1,8 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isNativeApp, hasSessionToken } from '../native/platform';
 import { authenticateBiometric } from '../native/biometric';
 import { COLORS, FONTS } from '../theme-brand';
 import '../glass/glass-theme.css';
+
+export const BiometricLockContext = createContext(false);
+
+export function useBiometricLock() {
+  return useContext(BiometricLockContext);
+}
 
 // The lock overlay is a liquid-glass surface, but it deliberately does NOT call
 // useGlassSurface: the shared scene mounts BEHIND #root, and a privacy overlay
@@ -192,7 +198,7 @@ export default function BiometricGate({ children }) {
   // The container is made inert while locked (see effect above) so the hidden
   // content is non-interactive and invisible to assistive tech, not just covered.
   return (
-    <>
+    <BiometricLockContext.Provider value={locked}>
       <div ref={contentRef} aria-hidden={locked ? true : undefined}>
         {children}
       </div>
@@ -273,6 +279,6 @@ export default function BiometricGate({ children }) {
           </div>
         </div>
       )}
-    </>
+    </BiometricLockContext.Provider>
   );
 }

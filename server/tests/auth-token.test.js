@@ -9,11 +9,13 @@ const { authenticate, generateToken, generateRefreshToken } = require('../middle
 
 describe('customer auth tokens', () => {
   test('access tokens carry selected property and owning account separately', () => {
-    const token = generateToken('property-123', 'account-456');
+    const token = generateToken('property-123', 'account-456', 'session-family-1');
     const decoded = jwt.verify(token, config.jwt.secret);
 
     expect(decoded.customerId).toBe('property-123');
     expect(decoded.accountId).toBe('account-456');
+    expect(decoded.sessionId).toBe('session-family-1');
+    expect(decoded.exp - decoded.iat).toBe(15 * 60);
   });
 
   test('refresh tokens preserve the account claim for property switching', () => {
@@ -50,5 +52,32 @@ describe('customer auth tokens', () => {
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: 'Invalid token account' });
     expect(next).not.toHaveBeenCalled();
+  });
+
+  test('authenticate continues to accept pre-rollout access tokens without a session claim', async () => {
+    const token = jwt.sign(
+      { customerId: 'property-123', accountId: 'account-456' },
+      config.jwt.secret,
+      { expiresIn: '15m' },
+    );
+    const query = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'property-123',
+        active: true,
+        account_id: 'account-456',
+      }),
+    };
+    db.mockReturnValueOnce(query);
+    const req = { headers: { authorization: `Bearer ${token}` } };
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+
+    await authenticate(req, res, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.authSessionId).toBeNull();
+    expect(req.customerId).toBe('property-123');
   });
 });

@@ -7,7 +7,12 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
-const { isChargeableAutopayMethod, isBankMethodType, isPaused } = require('../services/autopay-eligibility');
+const {
+  isChargeableAutopayMethod,
+  isBankMethodType,
+  isExpiredCardMethod,
+  isPaused,
+} = require('../services/autopay-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -101,7 +106,11 @@ router.get('/', async (req, res, next) => {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled', 'card_funding', 'card_brand');
+      .first(
+        'id', 'processor', 'method_type', 'stripe_payment_method_id',
+        'is_default', 'autopay_enabled', 'card_funding', 'card_brand',
+        'exp_month', 'exp_year'
+      );
     // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
     // customers.ach_status is non-empty and not 'active'
     // (needs_verification / suspended), collection refuses everything but a
@@ -193,20 +202,20 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     if (autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
       if (!selectedPaymentMethod) return res.status(400).json({ error: 'Payment method not found' });
     } else if (autopay_payment_method_id === null || autopay_payment_method_id === '') {
       selectedPaymentMethod = null;
     } else if (current.autopay_payment_method_id) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ id: current.autopay_payment_method_id, customer_id: req.customerId })
-        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     } else if (willBeEnabled) {
       selectedPaymentMethod = await db('payment_methods')
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     }
 
     if (
@@ -218,7 +227,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
         .where({ customer_id: req.customerId, is_default: true, processor: 'stripe' })
         .whereNotNull('stripe_payment_method_id')
         .orderBy('created_at', 'desc')
-        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status');
+        .first('id', 'processor', 'stripe_payment_method_id', 'method_type', 'ach_status', 'exp_month', 'exp_year');
     }
 
     const methodCanChargeAutopay = selectedPaymentMethod?.processor === 'stripe'
@@ -226,6 +235,12 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     if (willBeEnabled && !methodCanChargeAutopay) {
       return res.status(400).json({ error: 'Add a payment method before enabling Auto Pay.' });
+    }
+
+    if (willBeEnabled && isExpiredCardMethod(selectedPaymentMethod)) {
+      return res.status(400).json({
+        error: 'This card is expired. Add a current payment method before enabling Auto Pay.',
+      });
     }
 
     // A micro-deposit bank account that hasn't verified (or failed

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NotificationBell from './NotificationBell';
 
@@ -30,15 +30,30 @@ const NOTIFICATIONS = [
   },
 ];
 
-function jsonResponse(body) {
-  return { ok: true, json: async () => body };
+function response(body, { ok = true, status = 200 } = {}) {
+  return { ok, status, json: async () => body };
 }
 
+function defaultFetch(url) {
+  if (String(url).includes('/unread-count')) return response({ count: 2 });
+  if (String(url).includes('?limit=')) return response({ notifications: NOTIFICATIONS });
+  return response({ success: true });
+}
+
+let notifyMediaChange;
+
 beforeEach(() => {
-  global.fetch = vi.fn(async (url) => {
-    if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
-    return jsonResponse({ notifications: NOTIFICATIONS });
+  Object.defineProperty(window, 'scrollTo', { value: vi.fn(), writable: true });
+  Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true, writable: true });
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: vi.fn(() => ({
+      matches: window.innerWidth < 768,
+      addEventListener: (_event, listener) => { notifyMediaChange = listener; },
+      removeEventListener: vi.fn(),
+    })),
   });
+  global.fetch = vi.fn(async (url) => defaultFetch(url));
 });
 
 afterEach(() => {
@@ -47,46 +62,132 @@ afterEach(() => {
 });
 
 describe('NotificationBell panel', () => {
-  it('portals the open panel to document.body so a glass (backdrop-filter) header cannot become its containing block', async () => {
-    // Regression: the customer portal header is a glass surface whose
-    // backdrop-filter makes it the containing block for position:fixed
-    // descendants. Rendered in place, the panel collapsed to the header's
-    // box and the notification list was invisible (issue: empty panel).
-    const { container } = render(<NotificationBell type="customer" />);
+  it('portals a labelled modal dialog to body and restores focus after Escape', async () => {
+    const { container } = render(<NotificationBell type="customer" customerId="customer-a" />);
+    const bell = screen.getByRole('button', { name: /notifications/i });
+    bell.focus();
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
-    });
+    await act(async () => { fireEvent.click(bell); });
 
-    const items = await screen.findAllByText('Visit completed');
-    expect(items.length).toBeGreaterThan(0);
+    const dialog = await screen.findByRole('dialog', { name: 'Notifications' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(container.contains(dialog)).toBe(false);
+    expect(document.body.contains(dialog)).toBe(true);
+    expect(await screen.findByText('Visit completed')).toBeInTheDocument();
+    expect(dialog).toHaveFocus();
 
-    // The list must NOT be nested inside the bell wrapper (which lives in
-    // the header) — it must mount under document.body via the portal.
-    for (const el of items) {
-      expect(container.contains(el)).toBe(false);
-      expect(document.body.contains(el)).toBe(true);
-    }
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Notifications' })).not.toBeInTheDocument());
+    expect(bell).toHaveFocus();
   });
 
-  it('keeps the panel open when clicking inside the portaled panel, and closes on outside click', async () => {
-    render(<NotificationBell type="customer" />);
-
+  it('keeps the portaled panel open for inside clicks and closes on an outside click', async () => {
+    render(<NotificationBell type="customer" customerId="customer-a" />);
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
     });
-    const title = (await screen.findAllByText('Visit completed'))[0];
+    const title = await screen.findByText('Visit completed');
 
-    // Click inside the portaled panel — must stay open.
-    await act(async () => {
-      fireEvent.mouseDown(title);
-    });
-    expect(screen.getAllByText('Visit completed').length).toBeGreaterThan(0);
+    fireEvent.mouseDown(title);
+    expect(screen.getByRole('dialog', { name: 'Notifications' })).toBeInTheDocument();
 
-    // Click outside (document body) — must close.
-    await act(async () => {
-      fireEvent.mouseDown(document.body);
+    fireEvent.mouseDown(document.body);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Notifications' })).not.toBeInTheDocument());
+  });
+
+  it('reflows an open drawer when the viewport crosses the mobile breakpoint', async () => {
+    render(<NotificationBell type="customer" customerId="customer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const dialog = await screen.findByRole('dialog', { name: 'Notifications' });
+    expect(screen.getByRole('button', { name: 'Close notifications' })).toBeInTheDocument();
+    expect(dialog).toHaveStyle({ bottom: '12px' });
+
+    Object.defineProperty(window, 'innerWidth', { value: 500, configurable: true, writable: true });
+    act(() => { notifyMediaChange({ matches: true }); });
+
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    expect(dialog.style.bottom).toContain('safe-area-inset-bottom');
+  });
+
+  it('shows a retryable error instead of claiming an HTTP failure is an empty inbox', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return response({ error: 'down' }, { ok: false, status: 503 });
+      return response({ error: 'down' }, { ok: false, status: 503 });
     });
-    expect(screen.queryByText('Visit completed')).toBeNull();
+    render(<NotificationBell type="customer" customerId="customer-a" />);
+
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be loaded');
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText('No notifications yet')).not.toBeInTheDocument();
+  });
+
+  it('supports keyboard activation and never marks a row read after a failed write', async () => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return response({ count: 2 });
+      if (String(url).includes('?limit=')) return response({ notifications: NOTIFICATIONS });
+      if (String(url).endsWith('/1/read')) return response({ error: 'down' }, { ok: false, status: 503 });
+      return response({ success: true });
+    });
+    render(<NotificationBell type="customer" customerId="customer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+
+    const row = await screen.findByRole('button', { name: 'Visit completed, unread' });
+    fireEvent.keyDown(row, { key: 'Enter' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be marked as read');
+    expect(screen.getByRole('button', { name: 'Visit completed, unread' })).toBeInTheDocument();
+  });
+
+  it('clears property A data before a failed property B reload', async () => {
+    let property = 'a';
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return response({ count: property === 'a' ? 1 : 0 });
+      if (property === 'a') {
+        return response({ notifications: [{ ...NOTIFICATIONS[0], title: 'Property A visit' }] });
+      }
+      return response({ error: 'offline' }, { ok: false, status: 503 });
+    });
+
+    const { rerender } = render(<NotificationBell type="customer" customerId="customer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    expect(await screen.findByText('Property A visit')).toBeInTheDocument();
+
+    property = 'b';
+    rerender(<NotificationBell type="customer" customerId="customer-b" />);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Notifications' })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be loaded');
+    expect(screen.queryByText('Property A visit')).not.toBeInTheDocument();
+  });
+
+  it('ignores a property A mark-read response after switching to property B', async () => {
+    let property = 'a';
+    let finishOldMark;
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return response({ count: property === 'a' ? 2 : 5 });
+      if (String(url).includes('?limit=')) {
+        return response({ notifications: property === 'a' ? NOTIFICATIONS : [] });
+      }
+      if (String(url).endsWith('/1/read')) {
+        return new Promise((resolve) => { finishOldMark = resolve; });
+      }
+      return response({ success: true });
+    });
+
+    const { rerender } = render(<NotificationBell type="customer" customerId="customer-a" />);
+    fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+    const oldRow = await screen.findByRole('button', { name: 'Visit completed, unread' });
+    fireEvent.click(oldRow);
+    await waitFor(() => expect(finishOldMark).toBeTypeOf('function'));
+
+    property = 'b';
+    rerender(<NotificationBell type="customer" customerId="customer-b" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Notifications (5 unread)' })).toBeInTheDocument());
+    await act(async () => { finishOldMark(response({ success: true })); });
+
+    expect(screen.getByRole('button', { name: 'Notifications (5 unread)' })).toBeInTheDocument();
   });
 });

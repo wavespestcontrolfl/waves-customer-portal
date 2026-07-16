@@ -11,12 +11,24 @@ function isPaused(customer, now = new Date()) {
   return /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil >= etDateString(now);
 }
 
-function isChargeableAutopayMethod(method) {
+function isExpiredCardMethod(method, now = new Date()) {
+  if (!method || isBankMethodType(method.method_type)) return false;
+  const expMonth = Number(method.exp_month);
+  const expYear = Number(method.exp_year);
+  if (!Number.isInteger(expMonth) || expMonth < 1 || expMonth > 12 || !Number.isInteger(expYear)) {
+    return true;
+  }
+  const [currentYear, currentMonth] = etDateString(now).split('-').map(Number);
+  return expYear < currentYear || (expYear === currentYear && expMonth < currentMonth);
+}
+
+function isChargeableAutopayMethod(method, now = new Date()) {
   return !!method
     && method.processor === 'stripe'
     && method.is_default === true
     && method.autopay_enabled === true
-    && !!method.stripe_payment_method_id;
+    && !!method.stripe_payment_method_id
+    && !isExpiredCardMethod(method, now);
 }
 
 async function getChargeableAutopayMethod(customer, knex) {
@@ -30,7 +42,10 @@ async function getChargeableAutopayMethod(customer, knex) {
         is_default: true,
         autopay_enabled: true,
       })
-      .first('id', 'processor', 'method_type', 'stripe_payment_method_id', 'is_default', 'autopay_enabled');
+      .first(
+        'id', 'processor', 'method_type', 'stripe_payment_method_id',
+        'is_default', 'autopay_enabled', 'exp_month', 'exp_year'
+      );
   } catch {
     return null;
   }
@@ -43,7 +58,7 @@ async function customerOnAutopay(customer, options = {}) {
   if (isPaused(customer, options.now)) return false;
 
   const paymentMethod = await getChargeableAutopayMethod(customer, knex);
-  if (!isChargeableAutopayMethod(paymentMethod)) return false;
+  if (!isChargeableAutopayMethod(paymentMethod, options.now)) return false;
 
   if (customer.ach_status && customer.ach_status !== 'active') {
     return paymentMethod.method_type === 'card';
@@ -72,6 +87,20 @@ function autopayActivePredicate() {
         AND pm.autopay_enabled = true
         AND pm.stripe_payment_method_id IS NOT NULL
         AND (
+          pm.method_type IN ('ach', 'us_bank_account', 'bank', 'bank_account')
+          OR (
+            pm.exp_month BETWEEN 1 AND 12
+            AND pm.exp_year IS NOT NULL
+            AND (
+              pm.exp_year > EXTRACT(YEAR FROM CURRENT_DATE)
+              OR (
+                pm.exp_year = EXTRACT(YEAR FROM CURRENT_DATE)
+                AND pm.exp_month >= EXTRACT(MONTH FROM CURRENT_DATE)
+              )
+            )
+          )
+        )
+        AND (
           c.ach_status IS NULL OR c.ach_status = '' OR c.ach_status = 'active'
           OR pm.method_type = 'card'
         )
@@ -94,6 +123,7 @@ module.exports = {
   getChargeableAutopayMethod,
   isChargeableAutopayMethod,
   isBankMethodType,
+  isExpiredCardMethod,
   isPaused,
   autopayActivePredicate,
 };

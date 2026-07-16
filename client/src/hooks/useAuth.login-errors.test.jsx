@@ -14,8 +14,13 @@ vi.mock('../utils/api', () => ({
     getMe: vi.fn(),
     getAuthProperties: vi.fn(async () => ({ properties: [] })),
     setTokens: vi.fn(),
+    adoptTokens: vi.fn(function adoptTokens(token, refreshToken) {
+      this.token = token;
+      this.refreshToken = refreshToken;
+    }),
     clearTokens: vi.fn(),
     selectAuthProperty: vi.fn(),
+    request: vi.fn(async () => ({ success: true })),
   },
 }));
 
@@ -26,6 +31,7 @@ vi.mock('../native/nativePush', () => ({
 }));
 
 import api from '../utils/api';
+import { deactivateNativePushToken } from '../native/nativePush';
 
 let authApi;
 function Probe() {
@@ -35,6 +41,7 @@ function Probe() {
       <div data-testid="auth-error">{authApi.error || ''}</div>
       <div data-testid="properties-error">{authApi.propertiesError || ''}</div>
       <div data-testid="properties-count">{authApi.properties.length}</div>
+      <div data-testid="customer-id">{authApi.customer?.id || ''}</div>
     </>
   );
 }
@@ -57,6 +64,8 @@ function stubLocalStorage(store = {}) {
 
 beforeEach(() => {
   stubLocalStorage();
+  api.token = null;
+  api.refreshToken = null;
   vi.spyOn(console, 'error').mockImplementation(() => {});
   render(<AuthProvider><Probe /></AuthProvider>);
 });
@@ -120,6 +129,15 @@ describe('login OTP error copy (F-059, login half)', () => {
     expect(screen.getByTestId('auth-error').textContent)
       .toBe('Invalid or expired verification code');
   });
+
+  it('exposes a way for login navigation to clear stale OTP errors', async () => {
+    await sendCodeRejectingWith(requestError('Invalid or expired verification code', 401));
+    expect(screen.getByTestId('auth-error')).not.toBeEmptyDOMElement();
+
+    act(() => { authApi.clearError(); });
+
+    expect(screen.getByTestId('auth-error')).toBeEmptyDOMElement();
+  });
 });
 
 describe('multi-property partial failures', () => {
@@ -139,5 +157,34 @@ describe('multi-property partial failures', () => {
     api.getAuthProperties.mockResolvedValueOnce({ properties: [{ id: 'cust-1' }, { id: 'cust-2' }] });
     await act(async () => { await authApi.refreshProperties(); });
     expect(screen.getByTestId('properties-error')).toBeEmptyDOMElement();
+  });
+});
+
+describe('logout', () => {
+  it('clears the visible session immediately while server and native cleanup continue', async () => {
+    api.getMe.mockResolvedValue({ id: 'cust-1', firstName: 'Pat' });
+    api.getAuthProperties.mockResolvedValue({ properties: [{ id: 'cust-1' }] });
+    await act(async () => { await authApi.refreshCustomer(); });
+    expect(screen.getByTestId('customer-id')).toHaveTextContent('cust-1');
+
+    localStorage.setItem('waves_refresh_token', 'refresh-1');
+    api.refreshToken = 'refresh-1';
+    let finishPush;
+    deactivateNativePushToken.mockReturnValueOnce(new Promise((resolve) => { finishPush = resolve; }));
+    api.request.mockReturnValueOnce(new Promise(() => {}));
+
+    act(() => { authApi.logout(); });
+
+    expect(screen.getByTestId('customer-id')).toBeEmptyDOMElement();
+    expect(api.clearTokens).not.toHaveBeenCalled();
+    expect(api.request).not.toHaveBeenCalled();
+
+    await act(async () => { finishPush(); });
+
+    expect(api.clearTokens).toHaveBeenCalledTimes(1);
+    expect(api.request).toHaveBeenLastCalledWith('/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({ refreshToken: 'refresh-1' }),
+    });
   });
 });

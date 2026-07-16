@@ -20,6 +20,7 @@
  */
 import api from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
+import { navigateToCustomerUrl } from './nativeLinks';
 
 export { isNativeApp };
 
@@ -32,6 +33,7 @@ let pendingToken = null;
 let lastToken = null;
 const LAST_TOKEN_KEY = 'waves_native_push_token';
 let listenersBound = false;
+let pushPluginPromise = null;
 // Logout's unsubscribe request while it's on the wire. postToken() awaits it
 // so a quick logout→login re-subscribe can't reach the server first and then
 // be deactivated when the older unsubscribe lands.
@@ -87,6 +89,81 @@ async function postToken(token) {
   }
 }
 
+function pushPlugin() {
+  if (!pushPluginPromise) {
+    pushPluginPromise = import('@capacitor/push-notifications')
+      .then(({ PushNotifications }) => PushNotifications)
+      .catch((error) => {
+        pushPluginPromise = null;
+        throw error;
+      });
+  }
+  return pushPluginPromise;
+}
+
+async function bindPushListeners(PushNotifications) {
+  if (listenersBound) return;
+  listenersBound = true;
+  try {
+    await PushNotifications.addListener('registration', (t) => {
+      if (t?.value) postToken(t.value);
+    });
+    await PushNotifications.addListener('registrationError', (err) => {
+      console.error('[nativePush] push registration error:', err?.error || err);
+    });
+    await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
+      const url = action?.notification?.data?.url;
+      if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
+    });
+  } catch (error) {
+    // A partial bind must be retryable after an app/plugin recovery.
+    listenersBound = false;
+    throw error;
+  }
+}
+
+function permissionValue(permission) {
+  const state = permission?.receive;
+  if (state === 'granted' || state === 'denied' || state === 'prompt' || state === 'prompt-with-rationale') {
+    return state;
+  }
+  return 'unavailable';
+}
+
+/** Return the current native permission without triggering an OS prompt. */
+export async function nativePushPermissionState() {
+  if (!isNativeApp()) return 'unavailable';
+  try {
+    const PushNotifications = await pushPlugin();
+    await bindPushListeners(PushNotifications);
+    return permissionValue(await PushNotifications.checkPermissions());
+  } catch {
+    return 'unavailable';
+  }
+}
+
+/**
+ * Ask for native push from an explicit customer gesture (the notification
+ * drawer's Enable button). A denied permission is reported to the caller so
+ * it can direct the customer to device Settings instead of leaving a dead UI.
+ */
+export async function requestNativePushPermission() {
+  if (!isNativeApp()) return 'unavailable';
+  try {
+    const PushNotifications = await pushPlugin();
+    await bindPushListeners(PushNotifications);
+    let state = permissionValue(await PushNotifications.checkPermissions());
+    if (state === 'prompt' || state === 'prompt-with-rationale') {
+      state = permissionValue(await PushNotifications.requestPermissions());
+    }
+    if (state === 'granted') await PushNotifications.register();
+    return state;
+  } catch (err) {
+    console.error('[nativePush] permission request failed:', err?.message || err);
+    return 'unavailable';
+  }
+}
+
 /**
  * Bind listeners + request permission + register with APNs. Call once at
  * startup. No-op on web; safe to call again.
@@ -94,30 +171,16 @@ async function postToken(token) {
 export async function initNativePush() {
   if (!isNativeApp()) return;
   try {
-    const { PushNotifications } = await import('@capacitor/push-notifications');
+    const PushNotifications = await pushPlugin();
+    await bindPushListeners(PushNotifications);
 
-    if (!listenersBound) {
-      listenersBound = true;
-      await PushNotifications.addListener('registration', (t) => {
-        if (t?.value) postToken(t.value);
-      });
-      await PushNotifications.addListener('registrationError', (err) => {
-        console.error('[nativePush] APNs registration error:', err?.error || err);
-      });
-      // Tapping a notification — route the webview to the deep-linked path.
-      await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
-        const url = action?.notification?.data?.url;
-        if (url && typeof window !== 'undefined') {
-          try { window.location.assign(url); } catch { /* ignore */ }
-        }
-      });
-    }
-
-    const perm = await PushNotifications.requestPermissions();
-    if (perm?.receive === 'granted') {
+    // Startup may silently recover an already-granted registration, but it
+    // must never surprise a newly installed customer with an OS prompt before
+    // the app has explained the value. Prompting happens only from
+    // requestNativePushPermission(), called by the bell's Enable action.
+    const state = permissionValue(await PushNotifications.checkPermissions());
+    if (state === 'granted') {
       await PushNotifications.register();
-    } else {
-      console.info('[nativePush] push permission not granted:', perm?.receive);
     }
   } catch (err) {
     console.error('[nativePush] init failed:', err?.message || err);

@@ -2,76 +2,94 @@ const {
   buildCustomerPricingResponse,
   inferRequestedServices,
   serviceKeyFromText,
-  tierServicesForCustomer,
 } = require('../services/customer-pricing-ai');
 
 function dbForTables(tables = {}) {
-  return (table) => ({
-    where() { return this; },
-    whereNotIn() { return this; },
-    select() { return this; },
-    limit() { return tables[table] || []; },
-    first() { return (tables[table] || [])[0] || null; },
+  return (table) => {
+    const rows = tables[table] || [];
+    const q = {
+      where() { return q; },
+      whereNotIn() { return q; },
+      orWhereNull() { return q; },
+      select() { return rows; },
+      limit() { return rows; },
+      first() { return rows[0] || null; },
+      columnInfo() {
+        return table === 'scheduled_services' ? { is_recurring: {} } : {};
+      },
+    };
+    return q;
+  };
+}
+
+function activePlanDb(customerId, serviceTypes, tier = 'Bronze') {
+  return dbForTables({
+    customers: [{ id: customerId, active: true, waveguard_tier: tier, monthly_rate: 55 }],
+    scheduled_services: serviceTypes.map((service_type, index) => ({
+      id: `svc-${index + 1}`,
+      service_type,
+      scheduled_date: '2026-08-01',
+      status: 'scheduled',
+      is_recurring: true,
+    })),
   });
 }
 
-function dateOffset(days) {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
-}
+const propertyCustomer = (overrides = {}) => ({
+  id: 'cust-1',
+  waveguard_tier: 'Bronze',
+  monthly_rate: 55,
+  property_sqft: 2200,
+  lot_sqft: 7000,
+  lawn_type: 'St. Augustine',
+  ...overrides,
+});
 
 describe('customer pricing AI helpers', () => {
-  test('infers lawn care from natural language', () => {
+  test('infers services from natural language', () => {
     expect(serviceKeyFromText('I am interested in adding lawn care')).toBe('lawn_care');
     expect(inferRequestedServices('Can you price mosquito service?', new Set())).toEqual(['mosquito']);
     expect(inferRequestedServices('Can you add rodent bait stations?', new Set())).toEqual(['rodent_bait']);
   });
 
-  test('uses WaveGuard tier as current-service context', () => {
-    expect(tierServicesForCustomer({ waveguard_tier: 'Silver' })).toEqual(['pest_control', 'lawn_care']);
-    expect(tierServicesForCustomer({ waveguard_tier: 'One-Time' })).toEqual([]);
-  });
-
-  test('does not re-price a service already included on the property', async () => {
+  test('does not invent service coverage from a WaveGuard tier label', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
       propertyLookup: null,
       prompt: 'I am interested in adding lawn care',
-      customer: {
-        id: 'cust-1',
-        waveguard_tier: 'Silver',
-        monthly_rate: 110,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
+      customer: propertyCustomer({ waveguard_tier: 'Silver', monthly_rate: 110 }),
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.currentServices).toEqual([]);
+    expect(result.alreadyIncluded).not.toContain('Lawn Care');
+    expect(result.options.length).toBeGreaterThan(0);
+  });
+
+  test('does not re-price a service present in authoritative recurring rows', async () => {
+    const customer = propertyCustomer({ id: 'cust-existing', waveguard_tier: 'Silver' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: null,
+      prompt: 'I am interested in adding lawn care',
+      customer,
+    });
+
+    expect(result.currentServices).toEqual(expect.arrayContaining(['Pest Control', 'Lawn Care']));
     expect(result.alreadyIncluded).toContain('Lawn Care');
     expect(result.options).toEqual([]);
   });
 
-  test('prices requested service from the customer property profile', async () => {
+  test('prices a requested service from the customer property profile', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
       propertyLookup: null,
       prompt: 'I am interested in adding lawn care',
-      customer: {
-        id: 'cust-2',
-        waveguard_tier: 'Bronze',
-        monthly_rate: 55,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
+      customer: propertyCustomer({ id: 'cust-price' }),
     });
 
     expect(result.ok).toBe(true);
     expect(result.requestedServices).toContain('Lawn Care');
     expect(result.property.source).toBe('customer_profile');
-    expect(result.options.length).toBeGreaterThan(0);
     expect(result.options.some(option => option.monthly > 0)).toBe(true);
   });
 
@@ -80,18 +98,14 @@ describe('customer pricing AI helpers', () => {
       db: null,
       propertyLookup: null,
       prompt: 'I am interested in palm injection',
-      customer: {
-        id: 'cust-palm',
-        waveguard_tier: 'Bronze',
-        monthly_rate: 55,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-      },
+      customer: propertyCustomer({ id: 'cust-palm' }),
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.code).toBe('PROPERTY_DETAILS_NEEDED');
-    expect(result.message).toBe('Palm count is required for palm injection pricing.');
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'PROPERTY_DETAILS_NEEDED',
+      message: 'Palm count is required for palm injection pricing.',
+    });
   });
 
   test('uses lookup-provided stories when customer stories are missing', async () => {
@@ -99,15 +113,10 @@ describe('customer pricing AI helpers', () => {
       db: null,
       prompt: 'I am interested in adding termite protection',
       propertyLookup: async () => ({
-        enriched: {
-          homeSqFt: 2400,
-          lotSqFt: 7000,
-          stories: 2,
-        },
+        enriched: { homeSqFt: 2400, lotSqFt: 7000, stories: 2 },
       }),
       customer: {
-        id: 'cust-3',
-        waveguard_tier: 'Bronze',
+        id: 'cust-lookup',
         monthly_rate: 55,
         address_line1: '123 Gulf Dr',
         city: 'Sarasota',
@@ -121,42 +130,12 @@ describe('customer pricing AI helpers', () => {
     expect(result.property.stories).toBe(2);
   });
 
-  test('ignores historical scheduled services when deciding current services', async () => {
-    const result = await buildCustomerPricingResponse({
-      db: dbForTables({
-        scheduled_services: [
-          { service_type: 'Lawn Care', status: 'completed', scheduled_date: dateOffset(-14) },
-        ],
-      }),
-      propertyLookup: null,
-      prompt: 'I am interested in adding lawn care',
-      customer: {
-        id: 'cust-4',
-        waveguard_tier: 'Bronze',
-        monthly_rate: 55,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
-    });
-
-    expect(result.alreadyIncluded).not.toContain('Lawn Care');
-    expect(result.options.length).toBeGreaterThan(0);
-  });
-
   test('uses modeled baseline for add-on delta when billing differs', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
       propertyLookup: null,
       prompt: 'I am interested in adding lawn care',
-      customer: {
-        id: 'cust-5',
-        waveguard_tier: 'Bronze',
-        monthly_rate: 500,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
+      customer: propertyCustomer({ id: 'cust-mismatch', monthly_rate: 500 }),
     });
     const option = result.options[0];
 
@@ -164,133 +143,69 @@ describe('customer pricing AI helpers', () => {
     expect(option.estimatedPlanMonthly).toBeNull();
     expect(option.notes.some(note => note.includes('current billing differs'))).toBe(true);
   });
+});
 
-  test('prices a target WaveGuard tier as one plan option', async () => {
+describe('count-based WaveGuard tier truth', () => {
+  test('target-tier-only requests require the customer to choose actual services', async () => {
+    const customer = propertyCustomer({ id: 'cust-tier', waveguard_tier: 'Gold' });
     const result = await buildCustomerPricingResponse({
-      db: null,
-      propertyLookup: null,
-      prompt: 'Price WaveGuard Platinum',
-      targetTier: 'Platinum',
-      customer: {
-        id: 'cust-6',
-        waveguard_tier: 'Gold',
-        monthly_rate: 140,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
-    });
-
-    expect(result.mode).toBe('waveguard_tier');
-    expect(result.targetTier).toBe('Platinum');
-    expect(result.options).toHaveLength(1);
-    expect(result.options[0].label).toBe('WaveGuard Platinum');
-    expect(result.options[0].cadence).toContain('Tree & Shrub Care');
-  });
-
-  test('target tier pricing keeps existing non-tier recurring services', async () => {
-    const customer = {
-      id: 'cust-7',
-      waveguard_tier: 'Gold',
-      monthly_rate: 140,
-      property_sqft: 2200,
-      lot_sqft: 7000,
-      lawn_type: 'St. Augustine',
-    };
-    const base = await buildCustomerPricingResponse({
-      db: null,
-      propertyLookup: null,
-      prompt: 'Price WaveGuard Platinum',
-      targetTier: 'Platinum',
-      customer,
-    });
-    const withTermite = await buildCustomerPricingResponse({
-      db: dbForTables({
-        scheduled_services: [
-          { service_type: 'Termite Bait Monitoring', status: 'pending', scheduled_date: dateOffset(14) },
-        ],
-      }),
+      db: activePlanDb(customer.id, ['Pest Control', 'Lawn Care', 'Termite Bait Monitoring'], 'Gold'),
       propertyLookup: null,
       prompt: 'Price WaveGuard Platinum',
       targetTier: 'Platinum',
       customer,
     });
 
-    expect(withTermite.currentServices).toContain('Termite Bait Monitoring');
-    expect(withTermite.options[0].monthly).toBeGreaterThan(base.options[0].monthly);
-  });
-
-  test('target tier pricing promotes quotes when existing qualifiers derive a higher tier', async () => {
-    const result = await buildCustomerPricingResponse({
-      db: dbForTables({
-        scheduled_services: [
-          { service_type: 'Termite Bait Monitoring', status: 'pending', scheduled_date: dateOffset(14) },
-        ],
-      }),
-      propertyLookup: null,
-      prompt: 'Price WaveGuard Gold',
-      targetTier: 'Gold',
-      customer: {
-        id: 'cust-8',
-        waveguard_tier: 'Silver',
-        monthly_rate: 108,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'SERVICES_REQUIRED_FOR_TIER',
+      targetTier: 'Platinum',
+      requiredServiceCount: 4,
+      additionalServiceCount: 1,
+      options: [],
     });
-
-    expect(result.targetTier).toBe('Platinum');
-    expect(result.selectedTier).toBe('Gold');
-    expect(result.currentServices).toContain('Termite Bait Monitoring');
-    expect(result.options[0].label).toBe('WaveGuard Platinum');
-    expect(result.options[0].cadence).toContain('Tree & Shrub Care');
-    expect(result.options[0].waveguardTier).toBe('Platinum');
+    expect(result.currentServices).toEqual(expect.arrayContaining([
+      'Pest Control',
+      'Lawn Care',
+      'Termite Bait Monitoring',
+    ]));
+    expect(result.message).toMatch(/choose the 1 service/i);
   });
 
-  test('target tier pricing rejects same or lower tiers', async () => {
+  test('a stored Gold label does not fabricate three current services', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,
       propertyLookup: null,
-      prompt: 'Price WaveGuard Silver',
-      targetTier: 'Silver',
-      customer: {
-        id: 'cust-9',
-        waveguard_tier: 'Gold',
-        monthly_rate: 140,
-        property_sqft: 2200,
-        lot_sqft: 7000,
-        lawn_type: 'St. Augustine',
-      },
+      prompt: 'Price WaveGuard Platinum',
+      targetTier: 'Platinum',
+      customer: propertyCustomer({ id: 'cust-no-rows', waveguard_tier: 'Gold' }),
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.code).toBe('TARGET_TIER_NOT_UPGRADE');
-    expect(result.currentTier).toBe('Gold');
+    expect(result.currentServices).toEqual([]);
+    expect(result.additionalServiceCount).toBe(4);
     expect(result.options).toEqual([]);
   });
 
-  test('target tier pricing carries plan-level manual review warnings', async () => {
+  test('reports an already-earned tier from any qualifying service combination', async () => {
+    const customer = propertyCustomer({ id: 'cust-any-combo', waveguard_tier: 'Silver' });
     const result = await buildCustomerPricingResponse({
-      db: null,
+      db: activePlanDb(customer.id, ['Mosquito Control', 'Termite Bait Monitoring'], 'Silver'),
       propertyLookup: null,
-      prompt: 'Price WaveGuard Platinum',
-      targetTier: 'Platinum',
-      customer: {
-        id: 'cust-10',
-        waveguard_tier: 'Gold',
-        monthly_rate: 140,
-        property_sqft: 2200,
-        lot_sqft: 12000,
-        tree_count: 20,
-        lawn_type: 'St. Augustine',
-      },
+      prompt: 'Price WaveGuard Silver',
+      targetTier: 'Silver',
+      customer,
     });
-    const option = result.options[0];
 
-    expect(result.ok).toBe(true);
-    expect(option.manualReview).toBe(true);
-    expect(option.confidence).toBe('low');
-    expect(option.notes.some(note => note.includes('High tree count'))).toBe(true);
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'TARGET_TIER_ALREADY_EARNED',
+      requiredServiceCount: 2,
+      additionalServiceCount: 0,
+      options: [],
+    });
+    expect(result.currentServices).toEqual(expect.arrayContaining([
+      'Mosquito Control',
+      'Termite Bait Monitoring',
+    ]));
   });
 });

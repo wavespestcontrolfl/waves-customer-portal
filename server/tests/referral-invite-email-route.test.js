@@ -12,6 +12,7 @@ jest.mock('../models/db', () => jest.fn());
 
 jest.mock('../services/referral-engine', () => ({
   enrollPromoter: jest.fn(async () => ({ promoter: { id: 'promoter-1', first_name: 'Taylor', customer_email: 'taylor@waves.test' } })),
+  submitReferral: jest.fn(),
   getSettings: jest.fn(async () => ({ referee_discount_cents: 2500 })),
   getPromoterReferralLink: jest.fn(() => 'https://portal.wavespestcontrol.com/r/WAVES-J4KM'),
   buildRefereeOfferLine: jest.fn(() => 'Book your first service through their referral link and you’ll get $25 off — our way of saying welcome.'),
@@ -31,6 +32,7 @@ const express = require('express');
 const db = require('../models/db');
 const EmailTemplateLibrary = require('../services/email-template-library');
 const referralsRouter = require('../routes/referrals-v2');
+const referralEngine = require('../services/referral-engine');
 
 // Chainable knex-ish stub. `firstResults` drives per-table .first() lookups
 // (customers → self-check, referral_invites → cooldown read). Records inserts,
@@ -93,6 +95,25 @@ function post(path, body) {
     body: JSON.stringify(body),
   });
 }
+
+describe('referral phone validation', () => {
+  test('rejects alphabetic garbage before enrollment or persistence', async () => {
+    const res = await post('/api/referrals', { name: 'Jordan', phone: 'abcdefg' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
+    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+    expect(referralEngine.submitReferral).not.toHaveBeenCalled();
+  });
+
+  test('rejects alphabetic garbage for direct SMS invitations', async () => {
+    const res = await post('/api/referrals/invite', { phone: 'not-a-phone' });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'Enter a valid phone number' });
+    expect(referralEngine.enrollPromoter).not.toHaveBeenCalled();
+  });
+});
 
 const emailDigest = (email) => crypto.createHash('sha256').update(email).digest('hex').slice(0, 16);
 

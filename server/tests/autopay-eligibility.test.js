@@ -1,4 +1,9 @@
-const { customerOnAutopay, isChargeableAutopayMethod, isPaused } = require('../services/autopay-eligibility');
+const {
+  customerOnAutopay,
+  isChargeableAutopayMethod,
+  isExpiredCardMethod,
+  isPaused,
+} = require('../services/autopay-eligibility');
 
 const chargeableCard = {
   id: 'pm-1',
@@ -7,6 +12,8 @@ const chargeableCard = {
   stripe_payment_method_id: 'pm_stripe_1',
   is_default: true,
   autopay_enabled: true,
+  exp_month: 12,
+  exp_year: 2099,
 };
 
 const chargeableAch = {
@@ -55,6 +62,15 @@ describe('autopay eligibility', () => {
     expect(isChargeableAutopayMethod({ ...chargeableCard, is_default: false })).toBe(false);
     expect(isChargeableAutopayMethod({ ...chargeableCard, autopay_enabled: false })).toBe(false);
     expect(isChargeableAutopayMethod({ ...chargeableCard, stripe_payment_method_id: null })).toBe(false);
+  });
+
+  test('rejects expired or unknown-expiry cards while preserving bank eligibility', () => {
+    const now = new Date('2026-07-16T16:00:00Z');
+    expect(isExpiredCardMethod({ ...chargeableCard, exp_month: 6, exp_year: 2026 }, now)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: 6, exp_year: 2026 }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: null, exp_year: null }, now)).toBe(false);
+    expect(isChargeableAutopayMethod({ ...chargeableCard, exp_month: 7, exp_year: 2026 }, now)).toBe(true);
+    expect(isChargeableAutopayMethod({ ...chargeableAch, exp_month: null, exp_year: null }, now)).toBe(true);
   });
 
   test('finds the default Stripe autopay payment method row', async () => {
