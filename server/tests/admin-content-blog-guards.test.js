@@ -255,6 +255,17 @@ describe('GET /blog sort/limit hardening', () => {
 // codex r4 (P0): the manual publish lane must own the row while publishAstro
 // runs its long external workflow — DELETE/generate reject the claim, and
 // the route restores the prior publish_status afterwards.
+describe('regenerate-image publish guard (codex r10)', () => {
+  test('refuses while a publisher owns the row; allowed on a plain open-PR row (edit->refresh lane)', async () => {
+    setupDb();
+    tableState.post = { id: POST_ID, status: 'queued', publish_status: 'publishing' };
+    expect((await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } })).statusCode).toBe(409);
+
+    tableState.post = { id: POST_ID, status: 'draft', publish_claimed_at: new Date() };
+    expect((await invoke('post', '/blog/:id/regenerate-image', { params: { id: POST_ID } })).statusCode).toBe(409);
+  });
+});
+
 describe('publish-astro atomic claim (publish_claimed_at — lane-neutral, invisible to pages-poll)', () => {
   const AstroPublisher = require('../services/content-astro/astro-publisher');
 

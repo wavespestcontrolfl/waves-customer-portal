@@ -760,8 +760,16 @@ router.post('/blog/:id/optimize', aiContentLimiter, async (req, res, next) => {
 // whole content pipeline.
 router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => {
   try {
+    assertBlogPostId(req.params.id);
     const post = await db('blog_posts').where('id', req.params.id).first();
     if (!post) return res.status(404).json({ error: 'Post not found' });
+    // A publisher owns the row mid-publish: publishAstro has already read
+    // featured_image_url for its hero resolve — swapping it now would ship
+    // a PR hero different from the DB record. Editing while a PR is merely
+    // OPEN stays allowed (that's the edit→Refresh-PR lane).
+    if (post.publish_status === 'publishing' || publishClaimActive(post)) {
+      return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
+    }
 
     const url = await generateFeaturedImage({
       title: post.title,
@@ -769,10 +777,16 @@ router.post('/blog/:id/regenerate-image', aiContentLimiter, async (req, res) => 
       keyword: post.keyword,
     });
 
-    const [updated] = await db('blog_posts')
-      .where('id', req.params.id)
+    // Same predicates ATOMICALLY on the write (the image call above is slow —
+    // a publish can start during it).
+    const [updated] = await whereNoLivePublishClaim(
+      db('blog_posts')
+        .where('id', req.params.id)
+        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing')),
+    )
       .update({ featured_image_url: url, updated_at: new Date() })
       .returning('*');
+    if (!updated) return res.status(409).json({ error: 'Post is being published right now — retry after it finishes.' });
 
     res.json({ success: true, post: updated });
   } catch (err) {
