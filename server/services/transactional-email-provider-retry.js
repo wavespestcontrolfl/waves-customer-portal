@@ -114,6 +114,10 @@ async function recoverStaleClaims(now = new Date()) {
     .update({
       status: 'failed',
       provider_retry_next_at: now,
+      // The claim increments before network I/O. These rows have neither a
+      // provider id nor a sent timestamp, so refund the interrupted claim and
+      // let the next worker consume the same bounded attempt slot.
+      provider_retry_count: db.raw('GREATEST(provider_retry_count - 1, 0)'),
       error_message: 'Interrupted provider retry claim recovered',
       updated_at: now,
     });

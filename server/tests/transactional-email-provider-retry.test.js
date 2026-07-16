@@ -144,6 +144,7 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed',
       provider_retry_next_at: now,
+      provider_retry_count: 'GREATEST(provider_retry_count - 1, 0)',
     }));
   });
 });
