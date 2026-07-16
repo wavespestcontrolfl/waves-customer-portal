@@ -1410,3 +1410,25 @@ describe('markPrTerminal', () => {
     await expect(rem.markPrTerminal(1, 'merged', throwingDb)).resolves.toMatchObject({ updated: 0 });
   });
 });
+
+// Terminal rows must be immutable to saveState: a remediation round that
+// began while the PR was open can finish AFTER markPrTerminal and would
+// otherwise write status back to remediating/parked (codex r-local finding).
+describe('saveState vs terminal rows', () => {
+  const { saveState } = rem._internals;
+
+  test('saveState cannot overwrite a merged/closed row', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 42, status: 'merged', rounds: 1 }] });
+    const wrote = await saveState(db, 42, { status: 'remediating', branch: 'b' });
+    expect(wrote).toBe(false);
+    expect(db._tables.codex_remediation_state[0]).toMatchObject({ status: 'merged', rounds: 1 });
+  });
+
+  test('saveState still writes normally to non-terminal rows and inserts fresh ones', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 43, status: 'active', rounds: 0 }] });
+    expect(await saveState(db, 43, { status: 'remediating' })).toBe(true);
+    expect(db._tables.codex_remediation_state[0].status).toBe('remediating');
+    expect(await saveState(db, 44, { status: 'active', rounds: 0 })).toBe(true);
+    expect(db._tables.codex_remediation_state).toHaveLength(2);
+  });
+});

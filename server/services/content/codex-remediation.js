@@ -730,10 +730,20 @@ async function getState(db, prNumber) {
 async function saveState(db, prNumber, patch) {
   const existing = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
   if (existing) {
-    await db('codex_remediation_state').where({ pr_number: prNumber }).update({ ...patch, updated_at: new Date() });
-  } else {
-    await db('codex_remediation_state').insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() });
+    // Terminal rows are immutable: a remediation round that began while the
+    // PR was still open can finish AFTER markPrTerminal stamped it
+    // merged/closed — its unconditional write would flip status back to
+    // remediating/parked and resurrect the stale telemetry. The guarded
+    // update makes the stamp win; the round's bookkeeping is moot anyway
+    // (the PR left the open state, so no further round can start).
+    const updated = await db('codex_remediation_state')
+      .where({ pr_number: prNumber })
+      .whereNotIn('status', ['merged', 'closed'])
+      .update({ ...patch, updated_at: new Date() });
+    return updated > 0;
   }
+  await db('codex_remediation_state').insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() });
+  return true;
 }
 
 /**
@@ -1235,6 +1245,7 @@ module.exports = {
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
+  _internals: { saveState, getState },
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,

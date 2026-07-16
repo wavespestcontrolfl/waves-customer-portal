@@ -632,6 +632,17 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
 
 /** PR closed without merge: terminal failure, never retried (both lanes). */
 async function finalizeClosed(run, prNumber) {
+  // Retire the remediation row at the FIRST closed observation — the PR can
+  // never re-enter remediation regardless of what happens to the run below
+  // (supersede, already-finalized, crash between writes), and stamping after
+  // the claim left closed PRs marked parked/remediating forever on any of
+  // those early exits. Idempotent per tick.
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'closed');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
+  }
   // Same finalize-time queue re-check as finalizeMerged: an operator who
   // requeued the opportunity mid-tick has already re-routed the work — the
   // old run gets annotated out of selection, not marked failed.
@@ -654,12 +665,6 @@ async function finalizeClosed(run, prNumber) {
       updated_at: now,
     });
   if (!claimed) return { skipped: true, reason: 'already_finalized' };
-  try {
-    const { markPrTerminal } = require('./codex-remediation');
-    await markPrTerminal(prNumber, 'closed');
-  } catch (err) {
-    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
-  }
   await reconcileQueueRow(run, { merged: false });
   logger.info(`[autonomous-pr-poller] run ${run.id} failed: PR #${prNumber} closed unmerged`);
   return { closed: true };

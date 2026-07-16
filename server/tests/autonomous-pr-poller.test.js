@@ -1488,3 +1488,28 @@ describe('terminal-write hygiene (claim clears tracker + remediation row retired
     });
   });
 });
+
+// codex r-local: the closed-PR stamp must land at FIRST closed observation —
+// a superseded/already-finalized run (or a crash between writes) previously
+// left the closed PR's remediation row parked forever.
+describe('closed-PR terminal stamp ordering', () => {
+  test('a superseded closed run still retires the remediation row', async () => {
+    // queueFirst simulates the operator requeue landing AFTER the tick-start
+    // snapshot: pollRun runs (PR observed closed → stamp), then the
+    // finalize-time re-check supersedes the run instead of failing it.
+    const updates = setupDb({
+      pending: [makeRun()],
+      queueFirst: { id: 'opp-1', status: 'done', skip_reason: null },
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    // Run was superseded (no failed claim)…
+    expect(runUpdates(updates).find((u) => u.updates.outcome === 'failed')).toBeUndefined();
+    // …but the closed PR's remediation row is already terminal.
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+});
