@@ -327,12 +327,17 @@ const SERVICE_CONVERSION_LINK = {
   specialty: '/pest-control-calculator/',
   lawn: '/contact/',
   'tree-shrub': '/contact/',
-  // Verbatim facts-bank service ids the miner may emit unmapped
-  // (facts-sufficiency KNOWN_SERVICE_IDS) — without these aliases those
-  // opportunities would keep missing the conversion link.
-  'pest-control': '/pest-control-calculator/',
-  'lawn-care': '/contact/',
-  'tree-shrub-care': '/contact/',
+};
+
+// Verbatim facts-bank service ids the miner may emit unmapped
+// (facts-sufficiency KNOWN_SERVICE_IDS). Normalized ONCE in
+// _internalLinksFor so ALL three link maps (hubs, city slug, conversion)
+// resolve — aliasing only the conversion map left those opportunities
+// missing their mandatory service/city checklist links.
+const SERVICE_ID_ALIASES = {
+  'pest-control': 'pest',
+  'lawn-care': 'lawn',
+  'tree-shrub-care': 'tree-shrub',
 };
 
 // ── main API ────────────────────────────────────────────────────────
@@ -710,16 +715,20 @@ class ContentBriefBuilder {
 
   _internalLinksFor(opportunity, pageType) {
     if (['metadata', 'links', 'gbp', 'none'].includes(pageType)) return [];
+    // One normalization for ALL three maps below — a verbatim facts-bank id
+    // ('pest-control') previously missed the hub AND city links too, and the
+    // gate P1s drafts on exactly those mandatory checklist links.
+    const service = SERVICE_ID_ALIASES[opportunity.service] || opportunity.service;
     const links = new Set();
-    const hubs = SERVICE_HUB_LINKS[opportunity.service] || [];
+    const hubs = SERVICE_HUB_LINKS[service] || [];
     for (const h of hubs) links.add(h);
     // City-service link uses the canonical service slug, NOT
     // `${service}-control-` (lawn would produce /lawn-control-…-fl/
     // which isn't a real page; the real slug is /lawn-care-…-fl/).
     // Services without a canonical city-service slug pattern (e.g.
     // tree-shrub, specialty) get only the hub link.
-    if (opportunity.city && opportunity.service) {
-      const slug = SERVICE_CITY_SLUG[opportunity.service];
+    if (opportunity.city && service) {
+      const slug = SERVICE_CITY_SLUG[service];
       if (slug) {
         const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
         links.add(`/${slug}-${citySlug}-fl/`);
@@ -729,7 +738,7 @@ class ContentBriefBuilder {
     // other page types (customer-question's "one internal link" contract,
     // city pages' own CTA rules) keep their existing link shape.
     if (pageType === 'supporting-blog') {
-      const conversion = SERVICE_CONVERSION_LINK[opportunity.service];
+      const conversion = SERVICE_CONVERSION_LINK[service];
       if (conversion) links.add(conversion);
     }
     return Array.from(links).slice(0, 5);

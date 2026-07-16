@@ -441,10 +441,21 @@ describe('_internalLinksFor conversion link', () => {
     expect(builder._internalLinksFor({ city: null, service: 'tree-shrub' }, 'supporting-blog')).toContain('/contact/');
   });
 
-  test('verbatim facts-bank service ids get the conversion link too (codex r1)', () => {
-    expect(builder._internalLinksFor({ city: null, service: 'pest-control' }, 'supporting-blog')).toContain('/pest-control-calculator/');
-    expect(builder._internalLinksFor({ city: null, service: 'lawn-care' }, 'supporting-blog')).toContain('/contact/');
-    expect(builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog')).toContain('/contact/');
+  test('verbatim facts-bank service ids resolve ALL link maps — hub, city, and conversion (codex r1+r2)', () => {
+    const pest = builder._internalLinksFor({ city: 'Bradenton', service: 'pest-control' }, 'supporting-blog');
+    expect(pest).toContain('/pest-control-calculator/');
+    expect(pest).toContain('/pest-control-services/');
+    expect(pest).toContain('/pest-control-bradenton-fl/');
+    expect(pest.length).toBeLessThanOrEqual(5);
+
+    const lawn = builder._internalLinksFor({ city: 'Venice', service: 'lawn-care' }, 'supporting-blog');
+    expect(lawn).toContain('/contact/');
+    expect(lawn).toContain('/lawn-care/');
+    expect(lawn).toContain('/lawn-care-venice-fl/');
+
+    const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
+    expect(trees).toContain('/contact/');
+    expect(trees).toContain('/tree-shrub-care/');
   });
 
   test('non-blog page types keep their existing link shape', () => {
