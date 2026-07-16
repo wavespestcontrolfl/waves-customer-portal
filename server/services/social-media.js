@@ -1374,7 +1374,12 @@ const SocialMediaService = {
         .where('source_url', normalized)
         .whereNotIn('status', ['dry_run', 'failed'])
         .first();
-      if (existing) return { skipped: 'already_posted' };
+      // blocking_status lets callers distinguish "definitively sent/queued"
+      // (published/scheduled — safe to stamp the source row as shared) from
+      // "an admin drafted studio copy for this URL" (draft/approved — blocks
+      // the auto-share by design until the admin publishes or rejects it,
+      // but nothing has gone out, so callers must NOT mark it shared).
+      if (existing) return { skipped: 'already_posted', blocking_status: existing.status || null };
       const result = await this.publishToAll({
         title, description, link: normalized, guid: normalized, source, noAiImage,
         // Autonomous blog-share lane: opt into every platform incl. Twitter

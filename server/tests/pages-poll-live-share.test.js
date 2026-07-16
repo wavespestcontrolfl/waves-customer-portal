@@ -96,6 +96,7 @@ describe('pollLivePost live-flip auto-share', () => {
   test('manual-lane post shares via shareUrlOnce with the RE-FETCHED row fields and stamps shared_to_social', async () => {
     const updates = setupDb();
     const r = await pagesPoll.pollLivePost(makePost());
+    await r._sharePromise;
     expect(r.live).toBe(true);
     expect(social.shareUrlOnce).toHaveBeenCalledWith(expect.objectContaining({
       title: 'Test Post',
@@ -110,61 +111,71 @@ describe('pollLivePost live-flip auto-share', () => {
   test('per-post opt-out and already-shared rows do not share', async () => {
     setupDb();
     freshRow.auto_share_social = false;
-    await pagesPoll.pollLivePost(makePost());
+    await (await pagesPoll.pollLivePost(makePost()))._sharePromise;
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
 
     freshRow = { ...freshRow, auto_share_social: true, shared_to_social: true };
-    await pagesPoll.pollLivePost(makePost());
+    await (await pagesPoll.pollLivePost(makePost()))._sharePromise;
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
   test('scheduler-claimed rows, kill switch, automation-off, and admin pause all skip the share (flip unaffected)', async () => {
     setupDb();
-    expect((await pagesPoll.pollLivePost(makePost({ publish_status: 'publishing' }))).live).toBe(true);
+    const poll = async (over) => { const r = await pagesPoll.pollLivePost(makePost(over)); await r._sharePromise; return r; };
+    expect((await poll({ publish_status: 'publishing' })).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
 
     process.env.SOCIAL_BLOG_LIVE_SHARE_ENABLED = 'false';
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
     delete process.env.SOCIAL_BLOG_LIVE_SHARE_ENABLED;
 
     social.SOCIAL_FLAGS.automationEnabled = false;
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
     social.SOCIAL_FLAGS.automationEnabled = true;
 
     social.SOCIAL_FLAGS.rssAutopublish = false;
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
     social.SOCIAL_FLAGS.rssAutopublish = true;
 
     social.isPausedByAdmin.mockResolvedValue(true);
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(social.shareUrlOnce).not.toHaveBeenCalled();
   });
 
   test('stamping: already_posted stamps, other skips/dry-run do not; a throw never blocks the flip', async () => {
-    // already_posted = the URL is definitively out (another lane won the
-    // dedupe) — STAMP it so the scheduler's non-shareUrlOnce path can't
-    // double-post later.
+    const poll = async () => { const r = await pagesPoll.pollLivePost(makePost()); await r._sharePromise; return r; };
+    // already_posted with a PUBLISHED/SCHEDULED blocker = definitively out —
+    // STAMP it so the scheduler path can't double-post later.
     let updates = setupDb();
-    social.shareUrlOnce.mockResolvedValue({ skipped: 'already_posted' });
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    social.shareUrlOnce.mockResolvedValue({ skipped: 'already_posted', blocking_status: 'published' });
+    expect((await poll()).live).toBe(true);
     expect(updates.find((u) => u.updates.shared_to_social === true)).toBeDefined();
+
+    // already_posted with a DRAFT blocker = studio copy exists but nothing
+    // posted — must NOT stamp (the admin publishing/rejecting the draft is
+    // the recovery path).
+    updates = setupDb();
+    social.shareUrlOnce.mockResolvedValue({ skipped: 'already_posted', blocking_status: 'draft' });
+    expect((await poll()).live).toBe(true);
+    expect(updates.find((u) => u.updates.shared_to_social === true)).toBeUndefined();
 
     updates = setupDb();
     social.shareUrlOnce.mockResolvedValue({ skipped: 'automation_disabled' });
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(updates.find((u) => u.updates.shared_to_social === true)).toBeUndefined();
 
     updates = setupDb();
     social.shareUrlOnce.mockResolvedValue({ shared: true, success: true, dryRun: true });
-    expect((await pagesPoll.pollLivePost(makePost())).live).toBe(true);
+    expect((await poll()).live).toBe(true);
     expect(updates.find((u) => u.updates.shared_to_social === true)).toBeUndefined();
 
     updates = setupDb();
     social.shareUrlOnce.mockRejectedValue(new Error('meta 500'));
     const r = await pagesPoll.pollLivePost(makePost());
+    await r._sharePromise;
     expect(r.live).toBe(true);
     expect(updates.find((u) => u.updates.astro_status === 'live')).toBeDefined();
   });
