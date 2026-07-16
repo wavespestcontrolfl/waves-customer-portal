@@ -119,6 +119,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         return q;
       }),
       whereNot: jest.fn(() => q),
+      whereNotIn: jest.fn(() => q),
       whereNull: jest.fn(function (col) {
         q._filters[`null:${col}`] = true;
         return q;
@@ -167,10 +168,15 @@ function runUpdates(updates) {
   // first-observation stamp (day-cap accounting, fires on every merged-PR
   // observation) and the poll_pending_* observability tracker (fires on
   // every pending verdict) are filtered out so state assertions stay exact;
-  // both have their own dedicated suites.
-  return updates.filter((u) => u.table === 'autonomous_runs'
-    && !('astro_pr_merged_at' in u.updates)
-    && !Object.keys(u.updates).some((k) => k.startsWith('poll_pending')));
+  // both have their own dedicated suites. Terminal claims now carry
+  // poll_pending_* CLEARS inline (crash-safe atomicity), so the filter drops
+  // an update only when it has no substantive key beyond those trackers.
+  return updates.filter((u) => {
+    if (u.table !== 'autonomous_runs') return false;
+    return Object.keys(u.updates).some(
+      (k) => k !== 'updated_at' && k !== 'astro_pr_merged_at' && !k.startsWith('poll_pending'),
+    );
+  });
 }
 
 beforeEach(() => {
@@ -1398,5 +1404,71 @@ describe('pending-reason tracking (silent-starvation observability)', () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     const run = { id: 'run-1', astro_pr_url: PR_URL, poll_pending_reason: null };
     await expect(trackPendingReason(run, { pending: true, reason: 'preview_build_pending' })).resolves.toBeUndefined();
+  });
+});
+
+// 2026-07-16 finalize-hygiene audit fixes: terminal writes clear the
+// poll_pending_* tracker inline (a crash between the claim and the separate
+// tracker clear froze reasons like 'awaiting_live_deploy' onto completed
+// rows — prod run for PR #374), and the PR's codex_remediation_state row is
+// retired to a terminal status so merged PRs stop reading as live parks.
+describe('terminal-write hygiene (claim clears tracker + remediation row retired)', () => {
+  test('finalizeMerged claim clears poll_pending_* atomically and stamps the remediation row merged', async () => {
+    const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'awaiting_live_deploy', poll_pending_since: new Date() })] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'ok' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    await poller.pollPending();
+
+    const claim = runUpdates(updates)[0];
+    expect(claim.updates).toMatchObject({
+      outcome: 'completed_published',
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.filters).toMatchObject({ pr_number: 42 });
+    expect(stamp.updates).toMatchObject({ status: 'merged' });
+  });
+
+  test('finalizeClosed claim clears poll_pending_* and stamps the remediation row closed', async () => {
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+
+    await poller.pollPending();
+
+    const claim = runUpdates(updates)[0];
+    expect(claim.updates).toMatchObject({
+      outcome: 'failed',
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
+
+    const stamp = updates.find((u) => u.table === 'codex_remediation_state');
+    expect(stamp).toBeDefined();
+    expect(stamp.updates).toMatchObject({ status: 'closed' });
+  });
+
+  test('supersedeRun clears poll_pending_* (pollPending continues past the tracker on that path)', async () => {
+    const updates = setupDb({
+      pending: [makeRun({ poll_pending_reason: 'codex_review_pending', poll_pending_since: new Date() })],
+      queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
+    });
+    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: true, merged_at: '2026-06-11T05:00:00Z' });
+
+    await poller.pollPending();
+
+    const supersede = runUpdates(updates).find((u) => u.updates.skip_reason);
+    expect(supersede).toBeDefined();
+    expect(supersede.updates).toMatchObject({
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
+    });
   });
 });

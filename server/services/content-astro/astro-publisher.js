@@ -1937,6 +1937,13 @@ async function mergedHeroRef(slug) {
 }
 
 async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+  // The PR left the open state — retire its codex_remediation_state row so
+  // stale 'parked'/'remediating' rows over merged PRs don't read as live
+  // park telemetry. Fail-soft bookkeeping (markPrTerminal never throws).
+  if (post.astro_pr_number) {
+    const { markPrTerminal } = require('../content/codex-remediation');
+    await markPrTerminal(post.astro_pr_number, 'merged');
+  }
   if (isUnpublish) {
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'draft',

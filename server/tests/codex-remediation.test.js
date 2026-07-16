@@ -36,10 +36,16 @@ function makeDb(initial = {}) {
   function db(table) {
     tables[table] = tables[table] || [];
     let crit = {};
+    let notIn = null;
     return {
       where(c) { crit = c; return this; },
+      whereNotIn(col, vals) { notIn = { col, vals }; return this; },
       async first() { const r = tables[table].find((x) => match(x, crit)); return r ? { ...r } : null; },
-      async update(patch) { const rows = tables[table].filter((x) => match(x, crit)); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async update(patch) {
+        const rows = tables[table].filter((x) => match(x, crit) && (!notIn || !notIn.vals.includes(x[notIn.col])));
+        rows.forEach((r) => Object.assign(r, patch));
+        return rows.length;
+      },
       async insert(row) { tables[table].push({ ...row }); return [1]; },
     };
   }
@@ -1365,5 +1371,42 @@ describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
     const bad = 'Email john.doe@gmail.com for spider help across Sarasota, Bradenton and Venice — identification, prevention and treatment for Southwest Florida homes.';
     const resBad = rem.validateRewrittenMeta(bad, { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' });
     expect(resBad.ok).toBe(false);
+  });
+});
+
+// PR left the open state → its remediation row must stop reading as a live
+// park. markPrTerminal is fail-soft bookkeeping called from finalizeMerged/
+// finalizeClosed (autonomous poller) and applyMergeEffect (scheduler/admin
+// mergeAstro path).
+describe('markPrTerminal', () => {
+  test('retires a parked row to merged; already-terminal rows stay put', async () => {
+    const db = makeDb({
+      codex_remediation_state: [
+        { pr_number: 377, status: 'parked', park_reason: 'x', rounds: 2 },
+        { pr_number: 375, status: 'closed' },
+      ],
+    });
+    const r1 = await rem.markPrTerminal(377, 'merged', db);
+    expect(r1.updated).toBe(1);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 377).status).toBe('merged');
+
+    const r2 = await rem.markPrTerminal(375, 'merged', db);
+    expect(r2.updated).toBe(0);
+    expect(db._tables.codex_remediation_state.find((r) => r.pr_number === 375).status).toBe('closed');
+  });
+
+  test('never creates a row for a PR that never entered remediation', async () => {
+    const db = makeDb({ codex_remediation_state: [] });
+    const r = await rem.markPrTerminal(999, 'merged', db);
+    expect(r.updated).toBe(0);
+    expect(db._tables.codex_remediation_state).toHaveLength(0);
+  });
+
+  test('rejects junk input and never throws (fail-soft)', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 1, status: 'active' }] });
+    expect((await rem.markPrTerminal('not-a-number', 'merged', db)).updated).toBe(0);
+    expect((await rem.markPrTerminal(1, 'exploded', db)).updated).toBe(0);
+    const throwingDb = () => { throw new Error('db down'); };
+    await expect(rem.markPrTerminal(1, 'merged', throwingDb)).resolves.toMatchObject({ updated: 0 });
   });
 });

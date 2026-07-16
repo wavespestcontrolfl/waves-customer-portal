@@ -736,6 +736,31 @@ async function saveState(db, prNumber, patch) {
   }
 }
 
+/**
+ * Stamp a PR's remediation row terminal ('merged' | 'closed') once the PR
+ * leaves the open state. Nothing transitioned these rows before, so merged
+ * PRs stayed at 'parked'/'remediating'/'active' forever — dead rows that
+ * read as live park telemetry to anyone sweeping park_reason. Bookkeeping
+ * only and fail-soft: remediation never runs for a non-open PR regardless
+ * (runRemediationForPr self-guards on pr.state), so a lost stamp costs
+ * nothing. No row is created when the PR never entered remediation.
+ */
+async function markPrTerminal(prNumber, status, injectedDb = null) {
+  const dbc = injectedDb || dbDefault;
+  try {
+    const n = Number(prNumber);
+    if (!Number.isInteger(n) || !['merged', 'closed'].includes(status)) return { updated: 0 };
+    const updated = await dbc('codex_remediation_state')
+      .where({ pr_number: n })
+      .whereNotIn('status', ['merged', 'closed'])
+      .update({ status, updated_at: new Date() });
+    return { updated };
+  } catch (err) {
+    logger.warn(`[codex-remediation] terminal stamp failed for PR #${prNumber}: ${err.message}`);
+    return { updated: 0, error: err.message };
+  }
+}
+
 function reviewRequestedForHead(issueComments = [], headSha = null) {
   const h = shortSha(headSha);
   return (Array.isArray(issueComments) ? issueComments : []).some((c) => {
@@ -1197,6 +1222,7 @@ module.exports = {
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,
+  markPrTerminal,
   parseCodexFindings,
   pickTargetPath,
   buildReviewRequestBody,

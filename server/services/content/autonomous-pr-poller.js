@@ -351,6 +351,11 @@ async function supersedeRun(run, queueRow) {
           run.reviewer_notes,
           `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
         ].filter(Boolean).join(' | '),
+        // pollPending `continue`s past trackPendingReason on the supersede
+        // path, so without this the last pending reason froze onto the row.
+        poll_pending_reason: null,
+        poll_pending_since: null,
+        poll_pending_annotated_at: null,
         updated_at: new Date(),
       });
     if (!claimed) return { skipped: true, reason: 'already_finalized' };
@@ -515,10 +520,26 @@ async function finalizeMerged(run, prNumber, { autoMerged = false, mergeSha = nu
       outcome: 'completed_published',
       published_url: target.url,
       reviewer_notes: [run.reviewer_notes, note].filter(Boolean).join(' | '),
+      // Pending-reason columns clear inside the claim itself: the post-claim
+      // clear in trackPendingReason runs a separate write on the same tick,
+      // so a crash between the two froze reasons like 'awaiting_live_deploy'
+      // onto completed rows forever (run #374, 2026-07-15).
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
       completed_at: now,
       updated_at: now,
     });
   if (!claimed) return { skipped: true, reason: 'already_finalized' };
+
+  // The PR left the open state — retire its remediation row ('parked'/
+  // 'remediating'/'active' rows over merged PRs read as live park telemetry).
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'merged');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
+  }
 
   const patch = {};
 
@@ -623,10 +644,19 @@ async function finalizeClosed(run, prNumber) {
       outcome: 'failed',
       skip_reason: closedSkipReasonForRun(run),
       failure_message: `Astro ${isMetadataLane(run) ? 'metadata ' : ''}PR #${prNumber} was closed without merging; the draft was rejected and will not be retried.`,
+      poll_pending_reason: null,
+      poll_pending_since: null,
+      poll_pending_annotated_at: null,
       completed_at: now,
       updated_at: now,
     });
   if (!claimed) return { skipped: true, reason: 'already_finalized' };
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    await markPrTerminal(prNumber, 'closed');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] remediation terminal stamp failed for PR #${prNumber}: ${err.message}`);
+  }
   await reconcileQueueRow(run, { merged: false });
   logger.info(`[autonomous-pr-poller] run ${run.id} failed: PR #${prNumber} closed unmerged`);
   return { closed: true };
