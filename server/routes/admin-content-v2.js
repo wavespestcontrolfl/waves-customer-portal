@@ -851,18 +851,24 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     // late can't release a NEWER publisher's lease. The scheduler lane is
     // excluded symmetrically (its CAS also refuses a live claim).
     const stamp = new Date();
-    // Full not-astro-active predicate (markers, active states, scheduler
-    // marker, live claim): publishAstro would reject marker-bearing rows
-    // anyway, and requiring no external progress here also means a >30m
-    // stale-claim takeover only happens when the hung publisher verifiably
-    // did nothing external — takeover-with-progress needs a human.
-    const got = await whereNotAstroActive(db('blog_posts').where('id', req.params.id))
-      .update({ publish_claimed_at: stamp, updated_at: new Date() });
+    // Claim-specific predicate: retryable failed states (build_failed and
+    // publish_failed, markers or not) MAY claim — publishAstro itself
+    // reconciles the stale PR/branch on republish, and that path is the
+    // admin Retry button. Healthy open PRs and merged/live/unpublish states
+    // go through their own lifecycle endpoints; the scheduler marker and a
+    // live manual claim exclude concurrent publishers.
+    const CLAIM_BLOCKING_ASTRO = ['pr_open', 'merged', 'live', 'unpublish_pending'];
+    const got = await whereNoLivePublishClaim(
+      db('blog_posts')
+        .where('id', req.params.id)
+        .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+        .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', CLAIM_BLOCKING_ASTRO)),
+    ).update({ publish_claimed_at: stamp, updated_at: new Date() });
     if (!got) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      const why = astroActivePost(post)
-        ? `Post already has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — use refresh/merge/unpublish instead.`
+      const why = CLAIM_BLOCKING_ASTRO.includes(post.astro_status)
+        ? `Post already has Astro state '${post.astro_status}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — use refresh/merge/unpublish instead.`
         : 'Post is already being published.';
       return res.status(409).json({ error: why });
     }
