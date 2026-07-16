@@ -489,7 +489,10 @@ describe('review fixes', () => {
     expect(draftPriv.lineRequiresReview({ monthly: 250, requiresCustomQuote: true })).toBe(true);
   });
 
-  test('review-only lines are excluded from stored totals even when the summary includes them', () => {
+  test('stored totals stay CONSISTENT with the engine payload when priced review lines exist', () => {
+    // Money-consistency rule (pre-push P0): the public view recomputes from
+    // the engine payload, so stored totals must match it — priced review
+    // lines stay in the totals and the lane flags them as provisional.
     const totals = deriveTotals({
       summary: { recurringMonthlyAfterDiscount: 300, recurringAnnualAfterDiscount: 3600, oneTimeTotal: 0 },
       lineItems: [
@@ -497,8 +500,31 @@ describe('review fixes', () => {
         { service: 'lawn_care', monthly: 260, annual: 3120, customQuoteFlag: true },
       ],
     });
-    expect(totals.monthly).toBe(40);
-    expect(totals.annual).toBe(480);
+    expect(totals.monthly).toBe(300);
+    expect(totals.annual).toBe(3600);
+  });
+
+  test('priced custom-quote lines flag totals as provisional in the lane reasons', () => {
+    const { lane, reasons } = classifyLane({
+      intent: baseIntent(),
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      },
+      engineResult: {
+        summary: {},
+        lineItems: [
+          { service: 'pest_control', monthly: 40, annual: 480 },
+          { service: 'lawn_care', monthly: 260, annual: 3120, customQuoteFlag: true },
+        ],
+      },
+      totals: { monthly: 300, annual: 3600, oneTime: 0 },
+      comps: null,
+      calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched', transcript: 'looking for quarterly pest control', smsThread: [] },
+    });
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/PROVISIONAL/);
   });
 
   test('fabricated evidence quotes force yellow; verbatim quotes pass', () => {

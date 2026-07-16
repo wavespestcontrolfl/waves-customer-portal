@@ -979,10 +979,11 @@ function resolveCallQuoteSignals(extracted = {}, v2Extraction = null) {
 // retry produces — the lead path passes ignoreNoLead to dedupe only against
 // equivalent (lead-path) bells, while the no-lead path dedupes against any.
 // Fail-open: a dedupe-query error must cost a duplicate bell, never the bell.
-// Estimator engine gate (GATE_ESTIMATOR_ENGINE): when ON, the engine posts
-// the single quote-promised notification itself — with a priced draft
-// attached when it can compose one — so the generic bells below stay quiet
-// (one bell per call). Gate OFF preserves today's behavior exactly.
+// Estimator engine gate (GATE_ESTIMATOR_ENGINE). The generic quote-promised
+// bells below always fire synchronously — they are the DURABLE owed-quote
+// guarantee (the engine runs as a floating promise and a restart mid-draft
+// must not lose the promise). When the engine finishes it UPGRADES that
+// same bell in place with the draft link, keeping one bell per call.
 function estimatorEngineOn() {
   try {
     return require('./estimator-engine').estimatorEngineEnabled();
@@ -5963,7 +5964,7 @@ const CallRecordingProcessor = {
           // as an admin notification with the deadline. Without this the
           // promise lives only in the recording and dies if nobody remembers
           // (this is exactly what happened on real multi-property quote calls).
-          if (callQuotePromised && enriched && !estimatorEngineOn()
+          if (callQuotePromised && enriched
             && !(await quotePromisedAlreadyNotified(call.twilio_call_sid, { ignoreNoLead: true }))) {
             try {
               const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
@@ -6017,7 +6018,7 @@ const CallRecordingProcessor = {
     // lead-path notification above never fires for them, so the promise would
     // live only in the recording — the exact failure mode this notification
     // exists to prevent. Surface it at the customer level instead.
-    if (callQuotePromised && !leadId && !extracted.is_spam && !estimatorEngineOn()
+    if (callQuotePromised && !leadId && !extracted.is_spam
       && !(await quotePromisedAlreadyNotified(call.twilio_call_sid))) {
       try {
         const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
@@ -6047,11 +6048,11 @@ const CallRecordingProcessor = {
 
     // Estimator engine (GATE_ESTIMATOR_ENGINE, default OFF): quote-flavored
     // calls get a priced DRAFT estimate composed from the transcript + SMS
-    // thread + profile + arbitrated property data. The engine owns the
-    // quote-promised notification while the gate is on (the generic bells
-    // above are suppressed) and degrades to the classic "send it" text when
-    // it can't draft. Non-blocking by contract — a drafting failure must
-    // never break call processing or eat the promise.
+    // thread + profile + arbitrated property data. The generic quote-promised
+    // bell above already rang synchronously (the DURABLE owed-quote record);
+    // the engine upgrades that bell in place with the draft when it finishes.
+    // Non-blocking by contract — a drafting failure must never break call
+    // processing or eat the promise.
     if (estimatorEngineOn() && !extracted.is_spam
       && (callQuotePromised || callQuoteRequested)) {
       // Fire-and-forget: the DEEP composer + property pipeline can take

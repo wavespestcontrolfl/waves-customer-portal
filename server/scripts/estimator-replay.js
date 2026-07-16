@@ -2,9 +2,10 @@
 /**
  * Estimator Engine replay harness — the dev loop for composer/arbitration
  * changes. Replays a real call through the FULL pipeline (context → property
- * arbitration → composer → pricing → lanes) in dryRun mode: NO draft row is
- * written, NO notification fires, nothing customer-facing happens. Run it on
- * a couple of recent quote calls before every engine change.
+ * arbitration → composer → pricing → lanes) in dryRun mode: NO draft row,
+ * NO notification, and NO property-lookup cache writes (dryRun threads
+ * persist:false through performPropertyLookup). Run it on a couple of recent
+ * quote calls before every engine change.
  *
  * Usage:
  *   node server/scripts/estimator-replay.js --call <call_log_id> [--json]

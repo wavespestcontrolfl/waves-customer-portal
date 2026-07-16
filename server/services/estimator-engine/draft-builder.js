@@ -119,23 +119,24 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
 function deriveTotals(engineResult) {
   const summary = engineResult?.summary || {};
   const lines = engineResult?.lineItems || [];
-  const pricedLines = lines.filter((l) => !lineRequiresReview(l));
-  // The engine summary sums EVERY line — including priced-but-review-only
-  // ones (oversize-lawn custom quotes). A draft's stored totals and the
-  // notification amount must only carry money the operator can actually
-  // send, so any review line forces the per-line computation.
-  const hasReviewLines = lines.some(lineRequiresReview);
+  // Money CONSISTENCY over conservatism: stored totals must equal what the
+  // engine payload (which the public view recomputes from) says — dropping a
+  // priced review-only line here would make the stored, notification, and
+  // customer-rendered amounts disagree. Review-only lines instead force the
+  // yellow lane with an explicit provisional-amount flag, and genuinely
+  // unpriced (quote-required) lines carry no numbers to begin with.
+  const pricedLines = lines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly)
+    || Number(l.annualAfterDiscount ?? l.annual)
+    || Number(l.priceAfterDiscount ?? l.price ?? l.total));
 
-  let monthly = hasReviewLines ? 0 : Number(summary.recurringMonthlyAfterDiscount || 0);
-  let annual = hasReviewLines ? 0 : Number(summary.recurringAnnualAfterDiscount || 0);
+  let monthly = Number(summary.recurringMonthlyAfterDiscount || 0);
+  let annual = Number(summary.recurringAnnualAfterDiscount || 0);
   // Installation charges (termite bait install, etc.) are upfront one-time
   // money — the accept/converter path reads the stored one-time total, so
   // dropping them here would under-charge the accepted estimate.
-  let oneTime = hasReviewLines
-    ? 0
-    : Number(summary.oneTimeTotal || 0)
-      + Number(summary.specialtyTotal || 0)
-      + Number(summary.installationTotal || 0);
+  let oneTime = Number(summary.oneTimeTotal || 0)
+    + Number(summary.specialtyTotal || 0)
+    + Number(summary.installationTotal || 0);
 
   if (!monthly && !annual && pricedLines.length) {
     monthly = pricedLines.reduce((sum, l) => sum + (Number(l.monthlyAfterDiscount ?? l.monthly) || 0), 0);
@@ -289,7 +290,8 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
   if (propertyFacts?.newConstruction) reasons.push('new construction — county roll not yet assessed');
   if (manualLines.length) {
-    reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping`);
+    const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
+    reasons.push(`partial draft: ${manualLines.map((l) => l.service).join(', ')} still need${manualLines.length === 1 ? 's' : ''} manual scoping${pricedManual.length ? ' — their PROVISIONAL amounts are included in the totals; verify before send' : ''}`);
   }
   const lowConfidenceLines = pricedLines.filter((l) => String(l.pricingConfidence || '').toLowerCase() === 'low');
   if (lowConfidenceLines.length) {

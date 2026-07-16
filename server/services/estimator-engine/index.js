@@ -116,13 +116,17 @@ function sameStreetAddress(a, b) {
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
-async function gatherPropertySignals(context, { refreshLookup = false } = {}) {
+async function gatherPropertySignals(context, { refreshLookup = false, persistLookup = true } = {}) {
   const address = addressFromContext(context);
   let propertyRecord = null;
   if (address) {
     try {
       const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-      const lookup = await performPropertyLookup(address, refreshLookup ? { refresh: true } : {});
+      const lookup = await performPropertyLookup(address, {
+        ...(refreshLookup ? { refresh: true } : {}),
+        // dryRun replays are documented read-only — no cache rows behind.
+        ...(persistLookup ? {} : { persist: false }),
+      });
       propertyRecord = lookup?.propertyRecord || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
@@ -147,41 +151,52 @@ async function gatherPropertySignals(context, { refreshLookup = false } = {}) {
   return { address, propertyRecord, parcelView, subdivisionMedian };
 }
 
-// One-bell dedupe across processing retries: the engine's notifications all
-// carry estimator_engine + callSid metadata (and quote_promised, so the
-// processor's own dedupe guard also recognizes them).
-async function alreadyNotifiedForCall(callSid) {
-  if (!callSid) return false;
-  try {
-    const row = await db('notifications')
-      .whereRaw("metadata->>'callSid' = ?", [String(callSid)])
-      .whereRaw("metadata->>'estimator_engine' = 'true'")
-      .first();
-    return !!row;
-  } catch (err) {
-    logger.warn(`[estimator-engine] notification dedupe check failed: ${err.message}`);
-    return false;
-  }
-}
-
+// One-bell + durability: for PROMISED quotes the processor's generic
+// synchronous bell is the durable guarantee (this engine runs as a floating
+// promise — a restart mid-draft must not lose the owed-quote task). The
+// engine therefore UPGRADES that existing bell in place (title/body/link)
+// instead of adding a second one; when no bell exists (request-only calls,
+// or the generic path failed) it inserts fresh. Re-runs dedupe on the
+// estimator_engine marker.
 async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true }) {
-  if (await alreadyNotifiedForCall(call?.twilio_call_sid)) return;
+  const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   const link = estimateId
     ? '/admin/estimates'
     : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications');
+  const metadata = {
+    callSid,
+    estimator_engine: true,
+    // Only a real agent commitment counts as an owed quote — a mere pricing
+    // question must not create a false "send it" task.
+    quote_promised: quotePromised === true,
+    lane: lane || null,
+    estimateId,
+  };
   try {
-    await require('../notification-service').notifyAdmin('lead', title, body, {
-      link,
-      metadata: {
-        callSid: call?.twilio_call_sid || null,
-        estimator_engine: true,
-        // Only a real agent commitment counts as an owed quote — a mere
-        // pricing question must not create a false "send it" task.
-        quote_promised: quotePromised === true,
-        lane: lane || null,
-        estimateId,
-      },
-    });
+    if (callSid) {
+      const existing = await db('notifications')
+        .whereRaw("metadata->>'callSid' = ?", [callSid])
+        .whereRaw("metadata->>'quote_promised' = 'true'")
+        .orderBy('created_at', 'desc')
+        .first();
+      if (existing) {
+        let existingMeta = {};
+        try {
+          existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+        } catch { existingMeta = {}; }
+        if (existingMeta.estimator_engine === true) return; // engine already spoke for this call
+        await db('notifications')
+          .where({ id: existing.id })
+          .update({
+            title,
+            body,
+            link,
+            metadata: JSON.stringify({ ...existingMeta, ...metadata }),
+          });
+        return;
+      }
+    }
+    await require('../notification-service').notifyAdmin('lead', title, body, { link, metadata });
   } catch (err) {
     logger.warn(`[estimator-engine] admin notify failed: ${err.message}`);
   }
@@ -260,7 +275,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       }
     }
 
-    const { address, propertyRecord, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup });
+    const { address, propertyRecord, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
     // An ambiguous shared-phone profile must not size the draft either —
@@ -307,7 +322,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       logger.info('[estimator-engine] composer-final address differs from gathered address — re-gathering property signals');
       const regathered = await gatherPropertySignals(
         { ...context, extraction: null, lead: { address: intent.address }, customer: null },
-        { refreshLookup },
+        { refreshLookup, persistLookup: !dryRun },
       );
       effectiveSignals = regathered;
       addressRegathered = true;

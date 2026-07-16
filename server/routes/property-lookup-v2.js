@@ -160,6 +160,11 @@ function isTimeoutFailure(err, timeout) {
 // ─────────────────────────────────────────────
 async function performPropertyLookup(address, options = {}) {
   const t0 = Date.now();
+  // options.persist === false: read-everything, WRITE-NOTHING mode for
+  // replay/diagnostic callers (estimator-replay) — skips the cache-hit
+  // backfill patches and the final saveLookup so a documented read-only run
+  // truly leaves no rows behind.
+  const persist = options.persist !== false;
 
   // ── STEP -1: Cache ──
   // A verified-fresh row answers without re-running geocode/search/vision —
@@ -185,7 +190,7 @@ async function performPropertyLookup(address, options = {}) {
           .catch(() => null);
         if (floodZone) {
           cached.property_record._floodZone = floodZone;
-          await attachFloodZoneToCachedLookup(address, floodZone);
+          if (persist) await attachFloodZoneToCachedLookup(address, floodZone);
         }
       }
       // Permit-evidence backfill, same pattern: query once on hit, persist
@@ -202,7 +207,7 @@ async function performPropertyLookup(address, options = {}) {
         }).catch(() => null);
         if (permits) {
           cached.property_record._poolPermits = permits;
-          await attachPoolPermitsToCachedLookup(address, permits);
+          if (persist) await attachPoolPermitsToCachedLookup(address, permits);
         }
       }
       // House-number-audit backfill, same pattern: record-bearing rows cached
@@ -230,7 +235,7 @@ async function performPropertyLookup(address, options = {}) {
         if (marker) {
           if (cachedSnapped) marker.snappedRecord = cachedSnapped;
           cached.property_record._addressAudit = marker;
-          await attachAddressAuditToCachedLookup(address, marker);
+          if (persist) await attachAddressAuditToCachedLookup(address, marker);
         }
       }
       return buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
@@ -649,7 +654,7 @@ async function performPropertyLookup(address, options = {}) {
   result.meta.lookupMs = Date.now() - t0;
 
   // ── STEP 5: Persist ── (fail-open; never caches a failed lookup)
-  await saveLookup(address, result);
+  if (persist) await saveLookup(address, result);
 
   return result;
 }
