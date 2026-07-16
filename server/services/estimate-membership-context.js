@@ -33,7 +33,11 @@
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
-const { toQualifyingKey, loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+const {
+  toQualifyingKey,
+  loadActiveRecurringServiceRows,
+  loadExistingRecurringQualifyingRows,
+} = require('./waveguard-existing-services');
 
 const TIER_LABEL = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
 const SERVICE_LABEL = {
@@ -45,6 +49,21 @@ const SERVICE_LABEL = {
 };
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+
+function accountServiceKey(raw) {
+  return toQualifyingKey(raw) || String(raw || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+}
+
+function accountServiceLabel(key, raw) {
+  if (SERVICE_LABEL[key]) return SERVICE_LABEL[key];
+  return String(raw || key || 'Service')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 function parseEstimateData(estimate) {
   try {
@@ -226,8 +245,8 @@ function invoiceServiceAmount(row = {}) {
 // minted from the schedule carry service_type; standalone setup/prepay
 // invoices don't, so they never pollute this. Falls back to {} on any error
 // so the snapshot still renders from scheduled_services.estimated_price.
-async function loadLastPaidAmountsByKey(database, customerId) {
-  const amounts = {};
+async function loadLastPaidSpendByKey(database, customerId) {
+  const spend = {};
   try {
     const rows = await database('invoices')
       .where({ customer_id: customerId })
@@ -237,15 +256,76 @@ async function loadLastPaidAmountsByKey(database, customerId) {
       .limit(100)
       .select('service_type', 'total', 'line_items', 'paid_at');
     for (const row of rows) {
-      const key = toQualifyingKey(row.service_type);
-      if (!key || amounts[key] != null) continue;
+      const key = accountServiceKey(row.service_type);
+      if (!key || spend[key] != null) continue;
       const amount = invoiceServiceAmount(row);
-      if (amount != null) amounts[key] = amount;
+      if (amount != null) {
+        spend[key] = {
+          amount,
+          paidAt: row.paid_at || null,
+        };
+      }
     }
   } catch (err) {
     logger.warn(`[membership-context] last-paid lookup skipped for customer ${customerId}: ${err.message}`);
   }
-  return amounts;
+  return spend;
+}
+
+// Staff-facing account snapshot used before pricing an expansion estimate.
+// It says what the customer actively buys and what they currently spend per
+// application. Paid invoice history is authoritative; the scheduled-service
+// estimate is an explicit fallback, never presented as an actual payment.
+async function loadCurrentServiceSpendContext(database, customerId, { existingRows = null } = {}) {
+  if (!customerId) return {
+    existingServiceKeys: [],
+    currentServices: [],
+    currentSpendPerVisitTotal: 0,
+  };
+
+  const rows = Array.isArray(existingRows)
+    ? existingRows
+    : await loadActiveRecurringServiceRows(database, customerId);
+  const qualifyingRows = Array.isArray(existingRows)
+    ? existingRows
+    : await loadExistingRecurringQualifyingRows(database, customerId);
+  const existingServiceKeys = [...new Set(qualifyingRows.map((row) => toQualifyingKey(row.service_type)).filter(Boolean))];
+  const lastPaidByKey = await loadLastPaidSpendByKey(database, customerId);
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = accountServiceKey(row.service_type);
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(row);
+  }
+
+  const currentServices = [...byKey.entries()].map(([key, serviceRows]) => {
+    const scheduled = serviceRows.find((row) => Number(row.estimated_price) > 0);
+    const lastPaid = lastPaidByKey[key] || null;
+    const scheduledPerVisit = scheduled ? round2(scheduled.estimated_price) : null;
+    const currentPerVisit = lastPaid?.amount ?? scheduledPerVisit;
+    const scheduledDates = serviceRows.map((row) => row.scheduled_date).filter(Boolean).sort();
+    return {
+      key,
+      label: accountServiceLabel(key, serviceRows[0]?.service_type),
+      qualifiesForWaveGuard: existingServiceKeys.includes(key),
+      currentPerVisit: currentPerVisit ?? null,
+      spendSource: lastPaid ? 'last_paid_invoice' : (scheduledPerVisit != null ? 'scheduled_estimate' : 'unavailable'),
+      lastPaidAt: lastPaid?.paidAt || null,
+      scheduledPerVisit,
+      activeScheduledVisits: serviceRows.length,
+      nextScheduledDate: scheduledDates[0] || null,
+    };
+  });
+
+  return {
+    existingServiceKeys,
+    currentServices,
+    currentSpendPerVisitTotal: round2(currentServices.reduce(
+      (sum, service) => sum + (Number(service.currentPerVisit) || 0),
+      0,
+    )),
+  };
 }
 
 // The discount rate ACTUALLY applied to the estimate's recurring services,
@@ -337,14 +417,13 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     // basis is what the customer actually LAST PAID for that service (most
     // recent paid visit invoice), falling back to the scheduled
     // estimated_price when there's no paid history yet.
-    const lastPaidByKey = upgraded ? await loadLastPaidAmountsByKey(database, customerId) : {};
+    const currentSpend = await loadCurrentServiceSpendContext(database, customerId, { existingRows });
+    const currentSpendByKey = new Map(currentSpend.currentServices.map((service) => [service.key, service]));
     const existingServices = [];
     if (upgraded) {
       for (const key of existingKeys) {
         const rows = existingByKey.get(key) || [];
-        const priced = rows.find((r) => Number(r.estimated_price) > 0);
-        const perVisitPrice = lastPaidByKey[key]
-          ?? (priced ? round2(priced.estimated_price) : null);
+        const perVisitPrice = currentSpendByKey.get(key)?.currentPerVisit ?? null;
         const perVisitSavings = perVisitPrice ? round2(perVisitPrice * delta) : null;
         const remainingVisits = rows.filter((r) => isFuture(r.scheduled_date)).length;
         existingServices.push({
@@ -403,6 +482,8 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // pick a cross-sell the customer doesn't already have (existingServices
       // above is only populated on a tier upgrade).
       existingServiceKeys: existingKeys,
+      currentServices: currentSpend.currentServices,
+      currentSpendPerVisitTotal: currentSpend.currentSpendPerVisitTotal,
       existingServices,
       newServices,
     };
@@ -428,4 +509,8 @@ function buildEstimateMembershipContext(estimate) {
   }
 }
 
-module.exports = { buildEstimateMembershipContext, computeMembershipContext };
+module.exports = {
+  buildEstimateMembershipContext,
+  computeMembershipContext,
+  loadCurrentServiceSpendContext,
+};

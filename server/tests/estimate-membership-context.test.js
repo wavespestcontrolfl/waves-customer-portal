@@ -3,7 +3,10 @@
 // scheduled estimated_price fallback) and the new-service per-application
 // savings figure shown on the public estimate.
 
-const { computeMembershipContext } = require('../services/estimate-membership-context');
+const {
+  computeMembershipContext,
+  loadCurrentServiceSpendContext,
+} = require('../services/estimate-membership-context');
 
 // Minimal chainable knex fake: every chain method returns the builder;
 // first()/select() resolve canned rows per table.
@@ -71,6 +74,28 @@ function futurePestRows() {
 }
 
 describe('computeMembershipContext', () => {
+  test('account spend lists non-tier recurring work without using it for WaveGuard qualification', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
+        { id: 'r1', service_type: 'rodent_bait', scheduled_date: '2099-02-05', estimated_price: 45 },
+      ],
+      paidInvoices: [
+        { service_type: 'pest_control', total: 117, paid_at: '2026-05-20' },
+        { service_type: 'rodent_bait', total: 42, paid_at: '2026-05-21' },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.existingServiceKeys).toEqual(['pest_control']);
+    expect(spend.currentServices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'pest_control', currentPerVisit: 117, qualifiesForWaveGuard: true }),
+      expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: false }),
+    ]));
+    expect(spend.currentSpendPerVisitTotal).toBe(159);
+  });
+
   test('existing-service per-visit savings use the last PAID invoice amount', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),
@@ -98,6 +123,15 @@ describe('computeMembershipContext', () => {
         remainingVisits: 3,
       }),
     ]);
+    expect(ctx.currentServices).toEqual([
+      expect.objectContaining({
+        key: 'pest_control',
+        currentPerVisit: 117,
+        spendSource: 'last_paid_invoice',
+        lastPaidAt: '2026-05-20',
+      }),
+    ]);
+    expect(ctx.currentSpendPerVisitTotal).toBe(117);
   });
 
   test('a customer row with NO existing services is NOT flagged existing (keeps prepay eligible)', async () => {

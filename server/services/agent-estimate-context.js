@@ -16,6 +16,7 @@ const {
   loadSmsThread,
   _private: { extractionFromCall, last10 },
 } = require('./estimator-engine/context-builder');
+const { loadCurrentServiceSpendContext } = require('./estimate-membership-context');
 
 const MAX_EXTRACTED_CHARS = 12000;
 const MAX_TRANSCRIPT_CHARS = 24000;
@@ -165,12 +166,15 @@ async function loadCustomer(lead, extraction, sharedPhone) {
   return match.ambiguous ? null : match.customer;
 }
 
-function suggestedPrompt(lead, currentEstimate) {
+function suggestedPrompt(lead, currentEstimate, customerAccount = null) {
   const name = [lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'this lead';
   const action = currentEstimate?.status === 'draft' && currentEstimate?.source === 'estimator_engine'
     ? 'Review and revise the existing Agent Estimate draft'
     : 'Build a new Agent Estimate draft';
-  return `${action} for ${name}. Read every supplied quote-form field, call transcript, and SMS before selecting services. Verify the home/building sqft and lot sqft; for commercial properties verify the treated unit/building sqft, and for lawn verify treatable turf rather than assuming the whole lot. Check the selected service protocols, product availability (say untracked when no count exists), and collected margin using the $35 loaded labor rate. Use only compute_estimate for dollars. Show assumptions and conflicting facts, then propose create_agent_estimate_draft for my confirmation. Never send automatically.`;
+  const accountInstruction = customerAccount?.recognized
+    ? ' This is a recognized customer expansion: preserve every active current service, use its server-loaded spend only as account context, and quote only services the customer wants to add. Pass this selected lead ID to compute_estimate so the engine applies the combined membership tier. Select the customer presentation from the newly quoted service mix.'
+    : '';
+  return `${action} for ${name}. Read every supplied quote-form field, call transcript, and SMS before selecting services.${accountInstruction} Verify the home/building sqft and lot sqft; for commercial properties verify the treated unit/building sqft, and for lawn verify treatable turf rather than assuming the whole lot. Check the selected service protocols, product availability (say untracked when no count exists), and collected margin using the $35 loaded labor rate. Use only compute_estimate for dollars. Show assumptions and conflicting facts, then propose create_agent_estimate_draft for my confirmation. Never send automatically.`;
 }
 
 async function buildAgentEstimateContext(leadId) {
@@ -201,6 +205,31 @@ async function buildAgentEstimateContext(leadId) {
   ]);
 
   const profileIsExisting = !!lead.customer_id || !!customer;
+  let customerSpend = { existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0 };
+  if (customer?.id) {
+    try {
+      customerSpend = await loadCurrentServiceSpendContext(db, customer.id);
+    } catch (err) {
+      logger.warn(`[agent-estimate] current-service spend load failed: ${err.message}`);
+    }
+  }
+  const customerAccount = customer ? {
+    recognized: true,
+    customer_id: customer.id,
+    match_method: lead.customer_id ? 'linked_customer_id' : 'unambiguous_phone',
+    active_plan: customerSpend.existingServiceKeys.length > 0,
+    existing_service_keys: customerSpend.existingServiceKeys,
+    current_services: customerSpend.currentServices,
+    current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
+  } : {
+    recognized: false,
+    customer_id: null,
+    match_method: sharedPhone ? 'shared_phone_suppressed' : null,
+    active_plan: false,
+    existing_service_keys: [],
+    current_services: [],
+    current_spend_per_visit_total: 0,
+  };
   const currentEstimateData = parseJson(currentEstimate?.estimate_data);
   const currentEngine = currentEstimateData.estimatorEngine || {};
   const contact = {
@@ -249,6 +278,7 @@ async function buildAgentEstimateContext(leadId) {
       property_type: customer.property_type || null,
       company_name: customer.company_name || null,
     } : null,
+    customer_account: customerAccount,
     is_existing_customer: profileIsExisting,
     shared_phone_history_suppressed: sharedPhone,
     prior_estimates: priorEstimates,
@@ -267,6 +297,8 @@ async function buildAgentEstimateContext(leadId) {
       editable_here: currentEstimate.status === 'draft'
         && currentEstimate.source === 'estimator_engine'
         && currentEngine.origin === 'manual_agent',
+      presentation_template: currentEngine.presentationTemplate || null,
+      service_template_keys: currentEngine.serviceTemplateKeys || [],
       updated_at: currentEstimate.updated_at,
     } : null,
     approved_learning: memories,
@@ -278,7 +310,7 @@ async function buildAgentEstimateContext(leadId) {
       inventory_null_means: 'untracked, not in stock',
       send_policy: 'operator_only',
     },
-    suggested_prompt: suggestedPrompt(lead, currentEstimate),
+    suggested_prompt: suggestedPrompt(lead, currentEstimate, customerAccount),
   };
 }
 

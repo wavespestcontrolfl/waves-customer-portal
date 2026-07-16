@@ -77,17 +77,14 @@ function toQualifyingKey(raw) {
   return null;
 }
 
-// Load the customer's active, recurring, qualifying scheduled_services rows.
-// Restricts to RECURRING rows (is_recurring true; recurring_parent_id is NOT
-// used because booster-month visits carry a parent but is_recurring:false and
-// would inflate coverage — see admin-schedule.js). Guarded on column existence
-// so schema drift degrades gracefully rather than throwing.
-async function loadExistingRecurringQualifyingRows(database, customerId) {
+// Load every active recurring service row for account recognition/spend. This
+// is intentionally broader than WaveGuard qualification: staff still need to
+// see a customer's palm/rodent/non-tier recurring work even though those rows
+// must never raise a membership tier.
+async function loadActiveRecurringServiceRows(database, customerId) {
   if (!database || !customerId) return [];
-  // Plan-gate: only customers who actually hold a WaveGuard plan have
-  // "existing" recurring coverage. A lead / one-time buyer with a stray
-  // scheduled visit is NOT a member, so they get the new-customer treatment.
-  if (!(await isActivePlanCustomer(database, customerId))) return [];
+  const customer = await database('customers').where({ id: customerId }).first();
+  if (!customer || customer.active === false) return [];
   const cols = await database('scheduled_services').columnInfo();
   const hasIsRecurring = !!cols.is_recurring;
   let query = database('scheduled_services')
@@ -99,7 +96,15 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
-  const rows = await query.select(selectCols);
+  return query.select(selectCols);
+}
+
+// Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
+// gate prevents a lead/one-time buyer with a stray recurring visit from
+// receiving membership pricing.
+async function loadExistingRecurringQualifyingRows(database, customerId) {
+  if (!(await isActivePlanCustomer(database, customerId))) return [];
+  const rows = await loadActiveRecurringServiceRows(database, customerId);
   return rows.filter((r) => toQualifyingKey(r.service_type) !== null);
 }
 
@@ -122,6 +127,7 @@ async function loadExistingQualifyingServiceKeys(database, customerId) {
 module.exports = {
   TERMINAL_STATUSES,
   toQualifyingKey,
+  loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
