@@ -2476,7 +2476,17 @@ export function ProjectDetail({
               setEditProjectDate(e.target.value);
               setDirty(true);
             }}
-            style={inputStyle}
+            // iOS WebKit gives date inputs an intrinsic shadow-DOM width that
+            // can exceed width:100% — clamp it and drop the native appearance
+            // so the field tracks the container like the sibling text inputs
+            // (same fix as CreateProjectModal, #2806).
+            style={{
+              ...inputStyle,
+              WebkitAppearance: "none",
+              appearance: "none",
+              minWidth: 0,
+              maxWidth: "100%",
+            }}
           />{" "}
         </div>
         {project.project_type === WDO_TYPE && (
