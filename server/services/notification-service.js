@@ -132,9 +132,10 @@ const NotificationService = {
     }
     if (!notification || notification.suppressed) return notification;
 
+    let pushQueued = false;
     try {
       const PushService = require('./push-notifications');
-      const push = await PushService.sendToCustomer(customerId, {
+      const dispatch = PushService.sendToCustomer(customerId, {
         title,
         body: body || '',
         url: createOpts.link || '/',
@@ -142,13 +143,17 @@ const NotificationService = {
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
       });
-      return { ...notification, push };
+      pushQueued = true;
+      // The bell is already durable, and request paths such as status changes
+      // and estimate acceptance must not wait on external push providers.
+      void Promise.resolve(dispatch).catch((err) => {
+        logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
+      });
     } catch (err) {
-      // The bell row is already durable. Push is best-effort and must never
-      // turn a successful customer notification into an application failure.
+      // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
-      return { ...notification, push: { failed: 1, error: 'dispatch_failed' } };
     }
+    return { ...notification, push: { queued: pushQueued } };
   },
 
   // Get notifications for admin

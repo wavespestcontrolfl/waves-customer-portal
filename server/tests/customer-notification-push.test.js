@@ -58,8 +58,12 @@ describe('customer notification native push dispatch', () => {
     PushService.sendToCustomer.mockResolvedValue({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0 });
   });
 
-  test('persists one bell and dispatches its native push with a stable event tag', async () => {
+  test('persists one bell and queues its native push with a stable event tag without awaiting the provider', async () => {
     const { notifQ, trx } = setupDb({ prefs: { tech_en_route: true } });
+    let resolvePush;
+    PushService.sendToCustomer.mockReturnValue(new Promise((resolve) => {
+      resolvePush = resolve;
+    }));
 
     const result = await NotificationService.notifyCustomer(
       'customer-1',
@@ -94,7 +98,8 @@ describe('customer notification native push dispatch', () => {
       notificationId: 'notification-1',
       tag: 'scheduled-service:service-1:en-route',
     });
-    expect(result.push.sent).toBe(1);
+    expect(result.push).toEqual({ queued: true });
+    resolvePush({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0 });
   });
 
   test('honors a disabled customer event preference before bell or push', async () => {
@@ -130,7 +135,7 @@ describe('customer notification native push dispatch', () => {
     expect(PushService.sendToCustomer).not.toHaveBeenCalled();
   });
 
-  test('keeps the durable bell successful when push dispatch fails', async () => {
+  test('keeps the durable bell successful when queued push dispatch fails', async () => {
     setupDb();
     PushService.sendToCustomer.mockRejectedValue(new Error('provider unavailable'));
 
@@ -142,7 +147,8 @@ describe('customer notification native push dispatch', () => {
       { dedupeKey: 'estimate:estimate-1:accepted' },
     );
 
-    expect(result).toMatchObject({ id: 'notification-1', push: { failed: 1, error: 'dispatch_failed' } });
+    expect(result).toMatchObject({ id: 'notification-1', push: { queued: true } });
+    await Promise.resolve();
     expect(logger.warn).toHaveBeenCalledWith('[notifications] Customer push dispatch failed: provider unavailable');
   });
 
