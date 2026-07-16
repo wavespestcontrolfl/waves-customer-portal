@@ -296,8 +296,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     }
 
     // Send customer confirmation SMS. A cancellation is auto-processed, so it
-    // gets a dedicated template — the generic copy ("we'll text you when it has
-    // been assigned to a technician") is wrong for a cancellation.
+    // gets a dedicated template with cancellation-specific next steps.
     const responseTime = validUrgency === 'urgent' ? '2 hours' : '24 hours';
     let confirmationSmsSent = false;
     try {

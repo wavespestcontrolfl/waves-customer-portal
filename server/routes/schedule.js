@@ -99,14 +99,28 @@ router.post('/:id/confirm', async (req, res, next) => {
       return res.status(404).json({ error: 'Appointment not found or already confirmed' });
     }
 
-    await db('scheduled_services')
-      .where({ id: req.params.id })
+    // The staff board can move this visit after the read above. Gate the write
+    // on the customer and status we actually observed so a stale portal click
+    // cannot revive a cancelled/completed visit (or overwrite an in-progress
+    // transition).
+    const updatedCount = await db('scheduled_services')
+      .where({
+        id: req.params.id,
+        customer_id: req.customerId,
+        status: service.status,
+      })
       .update({
         status: 'confirmed',
         customer_confirmed: true,
         confirmed_at: new Date(),
         updated_at: new Date(),
       });
+
+    if (!updatedCount) {
+      return res.status(409).json({
+        error: 'This appointment changed before it could be confirmed. Refresh to see the latest status.',
+      });
+    }
 
     logger.info(`Appointment confirmed by customer: ${req.params.id}`);
 

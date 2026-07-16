@@ -187,6 +187,26 @@ function NotFoundCard() {
   );
 }
 
+function LoadErrorCard({ onRetry }) {
+  return (
+    <Card>
+      <div data-gt="h3x" style={{ fontSize: 20, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+        We couldn't load that appointment
+      </div>
+      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+        This looks temporary. Your link is still valid—try again in a moment.
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        style={{ marginTop: 16, border: 0, borderRadius: 8, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 800, cursor: 'pointer' }}
+      >
+        Try again
+      </button>
+    </Card>
+  );
+}
+
 const INELIGIBLE_COPY = {
   completed: 'This visit is already complete, so there is nothing to reschedule.',
   cancelled: 'This appointment was cancelled. Text or call us and we\'ll get you back on the calendar.',
@@ -863,6 +883,7 @@ export default function ReschedulePage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
@@ -890,6 +911,7 @@ export default function ReschedulePage() {
     loadAbortRef.current = controller;
     setLoading(true);
     setNotFound(false);
+    setLoadError(false);
     try {
       const res = await fetch(`${API_BASE}/public/reschedule/${token}`, { signal: controller.signal });
       if (res.status === 404) {
@@ -902,7 +924,7 @@ export default function ReschedulePage() {
       setData(body);
     } catch {
       if (controller.signal.aborted) return;
-      setNotFound(true);
+      setLoadError(true);
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
@@ -1002,6 +1024,7 @@ export default function ReschedulePage() {
 
   if (loading) return <Page><SkeletonCard /></Page>;
   if (notFound) return <Page><NotFoundCard /></Page>;
+  if (loadError) return <Page><LoadErrorCard onRetry={load} /></Page>;
   if (result) return <Page><SuccessCard result={result} service={data?.service} /></Page>;
   if (data?.state !== 'reschedulable') return <Page><IneligibleCard data={data} /></Page>;
 
