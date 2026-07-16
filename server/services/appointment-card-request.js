@@ -384,10 +384,36 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       throw insertErr;
     }
 
-    const markSendOutcome = () => db('appointment_card_requests')
-      .where({ scheduled_service_id: visit.id, status: 'pending' })
-      .update({ sent_at: stamp, updated_at: stamp })
-      .catch((err) => logger.warn(`[appt-card-request] sent_at marker failed for visit ${visit.id}: ${err.message}`));
+    // The maybe-sent marker MUST land (Codex #2771 r5): the stale-send
+    // lease reads a missing sent_at as died-before-send, so a swallowed
+    // marker failure after a Twilio-accepted dispatch would let a later
+    // trigger re-text a second bearer link once the lease expires.
+    // Bounded retries; if all fail, the office gets an exception alert
+    // naming the visit so a human intervenes before the lease can fire.
+    const markSendOutcome = async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          await db('appointment_card_requests')
+            .where({ scheduled_service_id: visit.id, status: 'pending' })
+            .update({ sent_at: stamp, updated_at: stamp });
+          return true;
+        } catch (err) {
+          logger.warn(`[appt-card-request] sent_at marker attempt ${attempt + 1} failed for visit ${visit.id}: ${err.message}`);
+        }
+      }
+      logger.error(`[appt-card-request] sent_at marker FAILED for visit ${visit.id} — the send lease could re-text; alerting office`);
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Card-link sent marker failed',
+          'A secure-card SMS was dispatched but its sent marker could not be written — investigate this visit before the send lease expires (~10 min) or the customer may receive a second link.',
+          { link: '/admin/dispatch', metadata: { scheduled_service_id: visit.id } },
+        );
+      } catch (alertErr) {
+        logger.warn(`[appt-card-request] marker-failure alert failed: ${alertErr.message}`);
+      }
+      return false;
+    };
 
     let result;
     try {
@@ -537,9 +563,19 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
   if (!request) return { ok: false, code: 'not_found' };
   // A row mid-completion (the page POST holds the claim) is NOT done —
   // ack-and-dropping here would burn the durable retry if that attempt
-  // then fails and reverts. Report retryable; the webhook branch throws.
-  if (request.status === 'completing') return { ok: false, code: 'completion_in_progress' };
-  if (request.status !== 'pending') return { ok: true, alreadyCompleted: true };
+  // then fails and reverts. A FRESH claim reports retryable (the webhook
+  // branch throws so Stripe re-delivers); a STALE one falls through to
+  // finishVerifiedSecureCapture, whose lease adopts it — the webhook is
+  // the only durable retry when the browser died after claiming (Codex
+  // #2771 r5), so it must not short-circuit forever.
+  if (request.status === 'completing'
+    && request.updated_at
+    && (Date.now() - new Date(request.updated_at).getTime()) <= STALE_CLAIM_MS) {
+    return { ok: false, code: 'completion_in_progress' };
+  }
+  if (request.status !== 'pending' && request.status !== 'completing') {
+    return { ok: true, alreadyCompleted: true };
+  }
   if (!secureCardIntentMatchesRequest(setupIntent, request.id)) {
     return { ok: false, code: 'intent_mismatch' };
   }

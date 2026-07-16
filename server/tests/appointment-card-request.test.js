@@ -369,6 +369,24 @@ describe('the send', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a failed sent marker escalates to the office instead of being swallowed', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => {
+      if (patch.sent_at) throw new Error('db down');
+      return 1;
+    };
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    // The send itself succeeded — the customer has the link.
+    expect(res.action).toBe('sent');
+    // But the marker never landed, so a human is told before the lease
+    // could re-text a second bearer link.
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'billing',
+      expect.stringContaining('marker failed'),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   test('a FRESH claim (not stale) never gets adopted', async () => {
     mockTableHandlers.scheduled_services = {
       first: () => ({ ...VISIT, card_link_sent_at: new Date() }),
@@ -692,12 +710,22 @@ describe('completeSecureCardCaptureFromWebhook — durability backstop', () => {
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
-  test('a mid-completion row is retryable, never acked (the retry is durable)', async () => {
+  test('a FRESH mid-completion row is retryable, never acked (the retry is durable)', async () => {
     const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
-    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing' });
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing', updated_at: new Date() });
     const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
     expect(res).toEqual({ ok: false, code: 'completion_in_progress' });
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  test('a STALE mid-completion row is adopted — the webhook is the durable retry', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    const oldStamp = new Date(Date.now() - 60 * 60 * 1000);
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing', updated_at: oldStamp });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: true });
+    expect(mockSavePaymentMethod).toHaveBeenCalled();
   });
 
   test('wrong purpose or request id never writes', async () => {

@@ -6707,8 +6707,16 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
+                  // An ATTACHED human booking resurfacing through the linked
+                  // (source_call_log_id) lookup keeps its attach semantics on
+                  // reprocess (Codex #2771 r5): no AI follow-up child on a
+                  // human's booking — a manually planned visit 2 is a
+                  // standalone parent row the child-dedup guard can't see.
+                  // Fresh AI inserts always carry booking_source
+                  // 'phone_call', so anything else came from the attach path.
+                  const isAttachedManualBooking = String(existing.booking_source || '') !== 'phone_call';
                   let primaryRow = existing;
-                  if (!existing.technician_id && defaultTechnicianId) {
+                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId) {
                     const [updatedExisting] = await trx('scheduled_services')
                       .where({ id: existing.id })
                       .update({ technician_id: defaultTechnicianId, updated_at: new Date() })
@@ -6732,8 +6740,13 @@ const CallRecordingProcessor = {
                       keepOpenForQuote: callQuotePromised,
                     });
                   }
-                  // After the backfill so the child inherits the assigned tech.
-                  followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  if (isAttachedManualBooking) {
+                    attachedManualBookingId = primaryRow.id;
+                    attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  } else {
+                    // After the backfill so the child inherits the assigned tech.
+                    followUpCreated = await ensureCallFollowUpVisit(primaryRow);
+                  }
                   return primaryRow;
                 }
                 // Which property is this visit FOR? Resolved BEFORE the
