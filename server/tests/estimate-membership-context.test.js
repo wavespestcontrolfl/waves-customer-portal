@@ -101,6 +101,20 @@ describe('computeMembershipContext', () => {
     expect(spend.currentSpendPerVisitTotal).toBe(159);
   });
 
+  test('display-name recurring rows canonicalize to template keys for duplicate checks', async () => {
+    const database = fakeDb({
+      scheduledRows: [
+        { id: 'r1', service_type: 'Rodent Bait Stations', scheduled_date: '2099-02-05', estimated_price: 45 },
+        { id: 'p1', service_type: 'Palm Injection', scheduled_date: '2099-03-05', estimated_price: 60 },
+      ],
+    });
+
+    const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
+
+    expect(spend.existingServiceKeys).toEqual([]);
+    expect(spend.currentServices.map((service) => service.key).sort()).toEqual(['palm_injection', 'rodent_bait']);
+  });
+
   test('existing-service spend is preserved as context while discounts apply only to additions', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

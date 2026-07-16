@@ -921,3 +921,60 @@ describe('Agent Estimate review-hardening regressions', () => {
     });
   });
 });
+
+describe('Agent Estimate recurring-customer flag control', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue({
+      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 0, specialtyTotal: 450 },
+      lineItems: [{ service: 'german_roach_initial', total: 450, costs: { total: 200 } }],
+    });
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test('rejects a model-supplied recurring-customer discount flag', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { germanRoachInitial: { isRecurringCustomer: true } },
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(result.error).toMatch(/isRecurringCustomer/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('derives the recurring-customer flag from the server-loaded account, not the model', async () => {
+    mockBuildAgentEstimateContext.mockResolvedValueOnce({
+      customer_account: {
+        recognized: true,
+        customer_id: 'customer-1',
+        existing_service_keys: ['pest_control'],
+        current_services: [{ key: 'pest_control', currentPerVisit: 117 }],
+      },
+    });
+
+    const result = await executeEstimateTool('compute_estimate', {
+      leadId: 'lead-1',
+      homeSqFt: 2000,
+      services: { germanRoachInitial: {} },
+    });
+
+    expect(result.error).toBeUndefined();
+    const engineArg = mockGenerateEstimate.mock.calls[0][0];
+    expect(engineArg.services.germanRoachInitial.isRecurringCustomer).toBe(true);
+    // The echoed engine_input must stay clean or the guard rejects the
+    // round-trip on the next draft revision.
+    expect(result.engine_input.services.germanRoachInitial.isRecurringCustomer).toBeUndefined();
+  });
+
+  test('a new lead never gets the recurring-customer discount flag', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { germanRoachInitial: {} },
+    });
+
+    expect(result.error).toBeUndefined();
+    const engineArg = mockGenerateEstimate.mock.calls[0][0];
+    expect(engineArg.services.germanRoachInitial.isRecurringCustomer).toBe(false);
+  });
+});

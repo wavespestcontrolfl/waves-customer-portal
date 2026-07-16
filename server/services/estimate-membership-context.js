@@ -49,7 +49,19 @@ const SERVICE_LABEL = {
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
 function accountServiceKey(raw) {
-  return toQualifyingKey(raw) || String(raw || '')
+  const qualifying = toQualifyingKey(raw);
+  if (qualifying) return qualifying;
+  // Canonical keys for the non-tier recurring programs. The estimate
+  // converter stores DISPLAY names on scheduled_services ("Rodent Bait
+  // Stations", "Palm Injection"); a generic snake-case of those labels
+  // ("rodent_bait_stations") never matches the requested-service template
+  // keys, so duplicate checks would miss the active service.
+  const s = String(raw || '').toLowerCase();
+  if (!s.includes('commercial')) {
+    if (s.includes('rodent') && s.includes('bait')) return 'rodent_bait';
+    if (s.includes('palm')) return 'palm_injection';
+  }
+  return String(raw || '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')

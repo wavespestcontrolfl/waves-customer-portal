@@ -33,6 +33,16 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   loadSmsThread: (...args) => mockLoadSmsThread(...args),
   _private: {
     extractionFromCall: () => ({ extraction: {}, source: 'none' }),
+    firstExternalPhone: (...candidates) => {
+      const SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
+      for (const candidate of candidates) {
+        const digits = String(candidate || '').replace(/\D/g, '');
+        if (digits.length >= 10 && !SENTINELS.has(digits) && !SENTINELS.has(digits.replace(/^1/, ''))) {
+          return candidate;
+        }
+      }
+      return null;
+    },
     last10: (value) => {
       const digits = String(value || '').replace(/\D/g, '');
       return digits.length >= 10 ? digits.slice(-10) : null;
@@ -146,5 +156,37 @@ describe('ambiguous customer phone suppression', () => {
     expect(context.sms_thread).toEqual([{ body: 'phone-scoped text' }]);
     expect(mockLoadSmsThread).toHaveBeenCalled();
     expect(mockLoadPriorEstimates).toHaveBeenCalled();
+  });
+});
+
+describe('suppressed-caller sentinel phones', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Blocked', last_name: 'Caller', phone: '+7378742833',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [{
+      id: 'call-77', twilio_call_sid: 'CA-stranger', direction: 'inbound',
+      duration_seconds: 45, transcription: 'unrelated blocked caller', created_at: '2026-07-02',
+    }];
+  });
+
+  test('a RESTRICTED sentinel phone never keys phone-scoped history or customer matching', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: { id: 'cust-x' }, ambiguous: false });
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.calls).toEqual([]);
+    expect(context.sms_thread).toEqual([]);
+    expect(context.prior_estimates).toEqual([]);
+    expect(context.customer_profile).toBeNull();
+    expect(context.customer_account.recognized).toBe(false);
+    expect(mockLoadCustomerByPhone).not.toHaveBeenCalled();
+    expect(mockLoadSmsThread).not.toHaveBeenCalled();
+    expect(mockLoadPriorEstimates).not.toHaveBeenCalled();
   });
 });

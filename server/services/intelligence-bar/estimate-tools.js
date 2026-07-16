@@ -378,6 +378,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'customproductozperfinishedgallon',
   'discountoverride',
   'fixedprice',
+  'isrecurringcustomer',
   'lawnlaborminutesbase',
   'lawnlaborminutesperk',
   'lawnmaterialcostperk',
@@ -387,6 +388,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'priceoverride',
   'pricingconfig',
   'priorqualifyingservices',
+  'recurringcustomer',
   'routedriveminutes',
   'servicespecificcredits',
   'servicespecificdiscounts',
@@ -535,6 +537,33 @@ function duplicateCurrentServices(services = {}, activeServiceKeys = []) {
   return [...new Set(Object.keys(services).map(serviceTemplateKey).filter((key) => current.has(key)))];
 }
 
+// Transient input for generateEstimate only. The forbidden-input guard rejects
+// model-supplied recurring-customer flags, so the germanRoachInitial discount
+// flag is re-derived here from the server-loaded account (the engine's own
+// definition: prior qualifying services make a recurring customer). Never
+// merge this into the echoed/stored engineInputs — a persisted copy would be
+// rejected by the guard on the next revision round-trip.
+function buildAgentPricingInput(engineInput, accountPricing) {
+  const priorQualifyingServices = accountPricing.priorQualifyingServices || [];
+  let pricingInput = priorQualifyingServices.length
+    ? { ...engineInput, priorQualifyingServices }
+    : engineInput;
+  const roachInitial = pricingInput.services?.germanRoachInitial;
+  if (roachInitial) {
+    pricingInput = {
+      ...pricingInput,
+      services: {
+        ...pricingInput.services,
+        germanRoachInitial: {
+          ...(typeof roachInitial === 'object' ? roachInitial : {}),
+          isRecurringCustomer: priorQualifyingServices.length > 0,
+        },
+      },
+    };
+  }
+  return pricingInput;
+}
+
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (value === undefined || value === null || value === '') return undefined;
   const number = Number(value);
@@ -662,9 +691,7 @@ async function computeEstimate(input) {
       customer_account: accountPricing.customerAccount,
     };
   }
-  const pricingEngineInput = accountPricing.priorQualifyingServices.length
-    ? { ...engineInput, priorQualifyingServices: accountPricing.priorQualifyingServices }
-    : engineInput;
+  const pricingEngineInput = buildAgentPricingInput(engineInput, accountPricing);
   if (needsSync()) await syncConstantsFromDB(db);
   const estimate = generateEstimate(pricingEngineInput);
 
@@ -1075,9 +1102,7 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
 
   if (needsSync()) await syncConstantsFromDB(db);
-  const pricingEngineInputs = accountPricing.priorQualifyingServices.length
-    ? { ...input.engineInputs, priorQualifyingServices: accountPricing.priorQualifyingServices }
-    : input.engineInputs;
+  const pricingEngineInputs = buildAgentPricingInput(input.engineInputs, accountPricing);
   const engineResult = generateEstimate(pricingEngineInputs);
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {

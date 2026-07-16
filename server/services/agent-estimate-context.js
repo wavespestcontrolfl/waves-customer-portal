@@ -14,7 +14,7 @@ const {
   loadCustomerByPhone,
   loadPriorEstimates,
   loadSmsThread,
-  _private: { extractionFromCall, last10 },
+  _private: { extractionFromCall, firstExternalPhone, last10 },
 } = require('./estimator-engine/context-builder');
 const { loadCurrentServiceSpendContext } = require('./estimate-membership-context');
 
@@ -84,9 +84,9 @@ async function phoneIsShared(lead) {
   }
 }
 
-async function loadCalls(lead, sharedPhone) {
+async function loadCalls(lead, phoneKey) {
   try {
-    const digits = sharedPhone ? null : last10(lead.phone);
+    const digits = last10(phoneKey);
     if (!lead.twilio_call_sid && !digits) return [];
     const rows = await db('call_log')
       .where(function callMatch() {
@@ -148,7 +148,7 @@ async function loadCalls(lead, sharedPhone) {
   }
 }
 
-async function resolveCustomer(lead, extraction, sharedPhone) {
+async function resolveCustomer(lead, extraction, phoneKey) {
   if (lead.customer_id) {
     try {
       const linked = await db('customers')
@@ -162,12 +162,12 @@ async function resolveCustomer(lead, extraction, sharedPhone) {
       logger.warn(`[agent-estimate] linked customer load failed: ${err.message}`);
     }
   }
-  if (sharedPhone) return { customer: null, ambiguous: false };
+  if (!phoneKey) return { customer: null, ambiguous: false };
   // A phone matching multiple customer rows is ambiguous even when no other
   // LEAD shares the number (phoneIsShared checks leads only) — the caller
   // must treat this exactly like a shared line and suppress phone-scoped
   // history, or one customer's SMS/estimates leak into another lead's session.
-  const match = await loadCustomerByPhone(lead.phone, extraction);
+  const match = await loadCustomerByPhone(phoneKey, extraction);
   return { customer: match.ambiguous ? null : match.customer, ambiguous: match.ambiguous === true };
 }
 
@@ -192,10 +192,16 @@ async function buildAgentEstimateContext(leadId) {
   if (!lead) return { error: 'lead_not_found' };
 
   const extractedData = parseJson(lead.extracted_data);
-  const sharedPhone = await phoneIsShared(lead);
-  const rawCalls = await loadCalls(lead, sharedPhone);
+  // Twilio substitutes digit sentinels for suppressed caller IDs (ANONYMOUS/
+  // RESTRICTED) and forwarded calls can store an internal tracking line —
+  // keying phone-scoped history on either merges unrelated blocked callers
+  // into this lead's evidence. Only a verified external number is usable.
+  const externalPhone = firstExternalPhone(lead.phone);
+  const sharedPhone = externalPhone ? await phoneIsShared(lead) : false;
+  const phoneKey = externalPhone && !sharedPhone ? externalPhone : null;
+  const rawCalls = await loadCalls(lead, phoneKey);
   const latestExtraction = rawCalls[0]?.extraction || null;
-  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, latestExtraction, sharedPhone);
+  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, latestExtraction, phoneKey);
   // Phone-scoped history fails closed on BOTH suppression signals: another
   // lead on the number (sharedPhone) or multiple customer rows on the number
   // (customerAmbiguous). Either way the thread/estimates may belong to a
@@ -211,8 +217,8 @@ async function buildAgentEstimateContext(leadId) {
     ))
     : rawCalls;
   const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
-    phoneHistorySuppressed ? Promise.resolve([]) : loadSmsThread(lead.phone, { limit: 60 }),
-    phoneHistorySuppressed ? Promise.resolve([]) : loadPriorEstimates(lead.phone, { limit: 8 }),
+    (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadSmsThread(phoneKey, { limit: 60 }),
+    (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadPriorEstimates(phoneKey, { limit: 8 }),
     db('lead_activities').where({ lead_id: lead.id }).orderBy('created_at', 'desc').limit(30)
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
