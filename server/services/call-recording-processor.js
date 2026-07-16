@@ -5852,10 +5852,15 @@ const CallRecordingProcessor = {
           const matchedForCompose = (() => {
             if (v2ServiceRequest === null) return extracted.matched_service;
             const v2Flat = flatView(v2ApprovedExtraction);
+            // A V2-anchored catalog pick IS the primary: "Palm Injection"
+            // must lead the label, not the coarse category mapping
+            // ("Tree & Shrub Care") that would then re-append the specific
+            // as a fake second service (codex r13).
+            if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
             const v2Cat = v2ServiceRequest.primary_service_category || null;
             const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
             return v2Flat.matched_service
-              && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)
+              && (!extracted.matched_service || preciseV2Category)
               ? v2Flat.matched_service
               : extracted.matched_service;
           })();

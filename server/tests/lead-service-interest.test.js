@@ -635,6 +635,20 @@ describe('composeServiceInterest', () => {
     })).toBe('Rodent Control + Rodent Exclusion');
   });
 
+  test('a specific catalog primary covers its own category words (codex r13 shape)', () => {
+    // Mirrors the V2 path prefixing with specific_service_name: the
+    // category-derived request adds nothing new, so a single booking never
+    // renders as fake multi-service.
+    expect(composeServiceInterest({
+      matched_service: 'Palm Injection',
+      requested_service: 'palm injection',
+    })).toBe('Palm Injection');
+    expect(composeServiceInterest(
+      { matched_service: 'Termite Bait Monitoring', requested_service: 'termite' },
+      { cueText: 'termite monitoring' },
+    )).toBe('Termite Bait Monitoring');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',

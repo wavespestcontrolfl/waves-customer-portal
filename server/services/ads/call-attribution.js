@@ -127,9 +127,16 @@ async function recordCallPpcAttribution({
       const lead = await db('leads').where({ id: leadId }).select('service_interest').first().catch(() => null);
       interest = lead?.service_interest || null;
     }
-    const serviceLine = inferServiceLine(interest);
-    const specificService = inferSpecificService(interest);
-    const serviceBucket = inferServiceBucket(interest);
+    // Composed multi-service labels ("A + B") carry the PRIMARY first — the
+    // funnel's single service line/bucket must come from it, not whichever
+    // family inferServiceLine's keyword order hits first (lawn-before-pest
+    // would bucket a pest-primary composite as lawn). Applies to EVERY
+    // caller: immediate call path, attached-lead backfill, and the
+    // bridge-unclaimed sweep all read the lead's stored composite here.
+    const primaryInterest = interest ? String(interest).split(' + ')[0].trim() || interest : interest;
+    const serviceLine = inferServiceLine(primaryInterest);
+    const specificService = inferSpecificService(primaryInterest);
+    const serviceBucket = inferServiceBucket(primaryInterest);
 
     // One funnel row per lead — dedupe by lead_id. Backfill richer data onto an
     // existing row (e.g. the bridge later supplies the campaign).
