@@ -1046,8 +1046,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
     if (fresh.head?.sha && newHead
       && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
-      logger.warn(`[codex-remediation] PR #${prNumber} head moved past the fix push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}) — skipping post-commit sync/comment; the newer push owns the review cycle`);
-      return { skipped: true, reason: 'pr head moved past the remediation push' };
+      // A parallel push (usually a human) landed mid-round: our fix is no
+      // longer the head, so syncing it would mirror content the merge won't
+      // take. Park like the other withheld-sync paths — and stamp OUR
+      // pushed head, so the parked row re-arms on the very next blocked
+      // tick (branch head ≠ parked head) and remediation re-evaluates the
+      // newer content with fresh rounds instead of going silent.
+      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}); sync withheld`, onPark, newHead);
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that

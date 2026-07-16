@@ -1534,10 +1534,14 @@ describe('post-push PR revalidation', () => {
       { ...CTX, onRemediated },
       { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
     );
-    expect(r.skipped).toBe(true);
+    expect(r.parked).toBe(true);
     expect(r.reason).toContain('head moved');
     expect(onRemediated).not.toHaveBeenCalled();
     expect(gh._calls.comments).toHaveLength(0);
+    // Parked on OUR pushed head — the newer head re-arms on the next tick.
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('parked');
+    expect(row.parked_head_sha).toBe('newcommit999aaa');
   });
 
   test('a GitHub error during revalidation fails CLOSED — parks with sync withheld', async () => {
