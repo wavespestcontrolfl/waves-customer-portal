@@ -83,6 +83,8 @@ function whereNotAstroActive(query) {
   return query
     .whereNull('astro_pr_number')
     .whereNull('astro_branch_name')
+    // Mid-publish claim: markers don't exist yet but a publisher owns the row.
+    .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
     .where((q) => q.whereNull('astro_status').orWhereNotIn('astro_status', Array.from(ASTRO_PIPELINE_ACTIVE)));
 }
 
@@ -664,9 +666,11 @@ router.delete('/blog/:id', async (req, res, next) => {
     if (!deleted) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      const why = post.status === 'published' && !astroActivePost(post)
-        ? "Post is published — un-publish it first (set status to draft, or unpublish-astro if it has a live page), then delete."
-        : `Post has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — unpublish it first (unpublish-astro), then delete.`;
+      const why = post.publish_status === 'publishing'
+        ? 'Post is being published right now (publisher claim) — retry after it finishes.'
+        : post.status === 'published' && !astroActivePost(post)
+          ? "Post is published — un-publish it first (set status to draft, or unpublish-astro if it has a live page), then delete."
+          : `Post has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — unpublish it first (unpublish-astro), then delete.`;
       return res.status(409).json({ error: why });
     }
     res.json({ success: true });
@@ -794,7 +798,31 @@ router.post('/blog/:id/publish', async (req, res, next) => {
 
 // POST /api/admin/content/blog/:id/publish-astro — create branch + PR
 router.post('/blog/:id/publish-astro', async (req, res, next) => {
+  // Atomic 'publishing' claim (the scheduler's own transient marker) for the
+  // manual lane: publishAstro runs a long external branch/commit/PR workflow
+  // and only persists astro markers at the END — without a claim, DELETE
+  // could remove the row (orphaning the PR publishAstro was about to open)
+  // and generate could overwrite the content it had already captured. The
+  // claim is restored afterwards so admin PRs never enter pages-poll's
+  // publishing+pr_open auto-merge branch; a crash mid-publish is bounded by
+  // the scheduler's resetStalePublishingBlogs sweep (~30 min).
+  let claimed = false;
+  let prior = null;
   try {
+    assertBlogPostId(req.params.id);
+    const post = await db('blog_posts').where('id', req.params.id).first();
+    if (!post) return res.status(404).json({ error: 'Post not found' });
+    prior = post.publish_status ?? null;
+    if (prior === 'publishing') {
+      return res.status(409).json({ error: 'Post is already being published.' });
+    }
+    const got = await db('blog_posts')
+      .where('id', req.params.id)
+      .where((q) => (prior === null ? q.whereNull('publish_status') : q.where('publish_status', prior)))
+      .update({ publish_status: 'publishing', updated_at: new Date() });
+    if (!got) return res.status(409).json({ error: 'Post state changed underneath this request — reload and retry.' });
+    claimed = true;
+
     const AstroPublisher = require('../services/content-astro/astro-publisher');
     const result = await AstroPublisher.publishAstro(req.params.id);
     res.json({ success: true, ...result });
@@ -806,6 +834,16 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
       || err.code === 'BLOG_GUARDRAILS_FAILED'
       || err.code === 'BLOG_COMPARISON_GATE_FAILED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
+  } finally {
+    if (claimed) {
+      try {
+        await db('blog_posts')
+          .where({ id: req.params.id, publish_status: 'publishing' })
+          .update({ publish_status: prior, updated_at: new Date() });
+      } catch (e) {
+        logger.warn(`[content] publish-astro claim restore failed for ${req.params.id}: ${e.message} (stale-publishing sweep will reset it)`);
+      }
+    }
   }
 });
 

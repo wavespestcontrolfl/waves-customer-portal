@@ -24,6 +24,7 @@ jest.mock('../services/content-astro/spoke-sites', () => ({ invalidSpokeSites: (
 jest.mock('../services/content/autonomous-review-queue', () => ({}));
 jest.mock('../services/content/internal-link-review-queue', () => ({}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => true }));
+jest.mock('../services/content-astro/astro-publisher', () => ({ publishAstro: jest.fn() }));
 
 const db = require('../models/db');
 const BlogWriter = require('../services/content/blog-writer');
@@ -35,8 +36,9 @@ let tableState;
 
 const ACTIVE_STATES = ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending'];
 const isActive = (p) => Boolean(p && (ACTIVE_STATES.includes(p.astro_status) || p.astro_pr_number || p.astro_branch_name));
-// Fake delete mirrors the route's full predicate (astro-active OR published)
-const isDeletable = (p) => Boolean(p && !isActive(p) && p.status !== 'published');
+// Fake delete mirrors the route's full predicate (astro-active, published,
+// or mid-publish claim)
+const isDeletable = (p) => Boolean(p && !isActive(p) && p.status !== 'published' && p.publish_status !== 'publishing');
 
 function setupDb() {
   const calls = { updates: [], deletes: 0 };
@@ -241,5 +243,50 @@ describe('GET /blog sort/limit hardening', () => {
 
     const bad = await invoke('get', '/blog', { query: { limit: 'abc' } });
     expect(bad.nextErr?.statusCode).toBe(400);
+  });
+});
+
+// codex r4 (P0): the manual publish lane must own the row while publishAstro
+// runs its long external workflow — DELETE/generate reject the claim, and
+// the route restores the prior publish_status afterwards.
+describe('publish-astro atomic claim', () => {
+  const AstroPublisher = require('../services/content-astro/astro-publisher');
+
+  test('claims publishing before publishAstro and restores the prior value after', async () => {
+    const calls = setupDb();
+    tableState.post = { id: POST_ID, status: 'draft', astro_status: null, publish_status: 'pending_review' };
+    AstroPublisher.publishAstro.mockResolvedValue({ pr_number: 9 });
+
+    const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(200);
+    const statusWrites = calls.updates.filter((u) => 'publish_status' in u.updates).map((u) => u.updates.publish_status);
+    expect(statusWrites).toEqual(['publishing', 'pending_review']);
+  });
+
+  test('a row already claimed by a publisher 409s instead of double-publishing', async () => {
+    setupDb();
+    tableState.post = { id: POST_ID, status: 'queued', publish_status: 'publishing' };
+    const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(409);
+    expect(AstroPublisher.publishAstro).not.toHaveBeenCalled();
+  });
+
+  test('the claim is restored even when publishAstro throws', async () => {
+    const calls = setupDb();
+    tableState.post = { id: POST_ID, status: 'draft', publish_status: null };
+    AstroPublisher.publishAstro.mockRejectedValue(Object.assign(new Error('gates failed'), { code: 'BLOG_GUARDRAILS_FAILED' }));
+    const r = await invoke('post', '/blog/:id/publish-astro', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(400);
+    const statusWrites = calls.updates.filter((u) => 'publish_status' in u.updates).map((u) => u.updates.publish_status);
+    expect(statusWrites).toEqual(['publishing', null]);
+  });
+
+  test('DELETE refuses a mid-publish claimed row', async () => {
+    const calls = setupDb();
+    tableState.post = { id: POST_ID, status: 'queued', astro_status: null, publish_status: 'publishing' };
+    const r = await invoke('delete', '/blog/:id', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(409);
+    expect(r.payload.error).toContain('being published');
+    expect(calls.deletes).toBe(0);
   });
 });
