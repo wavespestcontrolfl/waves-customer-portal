@@ -23,6 +23,7 @@
  * mobile-first stacked layout, two-column desktop via grid.
  */
 import Icon from '../components/Icon';
+import PublicLoadError from '../components/PublicLoadError';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
@@ -3521,6 +3522,7 @@ export default function EstimateViewPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   // Set from the /data 404 body — true only when the server confirms this
   // token is a real published estimate that expired (see NotFoundCard).
   const [extensionEligible, setExtensionEligible] = useState(false);
@@ -3769,6 +3771,7 @@ export default function EstimateViewPage() {
     // skeleton — a failed refresh used to leave the skeleton up forever
     // because nothing on the error path reset `loading`.
     if (!isRefresh) setLoading(true);
+    setLoadError(false);
     const params = [];
     if (isRefresh) params.push('refresh=1');
     let fetchOpts;
@@ -3786,6 +3789,7 @@ export default function EstimateViewPage() {
       const notFoundBody = await r.json().catch(() => ({}));
       setExtensionEligible(notFoundBody?.extensionRequestEligible === true);
       setNotFound(true);
+      setLoadError(false);
       setLoading(false);
       return;
     }
@@ -3848,7 +3852,7 @@ export default function EstimateViewPage() {
     let cancelled = false;
     loadEstimate().catch(() => {
       if (!cancelled) {
-        setNotFound(true);
+        setLoadError(true);
         setLoading(false);
       }
     });
@@ -4578,6 +4582,17 @@ export default function EstimateViewPage() {
         {/* First card ≈ the price card's real height at mobile widths. */}
         <SkeletonBlock minHeight={320} />
         <SkeletonBlock minHeight={200} />
+      </Page>
+    );
+  }
+  if (loadError) {
+    return (
+      <Page>
+        <Header customerFirstName={null} address={null} />
+        <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
+          setLoadError(true);
+          setLoading(false);
+        })} />
       </Page>
     );
   }

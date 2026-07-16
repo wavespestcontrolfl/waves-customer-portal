@@ -2908,6 +2908,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const [upcoming, setUpcoming] = useState([]);
   const [prefs, setPrefs] = useState(null);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
+  const [propertyPrefsError, setPropertyPrefsError] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
@@ -2920,11 +2921,16 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     Promise.all([
       api.getSchedule(90),
       api.getNotificationPrefs(),
-      api.getPropertyNotificationPrefs().catch(() => ({ properties: [] })),
+      api.getPropertyNotificationPrefs()
+        .then(data => ({ data, failed: false }))
+        .catch(() => ({ data: null, failed: true })),
     ]).then(([schedData, prefsData, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setPrefs(prefsData);
-      setPropertyPrefs(propertyPrefsData.properties || []);
+      setPropertyPrefsError(propertyPrefsData.failed);
+      if (propertyPrefsData.data) {
+        setPropertyPrefs(propertyPrefsData.data.properties || []);
+      }
     }).catch(err => {
       console.error(err);
       setLoadError(err?.message || 'Could not load your schedule.');
@@ -3334,12 +3340,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               You'll hear from us
             </div>
             {[
-              { icon: 'smartphone', label: '72-hour SMS reminder', time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { icon: 'smartphone', label: '24-hour SMS reminder', time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'smartphone', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'smartphone', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
               { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
-              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes texted to you', done: false },
-            ].map((step, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < 3 ? 8 : 0 }}>
+              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
+            ].filter((step) => step.enabled !== false).map((step, i, steps) => (
+              <div key={step.label} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < steps.length - 1 ? 8 : 0 }}>
                 <div style={{
                   width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
                   background: step.done ? '#F0FDF4' : step.active ? '#FFF7ED' : '#fff',
@@ -3625,6 +3631,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         </section>
       )}
 
+      {propertyPrefsError && (
+        <section role="alert" data-glass="card" style={{ ...card, padding: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Property contacts couldn&rsquo;t be loaded</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Your schedule is still available. Try again to manage notification recipients for each property.</div>
+          <button type="button" onClick={loadSchedule} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
+        </section>
+      )}
+
       {propertyPrefs.length > 0 && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
@@ -3841,6 +3855,7 @@ function BillingTab({ customer }) {
   const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
+  const [billingPrefsLoadError, setBillingPrefsLoadError] = useState(false);
   const compact = useIsMobile(760);
 
   // Stripe card management state
@@ -3876,7 +3891,7 @@ function BillingTab({ customer }) {
       api.getPayments(),
       api.getBalance(),
       api.getCards(),
-      api.getNotificationPrefs(),
+      api.getNotificationPrefs().catch(() => null),
       api.getAutopay().catch(() => ({ state: 'unknown', loadError: true })),
     ])
       .then(([payData, balData, cardData, prefsData, autopayData]) => {
@@ -3885,6 +3900,7 @@ function BillingTab({ customer }) {
         // has no error boundary and would white-screen.
         setPayments(payData.payments || []); setBalance(balData); setCards(cardData.cards || []);
         setAutopay(autopayData);
+        setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingSmsEnabled(!!prefsData.billingReminder);
@@ -4912,6 +4928,14 @@ function BillingTab({ customer }) {
         <div style={sectionTitle}>Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Recipients</div>
 
+        {billingPrefsLoadError && (
+          <div role="alert" style={{ marginBottom: 14, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
+            Billing details are available, but notification preferences couldn&rsquo;t be loaded. Try reloading before changing recipients.
+            <button type="button" onClick={loadBilling} style={{ ...secondaryButton, marginTop: 10, display: 'block' }}>Try again</button>
+          </div>
+        )}
+
+        {!billingPrefsLoadError && <>
         <div style={{ marginBottom: 14 }}>
           <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Billing recipient email
@@ -5046,6 +5070,7 @@ function BillingTab({ customer }) {
         }}>
           {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
         </button>
+        </>}
       </div>
     </div>
   );
@@ -7819,16 +7844,35 @@ function MyPlanTab({ customer, focusService }) {
   // Current bait-station layout (GATE_PORTAL_STATION_MAP; station-map-v1
   // lane). Fail-soft: no data or gate off simply renders no map.
   const [stationMaps, setStationMaps] = useState(null);
+  const [planStatus, setPlanStatus] = useState('loading');
+
+  const loadPlan = useCallback(() => {
+    setPlanStatus('loading');
+    Promise.all([
+      api.getNextService(),
+      api.getSchedule(365),
+      // Completed-service history is optional context. Keep the current plan
+      // usable when that focused endpoint is temporarily unavailable.
+      api.getServices({ limit: 50 }).catch((err) => {
+        console.error(err);
+        return { services: [] };
+      }),
+    ]).then(([nextData, scheduleData, servicesData]) => {
+      setNextService(nextData.next || null);
+      setUpcomingServices(scheduleData.upcoming || []);
+      setServiceHistory(servicesData.services || []);
+      setPlanStatus('ready');
+    }).catch((err) => {
+      console.error(err);
+      setPlanStatus('error');
+    });
+  }, []);
 
   useEffect(() => {
-    api.getNextService().then(d => setNextService(d.next || null)).catch(console.error);
-    api.getSchedule(365).then(d => setUpcomingServices(d.upcoming || [])).catch(console.error);
-    api.getServices({ limit: 50 }).then(d => {
-      if (d.services) setServiceHistory(d.services);
-    }).catch(console.error);
+    loadPlan();
     api.getAutopay().then(d => setBillingMode(d?.billing_mode || null)).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
-  }, []);
+  }, [loadPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
     const svcType = (service.serviceType || service.service_type || service.type || '').toLowerCase();
@@ -8149,6 +8193,22 @@ function MyPlanTab({ customer, focusService }) {
     minHeight: 36,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
+
+  if (planStatus !== 'ready') {
+    return (
+      <section role={planStatus === 'error' ? 'alert' : undefined} data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
+        <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+          {planStatus === 'loading' ? 'Loading your plan…' : 'We couldn’t load your plan'}
+        </div>
+        {planStatus === 'error' && (
+          <>
+            <div style={{ marginTop: 6, color: muted, fontSize: 14 }}>Your plan is still on file. This looks temporary.</div>
+            <button type="button" onClick={loadPlan} style={{ ...secondaryButton, marginTop: 14 }}>Try again</button>
+          </>
+        )}
+      </section>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -11886,14 +11946,32 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 function MyRequestsCard() {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
-  useEffect(() => {
+  const loadRequests = useCallback(() => {
+    setLoading(true);
+    setLoadError(false);
     api.getRequests()
       .then(d => { setRequests(d.requests || []); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch(() => { setLoadError(true); setLoading(false); });
   }, []);
 
+  useEffect(() => { loadRequests(); }, [loadRequests]);
+
   if (loading) return null;
+
+  if (loadError) {
+    return (
+      <section role="alert" data-glass="card" style={{
+        background: B.white, borderRadius: 8, padding: 16,
+        border: '1px solid #E7E2D7', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Recent requests couldn&rsquo;t be loaded</div>
+        <div style={{ fontSize: 12, color: '#475569', marginTop: 4 }}>A submitted request is not affected. Retry to view its receipt.</div>
+        <button type="button" onClick={loadRequests} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '8px 12px' }}>Try again</button>
+      </section>
+    );
+  }
 
   const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   const recent = requests
@@ -12567,7 +12645,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout, properties, switchProperty } = useAuth();
+  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty } = useAuth();
   const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
@@ -12892,6 +12970,12 @@ export default function PortalPage() {
                     </div>
                   </div>
                 </div>
+                {propertiesError && (
+                  <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>
+                    <div style={{ fontSize: 14, color: PORTAL_SHELL.text, lineHeight: 1.4 }}>{propertiesError}</div>
+                    <button type="button" onClick={refreshProperties} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 8, padding: '7px 10px', minHeight: 34 }}>Try again</button>
+                  </div>
+                )}
                 {canSwitchProperties && (
                   <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                     <div style={{
@@ -13195,3 +13279,7 @@ export default function PortalPage() {
     </PortalGlassContext.Provider>
   );
 }
+
+// Focused exports keep partial-failure behavior directly testable without
+// mounting the entire authenticated shell.
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard };

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import PublicLoadError from '../components/PublicLoadError';
 import { canSaveNative, isNativeApp, saveUrlNative } from '../native/nativeFile';
 import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section';
 import { StationMapCard } from '../components/StationMapCard';
@@ -8426,6 +8427,8 @@ export default function ReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const mode = useMemo(() => {
     if (typeof window === 'undefined') return 'live';
     const requestedMode = new URLSearchParams(window.location.search).get('mode');
@@ -8444,6 +8447,7 @@ export default function ReportViewPage() {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadError(false);
     const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
@@ -8453,7 +8457,11 @@ export default function ReportViewPage() {
       cache: 'no-store',
       headers: staffToken ? { Authorization: `Bearer ${staffToken}` } : undefined,
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (r.status === 404 || r.status === 410) return r.json();
+        if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
         // Must register BEFORE setData: the view-event effect fires on first
         // render of the report, and a staff read may never post events.
@@ -8461,7 +8469,7 @@ export default function ReportViewPage() {
         if (!cancelled) setData(d);
       })
       .catch(() => {
-        if (!cancelled) setData({ error: 'Report not found' });
+        if (!cancelled) setLoadError(true);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -8469,7 +8477,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode]);
+  }, [token, mode, loadAttempt]);
 
   useEffect(() => {
     if (!data || data.error) return;
@@ -8521,6 +8529,11 @@ export default function ReportViewPage() {
   }, [data]);
 
   if (loading) return <LoadingState glass={glassActive} />;
+  if (loadError) return (
+    <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: glassActive ? '#F8FCFE' : '#FAF8F3' }}>
+      <PublicLoadError resource="service report" onRetry={() => setLoadAttempt(a => a + 1)} />
+    </div>
+  );
   if (!data || data.error) return <NotFoundState glass={glassActive} />;
   if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
   return <LegacyReport data={data} token={token} glass={glassActive} />;

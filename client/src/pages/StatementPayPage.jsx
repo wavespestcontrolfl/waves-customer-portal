@@ -26,6 +26,7 @@ import { useParams } from "react-router-dom";
 import { COLORS } from "../theme-brand";
 import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
 import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import PublicLoadError from '../components/PublicLoadError';
 import BrandFooter from "../components/BrandFooter";
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
@@ -317,7 +318,8 @@ export default function StatementPayPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState(null); // null | notfound | temporary
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [setup, setSetup] = useState(null);
   const [setupError, setSetupError] = useState(null);
   // A benign in-flight state (ACH debit processing, or a micro-deposit
@@ -350,12 +352,19 @@ export default function StatementPayPage() {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setError(null);
     fetch(`${API_BASE}/pay/statement/${token}`)
-      .then((r) => { if (!r.ok) throw new Error("not found"); return r.json(); })
+      .then((r) => {
+        if (r.status === 404 || r.status === 410) {
+          const err = new Error('not found'); err.notFound = true; throw err;
+        }
+        if (!r.ok) throw new Error('temporary');
+        return r.json();
+      })
       .then((d) => { if (alive) { setData(d); setLoading(false); } })
-      .catch(() => { if (alive) { setError(true); setLoading(false); } });
+      .catch((err) => { if (alive) { setError(err.notFound ? 'notfound' : 'temporary'); setLoading(false); } });
     return () => { alive = false; };
-  }, [token]);
+  }, [token, loadAttempt]);
 
   // Resolve a Stripe redirect return by RETRIEVING the PaymentIntent (its real
   // status is authoritative — the statement's GET status lags the webhook, and a
@@ -466,7 +475,11 @@ export default function StatementPayPage() {
 
   if (loading) return shell(<BrandCard><p style={{ margin: 0, color: DOC.muted }}>Loading…</p></BrandCard>);
 
-  if (error || !data) {
+  if (error === 'temporary') {
+    return shell(<BrandCard><PublicLoadError resource="statement" onRetry={() => setLoadAttempt(a => a + 1)} /></BrandCard>);
+  }
+
+  if (error === 'notfound' || !data) {
     return shell(
       <BrandCard>
         <SerifHeading style={{ marginBottom: SP.sm }}>We couldn&rsquo;t find that statement</SerifHeading>

@@ -50,6 +50,23 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('ReportViewPage — temporary load failures', () => {
+  it('does not tell the customer a valid report is missing and offers retry', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 503, json: async () => ({ error: 'unavailable' }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/valid-token']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/couldn.t load that service report/i)).toBeInTheDocument();
+    expect(screen.queryByText(/report not found/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+});
+
 describe('ReportViewPage — recap SMS anchor (#visit-recap)', () => {
   // The recap SMS links /report/:token#visit-recap, but the card only exists
   // after /data resolves — the browser's native fragment scroll runs against

@@ -6,6 +6,7 @@ import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
+import PublicLoadError from '../components/PublicLoadError';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -164,6 +165,7 @@ export default function PestReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   useGlassSurface(true, 'full');
 
@@ -172,14 +174,15 @@ export default function PestReportViewPage() {
     // Token changes reuse this mounted component (React Router param nav) —
     // a stale notFound from the previous token must not mask a good report.
     setNotFound(false);
+    setLoadError(false);
     try {
       const res = await fetch(`${API_BASE}/public/pest-identifier/${token}`);
-      if (res.status === 404) { setNotFound(true); setLoading(false); return; }
+      if (res.status === 404 || res.status === 410) { setNotFound(true); setLoading(false); return; }
       if (!res.ok) throw new Error(`pest report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
     } catch {
-      setNotFound(true);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -194,6 +197,9 @@ export default function PestReportViewPage() {
         <SectionCard style={{ height: 220 }} />
       </Page>
     );
+  }
+  if (loadError) {
+    return <Page><SectionCard><PublicLoadError resource="pest report" onRetry={load} /></SectionCard></Page>;
   }
   if (notFound || !report) {
     return <Page><NotFoundCard /></Page>;
