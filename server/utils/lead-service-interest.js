@@ -269,7 +269,11 @@ function composeServiceInterest(extracted = {}, opts = {}) {
     // Normalize turf-pest catalog names first: a "Chinch Bug Treatment" /
     // "Lawn Pest Control" match covers LAWN, not the generic pest family —
     // else "lawn pests and roaches inside" never gets its pest tail (codex P2).
-    for (const fam of familiesIn(normalizeLawnPests(source || ''))) covered.add(fam.key);
+    // And a "Rodent Exclusion" label covers EXCLUSION only — the word
+    // "rodent" inside it must not mark rodent-control covered, or explicit
+    // "rat treatment and exclusion" text gets swallowed (codex r17).
+    const coverageSource = String(source || '').replace(/\brodent\s+exclusion\b/gi, 'exclusion');
+    for (const fam of familiesIn(normalizeLawnPests(coverageSource))) covered.add(fam.key);
   }
 
   const requested = cleanText(extracted.requested_service);
@@ -300,8 +304,11 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   // from trapping+exclusion).
   const scanFamilies = familiesIn(scanText);
   const exclusionPresent = scanFamilies.some((f) => f.key === 'exclusion');
+  // Work evidence must be BOUND to the rodent nouns, not request-wide — a
+  // lawn "treatment" elsewhere in the sentence is not rodent work (codex
+  // r17): rodent noun adjacent (±1 word) to a work verb, or the reverse.
   const rodentWorkEvidence = scanText
-    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b|\btreat\w*\b/i.test(scanText)
+    ? /\b(?:rodents?|rats?|mice|mouse)\s+(?:\w+\s+)?(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*|control|infestation\w*)\b|\b(?:trap\w*|bait\w*|remov\w*|treat\w*|exterminat\w*)\s+(?:for\s+)?(?:the\s+)?(?:rodents?|rats?|mice|mouse)\b|\brodent\s+control\b|\bdroppings?\b/i.test(scanText)
     : false;
   let label = matched;
   for (const fam of scanFamilies) {
@@ -310,6 +317,11 @@ function composeServiceInterest(extracted = {}, opts = {}) {
       if (!(fam.key === 'termite' && termiteWorkCue && !matchedTermiteWorkCue)) continue;
     }
     if (fam.key === 'termite' && wdoPresent && !termiteWorkCue) continue;
+    // Same lane, reverse direction: an inspection-only termite PRIMARY
+    // ("Termite Inspection") already IS the WDO deliverable — a requested
+    // WDO report must not render as a second inspection (codex r17).
+    // A work-cued termite primary keeps the WDO tail (distinct deliverable).
+    if (fam.key === 'wdo' && covered.has('termite') && !matchedTermiteWorkCue) continue;
     covered.add(fam.key);
     // Inspection-only termite wording ("pest control and termite inspection
     // for VA loan") is the inspection deliverable, not treatment work —

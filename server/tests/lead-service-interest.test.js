@@ -756,6 +756,37 @@ describe('composeServiceInterest', () => {
     expect(v2InexpressibleFamilyWords('pest control and a flea treatment')).toBe('Flea Control Service');
   });
 
+  test('rodent work evidence binds to rodent nouns (codex r17)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'seal entry points for rats and lawn treatment',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion + Lawn Care Service');
+  });
+
+  test('a Rodent Exclusion primary does not cover rodent-control work (codex r17)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Rodent Exclusion',
+      requested_service: 'rat treatment and exclusion',
+    })).toBe('Rodent Exclusion + Rodent Control Service');
+    // exclusion-only request on the same primary stays single
+    expect(composeServiceInterest({
+      matched_service: 'Rodent Exclusion',
+      requested_service: 'seal entry points for rats',
+    })).toBe('Rodent Exclusion');
+  });
+
+  test('inspection-only termite primary suppresses a WDO tail (codex r17)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Termite Inspection',
+      requested_service: 'WDO report for closing',
+    })).toBe('Termite Inspection');
+    // a work-cued termite primary keeps the distinct WDO deliverable
+    expect(composeServiceInterest({
+      matched_service: 'Liquid Termite Perimeter',
+      requested_service: 'termite treatment and a WDO report for closing',
+    })).toBe('Liquid Termite Perimeter + WDO Inspection Service');
+  });
+
   test('non-service chatter appends nothing', () => {
     expect(composeServiceInterest({
       matched_service: 'Quarterly Pest Control Service',
