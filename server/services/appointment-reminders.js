@@ -1668,41 +1668,47 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Send reschedule notice
-      const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
-        const day = formatDay(newApptTime);
-        const date = formatDate(newApptTime);
-        const time = formatTime(newApptTime);
+      // Send reschedule notice. Any unsent outcome — safeSendAppointment
+      // returning false, a missing customer, or a throw anywhere in the
+      // attempt — must re-arm the 72h window so the cron's fallback reminder
+      // still delivers the new time. Without this, the DB sync trigger's
+      // pre-covered flag survives (startMoved sees the already-synced
+      // appointment_time) and the customer would get only the 24h text.
+      let noticeSent = false;
+      try {
+        const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+        if (customer) {
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+          const day = formatDay(newApptTime);
+          const date = formatDate(newApptTime);
+          const time = formatTime(newApptTime);
 
-        const serviceLabel = smsServiceLabelStored(record.service_type);
-        const sent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-          return renderRequiredTemplate('appointment_rescheduled', {
-            first_name: firstName,
-            service_type: serviceLabel,
-            day,
-            date,
-            time,
-          }, {
-            workflow: 'appointment_rescheduled',
-            entity_type: 'scheduled_service',
-            entity_id: scheduledServiceId,
-          });
-        }, 'appointment_rescheduled', 'appointment_confirmation');
-        if (sent) {
-          await this.markRescheduleNoticeSent(scheduledServiceId);
-          logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
-        } else {
-          // Notice failed (or was blocked) on a notifying reschedule — re-arm
-          // the 72h window so the cron's fallback reminder still delivers the
-          // new time. Without this, the DB sync trigger's pre-covered flag
-          // survives (startMoved sees the already-synced appointment_time)
-          // and the customer would get only the 24h day-before text.
+          const serviceLabel = smsServiceLabelStored(record.service_type);
+          noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            return renderRequiredTemplate('appointment_rescheduled', {
+              first_name: firstName,
+              service_type: serviceLabel,
+              day,
+              date,
+              time,
+            }, {
+              workflow: 'appointment_rescheduled',
+              entity_type: 'scheduled_service',
+              entity_id: scheduledServiceId,
+            });
+          }, 'appointment_rescheduled', 'appointment_confirmation');
+          if (noticeSent) {
+            await this.markRescheduleNoticeSent(scheduledServiceId);
+            logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
+          }
+        }
+      } finally {
+        if (!noticeSent) {
           await db('appointment_reminders')
             .where({ id: record.id })
-            .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() });
+            .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
+            .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
         }
       }
 
