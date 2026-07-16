@@ -19,6 +19,7 @@ import { useParams } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { SOCIAL_ICON_PATHS, APP_STORE_URL, PLAY_STORE_URL } from '../components/BrandFooter';
 import { WAVES_FL_LICENSE_LINE } from '../constants/business';
+import PublicLoadError from '../components/PublicLoadError';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -164,7 +165,8 @@ const SMS_ICON = (
 export default function CardPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
-  const [status, setStatus] = useState('loading'); // loading | ready | missing
+  const [status, setStatus] = useState('loading'); // loading | ready | missing | error
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
   const [photoFailed, setPhotoFailed] = useState(false);
 
@@ -172,14 +174,18 @@ export default function CardPage() {
     let alive = true;
     setStatus('loading');
     fetch(`${API_BASE}/card/${token}`)
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => {
+        if (r.status === 404 || r.status === 410) return null;
+        if (!r.ok) throw new Error('temporary');
+        return r.json();
+      })
       .then((json) => {
         if (!alive) return;
         if (json) { setData(json); setStatus('ready'); } else setStatus('missing');
       })
-      .catch(() => alive && setStatus('missing'));
+      .catch(() => alive && setStatus('error'));
     return () => { alive = false; };
-  }, [token]);
+  }, [token, loadAttempt]);
 
   const techFirst = data?.tech?.firstName || null;
   const referralUrl = data?.referralUrl;
@@ -213,6 +219,11 @@ export default function CardPage() {
   if (status !== 'ready') {
     return (
       <div style={scene}>
+        {status === 'error' && (
+          <div style={{ ...GLASS_MATERIAL, cursor: 'default', borderRadius: 24, maxWidth: 460, marginTop: 60 }}>
+            <PublicLoadError light resource="card" onRetry={() => setLoadAttempt(a => a + 1)} />
+          </div>
+        )}
         {status === 'missing' && (
           <div style={{
             ...GLASS_MATERIAL, cursor: 'default', borderRadius: 24,

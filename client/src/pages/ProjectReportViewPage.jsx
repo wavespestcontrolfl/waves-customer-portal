@@ -7,6 +7,7 @@ import {
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import Icon from '../components/Icon';
+import PublicLoadError from '../components/PublicLoadError';
 import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -357,6 +358,8 @@ export default function ProjectReportViewPage() {
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   // Liquid-glass theme — now unconditional, except on the certificate view.
   // This page has no client pdf/static render modes (the filed FDACS-13645
@@ -369,11 +372,17 @@ export default function ProjectReportViewPage() {
   useGlassSurface(glassActive, 'full');
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(false);
     fetch(`${API_BASE}/reports/project/${token}/data`)
-      .then(r => r.json())
+      .then(r => {
+        if (r.status === 404 || r.status === 410 || r.status === 402) return r.json();
+        if (!r.ok) throw new Error(`temporary report failure: ${r.status}`);
+        return r.json();
+      })
       .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [token]);
+      .catch(() => { setLoadError(true); setLoading(false); });
+  }, [token, loadAttempt]);
 
   if (loading) return (
     <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT_BODY }}>
@@ -382,6 +391,12 @@ export default function ProjectReportViewPage() {
         <div style={{ height: 32, width: '70%', background: B.offWhite, borderRadius: 6, marginTop: 16 }} />
         <div style={{ height: 14, width: '50%', background: B.offWhite, borderRadius: 6, marginTop: 12 }} />
       </div>
+    </div>
+  );
+
+  if (loadError) return (
+    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'grid', placeItems: 'center', padding: 20, fontFamily: FONT_BODY }}>
+      <div style={{ ...cardStyle, maxWidth: 480 }}><PublicLoadError resource="project report" onRetry={() => setLoadAttempt(a => a + 1)} /></div>
     </div>
   );
 

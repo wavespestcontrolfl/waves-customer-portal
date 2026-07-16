@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
+import PublicLoadError from '../components/PublicLoadError';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
@@ -219,30 +220,36 @@ export default function PrepGuidePage() {
   const { token } = useParams();
   useGlassSurface(true, 'full');
   const [data, setData] = useState(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState(null); // null | notfound | temporary
   const [loading, setLoading] = useState(true);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      setLoading(true);
+      setError(null);
       try {
         const res = await fetch(`${API_BASE}/public/prep/${token}`);
-        if (!res.ok) { if (!cancelled) setError(true); return; }
+        if (res.status === 404 || res.status === 410) { if (!cancelled) setError('notfound'); return; }
+        if (!res.ok) { if (!cancelled) setError('temporary'); return; }
         const json = await res.json();
         if (!cancelled) setData(json);
       } catch {
-        if (!cancelled) setError(true);
+        if (!cancelled) setError('temporary');
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
     load();
     return () => { cancelled = true; };
-  }, [token]);
+  }, [token, loadAttempt]);
 
   const content = loading
     ? <LoadingSkeleton />
-    : error || !data
+    : error === 'temporary'
+      ? <PublicLoadError resource="prep guide" onRetry={() => setLoadAttempt(a => a + 1)} />
+    : error === 'notfound' || !data
       ? <NotFound />
       : (
         <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: DOC_FONT, color: SURFACE.text }}>

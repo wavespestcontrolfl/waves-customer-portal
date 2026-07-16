@@ -4,6 +4,7 @@ const Joi = require('joi');
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
+const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString } = require('../utils/datetime-et');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
@@ -167,8 +168,13 @@ router.post('/:id/reschedule', async (req, res, next) => {
       return res.status(404).json({ error: 'Appointment not found' });
     }
 
-    await db('scheduled_services')
-      .where({ id: req.params.id })
+    const updatedCount = await db('scheduled_services')
+      .where({
+        id: req.params.id,
+        customer_id: req.customerId,
+        status: service.status,
+        updated_at: service.updated_at,
+      })
       .update({
         status: 'rescheduled',
         customer_confirmed: false,
@@ -178,9 +184,41 @@ router.post('/:id/reschedule', async (req, res, next) => {
         updated_at: new Date(),
       });
 
+    if (!updatedCount) {
+      return res.status(409).json({
+        error: 'This appointment changed before the request was submitted. Refresh to see the latest status.',
+      });
+    }
+
     logger.info(`Reschedule requested by customer: ${req.params.id}`);
 
-    // TODO: Trigger internal notification to scheduling team
+    // The durable status/notes update is authoritative. Surface it in the
+    // operator notification feed as a best-effort alert so the promised
+    // follow-up is not dependent on someone noticing the status change.
+    try {
+      const customerName = [req.customer?.first_name, req.customer?.last_name].filter(Boolean).join(' ') || 'Customer';
+      const notification = await NotificationService.notifyAdmin(
+        'schedule',
+        `Reschedule request from ${customerName}`,
+        `${normalizeServiceType(service.service_type)} on ${service.scheduled_date}` +
+          (preferredDate ? `\nPreferred date: ${preferredDate}` : '') +
+          (notes ? `\nNotes: ${notes}` : ''),
+        {
+          icon: '📅',
+          link: `/admin/schedule?serviceId=${encodeURIComponent(service.id)}`,
+          metadata: {
+            scheduledServiceId: service.id,
+            customerId: req.customerId,
+            preferredDate: preferredDate || null,
+          },
+        },
+      );
+      if (!notification) {
+        logger.error(`Admin notification did not persist for reschedule request ${service.id}`);
+      }
+    } catch (notificationErr) {
+      logger.error(`Failed to notify staff about reschedule request ${service.id}: ${notificationErr.message}`);
+    }
 
     res.json({
       success: true,

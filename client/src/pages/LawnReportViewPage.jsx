@@ -6,6 +6,7 @@ import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
+import PublicLoadError from '../components/PublicLoadError';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const WAVES_PHONE_DISPLAY = '(941) 297-5749';
@@ -183,6 +184,7 @@ export default function LawnReportViewPage() {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   // Liquid-glass theme — now unconditional. This page has no pdf/static
   // render modes — the route only ever serves the live customer view.
@@ -191,14 +193,16 @@ export default function LawnReportViewPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setNotFound(false);
+    setLoadError(false);
     try {
       const res = await fetch(`${API_BASE}/public/lawn-diagnostic/${token}`);
-      if (res.status === 404) { setNotFound(true); setLoading(false); return; }
+      if (res.status === 404 || res.status === 410) { setNotFound(true); setLoading(false); return; }
       if (!res.ok) throw new Error(`lawn report fetch failed: ${res.status}`);
       const body = await res.json();
       setReport(body.report || null);
     } catch {
-      setNotFound(true);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -213,6 +217,9 @@ export default function LawnReportViewPage() {
         <SectionCard style={{ height: 220 }} />
       </Page>
     );
+  }
+  if (loadError) {
+    return <Page><SectionCard><PublicLoadError resource="lawn report" onRetry={load} /></SectionCard></Page>;
   }
   if (notFound || !report) {
     return <Page><NotFoundCard /></Page>;

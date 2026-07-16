@@ -16,6 +16,7 @@ import NewsletterSignup from '../components/NewsletterSignup';
 import { COLORS as B, FONTS } from '../theme-brand';
 import { WavesShell } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
+import PublicLoadError from '../components/PublicLoadError';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const PAGE_BG = '#FAF8F3';
@@ -47,7 +48,7 @@ function ArchiveBody({ html }) {
       el.removeEventListener('load', measure);
       clearTimeout(t);
     };
-  }, [html]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [html]);
 
   // Wrap the operator HTML in a minimal document so font-family + max-width
   // apply consistently regardless of whether the body content has its own
@@ -86,22 +87,24 @@ export default function NewsletterArchivePage() {
   // the other glass surfaces. The public/SEO archive lives on the astro site.
   useGlassSurface(true, 'full');
   const [post, setPost] = useState(null);
-  const [status, setStatus] = useState('loading'); // loading | ok | notfound
+  const [status, setStatus] = useState('loading'); // loading | ok | notfound | error
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setStatus('loading');
     fetch(`${API_BASE}/public/newsletter/posts/${id}`)
       .then(async (r) => {
         if (cancelled) return;
-        if (r.status === 404) { setStatus('notfound'); return; }
-        if (!r.ok) { setStatus('notfound'); return; }
+        if (r.status === 404 || r.status === 410) { setStatus('notfound'); return; }
+        if (!r.ok) { setStatus('error'); return; }
         const d = await r.json();
         setPost(d);
         setStatus('ok');
       })
-      .catch(() => { if (!cancelled) setStatus('notfound'); });
+      .catch(() => { if (!cancelled) setStatus('error'); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, loadAttempt]);
 
   // Standard shell top bar — same header as /track (owner 2026-07-09):
   // store links · centered logo · help icons. The navy issue strip stays
@@ -110,6 +113,15 @@ export default function NewsletterArchivePage() {
     return (
       <WavesShell variant="customer" topBar="solid">
         <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh' }} />
+      </WavesShell>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <WavesShell variant="customer" topBar="solid">
+        <div data-glass-clear="" style={{ background: PAGE_BG, minHeight: '100vh', padding: '48px 20px' }}>
+          <PublicLoadError resource="newsletter issue" onRetry={() => setLoadAttempt(a => a + 1)} />
+        </div>
       </WavesShell>
     );
   }

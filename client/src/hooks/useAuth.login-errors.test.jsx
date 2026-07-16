@@ -30,7 +30,13 @@ import api from '../utils/api';
 let authApi;
 function Probe() {
   authApi = useAuth();
-  return <div data-testid="auth-error">{authApi.error || ''}</div>;
+  return (
+    <>
+      <div data-testid="auth-error">{authApi.error || ''}</div>
+      <div data-testid="properties-error">{authApi.propertiesError || ''}</div>
+      <div data-testid="properties-count">{authApi.properties.length}</div>
+    </>
+  );
 }
 
 function requestError(message, status) {
@@ -51,6 +57,7 @@ function stubLocalStorage(store = {}) {
 
 beforeEach(() => {
   stubLocalStorage();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
   render(<AuthProvider><Probe /></AuthProvider>);
 });
 
@@ -112,5 +119,25 @@ describe('login OTP error copy (F-059, login half)', () => {
     await act(async () => { await authApi.verifyCode('9415551234', '123456'); });
     expect(screen.getByTestId('auth-error').textContent)
       .toBe('Invalid or expired verification code');
+  });
+});
+
+describe('multi-property partial failures', () => {
+  it('preserves the known property list and exposes a focused retry', async () => {
+    api.getMe.mockResolvedValue({ id: 'cust-1', firstName: 'Pat' });
+    api.getAuthProperties.mockResolvedValueOnce({ properties: [{ id: 'cust-1' }, { id: 'cust-2' }] });
+
+    await act(async () => { await authApi.refreshCustomer(); });
+    expect(screen.getByTestId('properties-count')).toHaveTextContent('2');
+
+    api.getAuthProperties.mockRejectedValueOnce(requestError('Request failed (503)', 503));
+    await act(async () => { await authApi.refreshCustomer(); });
+
+    expect(screen.getByTestId('properties-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('properties-error')).toHaveTextContent('temporarily unavailable');
+
+    api.getAuthProperties.mockResolvedValueOnce({ properties: [{ id: 'cust-1' }, { id: 'cust-2' }] });
+    await act(async () => { await authApi.refreshProperties(); });
+    expect(screen.getByTestId('properties-error')).toBeEmptyDOMElement();
   });
 });
