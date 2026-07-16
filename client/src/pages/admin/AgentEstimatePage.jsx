@@ -96,7 +96,7 @@ function TinyFact({ label, value }) {
   );
 }
 
-function LeadPicker({ selectedId, leads, value, loading, onValueChange, onSelect }) {
+function LeadPicker({ selectedId, leads, value, loading, disabled, onValueChange, onSelect }) {
   return (
     <div className="space-y-3 p-4">
       <label className="block text-[14px] font-medium text-zinc-800" htmlFor="agent-lead-search">
@@ -108,6 +108,7 @@ function LeadPicker({ selectedId, leads, value, loading, onValueChange, onSelect
           id="agent-lead-search"
           value={value}
           onChange={(event) => onValueChange(event.target.value)}
+          disabled={disabled}
           placeholder="Name, phone, address, or service"
           className="h-12 w-full rounded-sm border border-zinc-300 bg-white pl-10 pr-3 text-[16px] text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
         />
@@ -124,6 +125,7 @@ function LeadPicker({ selectedId, leads, value, loading, onValueChange, onSelect
               key={lead.id}
               type="button"
               onClick={() => onSelect(lead.id)}
+              disabled={disabled}
               className={cn(
                 "block min-h-16 w-full px-3 py-3 text-left transition-colors",
                 selected ? "bg-zinc-100" : "bg-white hover:bg-zinc-50",
@@ -274,7 +276,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   if (!draft) {
     return <div className="p-4 text-[14px] leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
-  const canSend = draft.status === "draft";
+  const canSend = draft.status === "draft" && draft.editable_here === true;
   return (
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -294,7 +296,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           <div className="text-[14px] font-medium text-zinc-900">Customer presentation</div>
           <div className="mt-1 text-[14px] text-zinc-600">
             {serviceTemplateLabel(draft.presentation_template || "service")}
-            {draft.service_template_keys?.length
+            {draft.service_template_keys?.length && draft.service_template_keys.length > 1
               ? ` · ${draft.service_template_keys.map(serviceTemplateLabel).join(" + ")}`
               : ""}
           </div>
@@ -579,13 +581,14 @@ export default function AgentEstimatePage() {
   const previewUrl = draft?.token ? `/estimate/${draft.token}?adminPreview=1` : null;
   const quickActions = intelligence.quickActions || [];
   const buildDisabled = !context || contextLoading || intelligence.loading;
+  const openLead = ["new", "contacted", "estimate_sent", "estimate_viewed"].includes(String(contact?.status || "new"));
 
   const chooseLead = (leadId) => {
     setSearchParams(leadId ? { leadId } : {});
   };
 
   const sendDraft = async (sendMethod) => {
-    if (!draft?.id || draft.status !== "draft" || sending) return;
+    if (!draft?.id || draft.status !== "draft" || draft.editable_here !== true || sending) return;
     setSending(true);
     setSendMessage("");
     try {
@@ -654,6 +657,7 @@ export default function AgentEstimatePage() {
               leads={leadOptions}
               value={leadSearch}
               loading={leadSearchLoading}
+              disabled={intelligence.loading}
               onValueChange={setLeadSearch}
               onSelect={chooseLead}
             />
@@ -679,7 +683,7 @@ export default function AgentEstimatePage() {
                 <div className="space-y-3 p-4">
                   <button
                     type="button"
-                    disabled={buildDisabled}
+                    disabled={buildDisabled || !openLead}
                     onClick={() => intelligence.submit(context.suggested_prompt || BUILD_PROMPT)}
                     className="flex min-h-14 w-full items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[16px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -776,6 +780,7 @@ export default function AgentEstimatePage() {
                         variant="light"
                         touchFriendly
                         onResolved={(action, decision, body) => {
+                          if (action?.params?.leadId && String(action.params.leadId) !== String(selectedLeadId)) return;
                           if (decision === "confirm" && body?.success) {
                             handleAfterSubmit({
                               toolCalls: [{ name: action.tool }],

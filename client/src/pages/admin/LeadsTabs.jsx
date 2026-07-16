@@ -2133,7 +2133,7 @@ export function LeadsSection() {
                                   >
                                     Create Estimate
                                   </Btn>{" "}
-                                  {agentEstimateEnabled && (
+                                  {agentEstimateEnabled && OPEN_FILTER_STATUSES.includes(lead.status) && (
                                     <Btn
                                       small
                                       color={C.purple}
