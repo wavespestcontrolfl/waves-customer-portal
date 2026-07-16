@@ -35,6 +35,8 @@ let tableState;
 
 const ACTIVE_STATES = ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending'];
 const isActive = (p) => Boolean(p && (ACTIVE_STATES.includes(p.astro_status) || p.astro_pr_number || p.astro_branch_name));
+// Fake delete mirrors the route's full predicate (astro-active OR published)
+const isDeletable = (p) => Boolean(p && !isActive(p) && p.status !== 'published');
 
 function setupDb() {
   const calls = { updates: [], deletes: 0 };
@@ -56,7 +58,7 @@ function setupDb() {
       // Mirrors the atomic guarded delete: only a non-astro-active existing
       // row deletes; anything else reports 0 rows like Postgres would.
       del: jest.fn(() => {
-        if (tableState.post && !isActive(tableState.post)) {
+        if (isDeletable(tableState.post)) {
           calls.deletes += 1;
           return Promise.resolve(1);
         }
@@ -153,6 +155,25 @@ describe('DELETE /blog/:id guard', () => {
     tableState.post = null;
     const missing = await invoke('delete', '/blog/:id', { params: { id: POST_ID } });
     expect(missing.statusCode).toBe(404);
+  });
+
+  test('legacy published row (no astro markers) still refuses delete — un-publish first (codex r2)', async () => {
+    const calls = setupDb();
+    tableState.post = { id: POST_ID, status: 'published', astro_status: 'draft', astro_pr_number: null, astro_branch_name: null };
+    const r = await invoke('delete', '/blog/:id', { params: { id: POST_ID } });
+    expect(r.statusCode).toBe(409);
+    expect(r.payload.error).toContain('un-publish');
+    expect(calls.deletes).toBe(0);
+  });
+
+  test('legacy statuses (wp_draft/scheduled) still save through PUT (codex r2)', async () => {
+    setupDb();
+    tableState.post = { id: POST_ID, status: 'wp_draft', astro_status: 'draft' };
+    const a = await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { status: 'wp_draft', title: 'T' } });
+    expect(a.statusCode).toBe(200);
+    tableState.post = { id: POST_ID, status: 'scheduled', astro_status: 'draft' };
+    const b = await invoke('put', '/blog/:id', { params: { id: POST_ID }, body: { status: 'scheduled', title: 'T' } });
+    expect(b.statusCode).toBe(200);
   });
 
   test('deletes a plain draft', async () => {

@@ -53,7 +53,10 @@ const BLOG_UPDATE_FIELDS = new Set([
   'hero_image_alt',
 ]);
 
-const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'published']);
+// Full persisted set per the blog_content migration — legacy rows still
+// carry wp_draft/scheduled, and the editor always sends the row's current
+// status on save, so a narrower allowlist would 400 every legacy-row edit.
+const BLOG_STATUS_VALUES = new Set(['idea', 'queued', 'draft', 'wp_draft', 'scheduled', 'published']);
 
 // Astro states in which the row's content is load-bearing outside this table
 // (an open PR, a merged commit, or a live page hangs off it) — destructive
@@ -651,15 +654,20 @@ router.delete('/blog/:id', async (req, res, next) => {
     // live page with no unpublish path. The guard lives INSIDE the delete's
     // WHERE (not a separate read) so a publisher opening a PR mid-request
     // can't slip between check and delete.
+    // status != published: legacy published rows (pre-astro; astro_status
+    // defaulted to 'draft', no PR/branch markers) represent externally
+    // published content too — require an explicit un-publish (status change
+    // or unpublish-astro) before a hard delete.
     const deleted = await whereNotAstroActive(
-      db('blog_posts').where('id', req.params.id),
+      db('blog_posts').where('id', req.params.id).whereNot('status', 'published'),
     ).del();
     if (!deleted) {
       const post = await db('blog_posts').where('id', req.params.id).first();
       if (!post) return res.status(404).json({ error: 'Post not found' });
-      return res.status(409).json({
-        error: `Post has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — unpublish it first (unpublish-astro), then delete.`,
-      });
+      const why = post.status === 'published' && !astroActivePost(post)
+        ? "Post is published — un-publish it first (set status to draft, or unpublish-astro if it has a live page), then delete."
+        : `Post has Astro state '${post.astro_status || 'pending'}'${post.astro_pr_number ? ` (PR #${post.astro_pr_number})` : ''} — unpublish it first (unpublish-astro), then delete.`;
+      return res.status(409).json({ error: why });
     }
     res.json({ success: true });
   } catch (err) { next(err); }
