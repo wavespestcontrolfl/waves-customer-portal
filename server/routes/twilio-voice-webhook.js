@@ -232,6 +232,14 @@ function resolveInboundDialCompletion({ status, duration, forwardAccepted }) {
   return { shouldRecordVoicemail, answeredBy };
 }
 
+function shouldAlertInboundDialFailure({ status, shouldRecordVoicemail }) {
+  // A failed staff-forward leg is not a failed customer call when the same
+  // TwiML response deliberately continues into Waves-owned voicemail. Alert
+  // only when the dial failure is terminal; downstream webhook/recording
+  // failures have their own failure paths.
+  return isFailureStatus(status) && !shouldRecordVoicemail;
+}
+
 function parseForwardNumbers(value) {
   const seen = new Set();
   return String(value || '')
@@ -689,7 +697,7 @@ router.post('/call-complete', async (req, res) => {
     await db('call_log').where('twilio_call_sid', CallSid).update(callUpdate);
     queueVoiceMessageSync(CallSid);
 
-    if (isFailureStatus(status)) {
+    if (shouldAlertInboundDialFailure({ status, shouldRecordVoicemail })) {
       notifyTwilioFailure({
         channel: 'voice',
         direction: 'inbound',
@@ -1548,6 +1556,7 @@ router._test = {
   resolveCsrName,
   resolveInboundDialCompletion,
   sanitizeVoiceProviderError,
+  shouldAlertInboundDialFailure,
   wasForwardAccepted,
 };
 
