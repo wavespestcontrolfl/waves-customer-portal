@@ -393,7 +393,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices });
+      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices, addressRegathered });
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);

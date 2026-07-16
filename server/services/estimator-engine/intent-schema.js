@@ -22,7 +22,10 @@ const SERVICE_OPTION_SCHEMAS = {
   pest: {
     type: 'object',
     properties: {
-      frequency: { enum: ['monthly', 'bimonthly', 'quarterly', 'semiannual'] },
+      // The pest pricer's cadence normalizer recognizes exactly these three
+      // — a schema-valid but engine-unknown cadence (e.g. semiannual) would
+      // silently price at quarterly. Unsupported cadences skip instead.
+      frequency: { enum: ['monthly', 'bimonthly', 'quarterly'] },
       roachType: { enum: ['none', 'german', 'american'] },
     },
     additionalProperties: false,
@@ -64,8 +67,10 @@ const SERVICE_OPTION_SCHEMAS = {
       method: { enum: ['CHEMICAL', 'HEAT'] },
       rooms: { type: 'integer', minimum: 1, maximum: 12 },
       severity: { enum: ['light', 'moderate', 'severe'] },
-      prepStatus: { enum: ['ready', 'needs_prep'] },
-      occupancyType: { enum: ['residential'] },
+      // Exactly priceBedBugTreatment's vocab — schema-valid values outside
+      // it would throw during pricing.
+      prepStatus: { enum: ['ready', 'partial', 'poor', 'refused'] },
+      occupancyType: { enum: ['singleFamily', 'apartment', 'hotel', 'studentHousing'] },
     },
     additionalProperties: false,
   },
@@ -75,7 +80,9 @@ const SERVICE_OPTION_SCHEMAS = {
     properties: {
       species: { enum: ['PAPER_WASP', 'YELLOW_JACKET', 'HORNET', 'HONEY_BEE'] },
       tier: { type: 'integer', minimum: 1, maximum: 3 },
-      removal: { enum: ['NONE', 'NEST'] },
+      // priceStingingInsect's removal add-on vocab — a generic 'NEST' fell
+      // through with removalPrice = 0 (silent underquote).
+      removal: { enum: ['NONE', 'SMALL', 'LARGE', 'HONEYCOMB', 'RELOCATE'] },
     },
     additionalProperties: false,
   },
@@ -115,7 +122,9 @@ const INTENT_SCHEMA = {
         type: 'object',
         properties: {
           decision: { type: 'string' },
-          quote: { type: 'string' },
+          // An empty/trivial quote would satisfy the coverage count while
+          // giving the operator nothing to verify.
+          quote: { type: 'string', minLength: 12 },
           speaker: { enum: ['caller', 'agent'] },
         },
         required: ['decision', 'quote'],

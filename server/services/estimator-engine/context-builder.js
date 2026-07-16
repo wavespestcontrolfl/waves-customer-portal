@@ -244,11 +244,11 @@ async function buildCallContext(callLogId) {
 
   const [lead, smsThread, priorEstimates] = await Promise.all([
     loadLeadForCall(call, phone, { phoneFallback: !customerMatch.ambiguous }),
-    // A shared line with MULTIPLE profiles carries texts about other
-    // properties — feeding that history to the composer lets it lift an
-    // unrelated address as evidence. Ambiguous match → no SMS context.
+    // A shared line with MULTIPLE profiles carries texts, estimates, and
+    // leads for other people/properties — none of that history may steer
+    // the composer on an ambiguous match.
     customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: call.created_at }),
-    loadPriorEstimates(phone),
+    customerMatch.ambiguous ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
 
   return {

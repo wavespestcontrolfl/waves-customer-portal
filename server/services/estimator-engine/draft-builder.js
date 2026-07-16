@@ -59,7 +59,11 @@ function lineRequiresReview(line = {}) {
 }
 
 // ── Engine input ──────────────────────────────────────────────
-function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [] }) {
+function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], addressRegathered = false }) {
+  // A re-gathered address means the quote is for a DIFFERENT property than
+  // the matched profile — its saved turf measurement and property type
+  // describe the old home and must not leak into the new one's pricing.
+  const profileDescribesQuotedProperty = !addressRegathered && !context?.customerPhoneAmbiguous;
   const isCommercial = intent.is_commercial === true;
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);
@@ -78,13 +82,11 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     propertyType: isCommercial
       ? 'commercial'
       : (propertyFacts?.propertyType
-        // Ambiguous shared-phone profiles must not steer pricing modifiers
-        // either — same trust rule as address/sqft.
-        || (context?.customerPhoneAmbiguous ? null : pricingSafePropertyType(context?.customer?.property_type))
+        || (profileDescribesQuotedProperty ? pricingSafePropertyType(context?.customer?.property_type) : null)
         || 'Single Family'),
     // customers.property_sqft is TREATED LAWN AREA by schema — the correct
     // plumbing is the engine's measured-turf input, never home sqft.
-    ...((!isCommercial && !context?.customerPhoneAmbiguous && positive(context?.customer?.property_sqft))
+    ...((!isCommercial && profileDescribesQuotedProperty && positive(context?.customer?.property_sqft))
       ? { measuredTurfSf: Number(context.customer.property_sqft) }
       : {}),
     // Existing-customer WaveGuard context: qualifying recurring services the
@@ -233,10 +235,12 @@ function verifyEvidenceQuotes(intent, context) {
   const haystack = normalize(
     `${context?.transcript || ''} ${(context?.smsThread || []).map((m) => m.body).join(' ')}`,
   );
-  const quotes = (intent?.evidence || []).map((e) => e.quote).filter(Boolean);
+  const quotes = (intent?.evidence || []).map((e) => e.quote);
+  // Empty/trivial quotes count as UNVERIFIED, not skipped — a quote too
+  // short to check is a quote the operator can't verify either.
   const unverified = quotes.filter((q) => {
     const needle = normalize(q);
-    return needle.length >= 8 && !haystack.includes(needle);
+    return needle.length < 8 || !haystack.includes(needle);
   });
   return { total: quotes.length, unverified: unverified.length };
 }
