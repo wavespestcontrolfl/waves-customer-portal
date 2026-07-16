@@ -24,6 +24,7 @@ import {
 } from "./EstimatePage";
 import { LeadsSection } from "./LeadsTabs";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { MarginCalculator } from "./PricingLogicPage";
 import EstimateToolViewV2 from "./EstimateToolViewV2";
 import CustomerEstimatesPanel from "./CustomerEstimatesPanel";
@@ -939,68 +940,20 @@ function PipelineCommandHeader({ activeTab, onTabChange }) {
   const actionTarget = activeTab === "new" ? "estimates" : "new";
 
   return (
-    <div
-      className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-      style={{ fontFamily: ROBOTO }}
-    >
-      {" "}
-      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-        {" "}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          {" "}
-          <div className="flex items-center gap-3 min-w-0">
-            {" "}
-            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
-              {" "}
-              <activeConfig.Icon size={17} strokeWidth={1.9} aria-hidden />{" "}
-            </div>{" "}
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: ROBOTO }}
-            >
-              Pipeline
-            </h1>{" "}
-          </div>{" "}
-          <Button
-            size="md"
-            variant={activeTab === "new" ? "secondary" : "primary"}
-            className="gap-2 text-12 font-medium uppercase tracking-label"
-            onClick={() => onTabChange(actionTarget)}
-          >
-            {" "}
-            <ActionIcon size={15} strokeWidth={1.9} aria-hidden />
-            {actionLabel}
-          </Button>{" "}
-        </div>{" "}
-        <nav
-          aria-label="Pipeline section"
-          className="grid grid-cols-2 lg:grid-cols-4 gap-1 p-2"
-        >
-          {TABS.map(({ key, label, Icon }) => {
-            const active = activeTab === key;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onTabChange(key)}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
-                  "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
-                  active
-                    ? "bg-zinc-900 text-white border-zinc-900"
-                    : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-                )}
-              >
-                {" "}
-                <Icon size={15} strokeWidth={1.8} aria-hidden />
-                {label}
-              </button>
-            );
-          })}
-        </nav>{" "}
-      </div>{" "}
-    </div>
+    <AdminCommandHeader
+      title="Pipeline"
+      icon={activeConfig.Icon}
+      sections={TABS}
+      activeKey={activeTab}
+      onSectionChange={onTabChange}
+      ariaLabel="Pipeline section"
+      action={{
+        label: actionLabel,
+        icon: ActionIcon,
+        variant: activeTab === "new" ? "secondary" : "primary",
+        onClick: () => onTabChange(actionTarget),
+      }}
+    />
   );
 }
 

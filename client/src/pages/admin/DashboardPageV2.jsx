@@ -556,7 +556,7 @@ export default function DashboardPageV2() {
   };
 
   return (
-    <div className="dashboard-blackout font-sans bg-surface-page min-h-full p-3 sm:p-6 pb-[calc(6rem+env(safe-area-inset-bottom))] md:pb-6 text-zinc-900">
+    <div className="dashboard-blackout min-h-full bg-surface-page font-sans text-zinc-900">
       <header className="mb-3 max-md:mb-4">
         <div className="flex items-start justify-between flex-wrap gap-3">
           <div>
@@ -583,7 +583,7 @@ export default function DashboardPageV2() {
               onClick={refresh}
               disabled={refreshing}
               aria-label="Refresh dashboard"
-              className="hover:text-ink-secondary u-focus-ring"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-sm hover:text-ink-secondary u-focus-ring md:h-8 md:w-8"
             >
               <span className={`inline-block ${refreshing ? "animate-spin" : ""}`}>
                 ↻

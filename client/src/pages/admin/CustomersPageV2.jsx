@@ -48,6 +48,7 @@ import {
   Users,
 } from "lucide-react";
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
+import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
 import useIsMobile from "../../hooks/useIsMobile";
@@ -811,11 +812,7 @@ function SortHeaderV2({
   );
 }
 
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
 // --- Command header ---
-// Mirrors the Pipeline page header chrome while keeping Customers'
-// section set: Directory / Map / Health / AI Advisor.
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
@@ -825,73 +822,25 @@ const VIEWS = [
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
   const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
-  const ActiveIcon = activeConfig.Icon;
 
   return (
-    <div
-      className="md:sticky md:top-0 z-20 mb-5 bg-surface-page/95 pb-3"
-      style={{ fontFamily: ROBOTO }}
-    >
-      {" "}
-      <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-        {" "}
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
-          {" "}
-          <div className="flex items-center gap-3 min-w-0">
-            {" "}
-            <div className="h-9 w-9 rounded-sm bg-zinc-900 text-white flex items-center justify-center flex-shrink-0">
-              {" "}
-              <ActiveIcon size={17} strokeWidth={1.9} aria-hidden />{" "}
-            </div>{" "}
-            <h1
-              className="m-0 text-22 font-medium text-zinc-900 tracking-normal"
-              style={{ fontFamily: ROBOTO }}
-            >
-              Customers
-            </h1>{" "}
-          </div>
-          {canAdd && (
-            <Button
-              size="md"
-              variant="primary"
-              className="gap-2 text-12 font-medium uppercase tracking-label"
-              onClick={onAddCustomer}
-            >
-              {" "}
-              <UserPlus size={15} strokeWidth={1.9} aria-hidden />
-              Add Customer
-            </Button>
-          )}
-        </div>{" "}
-        <nav
-          aria-label="Customers section"
-          className="grid grid-cols-2 lg:grid-cols-4 gap-1 p-2"
-        >
-          {VIEWS.map(({ key, label, Icon }) => {
-            const active = key === view;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onViewChange(key)}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "h-11 px-3 rounded-sm border-hairline text-12 font-medium uppercase tracking-label",
-                  "inline-flex items-center justify-center gap-2 u-focus-ring transition-colors",
-                  active
-                    ? "bg-zinc-900 text-white border-zinc-900"
-                    : "bg-white text-zinc-700 border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900",
-                )}
-              >
-                {" "}
-                <Icon size={15} strokeWidth={1.8} aria-hidden />
-                {label}
-              </button>
-            );
-          })}
-        </nav>{" "}
-      </div>{" "}
-    </div>
+    <AdminCommandHeader
+      title="Customers"
+      icon={activeConfig.Icon}
+      sections={VIEWS}
+      activeKey={view}
+      onSectionChange={onViewChange}
+      ariaLabel="Customers section"
+      action={
+        canAdd
+          ? {
+              label: "Add Customer",
+              icon: UserPlus,
+              onClick: onAddCustomer,
+            }
+          : null
+      }
+    />
   );
 }
 

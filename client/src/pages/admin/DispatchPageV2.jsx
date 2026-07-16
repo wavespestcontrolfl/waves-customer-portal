@@ -1812,7 +1812,7 @@ export default function DispatchPageV2({
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 
   return (
-    <div className="bg-surface-page min-h-full p-4 md:p-6 font-sans text-zinc-900">
+    <div className="min-h-full bg-surface-page font-sans text-zinc-900">
       {/* "↻ Sync AI Data" — right-aligned, only visible on non-board sub-tabs.
           The Schedule h1 + "+ Add Appointment" pill that used to share this
           row are now lifted into AdminDispatchPage so they sit above the
