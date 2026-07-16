@@ -375,6 +375,10 @@ export default function CreateProjectModal({
   // onCreated/onClose are DEFERRED to finishSignStep so parents (which
   // unmount the modal from onCreated) don't tear the step down.
   const [signStep, setSignStep] = useState(null);
+  // True while the pad's signature POST/DELETE is in flight — every sign-step
+  // exit holds until it settles, or the modal could unmount mid-mutation and
+  // hand the parent stale signed/unsigned state (Codex P2).
+  const [signBusy, setSignBusy] = useState(false);
 
   // Previous-treatment photo extraction (WDO Section 3): AI reads a prior
   // company's treatment sticker/notice (or visible evidence) into the
@@ -1333,8 +1337,10 @@ export default function CreateProjectModal({
 
   // The only exit from the sign step — signed or not, the draft is already
   // saved, so leaving always reports the created project to the parent
-  // (which refreshes its lists and may open the report) and closes.
+  // (which refreshes its lists and may open the report) and closes. Held
+  // while the pad's mutation is in flight.
   function finishSignStep() {
+    if (signBusy) return;
     const project = signStep?.project;
     setSignStep(null);
     if (onCreated && project) onCreated(project);
@@ -1366,7 +1372,14 @@ export default function CreateProjectModal({
         paddingTop: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-top, 0px))`,
         paddingBottom: `calc(${isEstimateStyle ? 24 : 12}px + env(safe-area-inset-bottom, 0px))`,
       }}
-      onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose?.(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget || saving) return;
+        // On the sign step the scrim is an exit like any other: it must go
+        // through finishSignStep so the parent still learns about the saved
+        // project (onCreated drives list refreshes / opening the report).
+        if (signStep) { finishSignStep(); return; }
+        onClose?.();
+      }}
     >
       <div style={isSheet ? {
         width: '100%', maxWidth: 640, margin: 0,
@@ -1480,6 +1493,7 @@ export default function CreateProjectModal({
               defaultSignerName={signStep.applicator?.name || ''}
               defaultSignerIdCard={signStep.applicator?.idCardNo || ''}
               onChanged={refreshSignStep}
+              onBusyChange={setSignBusy}
             />
           </div>
           <div style={{
@@ -1497,6 +1511,7 @@ export default function CreateProjectModal({
             <button
               type="button"
               onClick={finishSignStep}
+              disabled={signBusy}
               style={{
                 minHeight: isEstimateStyle || isSheet ? 48 : undefined,
                 padding: isEstimateStyle ? '0 18px' : '10px 18px',
@@ -1506,9 +1521,10 @@ export default function CreateProjectModal({
                 background: signStep.signature?.signed ? P.accent : 'transparent',
                 color: signStep.signature?.signed ? P.accentText : P.text,
                 border: signStep.signature?.signed ? 'none' : `1px solid ${P.border}`,
-                cursor: 'pointer',
+                cursor: signBusy ? 'default' : 'pointer',
+                opacity: signBusy ? 0.5 : 1,
               }}
-            >{signStep.signature?.signed ? 'Done' : 'Sign later'}</button>
+            >{signBusy ? 'Saving…' : signStep.signature?.signed ? 'Done' : 'Sign later'}</button>
           </div>
           </>
         ) : (

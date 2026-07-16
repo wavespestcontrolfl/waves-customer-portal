@@ -9,13 +9,18 @@ import { adminFetch } from "../../lib/adminFetch";
  */
 const CANVAS_CSS_HEIGHT = 160;
 
-export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged }) {
+// onBusyChange (optional): reports the in-flight save/clear mutation so a host
+// that can unmount this pad (the create sheet's sign step) can hold its exits
+// until the POST/DELETE settles — leaving mid-mutation strands the caller with
+// stale signed/unsigned state.
+export default function WdoSignaturePad({ projectId, signature, defaultSignerName = "", defaultSignerIdCard = "", onChanged, onBusyChange }) {
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const hasDrawn = useRef(false);
   const [signerName, setSignerName] = useState(defaultSignerName);
   const [signerIdCard, setSignerIdCard] = useState(defaultSignerIdCard);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSavingState] = useState(false);
+  const setSaving = (v) => { setSavingState(v); onBusyChange?.(v); };
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(!signature?.signed);
 

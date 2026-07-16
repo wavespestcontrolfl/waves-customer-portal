@@ -26,6 +26,8 @@ vi.mock('./WdoSignaturePad', () => ({
   default: (props) => (
     <div data-testid="sign-pad" data-project-id={props.projectId} data-signer={props.defaultSignerName} data-idcard={props.defaultSignerIdCard}>
       <button type="button" onClick={props.onChanged}>mock-sign-saved</button>
+      <button type="button" onClick={() => props.onBusyChange?.(true)}>mock-busy-start</button>
+      <button type="button" onClick={() => props.onBusyChange?.(false)}>mock-busy-end</button>
     </div>
   ),
 }));
@@ -267,6 +269,41 @@ describe('CreateProjectModal WDO one-page create-and-sign', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a scrim click on the sign step exits through the finisher (onCreated fires)', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    // The overlay only closes on a DIRECT scrim click (target === currentTarget).
+    fireEvent.click(screen.getByRole('dialog'));
+
+    expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('every sign-step exit holds while the signature mutation is in flight', async () => {
+    const onCreated = vi.fn();
+    const onClose = vi.fn();
+    await saveIntoSignStep({ onCreated, onClose });
+
+    fireEvent.click(screen.getByText('mock-busy-start'));
+
+    // Footer exit, header close, and scrim are all inert while busy.
+    const exit = screen.getByRole('button', { name: 'Saving…' });
+    expect(exit.disabled).toBe(true);
+    fireEvent.click(exit);
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('dialog'));
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Mutation settles → exits work again.
+    fireEvent.click(screen.getByText('mock-busy-end'));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign later' }));
     expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ id: 'p-1' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
