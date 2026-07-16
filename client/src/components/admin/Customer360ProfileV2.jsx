@@ -4140,7 +4140,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
 // the deposit at face value, email the customer), or explains why the run is
 // blocked. The server re-checks eligibility on confirm.
 // ============================================================================
-function CancelSignupModal({ customer, onClose, onDone }) {
+export function CancelSignupModal({ customer, onClose, onDone }) {
   const [preview, setPreview] = useState(null);
   const [loadErr, setLoadErr] = useState("");
   const [running, setRunning] = useState(false);
@@ -4164,7 +4164,13 @@ function CancelSignupModal({ customer, onClose, onDone }) {
         body: JSON.stringify({ reason: "requested_by_customer" }),
       });
       setResult(r);
-      onDone?.();
+      try {
+        await onDone?.();
+      } catch (refreshError) {
+        setRunErr(
+          `Cancellation succeeded, but the customer profile could not refresh: ${refreshError.message || "Refresh failed"}`,
+        );
+      }
     } catch (e) {
       setRunErr(e.message || "Cancellation failed");
     }

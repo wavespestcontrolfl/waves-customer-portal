@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import Customer360ProfileV2 from './Customer360ProfileV2';
+import Customer360ProfileV2, { CancelSignupModal } from './Customer360ProfileV2';
 
 vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
@@ -157,5 +157,37 @@ describe('Customer360ProfileV2 profile state', () => {
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
     expect(await screen.findAllByText('Blair Customer')).toHaveLength(2);
     expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a failed refresh after a successful signup cancellation', async () => {
+    const onDone = vi.fn().mockRejectedValue(new Error('Refresh unavailable'));
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      if (options.method === 'POST') {
+        return response({
+          invoicesVoided: [], visitsCancelled: 0, refunded: 25, email: { ok: true },
+        });
+      }
+      return response({
+        eligible: true,
+        blockers: [],
+        invoices: [],
+        terms: [],
+        visits: [],
+        refundTotal: 25,
+      });
+    }));
+
+    render(
+      <CancelSignupModal
+        customer={{ id: 'customer-a' }}
+        onClose={vi.fn()}
+        onDone={onDone}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel & refund $25.00 now' }));
+    expect(await screen.findByText(/Cancellation succeeded, but the customer profile could not refresh: Refresh unavailable/))
+      .toBeInTheDocument();
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });
