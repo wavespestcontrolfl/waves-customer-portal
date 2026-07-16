@@ -26,10 +26,14 @@ function ringClass() {
 }
 
 function formFromInitialValues(initialValues = null) {
+  const initialPhone = String(initialValues?.phone || "");
+  const localPhone = /^\+1\d{10}$/.test(initialPhone)
+    ? initialPhone.slice(2)
+    : initialPhone;
   return {
     firstName: initialValues?.firstName || "",
     lastName: initialValues?.lastName || "",
-    phone: initialValues?.phone || "",
+    phone: localPhone,
     email: initialValues?.email || "",
     addressLine1: initialValues?.address || "",
     addressLine2: "",
@@ -216,8 +220,8 @@ export default function MobileNewCustomerSheet({
               type="tel"
               inputMode="tel"
               placeholder="Phone number"
-              className="flex-1 bg-transparent outline-none"
-              style={{ fontSize: 15 }}
+              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
+              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
               value={form.phone}
               onChange={(e) => set("phone", e.target.value)}
               autoComplete="tel"
@@ -329,8 +333,8 @@ export default function MobileNewCustomerSheet({
           >
             {" "}
             <input
-              className="flex-1 bg-transparent outline-none"
-              style={{ fontSize: 15 }}
+              className="min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 outline-none shadow-none"
+              style={{ fontSize: 15, border: 0, boxShadow: "none" }}
               placeholder="State"
               value={form.state}
               onChange={(e) =>

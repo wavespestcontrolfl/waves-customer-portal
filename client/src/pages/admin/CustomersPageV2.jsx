@@ -35,7 +35,7 @@
 //   inside V2. Watch for V1 styling leaking through — should be
 //   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
 import {
   Filter,
   HeartPulse,
@@ -433,6 +433,24 @@ function normalizeQuickAddInitialValues(initialValues = {}) {
     customTag: "",
     customProfileLabel: values.customProfileLabel || "",
   };
+}
+
+function quickAddPresetFromSearchParams(searchParams) {
+  const preset = {};
+  for (const key of [
+    "firstName",
+    "lastName",
+    "phone",
+    "email",
+    "address",
+    "city",
+    "state",
+    "zip",
+  ]) {
+    const value = searchParams.get(key);
+    if (value) preset[key] = value;
+  }
+  return preset;
 }
 
 function QuickAddModalV2({
@@ -947,6 +965,7 @@ function pipelineCustomersFrom(data) {
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
+  const location = useLocation();
   const isAdmin = getAdminRole() === "admin";
   const [customers, setCustomers] = useState([]);
   const [pipelineData, setPipelineData] = useState(null);
@@ -967,8 +986,11 @@ export default function CustomersPageV2() {
   const [filterTier, setFilterTier] = useState("all");
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [quickAddPreset, setQuickAddPreset] = useState(null);
+  const isNewCustomerRoute = location.pathname === "/admin/customers/new";
+  const [showAddModal, setShowAddModal] = useState(isNewCustomerRoute);
+  const [quickAddPreset, setQuickAddPreset] = useState(() =>
+    isNewCustomerRoute ? quickAddPresetFromSearchParams(searchParams) : null,
+  );
   const [filterHasBalance, setFilterHasBalance] = useState(false);
   const [filterLastVisited, setFilterLastVisited] = useState("all"); // all | 30 | 90 | 180 | never
   const [filterCards, setFilterCards] = useState("all"); // all | has | none
@@ -1002,6 +1024,7 @@ export default function CustomersPageV2() {
   const closeAddCustomer = () => {
     setShowAddModal(false);
     setQuickAddPreset(null);
+    if (isNewCustomerRoute) navigate("/admin/customers", { replace: true });
   };
 
   const startEdit = (c) => {
@@ -1123,7 +1146,6 @@ export default function CustomersPageV2() {
       loadCustomers(1);
     }, 300);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     search,
     filterStage,
