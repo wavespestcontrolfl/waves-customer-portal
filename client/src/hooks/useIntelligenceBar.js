@@ -136,16 +136,21 @@ export function useIntelligenceBar({
       if (pd) body.pageData = pd;
     }
 
+    // Stale settle (the surface's request key moved on — e.g. a lead switch
+    // mid-flight): drop the result AND the shared cleanup. Clearing the prompt
+    // or attachments here would clobber the new key's freshly primed state;
+    // the surface's own switch handler (clear()) already reset them. Only the
+    // loading flag is released — no new submit can start while it is held.
+    const isStale = () => getRequestKeyRef.current && requestKey !== getRequestKeyRef.current();
+
     try {
       const data = await adminFetch('/admin/intelligence-bar/query', {
         method: 'POST',
         body: JSON.stringify(body),
       });
 
-      if (getRequestKeyRef.current && requestKey !== getRequestKeyRef.current()) {
+      if (isStale()) {
         setLoading(false);
-        setPrompt('');
-        resetAttachments();
         return;
       }
 
@@ -156,6 +161,10 @@ export function useIntelligenceBar({
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
+      if (isStale()) {
+        setLoading(false);
+        return;
+      }
       setResponse(`Error: ${err.message}`);
     }
 

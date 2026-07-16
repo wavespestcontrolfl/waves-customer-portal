@@ -586,6 +586,11 @@ export default function AgentEstimatePage() {
   // Closed (won/lost/unresponsive/duplicate) leads must not reach the draft
   // tool through ANY entry — Build, quick actions, or a typed Ask AI prompt.
   const askDisabled = buildDisabled || !openLead;
+  // A lead linked to a non-Agent estimate (legacy draft, or one already sent/
+  // scheduled) can never be drafted or revised here — the server rejects both
+  // paths deterministically — so don't send the operator through a paid AI
+  // run and confirmation that is guaranteed to fail.
+  const buildBlocked = !!draft && draft.editable_here !== true;
 
   const chooseLead = (leadId) => {
     setSearchParams(leadId ? { leadId } : {});
@@ -696,9 +701,14 @@ export default function AgentEstimatePage() {
                       This lead is {String(contact?.status || "closed").replaceAll("_", " ")} — Agent Estimate drafting works on open leads only. Reopen the lead to build or revise a draft here.
                     </div>
                   )}
+                  {openLead && buildBlocked && (
+                    <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+                      This lead is linked to {draft?.status === "draft" ? "a draft from another estimator flow" : `an estimate that is already ${String(draft?.status || "in progress").replaceAll("_", " ")}`} — Agent Estimate can’t revise it. Review it from the Estimates page instead.
+                    </div>
+                  )}
                   <button
                     type="button"
-                    disabled={askDisabled}
+                    disabled={askDisabled || buildBlocked}
                     onClick={() => intelligence.submit(context.suggested_prompt || BUILD_PROMPT)}
                     className="flex min-h-14 w-full items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[16px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -846,7 +856,9 @@ export default function AgentEstimatePage() {
               <div className="flex gap-2"><Phone size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Existing accounts supply current service/spend; only requested additions are priced.</div>
             </div>
             <div className="border-t border-zinc-200">
-              <LearningPanel leadId={selectedLeadId} user={user} memories={memories} onReload={loadMemories} />
+              {/* key remounts the panel on lead switch so an in-progress rule
+                  draft can't be submitted with the wrong source_lead_id */}
+              <LearningPanel key={selectedLeadId || "none"} leadId={selectedLeadId} user={user} memories={memories} onReload={loadMemories} />
             </div>
           </SectionCard>
         </aside>
