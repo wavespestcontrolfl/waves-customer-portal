@@ -1347,7 +1347,10 @@ export default function DispatchPageV2({
     return () => setOpenCreateHandler(null);
   }, [setOpenCreateHandler]);
 
-  const fetchSchedule = useCallback(async (d, { silent = false } = {}) => {
+  const fetchSchedule = useCallback(async (
+    d,
+    { silent = false, updateState = true } = {},
+  ) => {
     // silent: refresh data without tripping the page-level loading/error
     // gates — both render ABOVE the overlays, so a loud refresh (or a
     // transient refresh failure) unmounts the in-place project editor and
@@ -1362,8 +1365,10 @@ export default function DispatchPageV2({
         adminFetch(`/admin/schedule?date=${d}`),
         adminFetch("/admin/dispatch/products/catalog"),
       ]);
-      setData(scheduleData);
-      setProducts(catalogData.products || []);
+      if (updateState) {
+        setData(scheduleData);
+        setProducts(catalogData.products || []);
+      }
       if (!silent) setLoading(false);
       return scheduleData;
     } catch (e) {
@@ -2948,7 +2953,11 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date, { silent: true });
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
@@ -2956,6 +2965,7 @@ export default function DispatchPageV2({
             if (shouldReopenCompletionAfterPayment(completionService)) {
               handleComplete(completionService);
             }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
           }}
           onChargeSuccess={async () => {
@@ -2971,7 +2981,11 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date, { silent: true });
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
@@ -2979,6 +2993,7 @@ export default function DispatchPageV2({
             if (shouldReopenCompletionAfterPayment(completionService)) {
               handleComplete(completionService);
             }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
           }}
           onPrepaidRecorded={async ({ invoice } = {}) => {
@@ -2993,7 +3008,11 @@ export default function DispatchPageV2({
             setPaymentData(null);
             setCheckoutService(null);
             setDetailService(null);
-            const fresh = await fetchSchedule(date, { silent: true });
+            const serviceDate = String(svc.scheduledDate || date).split("T")[0];
+            const fresh = await fetchSchedule(serviceDate, {
+              silent: true,
+              updateState: serviceDate === String(date).split("T")[0],
+            });
             const updated = fresh?.services?.find((s) => s.id === svc.id);
             // Same project-backed routing as the primary Complete action
             // (Codex r7 P1).
@@ -3001,6 +3020,7 @@ export default function DispatchPageV2({
             if (shouldReopenCompletionAfterPayment(completionService)) {
               handleComplete(completionService);
             }
+            setScheduleRefreshKey((k) => k + 1);
             setProjectReloadKey((k) => k + 1);
           }}
         />
