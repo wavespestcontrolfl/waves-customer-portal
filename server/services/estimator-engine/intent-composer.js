@@ -58,7 +58,7 @@ EVIDENCE (required): for every service you select, and for frequency/commercial 
 
 CONSTRAINT FLAGS: anything the caller said that the pricing engine cannot express but the operator must know before sending — e.g. interior-only service (landlord covers exterior), access restrictions, competitor pricing mentioned, existing-customer discount expectations, multiple properties. Each flag: { flag: snake_case_key, note: one sentence, quote: verbatim or null }.
 
-CONTACT FIELDS: customer_name / customer_phone / customer_email / address exactly as established on the call or from the profile (prefer spelled-out corrections; use the profile when the call omits them). Do not invent any of them; use null when genuinely absent.
+CONTACT FIELDS: customer_name / customer_phone / customer_email / address exactly as established on the call or from the profile (prefer spelled-out corrections; use the profile when the call omits them). If the profile carries ambiguous_shared_phone: true it belongs to SOMEONE on this phone number but not verifiably the caller — never take an address or email from it; use only what the call/SMS established. Do not invent any of them; use null when genuinely absent.
 
 CONFIDENCE: high = service selection, contact info, and address are all unambiguous. medium = minor gaps. low = you selected services but real ambiguity remains (state it in uncertainties).
 
@@ -97,12 +97,21 @@ function compactExtraction(extraction) {
 }
 
 function buildUserContent(context, propertyFacts) {
+  // An AMBIGUOUS shared-phone match must not leak its address/email into the
+  // composer — the prompt tells the model to fall back to the profile for
+  // contact fields, and the orchestrator prices intent.address, so an echoed
+  // ambiguous address would draft the wrong property. The name stays so the
+  // model can note the mismatch.
+  const ambiguous = context.customerPhoneAmbiguous === true;
   const profile = context.customer
     ? {
       type: context.isExistingCustomer ? 'existing_customer' : 'lead_profile',
+      ...(ambiguous ? { ambiguous_shared_phone: true } : {}),
       name: `${context.customer.first_name || ''} ${context.customer.last_name || ''}`.trim() || null,
-      email: context.customer.email || null,
-      address: [context.customer.address_line1, context.customer.city, context.customer.zip].filter(Boolean).join(', ') || null,
+      email: ambiguous ? null : (context.customer.email || null),
+      address: ambiguous
+        ? null
+        : ([context.customer.address_line1, context.customer.city, context.customer.zip].filter(Boolean).join(', ') || null),
       waveguard_tier: context.customer.waveguard_tier || null,
       lawn_type: context.customer.lawn_type || null,
       property_type: context.customer.property_type || null,

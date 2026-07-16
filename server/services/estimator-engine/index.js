@@ -80,16 +80,29 @@ const STREET_TOKEN_ALIASES = {
   northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
 };
 function sameStreetAddress(a, b) {
-  const norm = (s) => String(s || '')
-    .split(',')[0]
+  const normSegment = (s) => String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(Boolean)
     .map((t) => STREET_TOKEN_ALIASES[t] || t)
     .join(' ');
-  const [na, nb] = [norm(a), norm(b)];
-  return !!na && !!nb && na === nb;
+  const first = (s) => normSegment(String(s || '').split(',')[0]);
+  const [na, nb] = [first(a), first(b)];
+  if (!na || !nb || na !== nb) return false;
+  // Same house number + street is NOT enough — SWFL street names repeat
+  // across cities, so a city/ZIP correction alone means a different parcel.
+  const zip = (s) => (String(s || '').match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || null;
+  const [za, zb] = [zip(a), zip(b)];
+  if (za && zb && za !== zb) return false;
+  const cityTokens = (s) => new Set(
+    normSegment(String(s || '').split(',').slice(1).join(' '))
+      .split(' ')
+      .filter((t) => t && t !== 'fl' && t !== 'florida' && !/^\d+$/.test(t)),
+  );
+  const [ca, cb] = [cityTokens(a), cityTokens(b)];
+  if (ca.size && cb.size && ![...ca].some((t) => cb.has(t))) return false;
+  return true;
 }
 
 // Property lookup + (when the county roll is unassessed) the

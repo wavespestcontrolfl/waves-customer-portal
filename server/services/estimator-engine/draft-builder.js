@@ -235,6 +235,15 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (usesHomeSqft && FALLBACK_SQFT_SOURCES.has(propertyFacts?.home?.source)) {
     reasons.push(`home/building sqft from fallback source (${propertyFacts.home.source}${propertyFacts.home.sampleCount ? `, n=${propertyFacts.home.sampleCount}` : ''})`);
   }
+  // Lot-driven services (lawn/mosquito/tree & shrub price off turf/treatable
+  // area derived from the lot) priced from an unverified lot source deserve
+  // the same review flag as fallback building sqft.
+  const LOT_DRIVEN_SERVICES = ['lawn', 'oneTimeLawn', 'lawnPestControl', 'mosquito', 'oneTimeMosquito', 'treeShrub'];
+  const usesLot = LOT_DRIVEN_SERVICES.some((s) => intent.services?.[s])
+    || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
+  if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
+    reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
+  }
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
   if (propertyFacts?.newConstruction) reasons.push('new construction — county roll not yet assessed');

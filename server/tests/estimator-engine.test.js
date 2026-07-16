@@ -403,7 +403,7 @@ describe('review fixes', () => {
       isCommercial: false,
       subdivisionMedian: null,
     });
-    expect(fromRecord.propertyType).toBe('Townhome');
+    expect(fromRecord.propertyType).toBe('townhome_end');
     const fromExtraction = resolvePropertyFacts({
       extraction: { property: { property_type: 'condo' } },
       propertyRecord: null,
@@ -411,7 +411,7 @@ describe('review fixes', () => {
       isCommercial: false,
       subdivisionMedian: null,
     });
-    expect(fromExtraction.propertyType).toBe('Condo');
+    expect(fromExtraction.propertyType).toBe('condo_ground');
   });
 
   test('engine input carries the resolved property type, stories, and prior services', () => {
@@ -453,7 +453,43 @@ describe('review fixes', () => {
   test('street comparison catches suffix and directional corrections', () => {
     expect(idxPriv.sameStreetAddress('123 Palm St', '123 Palm Ave')).toBe(false);
     expect(idxPriv.sameStreetAddress('123 N Palm Ave', '123 North Palm Avenue')).toBe(true);
-    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL', '123 Palm Avenue, Sarasota FL')).toBe(true);
+  });
+
+  test('street comparison treats a city or ZIP change as a different parcel', () => {
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL', '123 Palm Avenue, Sarasota FL')).toBe(false);
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL 34209', '123 Palm Ave, Bradenton FL 34211')).toBe(false);
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL 34209', '123 Palm Avenue, Bradenton FL 34209')).toBe(true);
+    expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton', '123 Palm Ave')).toBe(true);
+  });
+
+  test('pricing-safe property type keys reach the pest normalizer alias table', () => {
+    expect(arb.pricingSafePropertyType('Condo')).toBe('condo_ground');
+    expect(arb.pricingSafePropertyType('condo')).toBe('condo_ground');
+    expect(arb.pricingSafePropertyType('Townhome')).toBe('townhome_end');
+    expect(arb.pricingSafePropertyType('Interior Townhome')).toBe('townhome_interior');
+    expect(arb.pricingSafePropertyType('townhouse')).toBe('townhome_end');
+    expect(arb.pricingSafePropertyType('single_family')).toBe('single_family');
+    expect(arb.pricingSafePropertyType('Single Family')).toBe('single_family');
+    expect(arb.pricingSafePropertyType(null)).toBeNull();
+  });
+
+  test('fallback lot source forces yellow for lot-driven services', () => {
+    const { lane, reasons } = classifyLane({
+      intent: { ...baseIntent(), services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } },
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 8000, source: SQFT_SOURCES.LOOKUP_ESTIMATE, rejected: [] },
+        newConstruction: false,
+        tenant: false,
+      },
+      engineResult: { summary: {}, lineItems: [{ service: 'lawn_care', monthly: 60, annual: 720, turfSf: 5200 }] },
+      totals: { monthly: 60, annual: 720, oneTime: 0 },
+      comps: { samples: 10, median: 62, outlier: false, insufficient: false },
+      calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched' },
+    });
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/lot sqft from fallback/);
   });
 
   test('existing-customer address beats a stale phone-matched lead', () => {

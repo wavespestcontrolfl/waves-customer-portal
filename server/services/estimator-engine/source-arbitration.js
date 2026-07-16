@@ -164,6 +164,21 @@ function resolveLotSqft({ extraction, parcel, lookupLotSqft, profileLotSqft }) {
   return { value: null, source: SQFT_SOURCES.NONE, confidence: 'none', rejected };
 }
 
+// Display/extraction property labels → the keys the pricing engine's pest
+// normalizer accepts. Anything unrecognized passes through unchanged (the
+// engine flags-and-defaults it rather than crashing).
+function pricingSafePropertyType(value) {
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return null;
+  if (/interior/.test(s) && /town/.test(s)) return 'townhome_interior';
+  if (/town/.test(s)) return 'townhome_end';
+  if (/condo/.test(s) && /upper/.test(s)) return 'condo_upper';
+  if (/condo/.test(s)) return 'condo_ground';
+  if (/duplex/.test(s)) return 'duplex';
+  if (/single|family|house|home\b/.test(s) && !/mobile|town/.test(s)) return 'single_family';
+  return String(value);
+}
+
 // Sources that mean "we measured nothing real" — downstream lane logic
 // treats any of these as an automatic yellow (or red when unresolved).
 const FALLBACK_SQFT_SOURCES = new Set([
@@ -249,17 +264,14 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
   // Residential property type for the pricing engine: the lookup's merged
   // record first (county land-use aware), then the call extraction. A condo
   // or townhome priced as a detached home gets the wrong pest adjustment and
-  // hardscape/turf math.
-  const EXTRACTION_PROPERTY_TYPES = {
-    single_family: 'Single Family',
-    condo: 'Condo',
-    townhouse: 'Townhome',
-    mobile_home: 'Mobile Home',
-    multi_family: 'Multifamily',
-  };
-  const propertyType = propertyRecord?.propertyType
-    || EXTRACTION_PROPERTY_TYPES[String(extraction?.property?.property_type || '').toLowerCase()]
-    || null;
+  // hardscape/turf math. Emitted as the PRICING-SAFE keys the pest
+  // normalizer's alias table actually recognizes (normalizePestPropertyType
+  // has no bare condo/townhome entries — display labels silently default to
+  // single_family). Unknown floor/position falls to the conservative
+  // condo_ground / townhome_end defaults the general normalizer also uses.
+  const propertyType = pricingSafePropertyType(
+    propertyRecord?.propertyType || extraction?.property?.property_type,
+  );
 
   if (home.source === SQFT_SOURCES.SUBDIVISION_MEDIAN) {
     logger.info('[estimator-engine] home sqft resolved from subdivision median', {
@@ -300,5 +312,6 @@ module.exports = {
     countyLooksUnassessed,
     callerStatedSqft,
     isTenant,
+    pricingSafePropertyType,
   },
 };

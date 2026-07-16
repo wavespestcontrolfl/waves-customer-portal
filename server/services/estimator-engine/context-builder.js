@@ -95,17 +95,35 @@ async function loadCustomerByPhone(phone, extraction) {
   }
 }
 
-async function loadLeadByPhone(phone) {
-  const digits = last10(phone);
-  if (!digits) return null;
+// Lead for THIS call first (leads created/reused by the processor carry the
+// call's twilio_call_sid); the phone fallback is bounded to leads that
+// existed by ~the time this call processed — a NEWER unrelated lead on a
+// shared/long-lived number must not supply the address or notification link.
+async function loadLeadForCall(call, phone) {
+  const LEAD_COLS = ['id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
+    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at'];
   try {
-    return await db('leads')
-      .select('id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-        'service_interest', 'urgency', 'is_commercial', 'status', 'created_at')
+    if (call?.twilio_call_sid) {
+      const byCall = await db('leads')
+        .select(LEAD_COLS)
+        .where({ twilio_call_sid: call.twilio_call_sid })
+        .whereNull('deleted_at')
+        .orderBy('created_at', 'desc')
+        .first();
+      if (byCall) return byCall;
+    }
+    const digits = last10(phone);
+    if (!digits) return null;
+    let q = db('leads')
+      .select(LEAD_COLS)
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
       .whereNull('deleted_at')
-      .orderBy('created_at', 'desc')
-      .first();
+      .orderBy('created_at', 'desc');
+    if (call?.created_at) {
+      const cutoff = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
+      q = q.where('created_at', '<=', cutoff);
+    }
+    return await q.first();
   } catch (err) {
     logger.warn(`[estimator-engine] lead load failed: ${err.message}`);
     return null;
@@ -211,7 +229,7 @@ async function buildCallContext(callLogId) {
 
   const [phoneMatch, lead, smsThread, priorEstimates] = await Promise.all([
     customerMatch.customer ? Promise.resolve(customerMatch) : loadCustomerByPhone(phone, extraction),
-    loadLeadByPhone(phone),
+    loadLeadForCall(call, phone),
     loadSmsThread(phone, { before: call.created_at }),
     loadPriorEstimates(phone),
   ]);
