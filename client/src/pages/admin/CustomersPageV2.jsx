@@ -2150,6 +2150,7 @@ export default function CustomersPageV2() {
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
       {selected360Id && (
         <Customer360Profile
+          key={selected360Id}
           customerId={selected360Id}
           onSelectCustomer={(id) => selectCustomer(id)}
           onAddProperty={(customer) => {

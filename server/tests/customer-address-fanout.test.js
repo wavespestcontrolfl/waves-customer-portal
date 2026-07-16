@@ -190,6 +190,22 @@ describe('propagateCustomerAddressChange', () => {
       .toBe('4867 Tobermorey Way, Unit 4, Lakewood Ranch, FL 34211');
   });
 
+  test('updates a unit-only lead snapshot even when the customer has no city or ZIP', async () => {
+    const before = {
+      id: 'cust-1', address_line1: '123 Main St', address_line2: 'Unit 4', city: null, zip: null,
+    };
+    const after = { ...before, address_line2: 'Unit 5' };
+    const conn = makeConn({
+      leads: [{ id: 'lead-match', address: '123 Main St, Unit 4', city: null, zip: null }],
+      estimates: [],
+    });
+
+    const counts = await propagateCustomerAddressChange({ before, after }, conn);
+
+    expect(counts).toEqual({ leads: 1, estimates: 0 });
+    expect(conn.__updates[0].patch.address).toBe('123 Main St, Unit 5');
+  });
+
   test('an authored proposal snapshot (estimate_data.proposal.propertyAddress) is patched under the same guard', async () => {
     const conn = makeConn({
       leads: [],

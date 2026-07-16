@@ -155,6 +155,8 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.getByText('Edit customer')).toBeInTheDocument();
 
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    expect(screen.queryAllByText('Avery Customer')).toHaveLength(0);
+    expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
     expect(await screen.findAllByText('Blair Customer')).toHaveLength(2);
     expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
   });

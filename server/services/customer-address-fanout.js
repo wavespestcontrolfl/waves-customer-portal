@@ -230,14 +230,19 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   // rewriting one with just the street line would drop its embedded
   // city/state/zip. Full-string snapshots get the rebuilt full address (which
   // needs city+zip, same rule as estimates below); street-line snapshots get
-  // the street line.
+  // the street line plus unit. A comma is not enough to identify a full
+  // snapshot because a unit-only snapshot is also "street, unit".
   const matched = leadRows.filter((r) => leadMatchesContact(r, before) || leadMatchesContact(r, after));
+  const hasSnapshotPlace = (row) => {
+    const place = snapshotTailPlace(row.address);
+    return !!(place && (place.zip || addressMatchKey(place.city)));
+  };
   const leadGroups = [
-    { rows: matched.filter((r) => !String(r.address || '').includes(',')), address: streetAddress },
+    { rows: matched.filter((r) => !hasSnapshotPlace(r)), address: streetAddress },
     // leads.address is varchar(255) (default knex string) — an oversized full
     // string would throw INSIDE the caller's transaction and roll back the
     // whole customer edit.
-    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: leadFullAddress },
+    { rows: hasCityZip ? matched.filter(hasSnapshotPlace) : [], address: leadFullAddress },
   ];
   for (const group of leadGroups) {
     // city/zip are patched only when the customer row actually HAS them — a

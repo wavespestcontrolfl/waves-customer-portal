@@ -4576,7 +4576,10 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_email,
   ]);
 
-  if (loading)
+  const loadedCustomerMatches = data?.customer
+    && String(data.customer.id) === String(customerId);
+
+  if (loading || (data?.customer && !loadedCustomerMatches))
     return (
       <div
         className="fixed inset-0 bg-black/70 z-[1000] flex justify-end"
