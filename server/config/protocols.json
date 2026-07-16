@@ -985,27 +985,27 @@
         "visit_type": "Granular bed visit + targeted drench if justified",
         "main_goal": "Clean visual start, winter palm nutrition, bed pre-emergent, and documented systemic only where needed.",
         "primary": "Snapshot 2.5TG Q1: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)",
-        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nSuffOil-X 1.0-1.5% if scale crawlers are active and plant/weather safe ($6.56 est)\nOrganic acidifier only for high-pH/chlorosis properties ($4.50 est)",
+        "secondary": "Merit 2F drench only for documented scale/whitefly/borer history; log as IRAC 4A ($4.25)\nTriTek spray oil 1.0-1.5% if scale crawlers are active and plant/weather safe ($6.08)\nOrganic acidifier (Espoma) only for high-pH/chlorosis properties ($5.32)",
         "material_cost": "22.47",
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
         "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos.",
-        "conditional_cost": "4.91"
+        "conditional_cost": "4.99"
       },
       {
         "visit": 2,
         "month": "Feb",
         "visit_type": "Foliar PHC visit",
         "main_goal": "Clean up scale/mites/whitefly pressure, correct micros, and avoid unnecessary systemics.",
-        "primary": "SuffOil-X: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.56 est)\nIron Plus: label rate ($1.52)\nMn Combo: label rate ($1.33)\nCleanKelp: label rate as foliar or drench per product ($2.87 est)",
-        "secondary": "Conserve SC 0.1-0.2 fl oz/gal for caterpillars where labeled ($4.05)\nEDDHA iron for high-pH chlorosis ($2.44 est)\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)",
-        "material_cost": "12.28",
+        "primary": "TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nIron Plus: label rate ($1.52)\nMn Combo: label rate ($1.33)\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
+        "secondary": "Conserve SC 0.1-0.2 fl oz/gal for caterpillars where labeled ($4.05)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)",
+        "material_cost": "8.93",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Do not use turf disease language here. For T&S, document leaf spot, anthracnose, Phytophthora/root rot, palm disease diagnosis, mites, scale, or whitefly by plant group.",
-        "conditional_cost": "3.65"
+        "conditional_cost": "3.48"
       },
       {
         "visit": 3,
@@ -1027,13 +1027,13 @@
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
         "primary": "Snapshot 2.5TG Q2: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\n8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone where ordinance allows ($5.31)\n13-0-13 ornamental fertilizer: 0.25-0.50 lb N/1,000 sq ft equivalent where needed ($4.32)",
-        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\nSuffOil-X 1.0-1.5% only if scale crawlers are active and safe ($6.56 est)\nDistance or Talus for whitefly nymphs/crawlers ($16.52)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTalstar only as documented rescue, not default ($3.82)",
+        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nDistance or Talus for whitefly nymphs/crawlers ($16.52)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTalstar only as documented rescue, not default ($3.82)",
         "material_cost": "22.47",
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": false,
         "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review.",
-        "conditional_cost": "8.82"
+        "conditional_cost": "8.70"
       },
       {
         "visit": 5,
@@ -1041,27 +1041,27 @@
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
         "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nIron Plus + Mn Combo: label rate ($2.85)\n8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)",
-        "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron for high-pH chlorosis ($2.44 est)\nPalm weevil inspection and diagnostic/injection quote if crown, trunk wound, or decline symptoms support it\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
+        "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nPalm weevil inspection and diagnostic/injection quote if crown, trunk wound, or decline symptoms support it\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
         "material_cost": "16.37",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
         "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf.",
-        "conditional_cost": "11.27"
+        "conditional_cost": "11.09"
       },
       {
         "visit": 6,
         "month": "Jun",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Begin Sarasota/Manatee N/P blackout, manage summer pest/disease pressure, and avoid heat injury.",
-        "primary": "SuffOil-X: 1.0% early morning only when plant/weather safe ($6.56 est)\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)\nLiquid copper: 2-4 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($8.75 est)\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
+        "primary": "TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)\nLiquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($11.35)\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
         "secondary": "Conserve or Mainspring for caterpillars ($4.05)\nDistance or Talus for whitefly/scale nymphs ($16.52)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move",
-        "material_cost": "6.56",
+        "material_cost": "6.08",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "No N/P landscape fertilizer in Sarasota/Manatee June 1-Sept. 30. Do not run Merit as a standard June drench.",
-        "conditional_cost": "10.72"
+        "conditional_cost": "11.37"
       },
       {
         "visit": 7,
@@ -1069,41 +1069,41 @@
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG Q3: 2.3-3.45 lb/1,000 sq ft beds; water in ($17.16)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout",
-        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus for scale crawlers/nymphs ($16.52)\nSuffOil-X 1.0% only if plant/weather safe ($6.56 est)\nAzaMax organic option where label/site/pest fit ($8.00 est)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
+        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nDistance or Talus for scale crawlers/nymphs ($16.52)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($9.31)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)",
         "material_cost": "17.16",
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
         "notes": "July palm/ornamental N/P fertilizer is blocked on Sarasota/Manatee landscape accounts. Snapshot is fine; 8-2-12 and 13-0-13 are not.",
-        "conditional_cost": "15.27"
+        "conditional_cost": "15.47"
       },
       {
         "visit": 8,
         "month": "Aug",
         "visit_type": "Scout-first PHC",
         "main_goal": "Prevent summer collapse with low burn-risk pest correction and high observation.",
-        "primary": "Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs ($16.52)\nSuffOil-X: 1.0% only if safe ($6.56 est)\nCytogro and CleanKelp for premium/stressed accounts ($7.69)",
+        "primary": "Mainspring GNL: 4-8 fl oz/100 gal, IRAC 28 where target pest fits ($26.98)\nDistance IGR: 6-8 fl oz/100 gal for whitefly/scale nymphs ($16.52)\nTriTek spray oil: 1.0% only if safe ($6.08)\nCytogro and NutriRoot kelp/humate support for premium/stressed accounts ($10.47)",
         "secondary": "Floramite for confirmed mites ($6.02)\nNo alfalfa meal or other N/P bed products during Sarasota/Manatee blackout\nSevere whitefly: pair adult/nymph strategy to life stage, not calendar habit\nHeat stress: document and communicate instead of adding chemistry",
         "material_cost": "0.00",
         "labor_cost": "scout",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "August is low product, high observation. Customer value comes from catching decline early and explaining plant stress clearly.",
-        "conditional_cost": "14.02"
+        "conditional_cost": "13.90"
       },
       {
         "visit": 9,
         "month": "Sep",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Break late-summer scale/whitefly life cycles and prepare fall nutrition without N/P until October in Sarasota/Manatee.",
-        "primary": "Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)\nDistance IGR: 6-8 fl oz/100 gal if rotation calls for IRAC 7C ($16.52)\nIron Plus + Mn Combo: label rate ($2.85)\nSuffOil-X: 1.0% only if crawlers are present and safe ($6.56 est)",
+        "primary": "Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)\nDistance IGR: 6-8 fl oz/100 gal if rotation calls for IRAC 7C ($16.52)\nIron Plus + Mn Combo: label rate ($2.85)\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
         "secondary": "Headway only for labeled ornamental disease and only if FRAC history allows ($6.41)\nShortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating",
         "material_cost": "2.85",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
         "notes": "Final blackout month for Sarasota/Manatee. Do not make Merit automatic with Talus; use life-stage IGR strategy unless systemic need is documented.",
-        "conditional_cost": "9.61"
+        "conditional_cost": "9.49"
       },
       {
         "visit": 10,
@@ -1124,34 +1124,34 @@
         "month": "Nov",
         "visit_type": "Foliar cleanup + root/add-on work",
         "main_goal": "Cool-season cleanup, micronutrient correction, root support, and diagnosed injection add-on opportunities.",
-        "primary": "SuffOil-X: 1.0-1.5% if plant/weather safe ($6.56 est)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: label rate ($1.33)\nOrganic acidifier only where pH/chlorosis data supports it ($4.50 est)\nEDDHA iron for high-pH chlorosis sites ($2.44 est)",
+        "primary": "TriTek spray oil: 1.0-1.5% if plant/weather safe ($6.08)\nNutriRoot: label rate where site supports root nutrition ($5.65)\nMn Combo: label rate ($1.33)\nOrganic acidifier (Espoma) only where pH/chlorosis data supports it ($5.32)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis sites ($1.73)",
         "secondary": "Mn-Jet Fe add-on for diagnosed palm Mn/Fe deficiency pattern ($11.50)\nPalm-Jet Mg add-on for diagnosed Mg deficiency ($12.56)\nPropizol only for labeled diagnosed tree disease ($11.83)\nArtavia or Headway only if label fits and FRAC log allows ($2.11)",
-        "material_cost": "7.89",
+        "material_cost": "7.41",
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Call this cool-season cleanup, not dormant spray. SWFL ornamentals are not truly dormant like northern landscapes.",
-        "conditional_cost": "2.26"
+        "conditional_cost": "2.29"
       },
       {
         "visit": 12,
         "month": "Dec",
         "visit_type": "Scout/report + selective nutrition/systemic",
         "main_goal": "Retention, customer proof of value, winter palm nutrition where due, and next-year correction plan.",
-        "primary": "8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone if due and appropriate ($5.31)\nCytogro: label rate for premium/stressed accounts ($4.82)\nEDDHA iron: label rate for high-pH chlorosis ($2.44 est)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
+        "primary": "8-2-12 palm fertilizer: 1.5 lb/100 sq ft canopy/root-zone if due and appropriate ($5.31)\nCytogro: label rate for premium/stressed accounts ($4.82)\nEDDHA iron (Sequestar 6% Fe): label rate for high-pH chlorosis ($1.73)\nAnnual health report with photos, IRAC/FRAC history, Snapshot history, fertility dates, pest pressure, and next-year plan",
         "secondary": "Zylam only if pest history/pressure and 4A log allow ($17.63)\nDo not treat blooming plants with bee-toxic systemic/contact products while bees forage\nQuote diagnostic/injection add-on for palm decline\nNote soil pH, irrigation water, or salt issues for chronic chlorosis",
         "material_cost": "0.00",
         "labor_cost": "report",
         "tier_4x": false,
         "tier_6x": false,
         "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying.",
-        "conditional_cost": "6.34"
+        "conditional_cost": "6.17"
       }
     ],
     "costing_assumptions": [
       "COSTING BASIS (2026-07-16, products_catalog prod prices): average property = 2,000 sq ft ornamental beds, 400 sq ft palm canopy/root zone, 20 gal finished foliar spray per full application, 5 gal per spot treatment.",
       "material_cost = sum of always-applied primary lines. conditional_cost = spot/gated treatment reserve: gated fungicide/insecticide/nutrition-corrective lines counted at 1/4 of full application cost (herbicide spot would be 1/8 — none in this program; bed pre-emergent is broadcast). Injection and premium-tier add-ons (NutriRoot, Cytogro, Shortstop, Mn-Jet, Palm-Jet, Propizol, SuperThrive) are annotated but EXCLUDED — they are quoted separately.",
-      "Prices marked 'est' are market estimates pending inventory pricing: SuffOil-X $82/2.5 gal, CleanKelp $46/gal, liquid copper $28/qt, EDDHA iron $65/5 lb, AzaMax $90/qt, organic acidifier $18/gal, SuperThrive, 0N/0P corrective."
+      "SiteOne pricing adopted 2026-07-16 (owner-approved): Brandt Sequestar 6% Fe EDDHA 5 lb $46.05 (account price; list $59.73); Brandt TriTek 2.5 gal $76.02 replaces SuffOil-X; Azatin O 1 qt $595.92 replaces AzaMax; Southern Ag Copper Fungicide 27.15% 1 pt $36.33; Espoma Organic Soil Acidifier 30 lb $53.17; CleanKelp folded into NutriRoot (kelp+humates included there). Remaining 'est': SuperThrive, 0N/0P corrective."
     ]
   },
   "pest": {
