@@ -17,11 +17,16 @@
 //    while the row is missing or inactive, so nothing texts until the owner
 //    reviews the copy in /admin templates AND APPOINTMENT_CARD_REQUEST is on.
 
+// Body is GSM-7-safe (no em-dash/curly quotes — UCS-2 would cut the
+// per-segment budget to 67 chars) and deliberately tight: {secure_link} is
+// the UNSHORTENED /secure/<64-hex> bearer URL (~100 chars — the generic
+// 5-char shortener is too weak a credential for a card-capture page), so
+// the rendered send runs ~3 GSM segments (card_request maxSegments: 3).
 const TEMPLATE = {
   template_key: 'secure_appointment_card',
   name: 'Secure Appointment (card on file link)',
   category: 'billing',
-  body: 'Hi {first_name}! To finish booking your {service_type} visit{date_line}, please add a card on file — nothing is charged today; your card is only charged after service is completed: {secure_link}\n\nWe never take card numbers over the phone. Questions? Reply here.\n\nReply STOP to opt out.',
+  body: 'Hi {first_name}! To finish booking your {service_type} visit{date_line}, add a card on file. Nothing is charged today - your card is only charged after service is completed: {secure_link}\nWe never take card numbers by phone. Reply STOP to opt out.',
   variables: JSON.stringify(['first_name', 'service_type', 'date_line', 'secure_link']),
   is_active: false,
   sort_order: 32,

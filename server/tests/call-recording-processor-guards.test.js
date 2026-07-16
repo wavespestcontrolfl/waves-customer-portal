@@ -1391,6 +1391,23 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
     )).toBe(false);
   });
 
+  test('same street, different unit refuses — Apt A is not evidence for Apt B', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_line2: 'Apt A' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(false);
+    // One-sided unit can't confirm the match either.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(false);
+    // Matching units agree.
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St', service_address_line2: 'apt b' },
+      { address: { line1: '123 Main St', line2: 'Apt B' } },
+    )).toBe(true);
+  });
+
   test('no evidence on either side = both resolve to the primary property', () => {
     expect(attachCandidateMatchesProperty({}, { propertyId: null, address: null })).toBe(true);
   });

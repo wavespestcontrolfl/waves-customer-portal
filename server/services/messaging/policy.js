@@ -316,11 +316,14 @@ const PURPOSE_POLICY = {
   // Card-on-file capture link for a booked visit (appointment-card-request
   // funnel). No invoice exists yet — nothing is charged from this message —
   // so it is payment_link's pre-service sibling: same trust bar, customer
-  // id required, no invoice id.
+  // id required, no invoice id. 3 segments, not 2: the link is the
+  // UNSHORTENED /secure/<64-hex> bearer URL (a 5-char short code is too
+  // weak a credential for a card-capture page), which alone runs ~100
+  // GSM characters.
   card_request: {
     allowEmoji: false,
     allowExactPrice: false,
-    maxSegments: 2,
+    maxSegments: 3,
     requireConsent: 'transactional',
     prefsColumn: null,
     minIdentityTrust: 'phone_matches_customer',

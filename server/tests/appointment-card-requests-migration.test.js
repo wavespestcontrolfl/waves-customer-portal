@@ -40,11 +40,14 @@ describe('appointment card requests migration', () => {
     expect(row.is_active).toBe(false);
     expect(JSON.parse(row.variables)).toEqual(['first_name', 'service_type', 'date_line', 'secure_link']);
     // Copy contract: $0-today honesty, the no-card-by-phone policy line,
-    // the capture link, and the opt-out line.
-    expect(row.body).toContain('nothing is charged today');
+    // the capture link, and the opt-out line — all GSM-7-safe (no em-dash/
+    // curly quotes: the unshortened 64-hex link already costs ~100 chars,
+    // and a UCS-2 body would blow the 3-segment budget).
+    expect(row.body).toContain('Nothing is charged today');
     expect(row.body).toContain('{secure_link}');
-    expect(row.body).toContain('We never take card numbers over the phone');
+    expect(row.body).toContain('We never take card numbers by phone');
     expect(row.body).toContain('Reply STOP to opt out');
+    expect(row.body).not.toMatch(/[—’“”]/);
   });
 
   test('is idempotent: existing column and table are left alone', async () => {

@@ -126,6 +126,18 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         .update({ status: 'resolved', updated_at: db.fn.now() });
     }
   } catch (e) { logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
+
+  // 4. Card-on-file request (Codex #2771 r2): the AI booking path skips
+  // the card funnel for pending outbound-review rows, and without this the
+  // confirmed visit would never get one. The office just re-confirmed the
+  // appointment with the customer (same trust point that arms reminders),
+  // and the funnel's canonical send path still enforces stored SMS
+  // consent + suppression. Idempotent; dark until APPOINTMENT_CARD_REQUEST
+  // + the template flip.
+  try {
+    const { requestCardForAppointment } = require('./appointment-card-request');
+    await requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'outbound_review_confirm' });
+  } catch (e) { logger.warn(`[${routeTag}] card-request funnel failed for ${svc.id}: ${e.message}`); }
 }
 
 module.exports = { runOutboundReviewConfirmHook };

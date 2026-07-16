@@ -1862,10 +1862,37 @@ async function createSelfBooking(payload = {}) {
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      // Re-offer the inline card step on replay (Codex #2771 r2): if the
+      // first response was lost after the pending card row landed, this
+      // retry must still carry the /secure link — inline delivery
+      // deliberately consumes no SMS claim, so without it the customer
+      // would get neither the step nor a text. The funnel is idempotent
+      // (an existing pending row returns the SAME link).
+      let replaySecureCard = null;
+      try {
+        const replayServiceRow = await db('scheduled_services')
+          .where({ self_booking_id: txResult.existing.id })
+          .whereIn('status', ['pending', 'confirmed'])
+          .first('id');
+        if (replayServiceRow?.id) {
+          const { requestCardForAppointment } = require('../services/appointment-card-request');
+          const cardReq = await requestCardForAppointment({
+            scheduledServiceId: replayServiceRow.id,
+            trigger: 'book_flow',
+            delivery: 'inline',
+          });
+          if (cardReq?.action === 'link_created' && cardReq.secureUrl) {
+            replaySecureCard = { url: cardReq.secureUrl };
+          }
+        }
+      } catch (err) {
+        logger.warn(`[booking:confirm] replay card-request funnel failed for booking ${txResult.existing.id}: ${err.message}`);
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
         replayed: true,
+        ...(replaySecureCard ? { secureCard: replaySecureCard } : {}),
       } };
     }
 

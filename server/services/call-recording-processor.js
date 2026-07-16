@@ -2020,7 +2020,13 @@ function attachCandidateMatchesProperty(candidate, linkage) {
   if (candProp && linkProp) return String(candProp) === String(linkProp);
   const candAddr = norm(candidate?.service_address_line1);
   const linkAddr = norm(linkage?.address?.line1);
-  if (candAddr && linkAddr) return candAddr === linkAddr;
+  if (candAddr && linkAddr) {
+    if (candAddr !== linkAddr) return false;
+    // Same street ≠ same unit (Codex #2771 r2): a multi-unit address must
+    // agree on line2 too — Apt A's booking is not evidence for a call
+    // about Apt B, and a one-sided unit can't confirm the match.
+    return norm(candidate?.service_address_line2) === norm(linkage?.address?.line2);
+  }
   return !candProp && !linkProp && !candAddr && !linkAddr;
 }
 

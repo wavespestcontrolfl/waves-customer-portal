@@ -41,7 +41,6 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
-const { shortenOrPassthrough } = require('./short-url');
 const { etDateString } = require('../utils/datetime-et');
 const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -116,15 +115,33 @@ async function resolveExemption({ customerId, scheduledServiceId }) {
   return { exempt: false };
 }
 
-// Check 2 — auto-secure from an existing consented chargeable card. The
-// `satisfied` row is the durable "this visit is covered" record (check 3
-// catches it on every later trigger); enrollment reuses the single
-// enrollment semantics (enrollConsentedMethod) and is best-effort — the
-// consented saved method IS the protection, a refused enrollment is
-// surfaced by the pay-path backstops, and re-texting a customer who has a
-// consented card on file is wrong regardless.
+// Check 2 — auto-secure from an existing consented chargeable card, via
+// the single enrollment semantics (enrollConsentedMethod). Enrollment runs
+// FIRST and the `satisfied` row is written only after it succeeds (Codex
+// #2771: completion billing keys on the Auto Pay flags, not this table —
+// a `satisfied` row written before a failed enrollment would make every
+// later trigger skip on request_exists while the visit sits unprotected).
+// A refused/failed enrollment returns a retryable skip so the next
+// trigger re-attempts; enrollment is idempotent, so a concurrent double
+// run resolves as already_enrolled.
 async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
-  const inserted = await db('appointment_card_requests')
+  try {
+    const { enrollConsentedMethod } = require('./autopay-enrollment');
+    const enrollment = await enrollConsentedMethod({
+      customerId: visit.customer_id,
+      paymentMethodId: savedMethod.id,
+      source: 'save_card_consent',
+      details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
+    });
+    if (!enrollment?.enrolled && enrollment?.reason !== 'already_enrolled') {
+      logger.warn(`[appt-card-request] auto-secure enrollment refused (${enrollment?.reason || 'unknown'}) for visit ${visit.id} — left retryable`);
+      return skip(`enrollment_refused:${enrollment?.reason || 'unknown'}`);
+    }
+  } catch (err) {
+    logger.warn(`[appt-card-request] auto-secure enrollment failed for visit ${visit.id} — left retryable: ${err.message}`);
+    return skip('enrollment_failed');
+  }
+  await db('appointment_card_requests')
     .insert({
       scheduled_service_id: visit.id,
       customer_id: visit.customer_id,
@@ -135,23 +152,7 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       completed_at: new Date(),
     })
     .onConflict('scheduled_service_id')
-    .ignore()
-    .returning('id');
-  if (!inserted || !inserted.length) {
-    // Another trigger's row landed first — the funnel already ran.
-    return skip('request_exists');
-  }
-  try {
-    const { enrollConsentedMethod } = require('./autopay-enrollment');
-    await enrollConsentedMethod({
-      customerId: visit.customer_id,
-      paymentMethodId: savedMethod.id,
-      source: 'save_card_consent',
-      details: { via: 'appointment_card_request', scheduled_service_id: visit.id, trigger },
-    });
-  } catch (err) {
-    logger.warn(`[appt-card-request] auto-secure enrollment failed for visit ${visit.id} (saved method remains the protection): ${err.message}`);
-  }
+    .ignore();
   return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
 }
 
@@ -218,8 +219,6 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       }
     }
 
-    // Render before claiming: an inactive/missing template (the second dark
-    // lever) must not consume the one-text-ever stamp.
     const customer = await db('customers')
       .where({ id: visit.customer_id })
       .first('id', 'first_name', 'phone');
@@ -232,14 +231,31 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     if (delivery !== 'inline' && !smsTo) return skip('no_customer_phone');
 
     const token = reuseToken || crypto.randomBytes(32).toString('hex');
-    const longUrl = portalUrl(`/secure/${token}`);
+    // The 64-hex bearer link goes out UNSHORTENED (Codex #2771 P1): the
+    // generic /l/:code shortener would swap it for a 5-char permanent code
+    // — a far weaker credential for a payment-adjacent page — and /l/:code
+    // resolves outside the /api rate limiter.
+    const secureUrl = portalUrl(`/secure/${token}`);
+
+    // Render before ANY exposure: the inactive/missing template is the
+    // second dark lever, and it gates BOTH deliveries (Codex #2771 P1) —
+    // the inline /book step must not expose the capture surface while the
+    // template is inactive (template active + env gate = the documented
+    // two-switch launch), and an SMS claim must never be consumed for a
+    // send that can't render.
+    const body = await renderTemplate({
+      first_name: customer?.first_name || 'there',
+      service_type: visit.service_type || 'service',
+      date_line: dateLineFor(visit.scheduled_date),
+      secure_link: secureUrl,
+    });
+    if (!body) return skip('template_inactive');
 
     // Inline delivery: the customer is ON the booking surface — create the
     // tokenized capture and hand the URL back for the wizard's card step.
-    // No SMS, no template dependency, and the one-text-ever stamp stays
-    // unconsumed: if the customer abandons the step, the visit is still
-    // eligible for exactly one text later (Phase 4's nudge or an office
-    // trigger through this same funnel).
+    // No SMS, and the one-text-ever stamp stays unconsumed: if the
+    // customer abandons the step, the visit is still eligible for exactly
+    // one text later (an office/AI trigger through this same funnel).
     if (delivery === 'inline') {
       const inserted = await db('appointment_card_requests')
         .insert({
@@ -262,24 +278,8 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         return skip('request_exists');
       }
       logger.info(`[appt-card-request] inline capture link created for visit ${visit.id} (trigger ${trigger})`);
-      return { requested: true, action: 'link_created', reason: 'created', secureUrl: longUrl };
+      return { requested: true, action: 'link_created', reason: 'created', secureUrl };
     }
-    // Never-expiring short code, same posture as reschedule links: the
-    // /secure/:token page owns eligibility for stale links.
-    const secureLink = await shortenOrPassthrough(longUrl, {
-      kind: 'secure_card',
-      entityType: 'scheduled_services',
-      entityId: visit.id,
-      customerId: visit.customer_id,
-      expiresAt: null,
-    });
-    const body = await renderTemplate({
-      first_name: customer.first_name || 'there',
-      service_type: visit.service_type || 'service',
-      date_line: dateLineFor(visit.scheduled_date),
-      secure_link: secureLink || longUrl,
-    });
-    if (!body) return skip('template_inactive');
 
     // 4. One text, ever — atomic claim on the visit row.
     const stamp = new Date();
@@ -308,40 +308,49 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       }
     };
 
-    if (!reuseToken) {
-      const inserted = await db('appointment_card_requests')
-        .insert({
-          scheduled_service_id: visit.id,
-          customer_id: visit.customer_id,
-          status: 'pending',
-          trigger,
-          token,
-          sent_at: stamp,
-        })
-        .onConflict('scheduled_service_id')
-        .ignore()
-        .returning('id');
-      if (!inserted || !inserted.length) {
-        // A row landed between check 3 and the claim — funnel already ran.
-        await releaseClaim();
-        return skip('request_exists');
+    let result;
+    try {
+      if (!reuseToken) {
+        const inserted = await db('appointment_card_requests')
+          .insert({
+            scheduled_service_id: visit.id,
+            customer_id: visit.customer_id,
+            status: 'pending',
+            trigger,
+            token,
+            sent_at: stamp,
+          })
+          .onConflict('scheduled_service_id')
+          .ignore()
+          .returning('id');
+        if (!inserted || !inserted.length) {
+          // A row landed between check 3 and the claim — funnel already ran.
+          await releaseClaim();
+          return skip('request_exists');
+        }
       }
+      result = await sendCustomerMessage({
+        to: smsTo,
+        body,
+        channel: 'sms',
+        audience: 'customer',
+        purpose: 'card_request',
+        customerId: visit.customer_id,
+        identityTrustLevel: 'phone_matches_customer',
+        metadata: {
+          scheduled_service_id: visit.id,
+          trigger,
+          original_message_type: TEMPLATE_KEY,
+        },
+      });
+    } catch (postClaimErr) {
+      // A post-claim THROW (row-insert hiccup, an error escaping the send
+      // path) means the text never left — release the claim or the
+      // one-text-ever stamp permanently strands the visit with no card
+      // request and no retry (Codex #2771 P1).
+      await releaseClaim();
+      throw postClaimErr;
     }
-
-    const result = await sendCustomerMessage({
-      to: smsTo,
-      body,
-      channel: 'sms',
-      audience: 'customer',
-      purpose: 'card_request',
-      customerId: visit.customer_id,
-      identityTrustLevel: 'phone_matches_customer',
-      metadata: {
-        scheduled_service_id: visit.id,
-        trigger,
-        original_message_type: TEMPLATE_KEY,
-      },
-    });
     if (!result?.sent) {
       // Blocked or provider-failed: the text never left, so the claim and
       // the pending row release — a later trigger may retry once.

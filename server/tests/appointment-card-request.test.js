@@ -167,7 +167,7 @@ describe('check 1 — policy exemption (before any capture machinery)', () => {
 describe('check 2 — saved method auto-secures instead of texting', () => {
   const SAVED = { id: 'pm-row-1', stripe_payment_method_id: 'pm_stripe_1' };
 
-  test('consented chargeable card → satisfied row + enrollment, no SMS', async () => {
+  test('consented chargeable card → enrollment FIRST, then the satisfied row; no SMS', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow' });
     expect(res).toEqual({ requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' });
@@ -188,19 +188,32 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('auto-secure insert lost the race → request_exists, no enrollment', async () => {
+  test('already_enrolled counts as secured', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
-    mockTableHandlers.appointment_card_requests.returning = () => [];
+    mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'already_enrolled' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
-    expect(res.reason).toBe('request_exists');
-    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+    expect(res.action).toBe('auto_secured');
   });
 
-  test('enrollment failure still skips the text (saved method IS the protection)', async () => {
+  test('enrollment refusal writes NO satisfied row — the visit stays retryable', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+    mockEnrollConsentedMethod.mockResolvedValueOnce({ enrolled: false, reason: 'ach_blocked' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('enrollment_refused:ach_blocked');
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('enrollment throw writes NO satisfied row — the visit stays retryable', async () => {
     mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
     mockEnrollConsentedMethod.mockRejectedValueOnce(new Error('stripe down'));
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
-    expect(res.action).toBe('auto_secured');
+    expect(res.reason).toBe('enrollment_failed');
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });
@@ -244,12 +257,14 @@ describe('the send', () => {
     expect(insert[1].trigger).toBe('ai_call_pipeline');
     expect(insert[1].token).toMatch(/^[a-f0-9]{64}$/);
 
+    // The link is the UNSHORTENED 64-hex bearer URL — never a short code.
     expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card', expect.objectContaining({
       first_name: 'Pat',
       service_type: 'Pest Control',
-      secure_link: 'https://wvs.link/sec1',
+      secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
       date_line: expect.stringContaining(' on '),
     }));
+    expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415551234',
@@ -278,7 +293,9 @@ describe('the send', () => {
     expect(res.action).toBe('sent');
     // The link carries the EXISTING token (the /secure page the inline step
     // already minted), and no second row is inserted.
-    expect(mockShorten).toHaveBeenCalledWith(expect.stringContaining(inlineToken), expect.anything());
+    expect(mockGetTemplate).toHaveBeenCalledWith('secure_appointment_card', expect.objectContaining({
+      secure_link: expect.stringContaining(inlineToken),
+    }));
     const inserts = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
     expect(inserts).toHaveLength(0);
@@ -296,6 +313,18 @@ describe('the send', () => {
     const dels = touches('appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
     expect(dels).toHaveLength(0);
+  });
+
+  test('a post-claim THROW releases the claim (the one text stays available)', async () => {
+    mockSendCustomerMessage.mockRejectedValueOnce(new Error('provider exploded'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.action).toBe('skipped');
+    expect(res.reason).toMatch(/^error:/);
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(ssUpdates.some((p) => p.card_link_sent_at instanceof Date)).toBe(true);
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(true);
   });
 
   test('blocked send releases the claim and the pending row', async () => {
@@ -316,7 +345,7 @@ describe('the send', () => {
 });
 
 describe('inline delivery (the /book wizard card step)', () => {
-  test('creates the tokenized capture with no SMS, no template, no one-text claim', async () => {
+  test('creates the tokenized capture with no SMS and no one-text claim', async () => {
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'book_flow', delivery: 'inline' });
     expect(res.action).toBe('link_created');
     expect(res.requested).toBe(true);
@@ -328,12 +357,21 @@ describe('inline delivery (the /book wizard card step)', () => {
     expect(insert[1].sent_at).toBeUndefined();
 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-    expect(mockGetTemplate).not.toHaveBeenCalled();
     // card_link_sent_at untouched: the visit stays eligible for its one
     // future text if the customer abandons the inline step.
     const ssUpdates = touches('scheduled_services')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'));
     expect(ssUpdates).toHaveLength(0);
+  });
+
+  test('the inactive template dark lever gates inline too — no link while dark', async () => {
+    mockGetTemplate.mockResolvedValueOnce(null);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', delivery: 'inline' });
+    expect(res.reason).toBe('template_inactive');
+    expect(res.secureUrl).toBeUndefined();
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
   });
 
   test('re-running returns the SAME pending link, never a second row', async () => {
