@@ -38,6 +38,12 @@ describeOrSkip('PR 0.4 drift sweep — DB-backed integration', () => {
 
   afterAll(async () => {
     if (knex) await knex.destroy();
+    // lawn-intelligence pulls the shared app pool (models/db) at module
+    // scope; without destroying it too, its socket keeps jest alive after
+    // the suite passes (this was the open handle behind tests.yml's
+    // --forceExit). Jest module registries are per test file, so this
+    // can't touch other suites' pools.
+    if (LawnIntel) await require('../models/db').destroy();
   });
 
   // ── tech_calibration.bias_direction ───────────────────────────────────
@@ -64,7 +70,7 @@ describeOrSkip('PR 0.4 drift sweep — DB-backed integration', () => {
       const tech = await knex('technicians').select('id').first();
       const customer = await knex('customers').select('id').first();
       if (!tech || !customer) {
-        // eslint-disable-next-line no-console
+         
         console.warn('[drift-sweep] missing tech/customer fixtures — skipping');
         return;
       }
