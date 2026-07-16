@@ -3,7 +3,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { lookupPropertyFromAITrio } = require('./property-lookup/ai-property-lookup');
-const { sendNewRecurringWelcome } = require('./new-recurring-welcome-sms');
+const { sendNewRecurringWelcome, isNewRecurringSignupCandidate } = require('./new-recurring-welcome-sms');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isEnabled } = require('../config/feature-gates');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
@@ -38,7 +38,15 @@ const PREP_TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'rescheduled',
 
 class AppointmentTagger {
 
-  async onServiceScheduled(scheduledServiceId) {
+  // opts.suppressWelcome skips the new-recurring welcome branch. Callers
+  // pass it when the triggering row is not a fresh booking they own the
+  // welcome decision for: the admin regenerate-brief endpoint replays old
+  // appointments, and the estimate-accept route can reuse an existing
+  // appointment row AND already fires the converter's pre-conversion-gated
+  // welcome post-commit. The welcome's history checks are scoped to rows
+  // created before the triggering booking, which is only meaningful for a
+  // just-inserted row. Prep flows carry their own dedupe and always run.
+  async onServiceScheduled(scheduledServiceId, { suppressWelcome = false } = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', scheduledServiceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -72,11 +80,17 @@ class AppointmentTagger {
     // tiers are included (Bronze too) so the experience matches the
     // estimate-converter self-accept path; the is_recurring guard keeps the
     // auto_new_recurring text off one-time/standalone first appointments
-    // (onServiceScheduled runs for those jobs as well). Idempotent via
+    // (onServiceScheduled runs for those jobs as well). New-customer
+    // candidacy uses the same shared gate as every other booking path,
+    // scoped to history that predates this booking — a raw service_records
+    // count is blind to imported customers whose visit history lives only
+    // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
-    if (service.waveguard_tier && service.is_recurring) {
-      const prevCount = await db('service_records').where({ customer_id: service.customer_id }).count('* as count').first();
-      if (parseInt(prevCount?.count || 0) === 0) {
+    if (!suppressWelcome && service.waveguard_tier && service.is_recurring) {
+      const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
+        excludeServiceId: service.id,
+      });
+      if (isNewSignup) {
         await this.triggerWelcomeSequence(service);
       }
     }
