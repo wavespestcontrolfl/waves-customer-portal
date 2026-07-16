@@ -4,6 +4,7 @@ import { Trash2 } from "lucide-react";
 import { callViaBridge } from "../../components/admin/CallBridgeLink";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import useIsMobile from "../../hooks/useIsMobile";
+import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -654,6 +655,7 @@ export function LeadsSection() {
   const navigate = useNavigate();
   const [, setSearchParams] = useSearchParams();
   const isMobile = useIsMobile();
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const [tab, setTab] = useState("pipeline");
   const [smsCompose, setSmsCompose] = useState(null); // { leadId, message }
   const [callbackForm, setCallbackForm] = useState(null); // { leadId, date, time, notes }
@@ -2131,6 +2133,15 @@ export function LeadsSection() {
                                   >
                                     Create Estimate
                                   </Btn>{" "}
+                                  {agentEstimateEnabled && (
+                                    <Btn
+                                      small
+                                      color={C.purple}
+                                      onClick={() => navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)}
+                                    >
+                                      Agent Estimate
+                                    </Btn>
+                                  )}{" "}
                                   <Btn
                                     small
                                     color={C.amber}

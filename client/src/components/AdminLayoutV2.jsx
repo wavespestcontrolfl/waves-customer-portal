@@ -55,7 +55,7 @@ import {
   Bot,
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
-import { refetchFlags } from "../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { adminFetch } from "../utils/admin-fetch";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
@@ -122,6 +122,7 @@ const NAV_SECTIONS = [
     section: "Agents",
     items: [
       { path: "/admin/agents", icon: Bot, label: "Agent Ops" },
+      { path: "/admin/agent-estimate", icon: Sparkles, label: "Agent Estimate", flag: "agent_estimate" },
     ],
   },
   {
@@ -185,6 +186,7 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   // Restore route if we just returned from WavesPay (iOS often evicts the
   // tab during the hand-off, reloading the app to its default route).
@@ -490,7 +492,9 @@ export default function AdminLayoutV2() {
               >
                 {section}
               </div>
-              {items.map(({ path, icon: Icon, label }) => {
+              {items
+                .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
+                .map(({ path, icon: Icon, label }) => {
                 const isActive =
                   location.pathname === path ||
                   (path === "/admin/schedule" &&

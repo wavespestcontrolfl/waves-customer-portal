@@ -1676,3 +1676,13 @@ One-file delta: `estimate-card-holds.js sendNoShowFeeReceipt` mirrors the round-
 **Office desk:** the C360 panel toggle becomes Termite | Rodent | Traps (same dirty-lock rules); `/property-map` `nextStationNumberByProgram` gains `trapping` (the builder iterates STATION_PROGRAMS, so only the route's catch-fallback literal needed the new key).
 
 **Ship posture:** same as termite/rodent — dark behind `station-map-v1` until traps are mapped; customer-visible after (rodent family graduated 2026-07-12).
+
+## 2026-07-16 — Agent Estimate is a mobile workspace backed by the Intelligence Bar
+
+**Context.** Estimates are often built on the road. A command bar alone has the right reasoning/tool runtime, but it does not keep the selected lead, evidence state, draft preview, and explicit delivery controls visible enough for a phone workflow. The existing Create Estimate page remains the production fallback and is not replaced.
+
+**Decision.** `/admin/agent-estimate` is a separate, per-user-gated, mobile-first workspace. It uses the Intelligence Bar's agent/tool loop underneath, while the page owns the road workflow: select one new lead; load quote form, call transcript, SMS, profile, and prior-estimate evidence; run a large Build Estimate action; ask follow-up property/margin/protocol/photo questions; confirm an engine-priced draft; preview the real customer React route; then explicitly send by SMS, email, or both. The page retains the lead and draft across follow-ups. Existing-customer contacts fail closed to the task/flag path. Permanent “learning” is controlled: chat corrections affect the current session, but reusable rules enter a pending queue and only approved versions reach the system prompt.
+
+**Visual language.** Tier-1 zinc/Roboto remains the page chrome, with 14px as the minimum text size. Agent-draft state uses neutral badge chrome and a 6px semantic dot: `#10B981` for a green/no-review draft and `#F59E0B` for a yellow/review draft. Red stays reserved for actual blocking/error states. This keeps confidence from becoming decorative color while making the one road-relevant distinction scannable.
+
+**Pricing and safety boundary.** `generateEstimate` remains the only dollar authority and re-runs server-side on confirmation; the stored payload has one engine input/result pair. Complete protocols, product information, inventory, neighborhood grass aggregates, and image observations can affect scope or review status but never price. Missing inventory is “untracked,” not “available.” Internal reasoning lives in `estimate_data.estimatorEngine`; `estimates.notes` remains null because it is customer-visible. Draft creation/revision is a server-backed two-step write and can never send automatically.
