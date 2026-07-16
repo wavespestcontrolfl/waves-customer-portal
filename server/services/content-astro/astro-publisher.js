@@ -1749,6 +1749,12 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       return { already_merged: true, pr_number: pr.number, live_url: isUnpublish ? null : liveUrlForPost(post) };
     }
     if (pr.state !== 'open') {
+      // Closed without merging (operator closed it on GitHub): pages-poll has
+      // no finalizeClosed equivalent, so this retry path is the scheduler
+      // lane's only observation of the closed PR — retire its remediation
+      // row here or it reads as a live park forever.
+      const { markPrTerminal } = require('../content/codex-remediation');
+      await markPrTerminal(pr.number, 'closed');
       throw new Error(`PR #${pr.number} is ${pr.state}, cannot merge`);
     }
     // Callers that gated on an EXTERNAL signal (pages-poll: "the branch's
@@ -1937,6 +1943,13 @@ async function mergedHeroRef(slug) {
 }
 
 async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+  // The PR left the open state — retire its codex_remediation_state row so
+  // stale 'parked'/'remediating' rows over merged PRs don't read as live
+  // park telemetry. Fail-soft bookkeeping (markPrTerminal never throws).
+  if (post.astro_pr_number) {
+    const { markPrTerminal } = require('../content/codex-remediation');
+    await markPrTerminal(post.astro_pr_number, 'merged');
+  }
   if (isUnpublish) {
     await db('blog_posts').where({ id: postId }).update({
       astro_status: 'draft',

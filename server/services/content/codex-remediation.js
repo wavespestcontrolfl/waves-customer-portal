@@ -727,12 +727,63 @@ async function getState(db, prNumber) {
   return row || { pr_number: prNumber, rounds: 0, status: 'active' };
 }
 
+const TERMINAL_REMEDIATION_STATES = ['merged', 'closed'];
+
 async function saveState(db, prNumber, patch) {
-  const existing = await db('codex_remediation_state').where({ pr_number: prNumber }).first();
-  if (existing) {
-    await db('codex_remediation_state').where({ pr_number: prNumber }).update({ ...patch, updated_at: new Date() });
-  } else {
-    await db('codex_remediation_state').insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() });
+  // Insert-or-guarded-update, safe against a concurrent markPrTerminal in
+  // EVERY interleaving: terminal rows are immutable (a round that began
+  // while the PR was open can finish after the terminal stamp — its write
+  // must not flip status back to remediating/parked), and a blind insert
+  // could recreate a live row right after a tombstone check. onConflict
+  // ignore + status-guarded update makes the stamp win; callers get false
+  // when it did and must stop the round.
+  await db('codex_remediation_state')
+    .insert({ pr_number: prNumber, ...patch, created_at: new Date(), updated_at: new Date() })
+    .onConflict('pr_number')
+    .ignore();
+  const updated = await db('codex_remediation_state')
+    .where({ pr_number: prNumber })
+    .whereNotIn('status', TERMINAL_REMEDIATION_STATES)
+    .update({ ...patch, updated_at: new Date() });
+  return updated > 0;
+}
+
+/**
+ * Stamp a PR's remediation row terminal ('merged' | 'closed') once the PR
+ * leaves the open state. Nothing transitioned these rows before, so merged
+ * PRs stayed at 'parked'/'remediating'/'active' forever — dead rows that
+ * read as live park telemetry to anyone sweeping park_reason. Bookkeeping
+ * only and fail-soft. When no row exists yet a terminal TOMBSTONE is
+ * created: an in-flight round whose first saveState hasn't landed would
+ * otherwise insert a live 'remediating' row after the PR already left the
+ * open state (saveState's guarded update then loses to nothing).
+ */
+async function markPrTerminal(prNumber, status, injectedDb = null) {
+  const dbc = injectedDb || dbDefault;
+  try {
+    const n = Number(prNumber);
+    if (!Number.isInteger(n) || !TERMINAL_REMEDIATION_STATES.includes(status)) return { updated: 0 };
+    // ONE atomic statement: tombstone a missing row, flip a live one, leave
+    // a terminal one untouched. A separate update-then-insert had a window
+    // where a racing round's first saveState could land a live row (and pass
+    // its pre-push guard) between the two — with the upsert, whichever of
+    // the stamp and the first save commits first wins, and saveState's
+    // status-guarded update then sees the terminal row and aborts the round.
+    // 'merged' is permanent (merges are irreversible); 'closed' may only be
+    // UPGRADED to 'merged' (a closed PR can be reopened and later merged).
+    const res = await dbc.raw(
+      `INSERT INTO codex_remediation_state (pr_number, status, rounds, created_at, updated_at)
+       VALUES (?, ?, 0, NOW(), NOW())
+       ON CONFLICT (pr_number) DO UPDATE
+         SET status = EXCLUDED.status, updated_at = NOW()
+       WHERE codex_remediation_state.status <> 'merged'
+         AND (codex_remediation_state.status <> 'closed' OR EXCLUDED.status = 'merged')`,
+      [n, status],
+    );
+    return { updated: res?.rowCount ?? 0 };
+  } catch (err) {
+    logger.warn(`[codex-remediation] terminal stamp failed for PR #${prNumber}: ${err.message}`);
+    return { updated: 0, error: err.message };
   }
 }
 
@@ -749,11 +800,17 @@ async function park(db, prNumber, reason, onPark, headSha = null) {
   // to live only in logs (short retention: three parked autonomous PRs were
   // undiagnosable after the fact), and the head is what lets a later push
   // re-arm the loop (a park is a verdict on a specific head, not on the PR).
-  await saveState(db, prNumber, {
+  const wrote = await saveState(db, prNumber, {
     status: 'parked',
     park_reason: String(reason || '').slice(0, 1000),
     parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
   });
+  if (!wrote) {
+    // The PR merged/closed while this round ran — the row is terminal and a
+    // park (plus its run-notes annotation) would be stale noise.
+    logger.info(`[codex-remediation] park skipped for PR #${prNumber}: row already terminal (${reason})`);
+    return { parked: false, skipped: true, reason };
+  }
   if (typeof onPark === 'function') {
     try { await onPark(reason); } catch (e) { logger.warn(`[codex-remediation] onPark failed for PR #${prNumber}: ${e.message}`); }
   }
@@ -782,6 +839,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+
+  if (state.status === 'closed') {
+    // A 'closed' tombstone can go stale: PRs can be REOPENED, and this code
+    // only ever runs for a merge-blocked OPEN PR — so the observation in
+    // hand contradicts the tombstone. Re-arm with a direct CAS ('merged'
+    // stays permanent; saveState's terminal guard is deliberately bypassed
+    // here because this is the one sanctioned closed→live transition).
+    await db('codex_remediation_state')
+      .where({ pr_number: prNumber, status: 'closed' })
+      .update({ status: 'active', rounds: 0, park_reason: null, parked_head_sha: null, updated_at: new Date() });
+    state.status = 'active';
+    state.rounds = 0;
+    logger.info(`[codex-remediation] re-armed closed-tombstoned PR #${prNumber}: PR observed open again (reopened)`);
+  }
 
   if (state.status === 'parked') {
     // A park is a verdict on the head it was rendered against. If the branch
@@ -958,7 +1029,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const round = (state.rounds || 0) + 1;
   // Mark 'remediating' BEFORE the push so a later save/comment failure can't
   // strand the fix — the recovery branch keys off status='remediating'.
-  await saveState(db, prNumber, { branch, status: 'remediating' });
+  // A false return means markPrTerminal won (the PR merged/closed while
+  // this round was in flight) — stop BEFORE gh.putFile so we never push
+  // fixes to a branch whose PR already left the open state.
+  const armed = await saveState(db, prNumber, { branch, status: 'remediating' });
+  if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
   const commit = await gh.putFile({
     path: targetPath,
@@ -970,6 +1045,42 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
+
+  // Post-push revalidation: the PR can merge/close in the window between the
+  // pre-push saveState and gh.putFile. The push itself is then inert (the
+  // commit sits on a branch main never took), but the sync below would
+  // mirror content into portal state that was NEVER included in main — so
+  // verify the PR is still open and our commit is actually its head before
+  // any post-commit synchronization. Best-effort on transient GitHub errors
+  // (the recovery branch re-drives an interrupted round next tick).
+  try {
+    const fresh = await gh.getPr(prNumber);
+    if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
+      const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
+      await markPrTerminal(prNumber, terminal, db);
+      logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} not in main)`);
+      return { skipped: true, reason: 'pr left the open state during remediation (post-push check)' };
+    }
+    if (fresh.head?.sha && newHead
+      && String(fresh.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
+      // A parallel push (usually a human) landed mid-round: our fix is no
+      // longer the head, so syncing it would mirror content the merge won't
+      // take. Park like the other withheld-sync paths — and stamp OUR
+      // pushed head, so the parked row re-arms on the very next blocked
+      // tick (branch head ≠ parked head) and remediation re-evaluates the
+      // newer content with fresh rounds instead of going silent.
+      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(fresh.head.sha)}); sync withheld`, onPark, newHead);
+    }
+  } catch (e) {
+    // Fail CLOSED: proceeding could mirror a fix into portal state that
+    // never reached main (if the PR merged during the push and this fetch
+    // failed), and completing the round would record it so nothing ever
+    // re-checks. The 'remediating'-recovery branch only re-requests review —
+    // it cannot re-run the sync — so park instead: sync withheld, the lane's
+    // onPark disarms/annotates, and a human (or a re-arm on a new head)
+    // reconciles. Stamped with newHead so our own push can't self-re-arm.
+    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha);
+  }
 
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
   // blog_posts.content so a later edit/republish/social share can't resurrect
@@ -1197,6 +1308,7 @@ module.exports = {
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,
+  markPrTerminal,
   parseCodexFindings,
   pickTargetPath,
   buildReviewRequestBody,
@@ -1209,6 +1321,7 @@ module.exports = {
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
+  _internals: { saveState, getState },
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
