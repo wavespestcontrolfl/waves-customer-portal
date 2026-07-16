@@ -55,7 +55,7 @@ function lineRequiresReview(line = {}) {
 }
 
 // ── Engine input ──────────────────────────────────────────────
-function buildEngineInput({ intent, propertyFacts, context }) {
+function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [] }) {
   const isCommercial = intent.is_commercial === true;
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);
@@ -68,7 +68,11 @@ function buildEngineInput({ intent, propertyFacts, context }) {
     category: intent.category || (isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL'),
     propertyType: isCommercial
       ? 'commercial'
-      : (context?.customer?.property_type || 'Single Family'),
+      : (context?.customer?.property_type || propertyFacts?.propertyType || 'Single Family'),
+    // Existing-customer WaveGuard context: qualifying recurring services the
+    // caller already has, so an add-on quote gets the combined tier discount
+    // and recurring-customer perks (same key the admin save path feeds).
+    ...(priorQualifyingServices.length ? { priorQualifyingServices } : {}),
     commercialRiskType: intent.commercial_risk_type || null,
     commercialSubtype: intent.commercial_subtype || null,
     ...(homeSqFt ? { homeSqFt } : {}),
@@ -98,7 +102,12 @@ function deriveTotals(engineResult) {
   const summary = engineResult?.summary || {};
   let monthly = Number(summary.recurringMonthlyAfterDiscount || 0);
   let annual = Number(summary.recurringAnnualAfterDiscount || 0);
-  let oneTime = Number(summary.oneTimeTotal || 0) + Number(summary.specialtyTotal || 0);
+  // Installation charges (termite bait install, etc.) are upfront one-time
+  // money — the accept/converter path reads the stored one-time total, so
+  // dropping them here would under-charge the accepted estimate.
+  let oneTime = Number(summary.oneTimeTotal || 0)
+    + Number(summary.specialtyTotal || 0)
+    + Number(summary.installationTotal || 0);
 
   const pricedLines = (engineResult?.lineItems || []).filter((l) => !lineRequiresReview(l));
   if (!monthly && !annual && pricedLines.length) {
@@ -108,7 +117,8 @@ function deriveTotals(engineResult) {
   if (!oneTime && pricedLines.length) {
     oneTime = pricedLines
       .filter((l) => !l.monthly && !l.annual)
-      .reduce((sum, l) => sum + (Number(l.priceAfterDiscount ?? l.price ?? l.total) || 0), 0);
+      .reduce((sum, l) => sum + (Number(l.priceAfterDiscount ?? l.price ?? l.total) || 0), 0)
+      + pricedLines.reduce((sum, l) => sum + (Number(l.installation?.price) || 0), 0);
   }
   return {
     monthly: Math.round(monthly * 100) / 100,
@@ -237,6 +247,12 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   }
   if (intent.confidence !== 'high') reasons.push(`composer confidence ${intent.confidence}`);
   if ((intent.uncertainties || []).length) reasons.push(`open questions: ${intent.uncertainties.join(' | ')}`);
+  if ((intent.evidence || []).length < Object.keys(intent.services || {}).length) {
+    reasons.push('evidence quotes do not cover every selected service');
+  }
+  if (context?.customerPhoneAmbiguous) {
+    reasons.push('multiple customer profiles share this phone number — verify the matched profile before send');
+  }
   if (comps?.outlier) {
     reasons.push(`monthly $${totals.monthly} sits outside the comps band (median $${comps.median} over ${comps.samples} recent comparable estimates)`);
   }
@@ -288,7 +304,7 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
 }
 
 // ── Draft row ─────────────────────────────────────────────────
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -305,6 +321,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         engineInputs: engineInput,
         engineResult,
         agentDraft: true,
+        // Existing-customer marker the accept path reads to waive the $99
+        // WaveGuard setup fee (shouldIncludeWaveGuardSetupFeeForRecurring
+        // keys off membershipSnapshot.isExistingCustomer).
+        ...(membershipSnapshot ? { membershipSnapshot } : {}),
         estimatorEngine: {
           version: 1,
           callLogId: call?.id || null,
@@ -326,6 +346,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       monthly_total: totals.monthly,
       annual_total: totals.annual,
       onetime_total: totals.oneTime,
+      // The engine's computed tier must persist — the public engine-backed
+      // render/accept path falls back to 'Bronze' when this column is null,
+      // which would show Silver/Gold/Platinum-priced drafts as Bronze.
+      waveguard_tier: engineResult?.waveGuard?.tier || null,
       token,
       expires_at: expiresAt,
       notes,

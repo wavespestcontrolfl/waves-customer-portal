@@ -61,6 +61,17 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
+// House number + first street token — enough to tell "same property" from
+// "the caller asked about a different address than the matched profile".
+function sameStreetAddress(a, b) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const [na, nb] = [norm(a), norm(b)];
+  if (!na || !nb) return false;
+  const tokens = (s) => s.split(' ');
+  const [ta, tb] = [tokens(na), tokens(nb)];
+  return ta[0] === tb[0] && ta[1] === tb[1];
+}
+
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
 async function gatherPropertySignals(context, { refreshLookup = false } = {}) {
@@ -210,25 +221,59 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const { intent, model } = composed;
     result.intent = intent;
 
-    // The composer may reclassify commercial vs the pre-intent hint — the
-    // tenant/building arbitration rules depend on it, so re-run (pure).
-    if (intent.is_commercial !== commercialHint(context)) {
-      propertyFacts = resolvePropertyFacts({
-        extraction: context.extraction,
-        propertyRecord,
-        parcelView,
-        customer: context.customer,
-        isCommercial: intent.is_commercial,
-        subdivisionMedian,
-      });
+    // The composer establishes the FINAL service address (spelled-out
+    // corrections, quote-for-a-different-property). When it differs from the
+    // address the property signals were gathered for, re-gather — otherwise
+    // the draft is priced off the wrong parcel's sqft/lot.
+    let effectiveSignals = { propertyRecord, parcelView, subdivisionMedian };
+    if (intent.address && address && !sameStreetAddress(intent.address, address)) {
+      logger.info('[estimator-engine] composer address differs from profile address — re-gathering property signals');
+      const regathered = await gatherPropertySignals(
+        { ...context, extraction: null, lead: { address: intent.address }, customer: null },
+        { refreshLookup },
+      );
+      effectiveSignals = regathered;
+      result.addressUsed = regathered.address;
     }
+
+    // The composer may also reclassify commercial vs the pre-intent hint —
+    // the tenant/building arbitration rules depend on it. Re-run (pure) off
+    // the effective signals either way to keep one code path.
+    propertyFacts = resolvePropertyFacts({
+      extraction: context.extraction,
+      propertyRecord: effectiveSignals.propertyRecord,
+      parcelView: effectiveSignals.parcelView,
+      customer: context.customer,
+      isCommercial: intent.is_commercial,
+      subdivisionMedian: effectiveSignals.subdivisionMedian,
+    });
     result.propertyFacts = propertyFacts;
+
+    // Existing-customer pricing context: qualifying services for the combined
+    // WaveGuard tier + the membership snapshot the accept path reads to waive
+    // the setup fee. Both fail-open.
+    let priorQualifyingServices = [];
+    let membershipSnapshot = null;
+    if (context.isExistingCustomer && context.customer?.id) {
+      try {
+        const { loadExistingQualifyingServiceKeys } = require('../waveguard-existing-services');
+        priorQualifyingServices = await loadExistingQualifyingServiceKeys(db, context.customer.id) || [];
+      } catch (err) {
+        logger.warn(`[estimator-engine] prior qualifying services load failed: ${err.message}`);
+      }
+      try {
+        const { computeMembershipContext } = require('../estimate-membership-context');
+        membershipSnapshot = await computeMembershipContext(db, { customerId: context.customer.id });
+      } catch (err) {
+        logger.warn(`[estimator-engine] membership context load failed: ${err.message}`);
+      }
+    }
 
     let engineResult = null;
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({ intent, propertyFacts, context });
+      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices });
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);
@@ -275,6 +320,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
       propertyFacts, comps, calibration, model, call: context.call, context,
+      membershipSnapshot,
     });
 
     if (draft.blocked) {
@@ -332,5 +378,5 @@ function generateEstimateSafely(engineInput) {
 module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
-  _private: { addressFromContext, commercialHint, gatherPropertySignals },
+  _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress },
 };

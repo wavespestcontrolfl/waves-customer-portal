@@ -83,6 +83,21 @@ describe('intent schema', () => {
     delete intent.evidence;
     expect(validateIntent(intent).valid).toBe(false);
   });
+
+  test('a draft with EMPTY evidence fails (operator-verification contract)', () => {
+    const intent = baseIntent();
+    intent.evidence = [];
+    expect(validateIntent(intent).valid).toBe(false);
+  });
+
+  test('a skip with empty evidence is still valid', () => {
+    const intent = baseIntent();
+    intent.decision = 'skip';
+    intent.skip_reason = 'not a quote request';
+    intent.services = {};
+    intent.evidence = [];
+    expect(validateIntent(intent).valid).toBe(true);
+  });
 });
 
 // ── Source arbitration ────────────────────────────────────────
@@ -326,5 +341,88 @@ describe('lane classification', () => {
     expect(draftPriv.lineRequiresReview({ requiresManualReview: true })).toBe(true);
     expect(draftPriv.lineRequiresReview({ manualReviewReasons: ['x'] })).toBe(true);
     expect(draftPriv.lineRequiresReview({ monthly: 10 })).toBe(false);
+  });
+
+  test('evidence not covering every service forces yellow', () => {
+    const args = cleanArgs();
+    args.intent = { ...baseIntent(), services: { pest: {}, lawn: {} }, evidence: [{ decision: 'pest', quote: 'q', speaker: 'caller' }] };
+    const { lane, reasons } = classifyLane(args);
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/evidence/);
+  });
+
+  test('ambiguous shared-phone profile match forces yellow', () => {
+    const args = cleanArgs();
+    args.context = { isExistingCustomer: false, extractionSource: 'enriched', customerPhoneAmbiguous: true };
+    const { lane, reasons } = classifyLane(args);
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/share this phone/);
+  });
+});
+
+// ── Codex-review regressions (PR #2761) ──────────────────────
+describe('review fixes', () => {
+  const { _private: ctxPriv } = require('../services/estimator-engine/context-builder');
+  const { _private: idxPriv } = require('../services/estimator-engine/index');
+
+  test('installation totals count toward one-time money', () => {
+    const totals = deriveTotals({
+      summary: { recurringMonthlyAfterDiscount: 40, recurringAnnualAfterDiscount: 480, oneTimeTotal: 0, installationTotal: 350 },
+      lineItems: [],
+    });
+    expect(totals.oneTime).toBe(350);
+  });
+
+  test('shared phone: name match beats recency; no match marks ambiguous', () => {
+    const rows = [
+      { id: 'newer', first_name: 'Pat', last_name: 'Landlord' },
+      { id: 'older', first_name: 'Sam', last_name: 'Caller' },
+    ];
+    const matched = ctxPriv.pickCustomerMatch(rows, { caller: { first_name: 'Sam', last_name: 'Caller' } });
+    expect(matched.customer.id).toBe('older');
+    expect(matched.ambiguous).toBe(false);
+    const unmatched = ctxPriv.pickCustomerMatch(rows, { caller: { first_name: 'Alex', last_name: 'Unknown' } });
+    expect(unmatched.customer.id).toBe('newer');
+    expect(unmatched.ambiguous).toBe(true);
+  });
+
+  test('property type resolves from lookup record, then extraction', () => {
+    const fromRecord = resolvePropertyFacts({
+      extraction: { property: { property_type: 'condo' } },
+      propertyRecord: { propertyType: 'Townhome', squareFootage: 1400, yearBuilt: 2010, _parcel: countyParcel() },
+      customer: null,
+      isCommercial: false,
+      subdivisionMedian: null,
+    });
+    expect(fromRecord.propertyType).toBe('Townhome');
+    const fromExtraction = resolvePropertyFacts({
+      extraction: { property: { property_type: 'condo' } },
+      propertyRecord: null,
+      customer: null,
+      isCommercial: false,
+      subdivisionMedian: null,
+    });
+    expect(fromExtraction.propertyType).toBe('Condo');
+  });
+
+  test('engine input carries the resolved property type and prior services', () => {
+    const input = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: {
+        home: { value: 1400, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 5000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        propertyType: 'Condo',
+      },
+      context: {},
+      priorQualifyingServices: ['lawn_care'],
+    });
+    expect(input.propertyType).toBe('Condo');
+    expect(input.priorQualifyingServices).toEqual(['lawn_care']);
+  });
+
+  test('street-address comparison detects a different quoted property', () => {
+    expect(idxPriv.sameStreetAddress('123 Example St, Testville FL', '123 Example Street')).toBe(true);
+    expect(idxPriv.sameStreetAddress('123 Example St', '456 Other Rd')).toBe(false);
+    expect(idxPriv.sameStreetAddress('123 Example St', null)).toBe(false);
   });
 });

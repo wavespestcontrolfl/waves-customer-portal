@@ -41,20 +41,40 @@ function extractionFromCall(call) {
   return { extraction: null, source: 'none' };
 }
 
-async function loadCustomerByPhone(phone) {
+// Shared lines are real (property managers, family numbers): when several
+// customer rows match the last-10, prefer the one whose name matches the
+// caller established on the call, and mark the match ambiguous otherwise so
+// the lane classifier forces a review instead of silently quoting the wrong
+// profile's address.
+function pickCustomerMatch(rows, extraction) {
+  if (!rows.length) return { customer: null, ambiguous: false };
+  if (rows.length === 1) return { customer: rows[0], ambiguous: false };
+  const callerLast = String(extraction?.caller?.last_name || '').trim().toLowerCase();
+  const callerFirst = String(extraction?.caller?.first_name || '').trim().toLowerCase();
+  const byName = rows.find((r) => {
+    const last = String(r.last_name || '').trim().toLowerCase();
+    const first = String(r.first_name || '').trim().toLowerCase();
+    return (callerLast && last === callerLast) || (callerFirst && callerLast && first === callerFirst);
+  });
+  if (byName) return { customer: byName, ambiguous: false };
+  return { customer: rows[0], ambiguous: true };
+}
+
+async function loadCustomerByPhone(phone, extraction) {
   const digits = last10(phone);
-  if (!digits) return null;
+  if (!digits) return { customer: null, ambiguous: false };
   try {
-    return await db('customers')
+    const rows = await db('customers')
       .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
         'property_type', 'company_name')
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
       .orderBy('created_at', 'desc')
-      .first();
+      .limit(5);
+    return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);
-    return null;
+    return { customer: null, ambiguous: false };
   }
 }
 
@@ -138,14 +158,21 @@ async function buildCallContext(callLogId) {
   }
 
   const { extraction, source: extractionSource } = extractionFromCall(call);
-  const phone = call.from_phone || extraction?.caller?.phone_e164 || null;
+  // On OUTBOUND calls from_phone is the Waves line and the customer is the
+  // dialed party — keying on from_phone would load SMS/profile data for our
+  // own number (mirrors resolveCallContactPhone in the call processor).
+  const outbound = String(call.direction || '').toLowerCase() === 'outbound';
+  const phone = (outbound ? call.to_phone : call.from_phone)
+    || extraction?.caller?.phone_e164
+    || null;
 
-  const [customer, lead, smsThread, priorEstimates] = await Promise.all([
-    loadCustomerByPhone(phone),
+  const [customerMatch, lead, smsThread, priorEstimates] = await Promise.all([
+    loadCustomerByPhone(phone, extraction),
     loadLeadByPhone(phone),
     loadSmsThread(phone),
     loadPriorEstimates(phone),
   ]);
+  const customer = customerMatch.customer;
 
   return {
     call,
@@ -154,6 +181,7 @@ async function buildCallContext(callLogId) {
     extractionSource,
     phone,
     customer: customer || null,
+    customerPhoneAmbiguous: customerMatch.ambiguous,
     lead: lead || null,
     smsThread,
     priorEstimates,
@@ -164,5 +192,5 @@ async function buildCallContext(callLogId) {
 module.exports = {
   buildCallContext,
   existingDraftForCall,
-  _private: { extractionFromCall, last10, loadSmsThread },
+  _private: { extractionFromCall, last10, loadSmsThread, pickCustomerMatch },
 };

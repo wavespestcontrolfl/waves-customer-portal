@@ -244,6 +244,21 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
   const newConstruction = countyLooksUnassessed(parcel)
     && (home.source !== SQFT_SOURCES.COUNTY_ASSESSED);
 
+  // Residential property type for the pricing engine: the lookup's merged
+  // record first (county land-use aware), then the call extraction. A condo
+  // or townhome priced as a detached home gets the wrong pest adjustment and
+  // hardscape/turf math.
+  const EXTRACTION_PROPERTY_TYPES = {
+    single_family: 'Single Family',
+    condo: 'Condo',
+    townhouse: 'Townhome',
+    mobile_home: 'Mobile Home',
+    multi_family: 'Multifamily',
+  };
+  const propertyType = propertyRecord?.propertyType
+    || EXTRACTION_PROPERTY_TYPES[String(extraction?.property?.property_type || '').toLowerCase()]
+    || null;
+
   if (home.source === SQFT_SOURCES.SUBDIVISION_MEDIAN) {
     logger.info('[estimator-engine] home sqft resolved from subdivision median', {
       sampleCount: home.sampleCount || 0,
@@ -254,6 +269,7 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     home,
     lot,
     newConstruction,
+    propertyType,
     tenant: isTenant(extraction),
     countyParcel: parcel ? {
       county: parcel.county || null,

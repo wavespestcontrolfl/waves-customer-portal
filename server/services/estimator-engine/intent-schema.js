@@ -141,6 +141,15 @@ const INTENT_SCHEMA = {
   },
   required: ['decision', 'category', 'is_commercial', 'services', 'evidence', 'confidence'],
   additionalProperties: false,
+  // A draft with no supporting quotes defeats the operator-verification
+  // design (the notes' evidence section is the 10-second review path) — a
+  // schema-valid `evidence: []` draft must fail and trigger the repair retry.
+  allOf: [
+    {
+      if: { properties: { decision: { const: 'draft' } } },
+      then: { properties: { evidence: { type: 'array', minItems: 1 } } },
+    },
+  ],
 };
 
 const ajv = new Ajv({ allErrors: true, allowUnionTypes: true });
