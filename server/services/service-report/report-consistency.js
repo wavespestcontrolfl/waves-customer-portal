@@ -51,8 +51,13 @@ function reconcileLawnReport({ data = {}, reportV2 = null } = {}) {
   // Don't manufacture a "follow-up planned" card from loose summary text when the
   // copy explicitly says none is needed — a real nextVisitFocus still counts.
   const deniesFollowUp = /\bno\b[^.]{0,40}\b(?:follow[- ]?up|re-?check|return|next visit)\b|\b(?:follow[- ]?up|re-?check)\b[^.]{0,20}\bnot needed\b|\bno (?:further|additional) (?:visit|action)\b/i.test(summaryText);
+  // Prose only counts with an explicit follow-up COMMITMENT ("a follow-up is
+  // planned", "we'll re-check", "we will return/come back"). Routine sign-offs
+  // ("see you at your next visit") and advice ("return to normal watering")
+  // used to fabricate a "Follow-up already planned" card telling the customer
+  // an unbooked visit was scheduled (audit 2026-07-16).
   const mentionsFollowUp = !!nextVisitFocus
-    || (!deniesFollowUp && /\bfollow[- ]?up\b|\bnext visit\b|\bre-?check\b|\breturn (?:on|this|next|to)\b/i.test(summaryText));
+    || (!deniesFollowUp && /\bfollow[- ]?up\b|\bre-?check\b|\breturn visit\b|\b(?:will|we['’]ll) (?:return|come back|be back)\b/i.test(summaryText));
   let followUp = null;
   if (mentionsFollowUp) {
     followUp = {

@@ -347,10 +347,15 @@ function answerReentry({ data = {} } = {}) {
   const dynamic = data.dynamicContext || {};
   if (dynamic.reentry?.customerSummary) return dynamic.reentry.customerSummary;
   const advisory = data.advisory || {};
-  const parts = [];
-  if (Number(advisory.exterior_reentry_min) > 0) parts.push(`${advisory.exterior_reentry_min} min outside`);
-  if (Number(advisory.interior_reentry_min) > 0) parts.push(`${advisory.interior_reentry_min} min inside`);
-  const base = parts.length ? `Re-entry guidance: ${parts.join(', ')}.` : 'No re-entry timer was recorded for this report.';
+  // Owner rule (site-compliance): customer surfaces never phrase re-entry as
+  // a minute count. Ready-at times come from dynamic.reentry above; without
+  // that anchor this fallback speaks in "once dry" terms only, matching
+  // reentry.js's framing (audit 2026-07-16 — this was the one surface that
+  // still said "N min outside, N min inside").
+  const hasWindow = Number(advisory.exterior_reentry_min) > 0 || Number(advisory.interior_reentry_min) > 0;
+  const base = hasWindow
+    ? 'Give treated areas time to fully dry before normal use.'
+    : 'No re-entry timer was recorded for this report.';
   return `${base}${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
 }
 
@@ -374,8 +379,13 @@ function answerTrend({ data = {} } = {}) {
       breakdown.length ? `Breakdown: ${breakdown.join(', ')}.` : null,
     ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index).join(' ');
   }
-  return dynamic.pressureTrend?.customerSummary
-    || `This visit's pressure index is ${customerVisiblePressureIndex(data.pressureIndex)?.toFixed(1) || '0.3'} on a 0-5 scale. Lower is better.`;
+  if (dynamic.pressureTrend?.customerSummary) return dynamic.pressureTrend.customerSummary;
+  const visibleIndex = customerVisiblePressureIndex(data.pressureIndex);
+  // No reading → say so. 0.3 is the display FLOOR for real readings, never a
+  // stand-in for missing data (audit 2026-07-16: the old `|| '0.3'` fallback
+  // invented a score on reports whose pressure is hidden or absent).
+  if (visibleIndex != null) return `This visit's pressure index is ${visibleIndex.toFixed(1)} on a 0-5 scale. Lower is better.`;
+  return 'A pressure reading was not recorded for this visit, so there is no score to compare yet. Text Waves if you are seeing activity and we will take a look.';
 }
 
 function answerFindings({ data = {} } = {}) {

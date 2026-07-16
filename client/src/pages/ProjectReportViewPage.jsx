@@ -244,6 +244,10 @@ const FIELD_LABELS = {
   comments: 'Comments / financial disclosure notes',
   termite_type: 'Termite species',
   activity_status: 'Activity status',
+  // "infestation" is banned in customer NARRATIVE copy, but WDO/termite
+  // reports are official FDACS inspection documents where it is the
+  // regulatory term — deliberate exception (owner ruling 2026-07-16);
+  // compliance sweeps must not "fix" this label.
   infestation_extent: 'Infestation extent',
   pests_identified: 'Pests identified',
   severity: 'Severity',
