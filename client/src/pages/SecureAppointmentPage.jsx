@@ -118,7 +118,12 @@ export default function SecureAppointmentPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ setupIntentId }),
     });
-    if (!res.ok) throw new Error('complete_failed');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const err = new Error(body.error || 'complete_failed');
+      err.code = body.code || null;
+      throw err;
+    }
     return res.json();
   }, [token]);
 
@@ -166,7 +171,13 @@ export default function SecureAppointmentPage() {
       }
       await complete(confirmed.setupIntentId);
       setState('secured');
-    } catch {
+    } catch (err) {
+      // The visit was cancelled / became payer-billed since the page
+      // loaded — nothing to save; show the "nothing needed" state.
+      if (err?.code === 'no_longer_needed') {
+        setState('closed');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);

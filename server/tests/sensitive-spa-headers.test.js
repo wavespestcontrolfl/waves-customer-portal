@@ -5,6 +5,7 @@ const {
   isPestReportPath,
   isServiceReportPath,
   isEstimatePath,
+  isSecureCardPath,
   isPriceChangeNoticePath,
 } = require('../utils/sensitive-spa-headers');
 
@@ -116,6 +117,26 @@ describe('sensitive SPA document headers', () => {
     // Not single-segment estimate paths at all.
     expect(isEstimatePath('/estimate')).toBe(false);
     expect(isEstimatePath('/api/estimates/0123456789abcdef0123456789abcdef/data')).toBe(false);
+  });
+
+  test('marks secure-appointment card token pages noindex, no-referrer, and no-store', () => {
+    const SECURE_TOKEN = 'a'.repeat(64);
+    const res = mockResponse();
+
+    applySensitiveSpaHeaders(`/secure/${SECURE_TOKEN}`, res);
+
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
+
+  test('recognizes only full secure-card 64-hex token document paths', () => {
+    const SECURE_TOKEN = 'b'.repeat(64);
+    expect(isSecureCardPath(`/secure/${SECURE_TOKEN}`)).toBe(true);
+    expect(isSecureCardPath(`/secure/${SECURE_TOKEN}/`)).toBe(true);
+    expect(isSecureCardPath('/secure/not-a-token')).toBe(false);
+    expect(isSecureCardPath(`/secure/${'c'.repeat(32)}`)).toBe(false);
+    expect(isSecureCardPath(`/api/public/secure-card/${SECURE_TOKEN}`)).toBe(false);
   });
 
   test('marks price-change notice token pages noindex, no-referrer, and no-store', () => {

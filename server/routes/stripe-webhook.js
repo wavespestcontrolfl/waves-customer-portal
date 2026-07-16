@@ -2546,6 +2546,22 @@ async function handleSetupIntentSucceeded(setupIntent) {
     }
     return;
   }
+  // "Secure your appointment" capture (appointment-card-request funnel,
+  // dark until APPOINTMENT_CARD_REQUEST): durability backstop when the
+  // customer finishes 3DS but the browser never posts /complete — Stripe
+  // is the only durable signal, and without this the request stays pending
+  // and the card is never saved/enrolled (Codex #2771). Idempotent with
+  // the page path (only a pending row completes). Transient failures THROW
+  // so Stripe's retry schedule re-runs it; permanent states (mismatch,
+  // no-longer-needed visit, already completed) ack and drop.
+  if (setupIntent.metadata?.purpose === 'appointment_card_request') {
+    const AppointmentCardRequests = require('../services/appointment-card-request');
+    const result = await AppointmentCardRequests.completeSecureCardCaptureFromWebhook(setupIntent);
+    if (result?.code === 'completion_failed') {
+      throw new Error(`appointment card capture ${setupIntent.id} completion failed — retry`);
+    }
+    return;
+  }
   // Recurring card-on-file capture (dark until RECURRING_CARD_ON_FILE):
   // durability backstop for the accept path's awaited enrollment. The accept
   // handler normally enrolls inline; this re-runs the same idempotent

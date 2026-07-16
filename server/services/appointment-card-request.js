@@ -166,7 +166,7 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
  *   action 'skipped'      — reason says why (gate_off, exemption, dedup...).
  * Never throws — every trigger path treats this as fire-and-observe.
  */
-async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms' }) {
+async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspecified', delivery = 'sms', recipientPhone = null }) {
   try {
     if (!isAppointmentCardRequestEnabled()) return skip('gate_off');
     if (!scheduledServiceId) return skip('no_scheduled_service_id');
@@ -201,11 +201,21 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     const existing = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
       .first('id', 'status', 'token');
+    let reuseToken = null;
     if (existing) {
-      if (delivery === 'inline' && existing.status === 'pending' && existing.token) {
-        return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${existing.token}`) };
+      if (existing.status === 'pending' && existing.token) {
+        if (delivery === 'inline') {
+          return { requested: false, action: 'link_created', reason: 'request_exists', secureUrl: portalUrl(`/secure/${existing.token}`) };
+        }
+        // A pending row whose text never went out — an inline /book step
+        // the customer abandoned, or a prior send that failed after the
+        // row landed — must stay reachable by the ONE allowed SMS (Codex
+        // #2771): reuse its token; the card_link_sent_at claim below still
+        // guarantees one text total.
+        reuseToken = existing.token;
+      } else {
+        return skip('request_exists', { status: existing.status });
       }
-      return skip('request_exists', { status: existing.status });
     }
 
     // Render before claiming: an inactive/missing template (the second dark
@@ -213,9 +223,15 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     const customer = await db('customers')
       .where({ id: visit.customer_id })
       .first('id', 'first_name', 'phone');
-    if (delivery !== 'inline' && !customer?.phone) return skip('no_customer_phone');
+    // The caller may pass the CONSENTED recipient (Codex #2771 P1: the AI
+    // call pipeline redirects implied-consent sends to the inbound caller's
+    // number when the saved customer phone is a spouse/alternate slot) —
+    // a payment-adjacent bearer link follows the same recipient decision
+    // as the confirmation, never blindly customer.phone.
+    const smsTo = recipientPhone || customer?.phone || null;
+    if (delivery !== 'inline' && !smsTo) return skip('no_customer_phone');
 
-    const token = crypto.randomBytes(32).toString('hex');
+    const token = reuseToken || crypto.randomBytes(32).toString('hex');
     const longUrl = portalUrl(`/secure/${token}`);
 
     // Inline delivery: the customer is ON the booking surface — create the
@@ -278,35 +294,42 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         await db('scheduled_services')
           .where({ id: visit.id, card_link_sent_at: stamp })
           .update({ card_link_sent_at: null, updated_at: new Date() });
-        await db('appointment_card_requests')
-          .where({ scheduled_service_id: visit.id, status: 'pending', token })
-          .whereNull('stripe_setup_intent_id')
-          .del();
+        // Only remove a row THIS call created — a reused pending row (the
+        // /book inline step's) also serves the /secure page and may carry
+        // a SetupIntent already.
+        if (!reuseToken) {
+          await db('appointment_card_requests')
+            .where({ scheduled_service_id: visit.id, status: 'pending', token })
+            .whereNull('stripe_setup_intent_id')
+            .del();
+        }
       } catch (err) {
         logger.warn(`[appt-card-request] claim release failed for visit ${visit.id}: ${err.message}`);
       }
     };
 
-    const inserted = await db('appointment_card_requests')
-      .insert({
-        scheduled_service_id: visit.id,
-        customer_id: visit.customer_id,
-        status: 'pending',
-        trigger,
-        token,
-        sent_at: stamp,
-      })
-      .onConflict('scheduled_service_id')
-      .ignore()
-      .returning('id');
-    if (!inserted || !inserted.length) {
-      // A row landed between check 3 and the claim — funnel already ran.
-      await releaseClaim();
-      return skip('request_exists');
+    if (!reuseToken) {
+      const inserted = await db('appointment_card_requests')
+        .insert({
+          scheduled_service_id: visit.id,
+          customer_id: visit.customer_id,
+          status: 'pending',
+          trigger,
+          token,
+          sent_at: stamp,
+        })
+        .onConflict('scheduled_service_id')
+        .ignore()
+        .returning('id');
+      if (!inserted || !inserted.length) {
+        // A row landed between check 3 and the claim — funnel already ran.
+        await releaseClaim();
+        return skip('request_exists');
+      }
     }
 
     const result = await sendCustomerMessage({
-      to: customer.phone,
+      to: smsTo,
       body,
       channel: 'sms',
       audience: 'customer',
@@ -326,6 +349,14 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return skip(`send_blocked:${result?.code || result?.reason || 'unknown'}`);
     }
 
+    if (reuseToken) {
+      // The reused inline row finally got its text — stamp it for
+      // observability (Phase 4's abandonment queries key on sent state).
+      await db('appointment_card_requests')
+        .where({ scheduled_service_id: visit.id, status: 'pending' })
+        .update({ sent_at: stamp, updated_at: stamp })
+        .catch((err) => logger.warn(`[appt-card-request] sent_at stamp failed for visit ${visit.id}: ${err.message}`));
+    }
     logger.info(`[appt-card-request] secure-card link sent for visit ${visit.id} (trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent' };
   } catch (err) {
@@ -406,11 +437,8 @@ async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason 
   } catch (e) { logger.warn(`[appt-card-request] capture review alert failed: ${e.message}`); }
 }
 
-// POST /secure/:token completion. Verify live, then the idempotent
-// save → consent → enroll sequence (mirrors completeRecurringCardEnrollment
-// so enrollment semantics can't drift between save surfaces), then flip the
-// request row pending → completed (claim-based: only the pending row
-// transitions, so a double-submit or webhook overlap can't double-write).
+// POST /secure/:token completion. Verify live, then the shared completion
+// tail below.
 async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null }) {
   const request = await db('appointment_card_requests').where({ token }).first();
   if (!request) return { ok: false, code: 'not_found' };
@@ -420,7 +448,74 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
 
   const verified = await verifySecureCardIntent({ request, setupIntentId });
   if (!verified.ok) return { ok: false, code: verified.reason };
-  const { stripePaymentMethodId } = verified;
+  return finishVerifiedSecureCapture({
+    request,
+    stripePaymentMethodId: verified.stripePaymentMethodId,
+    setupIntentId: verified.setupIntentId,
+    ip,
+    userAgent,
+  });
+}
+
+// Durability backstop, called from stripe-webhook's setup_intent.succeeded
+// dispatch: the SetupIntent succeeded at Stripe (3DS finished) but the
+// browser never posted /complete. The intent object arrives signed from
+// the webhook, so no re-retrieve is needed — pin it to its request via the
+// same purpose/request-id/succeeded checks, then run the same idempotent
+// completion tail. A non-pending request no-ops (the page path won).
+async function completeSecureCardCaptureFromWebhook(setupIntent) {
+  const requestId = setupIntent?.metadata?.request_id;
+  if (!requestId) return { ok: false, code: 'no_request_id' };
+  const request = await db('appointment_card_requests').where({ id: requestId }).first();
+  if (!request) return { ok: false, code: 'not_found' };
+  if (request.status !== 'pending') return { ok: true, alreadyCompleted: true };
+  if (!secureCardIntentMatchesRequest(setupIntent, request.id)) {
+    return { ok: false, code: 'intent_mismatch' };
+  }
+  const pm = setupIntent.payment_method;
+  return finishVerifiedSecureCapture({
+    request,
+    stripePaymentMethodId: typeof pm === 'string' ? pm : pm.id,
+    setupIntentId: setupIntent.id,
+  });
+}
+
+// Shared completion tail: the idempotent save → consent → enroll sequence
+// (mirrors completeRecurringCardEnrollment so enrollment semantics can't
+// drift between save surfaces), then the request row flips pending →
+// completed (claim-based: only the pending row transitions, so a
+// double-submit or page/webhook overlap can't double-write).
+//
+// Re-derives visit + payer state immediately before saving (Codex #2771
+// P1): the office can cancel/reschedule the visit or attach a third-party
+// payer between page load and card submit — never save/enroll the
+// homeowner's card for a visit that is no longer live or that now bills a
+// payer. A payer-lookup failure refuses completion (fail toward not
+// enrolling the wrong party); the SetupIntent stays succeeded at Stripe,
+// so a retry (page re-POST or webhook redelivery) completes once the
+// payer state is readable.
+async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null }) {
+  const visit = await db('scheduled_services')
+    .where({ id: request.scheduled_service_id })
+    .first('id', 'status', 'scheduled_date');
+  const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
+  if (!visit
+    || !LIVE_VISIT_STATUSES.includes(visit.status)
+    || (dateOnly && dateOnly < etDateString(new Date()))) {
+    return { ok: false, code: 'no_longer_needed' };
+  }
+  try {
+    const PayerService = require('./payer');
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(request.customer_id),
+      scheduledServiceId: String(request.scheduled_service_id),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return { ok: false, code: 'no_longer_needed' };
+  } catch (err) {
+    logger.warn(`[appt-card-request] completion payer re-check failed — refusing enrollment for request ${request.id}: ${err.message}`);
+    return { ok: false, code: 'completion_failed' };
+  }
 
   try {
     // Idempotent save: stripe_payment_method_id is unique — a retry after a
@@ -461,7 +556,7 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
       customerId: request.customer_id,
       paymentMethodId: saved?.id,
       source: 'save_card_consent',
-      details: { via: 'appointment_card_request', scheduled_service_id: request.scheduled_service_id, setup_intent_id: verified.setupIntentId },
+      details: { via: 'appointment_card_request', scheduled_service_id: request.scheduled_service_id, setup_intent_id: setupIntentId },
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       // The card IS saved and consented — the visit is secured — but the
@@ -475,7 +570,7 @@ async function completeSecureCardCapture({ token, setupIntentId, ip = null, user
       .where({ id: request.id, status: 'pending' })
       .update({
         status: 'completed',
-        stripe_setup_intent_id: verified.setupIntentId,
+        stripe_setup_intent_id: setupIntentId,
         stripe_payment_method_id: stripePaymentMethodId,
         payment_method_id: saved?.id || null,
         completed_at: new Date(),
@@ -530,6 +625,7 @@ module.exports = {
   isAppointmentCardRequestEnabled,
   loadSecureCardPageData,
   completeSecureCardCapture,
+  completeSecureCardCaptureFromWebhook,
   _test: {
     dateLineFor,
     resolveExemption,

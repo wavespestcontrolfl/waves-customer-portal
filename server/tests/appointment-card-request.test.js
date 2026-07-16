@@ -261,6 +261,43 @@ describe('the send', () => {
     }));
   });
 
+  test('a resolved call recipient overrides customer.phone (consented-recipient routing)', async () => {
+    const res = await requestCardForAppointment({
+      scheduledServiceId: 'svc-1',
+      trigger: 'ai_call_pipeline',
+      recipientPhone: '+19419998888',
+    });
+    expect(res.action).toBe('sent');
+    expect(mockSendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+19419998888' }));
+  });
+
+  test('an abandoned inline pending row gets its ONE text — same token, no new row', async () => {
+    const inlineToken = 'd'.repeat(64);
+    mockTableHandlers.appointment_card_requests.first = () => ({ id: 'req-1', status: 'pending', token: inlineToken });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'office' });
+    expect(res.action).toBe('sent');
+    // The link carries the EXISTING token (the /secure page the inline step
+    // already minted), and no second row is inserted.
+    expect(mockShorten).toHaveBeenCalledWith(expect.stringContaining(inlineToken), expect.anything());
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+    // The one-text claim was still consumed.
+    const claims = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch.card_link_sent_at instanceof Date));
+    expect(claims).toHaveLength(1);
+  });
+
+  test('blocked send on a reused row releases the claim but keeps the row', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ id: 'req-1', status: 'pending', token: 'e'.repeat(64) });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_blocked:SUPPRESSED');
+    const dels = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(dels).toHaveLength(0);
+  });
+
   test('blocked send releases the claim and the pending row', async () => {
     mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
@@ -383,8 +420,32 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
       appointment_card_requests: { first: () => ({ ...REQUEST }) },
       payment_methods: { first: () => null },
       customers: { first: () => ({ ...CUSTOMER }) },
+      scheduled_services: { first: () => ({ ...VISIT }) },
     };
     mockRetrieveSetupIntent.mockResolvedValue(GOOD_INTENT);
+  });
+
+  test('visit cancelled since page load → no_longer_needed, nothing saved', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'no_longer_needed' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+    expect(mockRecordConsent).not.toHaveBeenCalled();
+    expect(mockEnrollConsentedMethod).not.toHaveBeenCalled();
+  });
+
+  test('payer attached since page load → no_longer_needed (never the wrong party)', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-7' });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'no_longer_needed' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  test('payer re-check failure refuses completion but stays retryable', async () => {
+    mockResolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'completion_failed' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
   test('happy path: saves, records consent, enrolls, marks the row completed', async () => {
@@ -448,6 +509,44 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
     expect(mockRecordConsent).not.toHaveBeenCalled();
     expect(touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))).toHaveLength(0);
+  });
+});
+
+describe('completeSecureCardCaptureFromWebhook — durability backstop', () => {
+  beforeEach(() => {
+    mockTableHandlers = {
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      payment_methods: { first: () => null },
+      customers: { first: () => ({ ...CUSTOMER }) },
+      scheduled_services: { first: () => ({ ...VISIT }) },
+    };
+  });
+
+  test('pending request + matching signed intent completes without a re-retrieve', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: true });
+    expect(mockRetrieveSetupIntent).not.toHaveBeenCalled();
+    expect(mockSavePaymentMethod).toHaveBeenCalledWith('cust-1', 'pm_stripe_9', expect.anything());
+    expect(mockEnrollConsentedMethod).toHaveBeenCalled();
+  });
+
+  test('non-pending request no-ops (the page path won)', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completed' });
+    const res = await completeSecureCardCaptureFromWebhook(GOOD_INTENT);
+    expect(res).toEqual({ ok: true, alreadyCompleted: true });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
+  test('wrong purpose or request id never writes', async () => {
+    const { completeSecureCardCaptureFromWebhook } = require('../services/appointment-card-request');
+    const res = await completeSecureCardCaptureFromWebhook({
+      ...GOOD_INTENT,
+      metadata: { purpose: 'estimate_recurring_card', request_id: 'req-1' },
+    });
+    expect(res).toEqual({ ok: false, code: 'intent_mismatch' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 });
 

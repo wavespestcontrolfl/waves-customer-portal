@@ -75,6 +75,11 @@ router.post('/:token/complete', async (req, res) => {
     });
     if (!result.ok) {
       if (result.code === 'not_found') return res.status(404).json({ error: 'Not found' });
+      if (result.code === 'no_longer_needed') {
+        // Visit cancelled/past or now payer-billed since page load — the
+        // client maps this to its "nothing needed" state.
+        return res.status(409).json({ error: 'This appointment no longer needs a card on file.', code: 'no_longer_needed' });
+      }
       // intent_mismatch / verification_failed / pm_ownership_mismatch /
       // completion_failed — the customer retries from the page; details
       // stay in the logs, not the response.

@@ -1371,3 +1371,34 @@ describe('findAttachableCallAppointment (attach to a human booking instead of in
     }
   });
 });
+
+describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
+  const { attachCandidateMatchesProperty } = CallRecordingProcessor._test;
+
+  test('matching property ids agree; differing ids refuse', () => {
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-1' }, { propertyId: 'prop-1' })).toBe(true);
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-1' }, { propertyId: 'prop-2' })).toBe(false);
+  });
+
+  test('matching service address line 1 agrees (case/whitespace-insensitive)', () => {
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123  Main St' },
+      { address: { line1: '123 main st' } },
+    )).toBe(true);
+    expect(attachCandidateMatchesProperty(
+      { service_address_line1: '123 Main St' },
+      { address: { line1: '456 Oak Ave' } },
+    )).toBe(false);
+  });
+
+  test('no evidence on either side = both resolve to the primary property', () => {
+    expect(attachCandidateMatchesProperty({}, { propertyId: null, address: null })).toBe(true);
+  });
+
+  test('one-sided evidence cannot confirm the match — never attach on it', () => {
+    // Call resolved the rental; candidate is a bare primary-property booking.
+    expect(attachCandidateMatchesProperty({}, { propertyId: 'prop-9', address: { line1: '9 Rental Rd' } })).toBe(false);
+    // Candidate carries an explicit property; the call resolved nothing.
+    expect(attachCandidateMatchesProperty({ property_id: 'prop-9' }, { propertyId: null, address: null })).toBe(false);
+  });
+});
