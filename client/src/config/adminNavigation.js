@@ -234,12 +234,6 @@ export const ADMIN_NAV_ITEMS = {
     label: "Pricing",
     icon: Calculator,
   },
-  priceNotices: {
-    id: "priceNotices",
-    path: "/admin/price-change",
-    label: "Price Notices",
-    icon: Megaphone,
-  },
   toolHealth: {
     id: "toolHealth",
     path: "/admin/tool-health",
@@ -300,7 +294,6 @@ const NAV_SECTION_DEFINITIONS = [
       "banking",
       "taxes",
       "pricing",
-      "priceNotices",
     ],
   },
   { section: "Resources", itemIds: ["wiki", "knowledgeBase"] },

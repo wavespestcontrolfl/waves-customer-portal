@@ -18,7 +18,7 @@ function LocationProbe() {
   );
 }
 
-function renderRedirect({ entry, source, to, tab, preserveTabs }) {
+function renderRedirect({ entry, source, to, tab, preserveTabs, queryKey }) {
   render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
@@ -29,6 +29,7 @@ function renderRedirect({ entry, source, to, tab, preserveTabs }) {
               to={to}
               tab={tab}
               preserveTabs={preserveTabs}
+              queryKey={queryKey}
             />
           )}
         />
@@ -104,6 +105,20 @@ describe("AdminTabRedirect", () => {
 
     expect(destination).toBe(
       "/admin/compliance?credentialId=credential-123&tab=credentials#renewal",
+    );
+  });
+
+  it("supports non-tab hub parameters for legacy Pricing routes", () => {
+    const destination = renderRedirect({
+      entry: "/admin/pricing?campaign=spring#offers",
+      source: "/admin/pricing",
+      to: "/admin/pricing-logic",
+      tab: "strategy",
+      queryKey: "area",
+    });
+
+    expect(destination).toBe(
+      "/admin/pricing-logic?campaign=spring&area=strategy#offers",
     );
   });
 });

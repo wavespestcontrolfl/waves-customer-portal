@@ -256,7 +256,6 @@ const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
-const AdminPricingPage = lazyWithRetry(() => import('./pages/admin/PricingStrategyPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
 const AdminAutoDispatchPage = lazyWithRetry(() => import('./pages/admin/AutoDispatchPage'));
 const AdminPriceMatchPage = lazyWithRetry(() => import('./pages/admin/PriceMatchPage'));
@@ -277,14 +276,13 @@ const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
-const AdminPriceChangePage = lazyWithRetry(() => import('./pages/admin/AdminPriceChangePage'));
 const EstimateViewPage = lazyWithRetry(() => import('./pages/EstimateViewPage'));
 const TimeTrackingPage = lazyWithRetry(() => import('./pages/admin/TimeTrackingPage'));
 const ServiceLibraryPage = lazyWithRetry(() => import('./pages/admin/ServiceLibraryPage'));
 const ProjectsPage = lazyWithRetry(() => import('./pages/admin/ProjectsPage'));
 const NewsletterPage = lazyWithRetry(() => import('./pages/admin/NewsletterPage'));
 const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'));
-const PricingLogicPage = lazyWithRetry(() => import('./pages/admin/PricingLogicPage'));
+const PricingHubPage = lazyWithRetry(() => import('./pages/admin/PricingHubPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
 const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
@@ -470,7 +468,7 @@ export default function App() {
             <Route path="referrals" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading referrals...</div>}><AdminReferralsPage /></Suspense>} />
             <Route path="social-media" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading social media...</div>}><AdminSocialMediaPage /></Suspense>} />
             <Route path="tax" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tax...</div>}><AdminTaxPage /></Suspense>} />
-            <Route path="pricing" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><AdminPricingPage /></Suspense>} />
+            <Route path="pricing" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="strategy" />} />
             {/* /admin/lawn-assessments is the consolidated Assessments hub
                 (Lead Magnets tab + Field Assessment tab). The old standalone
                 /admin/lawn-assessment route redirects to the Field tab so
@@ -505,12 +503,12 @@ export default function App() {
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
             <Route path="email" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading email...</div>}><AdminEmailPage /></Suspense>} />
             <Route path="banking" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading banking...</div>}><AdminBankingPage /></Suspense>} />
-            <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingLogicPage /></Suspense>} />
+            <Route path="pricing-logic" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading pricing...</div>}><PricingHubPage /></Suspense>} />
             <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />
             <Route path="tool-health" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading tool health...</div>}><AdminToolHealthPage /></Suspense>} />
             <Route path="auto-dispatch" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading auto-dispatch...</div>}><AdminAutoDispatchPage /></Suspense>} />
             <Route path="price-match" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price match...</div>}><AdminPriceMatchPage /></Suspense>} />
-            <Route path="price-change" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading price change...</div>}><AdminPriceChangePage /></Suspense>} />
+            <Route path="price-change" element={<AdminTabRedirect to="/admin/pricing-logic" queryKey="area" tab="notices" />} />
             <Route path="more" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading…</div>}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading design system...</div>}><DesignSystemPage /></Suspense>} />
             <Route path="_design-system/flags" element={<Suspense fallback={<div style={{color:'#94a3b8',padding:40}}>Loading flags...</div>}><DesignSystemFlagsPage /></Suspense>} />

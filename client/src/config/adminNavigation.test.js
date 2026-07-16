@@ -61,7 +61,6 @@ describe("admin navigation registry", () => {
           "banking",
           "taxes",
           "pricing",
-          "priceNotices",
         ],
       },
       { section: "Resources", itemIds: ["wiki", "knowledgeBase"] },
@@ -116,6 +115,8 @@ describe("admin navigation registry", () => {
     expect(ADMIN_NAV_ITEMS.communications.label).toBe("Communications");
     expect(ADMIN_NAV_ITEMS.wiki.label).toBe("Wiki");
     expect(ADMIN_NAV_ITEMS.knowledgeBase.label).toBe("Knowledge Base");
+    expect(ADMIN_NAV_ITEMS.pricing.path).toBe("/admin/pricing-logic");
+    expect(ADMIN_NAV_ITEMS.priceNotices).toBeUndefined();
   });
 
   it("renders every destination exactly once per navigation surface", () => {
