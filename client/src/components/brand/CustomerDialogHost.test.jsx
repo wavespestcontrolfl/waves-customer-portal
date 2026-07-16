@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { useRef } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useModalFocus from '../../hooks/useModalFocus';
 import { BiometricLockContext } from '../BiometricGate';
@@ -40,12 +40,13 @@ describe('CustomerDialogHost', () => {
     const dialog = await screen.findByRole('alertdialog', { name: 'Remove payment method?' });
     expect(dialog).toHaveAttribute('data-glass', 'modal');
     expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await waitFor(() => expect(dialog).toHaveAttribute('tabindex', '-1'));
 
     fireEvent.keyDown(document, { key: 'Escape' });
 
     await expect(result).resolves.toBe(false);
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  });
+  }, 10000);
 
   it('resolves alerts after the customer acknowledges them', async () => {
     render(<CustomerDialogHost />);

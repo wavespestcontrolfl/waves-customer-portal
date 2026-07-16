@@ -68,13 +68,18 @@ describe('InstallPrompt', () => {
   });
 
   it('cancels its delayed show when unmounted', () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
     const { unmount } = renderPrompt();
     fireEvent(window, installEvent());
-    expect(vi.getTimerCount()).toBe(1);
+
+    const showTimerIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 30000);
+    expect(showTimerIndex).toBeGreaterThanOrEqual(0);
+    const showTimer = setTimeoutSpy.mock.results[showTimerIndex].value;
 
     unmount();
 
-    expect(vi.getTimerCount()).toBe(0);
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(showTimer);
   });
 
   it('dismisses immediately when the browser reports installation', async () => {
