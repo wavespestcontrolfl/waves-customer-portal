@@ -49,7 +49,10 @@ function addressFromContext(context) {
   const leadAddress = context.lead?.address
     ? [context.lead.address, context.lead.city, context.lead.zip].filter(Boolean).join(', ')
     : null;
-  const customerAddress = context.customer?.address_line1
+  // An AMBIGUOUS shared-phone match must not supply the service address —
+  // pricing rows[0]'s saved home when the call itself established no address
+  // drafts the wrong property. No address → red lane, correctly.
+  const customerAddress = (context.customer?.address_line1 && !context.customerPhoneAmbiguous)
     ? [context.customer.address_line1, context.customer.city, [context.customer.state, context.customer.zip].filter(Boolean).join(' ')]
       .filter(Boolean).join(', ')
     : null;

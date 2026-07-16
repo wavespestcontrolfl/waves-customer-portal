@@ -467,4 +467,15 @@ describe('review fixes', () => {
     context.isExistingCustomer = false;
     expect(idxPriv.addressFromContext(context)).toMatch(/Old Lead Property/);
   });
+
+  test('ambiguous phone match never supplies the service address', () => {
+    const context = {
+      extraction: null,
+      isExistingCustomer: false,
+      customerPhoneAmbiguous: true,
+      customer: { address_line1: '10 Wrong Profile Rd', city: 'Testville', state: 'FL', zip: '34200' },
+      lead: null,
+    };
+    expect(idxPriv.addressFromContext(context)).toBeNull();
+  });
 });
