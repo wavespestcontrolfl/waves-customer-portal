@@ -242,7 +242,11 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
     // Only google_ads campaigns get apply_action/apply_value — other platforms
     // are managed in their own Ads Manager, so their recs stay advisory. A rec
     // that can't carry a concrete executable value stays advisory too (the
-    // client only renders Apply when the value is concrete).
+    // client only renders Apply when the value is concrete), and the apply
+    // fields must mirror the /advisor/apply guards: a STOP rec for a campaign
+    // already stopped is a no-op the route rejects, and a budget rec for a
+    // throttled (spent/stop) campaign can't take effect — either would render
+    // an Apply button that is guaranteed to 422.
     for (const c of summaries) {
       const controllable = c.platform === 'google_ads';
       if (c.last7d.roas > 0 && c.last7d.roas < minRoas * 0.5) {
@@ -250,7 +254,9 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
           priority: 'high', campaign: c.name,
           action: `Set to STOP mode — 7-day ROAS ${c.last7d.roas}x is less than half of ${minRoas}x target`,
           reasoning: 'Underperforming campaign burning budget',
-          ...(controllable ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' } : {}),
+          ...(controllable && c.budgetMode !== 'stop'
+            ? { campaign_id: c.id, apply_action: 'change_mode', apply_value: 'stop' }
+            : {}),
         });
       } else if (c.last7d.lostISBudget > 20 && c.last7d.roas >= minRoas) {
         // setBudget sets the BASE daily budget, so derive the target from the
@@ -260,13 +266,15 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
         const target = Number.isFinite(baseBudget) && baseBudget > 0
           ? Math.max(Math.round(baseBudget * 1.25), Math.floor(baseBudget) + 1)
           : null;
+        const budgetApplicable = controllable && target
+          && (!c.budgetMode || c.budgetMode === 'base');
         recommendations.push({
           priority: 'medium', campaign: c.name,
           action: target
             ? `Increase daily budget from $${baseBudget} to $${target} — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`
             : `Increase budget — losing ${c.last7d.lostISBudget}% IS to budget with ${c.last7d.roas}x ROAS`,
           reasoning: 'Profitable campaign with headroom',
-          ...(controllable && target ? { campaign_id: c.id, apply_action: 'increase_budget', apply_value: target } : {}),
+          ...(budgetApplicable ? { campaign_id: c.id, apply_action: 'increase_budget', apply_value: target } : {}),
         });
       }
     }

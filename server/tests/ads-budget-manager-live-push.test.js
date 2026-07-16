@@ -448,4 +448,80 @@ describe('BudgetManager live Google Ads push', () => {
       expect(result.googleAdsUpdated).toBe(false);
     });
   });
+
+  // requireLivePush (advisor apply): a linked campaign's push runs FIRST and
+  // a refused/unrunnable push throws BEFORE any DB write — a failed apply
+  // must leave no recorded intent for the reconcile cron to re-push later.
+  describe('requireLivePush (advisor apply contract)', () => {
+    test('setBudget: refused push throws live_push_failed and persists NOTHING', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue(null); // Google refused
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_failed' });
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('setBudget: linked but unconfigured throws live_push_unavailable, persists NOTHING', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(false);
+
+      await expect(BudgetManager.setBudget('c-1', 50, 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_unavailable' });
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+    });
+
+    test('setMode: pushes FIRST; refused push throws and persists NOTHING', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue(null);
+
+      await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_failed' });
+
+      expect(mockUpdateBudget).toHaveBeenCalled(); // push attempted first…
+      expect(mockCampaignUpdate).not.toHaveBeenCalled(); // …but nothing written
+      expect(mockLogInsert).not.toHaveBeenCalled();
+    });
+
+    test('setMode: linked with NULL base cannot push → live_push_unavailable, persists NOTHING', async () => {
+      campaignFirstRow = { ...baseCampaign(), daily_budget_base: null };
+      mockIsConfigured.mockReturnValue(true);
+
+      await expect(BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true }))
+        .rejects.toMatchObject({ code: 'live_push_unavailable' });
+
+      expect(mockCampaignUpdate).not.toHaveBeenCalled();
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+    });
+
+    test('setMode: successful push persists and reports googleAdsUpdated (single push)', async () => {
+      campaignFirstRow = baseCampaign();
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue({ ok: true });
+
+      const result = await BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true });
+
+      expect(mockUpdateBudget).toHaveBeenCalledTimes(1);
+      expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(true);
+      expect(result.livePushAttempted).toBe(true);
+    });
+
+    test('unlinked campaign: requireLivePush is a no-op, DB-only intent persists', async () => {
+      campaignFirstRow = { ...baseCampaign(), platform_campaign_id: null };
+      mockIsConfigured.mockReturnValue(true);
+
+      const result = await BudgetManager.setMode('c-1', 'stop', 'test', { requireLivePush: true });
+
+      expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+  });
 });

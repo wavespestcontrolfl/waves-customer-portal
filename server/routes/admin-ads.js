@@ -527,6 +527,27 @@ router.post('/advisor/generate', requireAdmin, async (req, res, next) => {
 // applied:false so the UI never claims an action it didn't take. Applies only
 // when the campaign resolves and a concrete value is present; increments the
 // day's applied_count only on a genuine apply.
+// Runs a budget-manager call made with requireLivePush and maps its typed
+// failures onto the honest applied:false contract ('live_push_unavailable' →
+// 422, 'live_push_failed' → 502). Push-first means NOTHING was persisted on
+// either failure — the reconcile cron has no recorded intent to retry later.
+const APPLY_FAILED = Symbol('apply-failed');
+async function applyLive(fn, res) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err.code === 'live_push_unavailable') {
+      res.status(422).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (err.code === 'live_push_failed') {
+      res.status(502).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    throw err;
+  }
+}
+
 router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
   try {
     const { action, campaignId, campaignName, value, reason } = req.body;
@@ -541,9 +562,13 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
     // for older stored reports. campaign_name is NOT unique (Google vs Meta
     // rows, duplicated experiments), so a name matching more than one row is
     // rejected rather than mutating whichever row Postgres returns first.
+    // The id is model output: a malformed one (not UUID-shaped) would 22P02
+    // the uuid column into a 500, so it's ignored in favor of the name.
+    const usableId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(campaignId || ''))
+      ? campaignId : null;
     let campaign = null;
-    if (campaignId) {
-      campaign = await db('ad_campaigns').where({ id: campaignId }).first();
+    if (usableId) {
+      campaign = await db('ad_campaigns').where({ id: usableId }).first();
     } else if (campaignName) {
       const matches = await db('ad_campaigns')
         .whereRaw('lower(campaign_name) = ?', [String(campaignName).toLowerCase()])
@@ -565,7 +590,7 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
     // The id is model output too: a rec can carry campaign A's id under
     // campaign B's name. The card shows the NAME, so a mismatch means the
     // click would mutate a different campaign than the admin approved.
-    if (campaignId && campaignName
+    if (usableId && campaignName
       && String(campaign.campaign_name).toLowerCase() !== String(campaignName).toLowerCase()) {
       return res.status(422).json({ applied: false, error: `This recommendation's campaign id resolves to "${campaign.campaign_name}", not "${campaignName}" — the advisor mislabeled it. Apply the change manually.` });
     }
@@ -600,29 +625,21 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount > boundRef * 3 || amount < boundRef / 3) {
         return res.status(422).json({ applied: false, error: `Refusing to one-click a budget change from $${boundRef}/day to $${amount}/day (more than a 3× move) — if that's really intended, set it in the campaign's budget editor.` });
       }
-      result = await getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`);
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, reason || `Advisor: ${action}`, { requireLivePush: true }), res);
+      if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {
         return res.status(422).json({ applied: false, error: 'This recommendation has no concrete mode (base/spent/stop) — set the mode manually.' });
       }
-      result = await getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`);
-    }
-
-    // A campaign linked to a live Google campaign is only "applied" when the
-    // live budget/mode actually changed. That covers both a refused push
-    // (shared budget, API error) and a push that never ran (Ads client not
-    // configured, no base budget) — either way a green "Applied" would be the
-    // exact lie this endpoint exists to prevent. An UNLINKED campaign has no
-    // live counterpart, so its DB-only apply is the genuine outcome.
-    if (result && campaign.platform_campaign_id && !result.googleAdsUpdated) {
-      const refused = Boolean(result.livePushAttempted);
-      return res.status(refused ? 502 : 422).json({
-        applied: false,
-        result,
-        error: refused
-          ? 'Google Ads refused the live update — the change was recorded locally but the live budget did not change. Check the campaign in Google Ads.'
-          : 'This campaign is linked to a live Google Ads campaign, but the live push could not run (Google Ads API not configured, or no base budget set) — the change was recorded locally only.',
-      });
+      // A rec targeting the mode the campaign is already in is a no-op — the
+      // fallback advisor emits STOP for every low-ROAS campaign without
+      // checking, and reporting "applied" for zero state change is the same
+      // false green this endpoint exists to prevent.
+      if (value === campaign.budget_mode) {
+        return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already in ${value} mode — nothing to apply.` });
+      }
+      result = await applyLive(() => getBudgetManager().setMode(campaign.id, value, reason || `Advisor: set ${value}`, { requireLivePush: true }), res);
+      if (result === APPLY_FAILED) return undefined;
     }
 
     // Count only genuinely-applied actions against today's report. Reporting

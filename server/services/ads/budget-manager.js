@@ -340,8 +340,16 @@ class BudgetManager {
 
   /**
    * Manually set a campaign's budget mode (from advisor "Apply" button).
+   *
+   * opts.requireLivePush: for callers that must never record an intent the
+   * live campaign didn't take (the advisor apply). On a LINKED campaign the
+   * Google push runs FIRST and a refused/unavailable push throws
+   * (err.code 'live_push_failed' / 'live_push_unavailable') BEFORE any DB
+   * write — otherwise the reconcile cron would retry the recorded target
+   * later and silently apply a change the caller reported as failed.
+   * Unlinked campaigns are unaffected (DB-only intent is their real outcome).
    */
-  async setMode(campaignId, mode, reason = 'manual') {
+  async setMode(campaignId, mode, reason = 'manual', { requireLivePush = false } = {}) {
     // Now that setMode can mutate real Google Ads spend, an unknown mode
     // must be rejected up front — calculateBudget's default case would
     // silently price a typo as the full base budget AND persist the invalid
@@ -361,6 +369,31 @@ class BudgetManager {
 
     const newBudget = this.calculateBudget(campaign, mode);
 
+    const canPush = Boolean(campaign.platform_campaign_id)
+      && campaign.daily_budget_base != null
+      && getGoogleAds().isConfigured();
+
+    // requireLivePush: push BEFORE persisting, and fail the whole call on a
+    // refused/unavailable push — nothing local may record a target Google
+    // didn't take (the reconcile cron re-pushes recorded targets).
+    let googleAdsUpdated = false;
+    let livePushAttempted = false;
+    if (requireLivePush && campaign.platform_campaign_id) {
+      if (!canPush) {
+        const err = new Error(`"${campaign.campaign_name}" is linked to a live Google Ads campaign, but the live push can't run (Google Ads API not configured, or no base budget set) — nothing was changed.`);
+        err.code = 'live_push_unavailable';
+        throw err;
+      }
+      livePushAttempted = true;
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
+      googleAdsUpdated = !!pushed;
+      if (!googleAdsUpdated) {
+        const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
+        err.code = 'live_push_failed';
+        throw err;
+      }
+    }
+
     await db('ad_campaigns').where({ id: campaignId }).update({
       budget_mode: mode,
       daily_budget_current: newBudget,
@@ -377,19 +410,16 @@ class BudgetManager {
       trigger: 'manual',
     });
 
-    // Mirror the manual /campaigns/:id/budget route: DB first, then
-    // best-effort live push, outcome reported so the caller can tell whether
-    // Google actually took the new budget. Human-initiated, so not gated by
-    // adsBudgetLivePush — that gate covers only the autonomous cron. NULL
-    // daily_budget_base skips the push like the cron does: calculateBudget's
-    // $20 fallback must never reach a real campaign.
-    // livePushAttempted lets callers distinguish "Google refused the push"
-    // (googleAdsUpdated false AFTER an attempt — the live budget did NOT
-    // change) from an unlinked/unconfigured campaign where false just means
-    // there was nothing live to push.
-    let googleAdsUpdated = false;
-    let livePushAttempted = false;
-    if (campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+    // Legacy (no requireLivePush) callers keep the mirror of the manual
+    // /campaigns/:id/budget route: DB first, then best-effort live push,
+    // outcome reported so the caller can tell whether Google actually took
+    // the new budget. Human-initiated, so not gated by adsBudgetLivePush —
+    // that gate covers only the autonomous cron. NULL daily_budget_base
+    // skips the push like the cron does: calculateBudget's $20 fallback
+    // must never reach a real campaign. livePushAttempted lets callers
+    // distinguish "Google refused the push" from an unlinked/unconfigured
+    // campaign where false just means there was nothing live to push.
+    if (!requireLivePush && canPush) {
       livePushAttempted = true;
       const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
       googleAdsUpdated = !!pushed;
@@ -400,8 +430,13 @@ class BudgetManager {
 
   /**
    * Manually update a campaign's base daily budget.
+   *
+   * opts.requireLivePush: same contract as setMode — on a LINKED campaign a
+   * refused or unrunnable push throws ('live_push_failed' /
+   * 'live_push_unavailable') BEFORE the new base is persisted, so a failed
+   * apply leaves no local intent for the reconcile cron to re-push later.
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual') {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false } = {}) {
     // Validate the amount up front — a non-positive / NaN / non-finite base would
     // be written locally and pushed to Google as garbage micros (or, at 0,
     // collapse to the $20 fallback), and the 2-hourly reconcile would keep
@@ -435,10 +470,22 @@ class BudgetManager {
     // advances to the intended amount (DB-only intent tracking).
     let googleAdsUpdated = false;
     let pushAttempted = false;
+    if (requireLivePush && campaign.platform_campaign_id && !getGoogleAds().isConfigured()) {
+      const err = new Error(`"${campaign.campaign_name}" is linked to a live Google Ads campaign, but the live push can't run (Google Ads API not configured) — nothing was changed.`);
+      err.code = 'live_push_unavailable';
+      throw err;
+    }
     if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
       pushAttempted = true;
       const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
       googleAdsUpdated = !!pushed;
+      if (requireLivePush && !googleAdsUpdated) {
+        // Nothing has been persisted yet (push-first) — failing here leaves
+        // no local intent for the reconcile cron to re-push later.
+        const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);
+        err.code = 'live_push_failed';
+        throw err;
+      }
     }
     const newCurrent = (pushAttempted && !googleAdsUpdated)
       ? campaign.daily_budget_current   // push failed → Google still runs the old amount
