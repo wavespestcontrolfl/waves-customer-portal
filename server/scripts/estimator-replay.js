@@ -76,7 +76,7 @@ function redactResult(result) {
   // Lane reasons and composer free text can quote names/addresses verbatim.
   if (Array.isArray(clone.reasons)) clone.reasons = clone.reasons.map((r) => mask(r, 0));
   if (clone.intent) {
-    for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address']) {
+    for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address', 'skip_reason']) {
       if (clone.intent[field]) clone.intent[field] = mask(clone.intent[field], 2);
     }
     for (const e of clone.intent.evidence || []) {
@@ -119,7 +119,7 @@ function printSummary(result) {
   if (facts.newConstruction) console.log('New construction: YES');
   if (facts.tenant) console.log('Tenant: YES');
   if (result.intent) {
-    console.log(`Decision: ${result.intent.decision}${result.intent.skip_reason ? ` (${result.intent.skip_reason})` : ''}`);
+    console.log(`Decision: ${result.intent.decision}${result.intent.skip_reason ? ` (${mask(result.intent.skip_reason, 0)})` : ''}`);
     console.log(`Services: ${Object.entries(result.intent.services || {}).map(([k, v]) => `${k}${Object.keys(v || {}).length ? ` ${JSON.stringify(v)}` : ''}`).join(', ') || '(none)'}`);
     console.log(`Composer confidence: ${result.intent.confidence}`);
     if (result.intent.constraint_flags?.length) {

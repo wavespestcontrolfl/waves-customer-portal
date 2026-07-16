@@ -206,10 +206,18 @@ const FALLBACK_SQFT_SOURCES = new Set([
 // correction supersedes the stale county roll); missing evidence (legacy
 // cached rows) counts as county when the parcel matched — the pre-evidence
 // behavior. Explicit AI/listing evidence downgrades.
-function sqftEvidenceIsCounty(propertyRecord) {
+// Raw/single-source records carry ARRAY-shaped evidence; the merged shape is
+// a single object.
+function sqftEvidenceItems(propertyRecord) {
   const evidence = propertyRecord?._fieldEvidence?.squareFootage;
-  if (!evidence) return true;
-  return evidence.sourceType === 'county' || evidence.sourceType === 'verified';
+  if (!evidence) return null;
+  return Array.isArray(evidence) ? evidence : [evidence];
+}
+
+function sqftEvidenceIsCounty(propertyRecord) {
+  const items = sqftEvidenceItems(propertyRecord);
+  if (!items) return true;
+  return items.some((item) => item?.sourceType === 'county' || item?.sourceType === 'verified');
 }
 
 function normalizeParcelView(propertyRecord) {
@@ -238,7 +246,7 @@ function normalizeParcelView(propertyRecord) {
       // A tech-VERIFIED override supersedes everything — including the
       // aggregate parcel figure, which stays the stale county value after a
       // field-verify correction.
-      ? ((propertyRecord._fieldEvidence?.squareFootage?.sourceType === 'verified'
+      ? (((sqftEvidenceItems(propertyRecord) || []).some((i) => i?.sourceType === 'verified')
         ? positive(propertyRecord.squareFootage) : null)
         || positive(parcel.livingAreaSqft)
         || (sqftEvidenceIsCounty(propertyRecord) ? positive(propertyRecord.squareFootage) : null))

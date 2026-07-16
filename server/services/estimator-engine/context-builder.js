@@ -123,7 +123,7 @@ async function loadCustomerByPhone(phone, extraction) {
 // shared/long-lived number must not supply the address or notification link.
 async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
   const LEAD_COLS = ['id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at'];
+    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at', 'updated_at'];
   try {
     if (call?.twilio_call_sid) {
       const byCall = await db('leads')
@@ -132,14 +132,25 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first();
-      if (byCall) return byCall;
+      if (byCall) return { lead: byCall, forThisCall: true };
     }
-    // On an AMBIGUOUS shared line, a phone-matched lead is as untrusted as
-    // the ambiguous profiles — only the sid-matched lead may speak for this
-    // call.
-    if (!phoneFallback) return null;
     const digits = last10(phone);
-    if (!digits) return null;
+    if (!digits) return { lead: null, forThisCall: false };
+    // On an AMBIGUOUS shared line a random phone-matched lead is as
+    // untrusted as the ambiguous profiles — but a REUSED open lead (the
+    // processor updates it without restamping twilio_call_sid) is this
+    // call's lead: it was touched at/after the call started.
+    if (!phoneFallback) {
+      if (!call?.created_at) return { lead: null, forThisCall: false };
+      const reused = await db('leads')
+        .select(LEAD_COLS)
+        .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+        .whereNull('deleted_at')
+        .where('updated_at', '>=', call.created_at)
+        .orderBy('updated_at', 'desc')
+        .first();
+      return { lead: reused || null, forThisCall: !!reused };
+    }
     let q = db('leads')
       .select(LEAD_COLS)
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
@@ -149,10 +160,15 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
       const cutoff = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       q = q.where('created_at', '<=', cutoff);
     }
-    return await q.first();
+    const byPhone = await q.first();
+    // A phone-fallback lead touched at/after the call started was created or
+    // reused by THIS call's processing; older ones are prior history.
+    const forThisCall = !!(byPhone && call?.created_at
+      && byPhone.updated_at && new Date(byPhone.updated_at) >= new Date(call.created_at));
+    return { lead: byPhone || null, forThisCall };
   } catch (err) {
     logger.warn(`[estimator-engine] lead load failed: ${err.message}`);
-    return null;
+    return { lead: null, forThisCall: false };
   }
 }
 
@@ -259,7 +275,7 @@ async function buildCallContext(callLogId) {
   }
   const customer = customerMatch.customer;
 
-  const [lead, smsThread, priorEstimates] = await Promise.all([
+  const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     loadLeadForCall(call, phone, { phoneFallback: !customerMatch.ambiguous }),
     // A shared line with MULTIPLE profiles carries texts, estimates, and
     // leads for other people/properties — none of that history may steer
@@ -267,6 +283,7 @@ async function buildCallContext(callLogId) {
     customerMatch.ambiguous ? Promise.resolve([]) : loadSmsThread(phone, { before: call.created_at }),
     customerMatch.ambiguous ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
+  const lead = leadMatch.lead;
 
   return {
     call,
@@ -277,6 +294,10 @@ async function buildCallContext(callLogId) {
     customer: customer || null,
     customerPhoneAmbiguous: customerMatch.ambiguous,
     lead: lead || null,
+    // Distinguishes THIS call's lead (sid-matched or touched by this call's
+    // processing) from prior phone history — the current lead's address
+    // outranks the saved profile for second-property quotes.
+    leadIsForThisCall: leadMatch.forThisCall,
     smsThread,
     priorEstimates,
     // An AMBIGUOUS shared-phone match must never unlock member pricing

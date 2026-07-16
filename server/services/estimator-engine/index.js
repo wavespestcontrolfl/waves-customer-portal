@@ -67,9 +67,11 @@ function addressFromContext(context) {
     ? [context.customer.address_line1, context.customer.city, [context.customer.state, context.customer.zip].filter(Boolean).join(' ')]
       .filter(Boolean).join(', ')
     : null;
-  // An established customer's service address beats a phone-matched lead —
-  // leads.loadByPhone returns the NEWEST lead on the line, which on shared or
-  // long-lived numbers can be a stale record for a different property.
+  // THIS call's lead (sid-matched / touched by this call's processing)
+  // outranks the saved profile — an existing customer asking about a second
+  // or rental property has that address on the current lead, not the home
+  // on file. Only STALE phone-history leads yield to the profile.
+  if (context.leadIsForThisCall && leadAddress) return leadAddress;
   if (context.isExistingCustomer) return customerAddress || leadAddress;
   return leadAddress || customerAddress;
 }
@@ -357,17 +359,26 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
 
     // The composer may also reclassify commercial vs the pre-intent hint —
     // the tenant/building arbitration rules depend on it. Re-run (pure) off
-    // the effective signals either way to keep one code path. After an
-    // address re-gather the matched profile's saved measurements describe the
-    // OLD property — they must not backfill the new one.
+    // the effective signals either way to keep one code path.
+    // The matched profile's saved measurements (lot_sqft; property_sqft is
+    // turf) may ONLY backfill when the profile's saved address street-matches
+    // the property actually being quoted — an extraction/lead-supplied
+    // different address never re-gathers, so absence-of-regather is not
+    // proof; second-property quotes must not inherit the home on file.
+    const quotedAddress = intent.address || result.addressUsed || address;
+    const customerSavedAddress = trustedCustomer?.address_line1
+      ? [trustedCustomer.address_line1, trustedCustomer.city, trustedCustomer.zip].filter(Boolean).join(', ')
+      : null;
+    const profileDescribesQuotedProperty = !addressRegathered
+      && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
+
     propertyFacts = resolvePropertyFacts({
       // Caller-stated facts (extraction) describe the property discussed on
-      // THIS call — they stay. Only the matched profile's saved measurements
-      // belong to the old property.
+      // THIS call — they stay.
       extraction: context.extraction,
       propertyRecord: effectiveSignals.propertyRecord,
       parcelView: effectiveSignals.parcelView,
-      customer: addressRegathered ? null : trustedCustomer,
+      customer: profileDescribesQuotedProperty ? trustedCustomer : null,
       isCommercial: intent.is_commercial,
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
@@ -390,14 +401,6 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      // The profile's saved measurements may steer pricing ONLY when its
-      // saved address street-matches the property actually being quoted.
-      const quotedAddress = intent.address || result.addressUsed || address;
-      const customerSavedAddress = trustedCustomer?.address_line1
-        ? [trustedCustomer.address_line1, trustedCustomer.city, trustedCustomer.zip].filter(Boolean).join(', ')
-        : null;
-      const profileDescribesQuotedProperty = !addressRegathered
-        && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
       engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices, profileDescribesQuotedProperty });
       try {
         engineResult = generateEstimateSafely(engineInput);

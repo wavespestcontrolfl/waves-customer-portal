@@ -381,6 +381,13 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
   ].filter((line) => line !== null).join('\n');
 }
 
+// Engine tier keys are lowercase; customers.waveguard_tier's CHECK allows
+// only the title-case labels.
+const WAVEGUARD_TIER_LABELS = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
+function normalizeWaveGuardTier(tier) {
+  return WAVEGUARD_TIER_LABELS[String(tier || '').toLowerCase()] || null;
+}
+
 // ── Draft row ─────────────────────────────────────────────────
 async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [] }) {
   const token = crypto.randomBytes(16).toString('hex');
@@ -459,7 +466,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // The engine's computed tier must persist — the public engine-backed
       // render/accept path falls back to 'Bronze' when this column is null,
       // which would show Silver/Gold/Platinum-priced drafts as Bronze.
-      waveguard_tier: engineResult?.waveGuard?.tier || null,
+      // TITLE-CASED: the engine emits lowercase keys, but the accept path
+      // copies this value onto customers.waveguard_tier whose CHECK only
+      // allows Bronze/Silver/Gold/Platinum — a lowercase value would blow up
+      // the conversion of a caller with no existing customer row.
+      waveguard_tier: normalizeWaveGuardTier(engineResult?.waveGuard?.tier),
       token,
       expires_at: expiresAt,
       status: 'draft',
