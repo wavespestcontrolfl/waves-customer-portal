@@ -277,6 +277,7 @@ const ReceiptPage = lazyWithRetry(() => import('./pages/ReceiptPage'));
 const ContractSignPage = lazyWithRetry(() => import('./pages/ContractSignPage'));
 const TrackPage = lazyWithRetry(() => import('./pages/TrackPage'));
 const ReschedulePage = lazyWithRetry(() => import('./pages/ReschedulePage'));
+const SecureAppointmentPage = lazyWithRetry(() => import('./pages/SecureAppointmentPage'));
 const PrepGuidePage = lazyWithRetry(() => import('./pages/PrepGuidePage'));
 const PriceChangeNoticePage = lazyWithRetry(() => import('./pages/PriceChangeNoticePage'));
 const AdminPriceChangePage = lazyWithRetry(() => import('./pages/admin/AdminPriceChangePage'));
@@ -407,6 +408,7 @@ export default function App() {
           <Route path="/contract/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ContractSignPage /></Suspense>} />
           <Route path="/track/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><TrackPage /></Suspense>} />
           <Route path="/reschedule/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReschedulePage /></Suspense>} />
+          <Route path="/secure/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><SecureAppointmentPage /></Suspense>} />
           <Route path="/prep/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PrepGuidePage /></Suspense>} />
           <Route path="/price-change/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PriceChangeNoticePage /></Suspense>} />
           <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimatePublicGateway /></Suspense>} />

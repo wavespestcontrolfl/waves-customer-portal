@@ -484,6 +484,9 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// "Secure your appointment" card-on-file capture page (appointment-card-
+// request funnel). Token-gated; unreachable until the funnel sends links.
+app.use('/api/public/secure-card', require('./routes/secure-card-public'));
 app.use('/api/public/prep', require('./routes/prep-public'));
 app.use('/api/public/price-change', require('./routes/price-change-public'));
 app.use('/api/public/lawn-diagnostic', require('./routes/public-lawn-diagnostic'));

@@ -290,12 +290,208 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
   }
 }
 
+// ── /secure/:token capture lifecycle (card-on-file spec §3 Phase 5.2) ──
+// The page the funnel's SMS points at. Same trust contract as the
+// recurring-accept capture (recurring-card-on-file.js): the SetupIntent is
+// live-verified against Stripe — status, purpose metadata, AND request id —
+// never trusted from the client, and completion runs the same idempotent
+// save → consent → enroll sequence as the pay page's /setup-complete.
+
+const MAX_SETUP_INTENT_GENERATIONS = 5;
+
+// Mint (or replay — deterministic idempotency key) the capture SetupIntent
+// for a pending request, walking the generation salt past terminal intents
+// (same self-heal as createRecurringCardSetupIntentForEstimate). Persists
+// the intent id on the row: Phase 4's abandonment stage keys on a pending
+// row whose intent never succeeded.
+async function createSecureCardSetupIntent(request) {
+  const StripeService = require('./stripe');
+  for (let generation = 0; generation < MAX_SETUP_INTENT_GENERATIONS; generation += 1) {
+    const setupIntent = await StripeService.createAppointmentCardSetupIntent({
+      requestId: request.id,
+      scheduledServiceId: request.scheduled_service_id,
+      generation,
+    });
+    if (!setupIntent) return null;
+    if (setupIntent.status === 'canceled') continue;
+    if (setupIntent.id !== request.stripe_setup_intent_id) {
+      await db('appointment_card_requests')
+        .where({ id: request.id })
+        .update({ stripe_setup_intent_id: setupIntent.id, updated_at: new Date() });
+    }
+    return { clientSecret: setupIntent.client_secret, setupIntentId: setupIntent.id };
+  }
+  logger.error(`[appt-card-request] exhausted SetupIntent generations for request ${request.id} — all replays terminal`);
+  return null;
+}
+
+function secureCardIntentMatchesRequest(setupIntent, requestId) {
+  return !!setupIntent
+    && setupIntent.status === 'succeeded'
+    && setupIntent.metadata?.purpose === 'appointment_card_request'
+    && String(setupIntent.metadata?.request_id) === String(requestId)
+    && !!setupIntent.payment_method;
+}
+
+// Live verification — trust re-derived from Stripe, never the client.
+async function verifySecureCardIntent({ request, setupIntentId }) {
+  if (!setupIntentId) return { ok: false, reason: 'no_setup_intent' };
+  let setupIntent = null;
+  try {
+    const StripeService = require('./stripe');
+    setupIntent = await StripeService.retrieveSetupIntent(setupIntentId);
+  } catch (err) {
+    logger.warn(`[appt-card-request] live SetupIntent verification failed: ${err.message}`);
+    return { ok: false, reason: 'verification_failed' };
+  }
+  if (!secureCardIntentMatchesRequest(setupIntent, request.id)) {
+    return { ok: false, reason: 'intent_mismatch' };
+  }
+  const pm = setupIntent.payment_method;
+  return { ok: true, stripePaymentMethodId: typeof pm === 'string' ? pm : pm.id, setupIntentId: setupIntent.id };
+}
+
+async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason }) {
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Secure-appointment card not enrolled',
+      `A customer saved a card from the secure-appointment link but it could not be enrolled (${reason}) — re-add a payment method or the visit will invoice unprotected.`,
+      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dashboard', metadata: { customerId, scheduledServiceId, reason } },
+    );
+  } catch (e) { logger.warn(`[appt-card-request] capture review alert failed: ${e.message}`); }
+}
+
+// POST /secure/:token completion. Verify live, then the idempotent
+// save → consent → enroll sequence (mirrors completeRecurringCardEnrollment
+// so enrollment semantics can't drift between save surfaces), then flip the
+// request row pending → completed (claim-based: only the pending row
+// transitions, so a double-submit or webhook overlap can't double-write).
+async function completeSecureCardCapture({ token, setupIntentId, ip = null, userAgent = null }) {
+  const request = await db('appointment_card_requests').where({ token }).first();
+  if (!request) return { ok: false, code: 'not_found' };
+  if (request.status === 'completed' || request.status === 'satisfied') {
+    return { ok: true, alreadyCompleted: true };
+  }
+
+  const verified = await verifySecureCardIntent({ request, setupIntentId });
+  if (!verified.ok) return { ok: false, code: verified.reason };
+  const { stripePaymentMethodId } = verified;
+
+  try {
+    // Idempotent save: stripe_payment_method_id is unique — a retry after a
+    // partial first attempt continues with the existing row.
+    let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePaymentMethodId }).first();
+    if (saved && String(saved.customer_id) !== String(request.customer_id)) {
+      logger.warn(`[appt-card-request] pm ownership mismatch: pm ${stripePaymentMethodId} belongs to ${saved.customer_id}, request customer ${request.customer_id}`);
+      await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: 'pm_ownership_mismatch' });
+      return { ok: false, code: 'pm_ownership_mismatch' };
+    }
+    if (!saved) {
+      const StripeService = require('./stripe');
+      saved = await StripeService.savePaymentMethod(request.customer_id, stripePaymentMethodId, {
+        enableAutopay: false,
+        // enrollConsentedMethod owns the default decision.
+        makeDefault: false,
+      });
+    }
+    const ConsentService = require('./payment-method-consents');
+    if (!(await ConsentService.hasEnrollmentScopedConsent(request.customer_id, stripePaymentMethodId))) {
+      // The page rendered the locked card consent verbatim (checkbox-gated)
+      // before confirmSetup — this row is the authorization of record.
+      await ConsentService.recordConsent({
+        customerId: request.customer_id,
+        paymentMethodId: saved?.id || null,
+        stripePaymentMethodId,
+        source: 'appointment_card_request',
+        methodType: saved?.method_type || 'card',
+        ip,
+        userAgent,
+      });
+    }
+    if (saved?.id) {
+      await ConsentService.linkPaymentMethodId(stripePaymentMethodId, saved.id);
+    }
+    const { enrollConsentedMethod } = require('./autopay-enrollment');
+    const enrollment = await enrollConsentedMethod({
+      customerId: request.customer_id,
+      paymentMethodId: saved?.id,
+      source: 'save_card_consent',
+      details: { via: 'appointment_card_request', scheduled_service_id: request.scheduled_service_id, setup_intent_id: verified.setupIntentId },
+    });
+    if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
+      // The card IS saved and consented — the visit is secured — but the
+      // enrollment refusal means completion auto-charge may fall back to a
+      // pay link. Surface it; don't fail the customer's capture.
+      logger.warn(`[appt-card-request] enrollment refused (${enrollment.reason}) for customer ${request.customer_id}`);
+      await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: enrollment.reason });
+    }
+
+    await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({
+        status: 'completed',
+        stripe_setup_intent_id: verified.setupIntentId,
+        stripe_payment_method_id: stripePaymentMethodId,
+        payment_method_id: saved?.id || null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
+    return { ok: true };
+  } catch (err) {
+    logger.error(`[appt-card-request] capture completion failed for request ${request.id}: ${err.message}`);
+    await alertCaptureNeedsReview({ customerId: request.customer_id, scheduledServiceId: request.scheduled_service_id, reason: err.message });
+    return { ok: false, code: 'completion_failed' };
+  }
+}
+
+// GET /secure/:token page payload. The page keeps working for already-sent
+// links even if the send gate is later switched off — the gate governs new
+// sends; stranding a customer mid-flow is never the kill-switch behavior.
+async function loadSecureCardPageData(token) {
+  const request = await db('appointment_card_requests').where({ token }).first();
+  if (!request) return null;
+
+  const visit = await db('scheduled_services')
+    .where({ id: request.scheduled_service_id })
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type');
+  const customer = request.customer_id
+    ? await db('customers').where({ id: request.customer_id }).first('id', 'first_name')
+    : null;
+  const base = {
+    firstName: customer?.first_name || null,
+    serviceType: visit?.service_type || null,
+    dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
+    windowDisplay: visit?.window_display || null,
+  };
+
+  if (request.status === 'completed' || request.status === 'satisfied') {
+    return { state: 'secured', ...base };
+  }
+  const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
+  if (!visit
+    || !LIVE_VISIT_STATUSES.includes(visit.status)
+    || (dateOnly && dateOnly < etDateString(new Date()))) {
+    return { state: 'closed', ...base };
+  }
+
+  const intent = await createSecureCardSetupIntent(request);
+  if (!intent) return { state: 'unavailable', ...base };
+  return { state: 'ready', ...base, clientSecret: intent.clientSecret, setupIntentId: intent.setupIntentId };
+}
+
 module.exports = {
   requestCardForAppointment,
   isAppointmentCardRequestEnabled,
+  loadSecureCardPageData,
+  completeSecureCardCapture,
   _test: {
     dateLineFor,
     resolveExemption,
     autoSecureFromSavedMethod,
+    createSecureCardSetupIntent,
+    verifySecureCardIntent,
+    secureCardIntentMatchesRequest,
   },
 };

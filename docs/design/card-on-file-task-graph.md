@@ -94,12 +94,14 @@ The repo moved between the spec (2026-07-12) and this audit. Verified against ma
   #2742 decline notice), T4 (#2729 payment-step abandonment, dark).
 - **Owner actions outstanding:** T1c (`ONE_TIME_CARD_HOLD` flip), T2h
   (`RECURRING_CARD_ON_FILE` flip), D1–D3 confirmations.
-- **Open code:** Wave 5. T5e (AI pre-book duplicate guard widening) and T5a
-  (idempotent request-card funnel: `appointment-card-request.js`, dark behind
-  `APPOINTMENT_CARD_REQUEST` + the inactive `secure_appointment_card` template)
-  implemented 2026-07-16 on this branch. T5b (the `/secure/:token` page the
-  link points at) is next — no trigger path is wired into T5a until it exists.
-  T5c/T5d not started.
+- **Open code:** Wave 5. Implemented 2026-07-16 on this branch: T5e (AI
+  pre-book duplicate guard widening), T5a (idempotent request-card funnel:
+  `appointment-card-request.js`, dark behind `APPOINTMENT_CARD_REQUEST` + the
+  inactive `secure_appointment_card` template), and T5b (the `/secure/:token`
+  capture page: `secure-card-public.js` routes + `SecureAppointmentPage.jsx`,
+  live-verified SetupIntent → save → consent → enroll, unreachable until the
+  funnel sends links). Remaining: T5c (wire the AI call pipeline into T5a) and
+  T5d (/book wizard card step).
 
 ## Nodes and contracts
 
