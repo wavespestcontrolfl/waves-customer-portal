@@ -1171,10 +1171,14 @@ const AppointmentReminders = {
         // Dispatch-owned pending bookings (call follow-ups, outbound-review
         // bookings) are left unarmed ON PURPOSE until the office confirms —
         // arming them here would text the customer first. admin-schedule
-        // registers them at the office-confirm transition.
-        .whereNot(function () {
-          this.where('ss.status', 'pending')
-            .whereIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
+        // registers them at the office-confirm transition. NULL-safe on
+        // purpose: NOT (pending AND source_action IN (...)) is NULL — not
+        // true — for NULL source_action, which would silently drop ordinary
+        // pending visits with no source marker from the sweep.
+        .where(function () {
+          this.whereNot('ss.status', 'pending')
+            .orWhereNull('ss.source_action')
+            .orWhereNotIn('ss.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS);
         })
         .whereNotExists(function () {
           this.select(1)
