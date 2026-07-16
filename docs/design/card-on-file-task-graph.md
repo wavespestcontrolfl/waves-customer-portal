@@ -83,6 +83,20 @@ graph TD
 Phase order 4-before-5 follows spec §5 decision 6 (protect the funnel being bought
 first). T5e has no hard dependency and can run any time.
 
+## Status (A1 audit, 2026-07-16)
+
+The repo moved between the spec (2026-07-12) and this audit. Verified against main:
+
+- **Done in code:** T0 (`server/utils/pan-scrub.js` + recording quarantine, PR #2676),
+  T1a (booking-age grace in `isWithinCancelWindow`), T1b (reminder policy clause),
+  T2a–T2g (`recurring-card-on-file.js` restore + exemptions; above-quote cap and
+  per-visit completeness via Codex #2680), T3a/T3b (#2738 saved-card retries,
+  #2742 decline notice), T4 (#2729 payment-step abandonment, dark).
+- **Owner actions outstanding:** T1c (`ONE_TIME_CARD_HOLD` flip), T2h
+  (`RECURRING_CARD_ON_FILE` flip), D1–D3 confirmations.
+- **Open code:** Wave 5. T5e (AI pre-book duplicate guard widening) implemented
+  2026-07-16 on this branch; T5a–T5d not started.
+
 ## Nodes and contracts
 
 ### Wave 0 — independent, ship first

@@ -1919,6 +1919,22 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
   if (!customerId) return null;
 
+  // An ATTACHED booking (a human's row this call was linked to — see
+  // findAttachableCallAppointment) carries no Call SID marker in notes and
+  // no phone_call booking_source, so a reprocess would miss it through both
+  // lookups below and re-book the visit. source_call_log_id is the durable
+  // this-call linkage (stamped on attach AND on fresh inserts), so it is
+  // checked first. Child rows stamp it too — same exclusion as below.
+  if (call.id) {
+    const linked = await trx('scheduled_services')
+      .where({ customer_id: customerId, source_call_log_id: call.id })
+      .whereNull('parent_service_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
+      .orderBy('created_at', 'asc')
+      .first();
+    if (linked) return linked;
+  }
+
   const marker = `Call SID: ${call.twilio_call_sid}`;
   // Both lookups answer "was the PRIMARY appointment for this call already
   // created?" — a linked follow-up child (visit 2) carries the same Call SID
@@ -1951,6 +1967,41 @@ async function findExistingCallAppointment({ customerId, call, scheduledDate, wi
   }
 
   return query.first();
+}
+
+// Card-on-file spec §3 Phase 5.5: the guard above only sees THIS call's own
+// rows. A visit booked by a HUMAN through another channel while the call was
+// still being processed (the office books it in the portal mid-call; the
+// customer self-books right after hanging up) is invisible to it, and the
+// pipeline would insert a duplicate. Find live parent visits for this
+// customer with the SAME service line within ±1 day of the extracted date:
+//  - exactly one match → the visit already exists; the caller ATTACHES the
+//    call to it (stamps source_call_log_id) instead of inserting.
+//  - multiple matches → ambiguous; the caller holds for human review.
+// phone_call-sourced rows and rows already linked to a call are excluded:
+// other calls' bookings keep their own dedup story (the same-day hold),
+// and re-attaching them would hijack that call's linkage.
+async function findAttachableCallAppointment({ customerId, scheduledDate, serviceType, trx = db }) {
+  const none = { row: null, ambiguous: [] };
+  if (!customerId || !scheduledDate || !serviceType) return none;
+  const anchor = new Date(`${scheduledDate}T00:00:00Z`);
+  if (Number.isNaN(anchor.getTime())) return none;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const windowFrom = new Date(anchor.getTime() - DAY_MS).toISOString().slice(0, 10);
+  const windowTo = new Date(anchor.getTime() + DAY_MS).toISOString().slice(0, 10);
+  const candidates = await trx('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('parent_service_id')
+    .whereIn('status', ['pending', 'confirmed'])
+    .whereNull('source_call_log_id')
+    .where((qb) => qb.whereNull('booking_source').orWhereNot('booking_source', 'phone_call'))
+    .whereBetween('scheduled_date', [windowFrom, windowTo])
+    .whereRaw('LOWER(TRIM(service_type)) = LOWER(TRIM(?))', [serviceType])
+    .orderBy('created_at', 'asc');
+  const rows = Array.isArray(candidates) ? candidates : [];
+  if (rows.length === 1) return { row: rows[0], ambiguous: [] };
+  if (rows.length > 1) return { row: null, ambiguous: rows };
+  return none;
 }
 
 const UNSUPPORTED_CALL_RE = /\b(seo|organic traffic|google ranking|search engine optimization|lead generation|contractor leads?)\b/i;
@@ -6445,6 +6496,13 @@ const CallRecordingProcessor = {
                 parentWindowStart: windowStart || '09:00',
               });
               let reusedExistingSchedule = false;
+              // Set when the call was ATTACHED to a live booking made by a
+              // human through another channel (see the attach guard below):
+              // the id drives the distinct log line, and the skipped-plan
+              // flag surfaces the promised-but-not-auto-booked visit 2 as an
+              // advisory review card after commit.
+              let attachedManualBookingId = null;
+              let attachSkippedFollowUpPlan = false;
               // Resolve the Bill-To payer once, before the transaction (it's a
               // reusable find-or-create keyed on AP email, independent of the
               // booking's atomicity), for the fresh insert + fresh follow-up
@@ -6641,15 +6699,75 @@ const CallRecordingProcessor = {
                   followUpCreated = await ensureCallFollowUpVisit(primaryRow);
                   return primaryRow;
                 }
-                // findExistingCallAppointment only sees THIS call's rows and
-                // same-run phone-call bookings — a customer merely
-                // re-confirming a visit booked through ANY other channel
-                // ("still on for Tuesday at 10?") would re-book it here, with
-                // duplicate reminders and a second confirmation SMS. Any live
-                // same-day parent visit for this customer means a human
-                // decides: hold instead of inserting a duplicate. (A genuine
-                // second same-day visit is rare enough that one review card
-                // beats a phantom double-dispatch.)
+                // findExistingCallAppointment only sees THIS call's rows —
+                // a visit booked through ANY other channel (a human in the
+                // portal mid-call, online self-booking) is invisible to it,
+                // and a customer merely re-confirming such a visit ("still
+                // on for Tuesday at 10?") would re-book it here, with
+                // duplicate reminders and a second confirmation SMS. The AI
+                // never books over a human: exactly one live row with the
+                // same service line within ±1 day → ATTACH the call to it
+                // (source_call_log_id makes the linkage durable — a
+                // reprocess finds it via the linked lookup) instead of
+                // inserting; several plausible rows → hold for human review.
+                const attachable = await findAttachableCallAppointment({
+                  customerId, scheduledDate, serviceType, trx,
+                });
+                if (attachable.row) {
+                  reusedExistingSchedule = true;
+                  attachedManualBookingId = attachable.row.id;
+                  attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  const attachNote = `Attached from phone call — Call SID: ${callSid}.`;
+                  const [stamped] = await trx('scheduled_services')
+                    .where({ id: attachable.row.id })
+                    .update({
+                      source_call_log_id: call.id,
+                      // JobDrawer-only: notes is customer-visible verbatim
+                      // (GET /api/schedule), so the linkage cue stays out of it.
+                      internal_notes: attachable.row.internal_notes
+                        ? `${attachable.row.internal_notes} ${attachNote}`
+                        : attachNote,
+                      updated_at: new Date(),
+                    })
+                    .returning('*');
+                  const primaryRow = stamped || attachable.row;
+                  // The deal still closed — same idempotent, ownership-guarded
+                  // conversion as the reuse path above, same outbound-review
+                  // exception (that lead closes from the office confirmation).
+                  if (!outboundReviewBooking) {
+                    await convertCallLeadOnPhoneBooking(trx, {
+                      leadId,
+                      customerId,
+                      scheduledServiceId: primaryRow.id,
+                      callSid,
+                      keepOpenForQuote: callQuotePromised,
+                    });
+                  }
+                  // Deliberately NO ensureCallFollowUpVisit on an attached
+                  // human booking: a manually planned visit 2 is a standalone
+                  // parent row the child-dedup guard can't see, so an AI
+                  // child here risks exactly the double-booking this guard
+                  // exists to prevent. A promised visit 2 surfaces as an
+                  // advisory review card instead (post-commit below).
+                  return primaryRow;
+                }
+                if (attachable.ambiguous.length) {
+                  return {
+                    __held: {
+                      reason: 'ambiguous_existing_appointment',
+                      existingId: attachable.ambiguous[0].id,
+                      existingStatus: attachable.ambiguous[0].status,
+                      existingService: attachable.ambiguous[0].service_type,
+                      existingIds: attachable.ambiguous.map((r) => r.id),
+                    },
+                  };
+                }
+                // Any live same-day parent visit for this customer that the
+                // attach guard did not claim (different service line, or an
+                // excluded shape like another call's booking) still means a
+                // human decides: hold instead of inserting a duplicate. (A
+                // genuine second same-day visit is rare enough that one
+                // review card beats a phantom double-dispatch.)
                 const sameDayExisting = await trx('scheduled_services')
                   .where({ customer_id: customerId })
                   .whereNull('parent_service_id')
@@ -6883,6 +7001,9 @@ const CallRecordingProcessor = {
                     extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
                     extraPayload: {
                       existing_scheduled_service_id: svc.__held.existingId || null,
+                      // Ambiguous-attach holds carry EVERY plausible row so the
+                      // review card shows the full choice, not just the oldest.
+                      existing_scheduled_service_ids: svc.__held.existingIds || null,
                       existing_status: svc.__held.existingStatus || null,
                       existing_service: svc.__held.existingService || null,
                       preferred_date_time: extracted.preferred_date_time || null,
@@ -6895,7 +7016,11 @@ const CallRecordingProcessor = {
               } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
-                logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
+                if (attachedManualBookingId) {
+                  logger.info(`[call-proc] Attached call ${callSid} to existing ${svc.booking_source || 'manually created'} booking ${svc.id}; not creating duplicate`);
+                } else {
+                  logger.info(`[call-proc] Reusing existing phone-call scheduled service ${svc.id} for ${callSid}; not creating duplicate`);
+                }
               }
               scheduledServiceId = svc.id;
               // NOTE: payer_id is stamped only on FRESH bookings (insert +
@@ -6938,6 +7063,27 @@ const CallRecordingProcessor = {
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
                   .catch((triageErr) => logger.warn(`[call-proc] unassigned-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+              }
+              if (attachedManualBookingId && attachSkippedFollowUpPlan) {
+                // The call promised a follow-up treatment, but the primary is
+                // a human's booking so no AI child was created (a manually
+                // planned visit 2 would be a standalone row the child-dedup
+                // guard can't see). Surface it — visit 2 is booked by hand.
+                await db('triage_items')
+                  .insert(buildTriageItem({
+                    callLogId: call.id,
+                    flag: 'attached_booking_followup_unbooked',
+                    extraction: v2ApprovedExtraction || v2CanonicalExtraction || undefined,
+                    severity: 'advisory',
+                    extraPayload: {
+                      scheduled_service_id: svc.id,
+                      scheduled_date: svc.scheduled_date || null,
+                      service: svc.service_type || null,
+                    },
+                  }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                  .ignore()
+                  .catch((triageErr) => logger.warn(`[call-proc] attached-booking follow-up triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
               }
               }
               if (followUpCreated) {
@@ -7825,6 +7971,7 @@ CallRecordingProcessor._test = {
   normalizeCallExtraction,
   shouldCreateCallLeadForCustomer,
   findExistingCallAppointment,
+  findAttachableCallAppointment,
   classifyCallerAccount,
   summarizeKnownCaller,
   summarizePriorCall,

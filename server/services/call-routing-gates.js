@@ -119,6 +119,13 @@ function buildTriageItem({
     existing_appointment_coordination: 'time_ambiguous',
     auto_booking_skipped_after_approval: 'time_ambiguous',
     existing_appointment_same_date: 'time_ambiguous',
+    // Several live bookings plausibly match the call (same service line
+    // within a day of the discussed date) — a human picks which one the
+    // call belongs to instead of the AI inserting a duplicate.
+    ambiguous_existing_appointment: 'time_ambiguous',
+    // The call was attached to a human's existing booking, so the promised
+    // follow-up treatment was NOT auto-booked — the office books visit 2.
+    attached_booking_followup_unbooked: 'time_ambiguous',
     auto_booking_previously_cancelled: 'time_ambiguous',
     // Pending booking created from an OUTBOUND callback — office confirms the
     // appointment (and any card/payer) before it's treated as booked.
