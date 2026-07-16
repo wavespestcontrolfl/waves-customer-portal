@@ -236,23 +236,14 @@ class BudgetManager {
     };
   }
 
-  async getTechCountForArea(area, dateStr) {
-    // Get active technicians
+  async getTechCountForArea(_area, _dateStr) {
+    // Capacity is driven by the real active-technician count. There is no
+    // per-area tech roster in the data (one field crew covers the whole service
+    // area), so every area uses the same live count — the old hardcoded
+    // {area: [names]} map invented 2–3 phantom techs per zone and overstated
+    // capacity, holding budgets at full base while the real schedule was full.
     const techs = await db('technicians').where({ active: true });
-    if (!area || area === 'general') return techs.length;
-
-    // Filter by service area (simplified — techs cover zones)
-    const areaMap = {
-      'Lakewood Ranch': ['Adam', 'Jose'],
-      'LWR': ['Adam', 'Jose'],
-      'Parrish': ['Jacob'],
-      'Sarasota': ['Adam', 'Jose'],
-      'Venice': ['Jacob'],
-      'Bradenton': ['Adam', 'Jose', 'Jacob'],
-    };
-
-    const techNames = areaMap[area] || techs.map(t => t.name);
-    return techNames.length;
+    return techs.length;
   }
 
   /**
