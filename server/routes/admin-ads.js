@@ -43,7 +43,10 @@ function toFiniteNumber(v) {
   return NaN;
 }
 
-const CAMPAIGN_PLATFORMS = ['google_ads', 'facebook'];
+// Known ad platforms (google_lsa + facebook are ingested read-only; only
+// google_ads is remotely budget-controllable — that guard lives in setBudget/
+// setMode). Matches ad_campaigns.platform's documented set.
+const CAMPAIGN_PLATFORMS = ['google_ads', 'google_lsa', 'facebook'];
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
 // Settable only at creation (identity); an update must not repoint them.

@@ -419,14 +419,32 @@ describe('BudgetManager live Google Ads push', () => {
       expect(mockUpdateBudget).not.toHaveBeenCalled();
     });
 
-    test('unconfigured API: DB still updated, no push, googleAdsUpdated false', async () => {
+    test('unconfigured API: base + current advance (intent tracking), no push', async () => {
       campaignFirstRow = baseCampaign();
       mockIsConfigured.mockReturnValue(false);
 
       const result = await BudgetManager.setBudget('c-1', 50, 'test');
 
-      expect(mockCampaignUpdate).toHaveBeenCalled();
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: 50,
+      });
       expect(mockUpdateBudget).not.toHaveBeenCalled();
+      expect(result.googleAdsUpdated).toBe(false);
+    });
+
+    test('push failure: base recorded but current stays at the old live amount', async () => {
+      campaignFirstRow = baseCampaign(); // current '40'
+      mockIsConfigured.mockReturnValue(true);
+      mockUpdateBudget.mockResolvedValue(null); // Google refused (e.g. shared budget)
+
+      const result = await BudgetManager.setBudget('c-1', 50, 'test');
+
+      // Google still runs the old budget, so current must NOT claim the new one.
+      expect(mockCampaignUpdate).toHaveBeenCalledWith({
+        daily_budget_base: 50,
+        daily_budget_current: '40',
+      });
       expect(result.googleAdsUpdated).toBe(false);
     });
   });

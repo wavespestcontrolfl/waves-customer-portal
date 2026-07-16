@@ -421,13 +421,26 @@ class BudgetManager {
     // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
     const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
 
-    // daily_budget_current tracks what Google is running, so it moves to the
-    // amount we're about to push (mirrors setMode). In 'spent' mode this is a
-    // no-op (effectiveBudget == current); in 'stop' it advances the throttle to
-    // 1% of the NEW base so the dashboard and reconcile stay consistent.
+    // Push FIRST so daily_budget_current only ever records a budget Google is
+    // actually running: if Google rejects the change (shared budget, API error)
+    // we keep the prior current, so a requested decrease can't leave local state
+    // claiming the lower budget is live while Google keeps overspending. An
+    // unlinked/unconfigured campaign has no live counterpart, so its current
+    // advances to the intended amount (DB-only intent tracking).
+    let googleAdsUpdated = false;
+    let pushAttempted = false;
+    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
+      pushAttempted = true;
+      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+      googleAdsUpdated = !!pushed;
+    }
+    const newCurrent = (pushAttempted && !googleAdsUpdated)
+      ? campaign.daily_budget_current   // push failed → Google still runs the old amount
+      : effectiveBudget;
+
     await db('ad_campaigns').where({ id: campaignId }).update({
       daily_budget_base: base,
-      daily_budget_current: effectiveBudget,
+      daily_budget_current: newCurrent,
     });
 
     await db('ad_budget_log').insert({
@@ -440,15 +453,6 @@ class BudgetManager {
       reason,
       trigger: 'manual',
     });
-
-    // DB first, then best-effort live push (human-initiated path, healed by the
-    // 2-hourly reconcile) — mirrors setMode. The base is validated ≥ 0 above, so
-    // the NULL-base push guard never applies here.
-    let googleAdsUpdated = false;
-    if (campaign.platform_campaign_id && getGoogleAds().isConfigured()) {
-      const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
-      googleAdsUpdated = !!pushed;
-    }
 
     return {
       campaign: campaign.campaign_name,
