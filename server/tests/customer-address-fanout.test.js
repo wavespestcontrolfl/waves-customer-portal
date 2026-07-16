@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   addressMatchKey,
+  formatAddressBounded,
   snapshotMatchesContact,
   snapshotMatchesLine1,
   propagateCustomerAddressChange,
@@ -54,6 +55,18 @@ const AFTER = {
 };
 
 describe('addressMatchKey / snapshotMatchesLine1', () => {
+  test('bounded formatting preserves the unit and place instead of truncating the tail', () => {
+    const formatted = formatAddressBounded({
+      line1: `123 ${'Very Long Street Name '.repeat(20)}`,
+      line2: 'Unit 4',
+      city: 'Lakewood Ranch',
+      state: 'FL',
+      zip: '34211',
+    }, 255);
+    expect(formatted.length).toBeLessThanOrEqual(255);
+    expect(formatted).toMatch(/, Unit 4, Lakewood Ranch, FL 34211$/);
+  });
+
   test('spacing, punctuation, and case differences compare equal', () => {
     expect(addressMatchKey('4867 Tober Morey Way')).toBe(addressMatchKey('4867 Tobermorey Way'));
     expect(addressMatchKey('123 Main St.')).toBe(addressMatchKey('123 main st'));

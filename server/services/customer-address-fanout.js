@@ -55,6 +55,28 @@ function addressMatchKey(value) {
   return String(value ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Keep the structurally important tail (unit + place) intact when a snapshot
+// column is narrower than the customer fields. Only the street line is
+// shortened; silently chopping the formatted string could drop the unit and
+// point the lead/estimate at a different door.
+function formatAddressBounded(parts, maxLength) {
+  const line1 = String(parts?.line1 || '').trim();
+  const tail = formatAddress({
+    line2: parts?.line2,
+    city: parts?.city,
+    state: parts?.state,
+    zip: parts?.zip,
+  });
+  if (!line1) return tail.slice(0, maxLength);
+  if (!tail) return line1.slice(0, maxLength).trimEnd();
+  const separator = ', ';
+  const line1Budget = Math.max(0, maxLength - separator.length - tail.length);
+  const boundedLine1 = line1.slice(0, line1Budget).trimEnd();
+  return boundedLine1
+    ? `${boundedLine1}${separator}${tail}`
+    : tail.slice(0, maxLength);
+}
+
 // A comma segment that is a secondary-unit designator ("Apt 2", "# 4",
 // "Suite 200", "Floor 2", "Space 12") — a snapshot carrying one refers to a
 // distinct unit even when its street segment matches the customer's unitless
@@ -171,12 +193,15 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     snapshotMatchesContact(snapshot, before) || snapshotMatchesContact(snapshot, after);
 
   const now = new Date();
-  const fullAddress = formatAddress({
+  const addressParts = {
     line1: after.address_line1, line2: after.address_line2, city: after.city, state: after.state, zip: after.zip,
-  }).slice(0, 300);
-  const streetAddress = formatAddress({
-    line1: after.address_line1, line2: after.address_line2,
-  });
+  };
+  const fullAddress = formatAddressBounded(addressParts, 300);
+  const leadFullAddress = formatAddressBounded(addressParts, 255);
+  const streetAddress = formatAddressBounded({
+    line1: after.address_line1,
+    line2: after.address_line2,
+  }, 255);
 
   // The updates re-assert the open/terminal predicates from the selects: a
   // concurrent accept/archive/close landing between select and update must
@@ -212,7 +237,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
     // leads.address is varchar(255) (default knex string) — an oversized full
     // string would throw INSIDE the caller's transaction and roll back the
     // whole customer edit.
-    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: fullAddress.slice(0, 255) },
+    { rows: hasCityZip ? matched.filter((r) => String(r.address || '').includes(',')) : [], address: leadFullAddress },
   ];
   for (const group of leadGroups) {
     // city/zip are patched only when the customer row actually HAS them — a
@@ -287,7 +312,7 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
           .map((x) => addressMatchKey(String(x).replace(/\bflorida\b/gi, 'fl')))
           .join('|');
       };
-      const proposalTarget = fullAddress.slice(0, 200);
+      const proposalTarget = formatAddressBounded(addressParts, 200);
       const proposalAlreadyTarget = proposalTargetKey(proposalCurrent) === proposalTargetKey(proposalTarget);
       const patchPropertyAddress = !!(proposalCurrent && !proposalAlreadyTarget && matchesCustomerAddress(proposalCurrent));
       // Synthesized-fallback proposals also carry the address as a BUILDING
@@ -357,4 +382,10 @@ async function propagateCustomerAddressChange({ before, after }, conn = db) {
   return counts;
 }
 
-module.exports = { addressMatchKey, snapshotMatchesContact, snapshotMatchesLine1, propagateCustomerAddressChange };
+module.exports = {
+  addressMatchKey,
+  formatAddressBounded,
+  snapshotMatchesContact,
+  snapshotMatchesLine1,
+  propagateCustomerAddressChange,
+};
