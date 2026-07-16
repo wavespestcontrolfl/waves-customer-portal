@@ -198,7 +198,7 @@ function CardTitle({ children, sub }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <h2 style={{ fontFamily: FONTS.serif, fontSize: 21, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: 0 }}>{children}</h2>
-      {sub ? <div style={{ fontSize: 13, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
+      {sub ? <div style={{ fontSize: 14, color: MUTED, marginTop: 3 }}>{sub}</div> : null}
     </div>
   );
 }
@@ -206,7 +206,9 @@ function CardTitle({ children, sub }) {
 function inchLabel(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return null;
-  return `${String(Number(n.toFixed(2))).replace(/\.?0+$/, '')}"`;
+  // Number() already drops trailing decimal zeros; the old /\.?0+$/ regex
+  // also ate integer zeros — 0 rendered as a bare '"' and 10 as '1"'.
+  return `${Number(n.toFixed(2))}"`;
 }
 
 // ── 1. Lawn Health Snapshot (hero) ──────────────────────────────────────────────
@@ -271,7 +273,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
         {nextVisitText ? <KeyLine label="Next lawn visit" value={nextVisitText} dot={COLORS.glassNavy} /> : null}
       </div>
       {seasonalNote ? (
-        <div style={{ marginTop: 14, fontSize: 13, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
+        <div style={{ marginTop: 14, fontSize: 14, color: MUTED, fontStyle: 'italic', lineHeight: 1.5 }}>{seasonalNote}</div>
       ) : null}
     </Card>
   );
@@ -570,7 +572,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       </div>
       <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
         {hasRain ? <Legend color={'#0A7EC2'} label="Rain" /> : null}
-        {hasIrr ? <Legend color="#7CB9E8" label="Irrigation" /> : null}
+        {hasIrr ? <Legend color="#7CC7F0" label="Irrigation" /> : null}
         {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
       </div>
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -582,7 +584,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
-        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.orange}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>Coverage watch:</strong> total weekly water looks adequate, but a few areas may not be getting even coverage — worth checking that your sprinklers reach those spots rather than watering the whole lawn more.
         </div>
       ) : null}
@@ -836,7 +838,7 @@ export function LawnVisitTimeline({ timeline = {} }) {
                   <span style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>{e.label}</span>
                   {e.displayTime ? <span style={{ fontFamily: FONTS.mono, fontSize: 12.5, color: MUTED, flex: 'none' }}>{e.displayTime}</span> : null}
                 </div>
-                {desc ? <div style={{ fontSize: 13, color: BODY, lineHeight: 1.45, marginTop: 2 }}>{desc}</div> : null}
+                {desc ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.45, marginTop: 2 }}>{desc}</div> : null}
               </div>
             </div>
           );
@@ -856,7 +858,7 @@ function ScoreBadge({ score, side }) {
     <div className="lawn-photo-score" style={{
       position: 'absolute', bottom: 10, [side]: 10, zIndex: 3,
       background: 'rgba(4,57,94,0.86)', color: '#fff', borderRadius: 999, padding: '3px 10px',
-      fontFamily: FONTS.heading, fontWeight: 800, fontSize: 13, lineHeight: 1,
+      fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14, lineHeight: 1,
     }}>{Math.round(toScore(score))}</div>
   );
 }
@@ -883,7 +885,9 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
 
   const before = pics[0];
   const after = pics[pics.length - 1];
-  const delta = toScore(after.score) - toScore(before.score);
+  // rounded like ScoreBadge in the same card — float scores otherwise render
+  // "+7.300000000000004 points"
+  const delta = Math.round(toScore(after.score) - toScore(before.score));
   const H = 260;
 
   const setFromX = (clientX) => {
@@ -947,7 +951,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
         </div>
       ) : null}
       {note ? (
-        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 13, color: BODY, lineHeight: 1.5 }}>{note}</div>
+        <div style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>{note}</div>
       ) : null}
     </Card>
   );
@@ -1047,11 +1051,29 @@ function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.green : COLO
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
 export function LawnTrends({ trends = {} }) {
-  const { overall, waterGap, mowing, weed, stress, coverage, color, mowingBand = [3.5, 4.0], seasonalNote } = trends;
+  const { overall, waterGap, mowing, weed, stress, coverage, color, seasonalNote } = trends;
+  // The server emits [null, null] when no ideal band is known for the grass —
+  // a destructure default only covers undefined, so [null, null] used to ride
+  // through bandAccent (v >= null && v <= null → false) and paint a false
+  // orange "off-target" accent with no band drawn. Unknown band → neutral
+  // accent, no band overlay, honest subtitle.
+  const rawBand = Array.isArray(trends.mowingBand) ? trends.mowingBand : [3.5, 4.0];
+  // null-check BEFORE Number(): Number(null) === 0 is finite — the exact trap
+  // that produced the false accent in the first place
+  const mowingBand = (rawBand[0] != null && rawBand[1] != null
+    && Number.isFinite(Number(rawBand[0])) && Number.isFinite(Number(rawBand[1]))) ? rawBand : null;
   const hasOverall = (overall || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2;
   const minis = [
     waterGap && { key: 'water', title: 'Water Gap', sub: 'vs. weekly target', points: waterGap, unit: '"', zeroLine: true, accent: gapAccent(lastVal(waterGap)) },
-    mowing && { key: 'mow', title: 'Mowing Height', sub: 'vs. ideal band', points: mowing, unit: '"', band: mowingBand, accent: bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) },
+    mowing && {
+      key: 'mow',
+      title: 'Mowing Height',
+      sub: mowingBand ? 'vs. ideal band' : 'recent readings',
+      points: mowing,
+      unit: '"',
+      band: mowingBand || undefined,
+      accent: mowingBand ? bandAccent(lastVal(mowing), mowingBand[0], mowingBand[1]) : COLORS.blue,
+    },
     weed && { key: 'weed', title: 'Weed Cleanliness', sub: 'higher is better', points: weed, domain: [0, 100], accent: scoreAccent(lastVal(weed)) },
     coverage && { key: 'cov', title: 'Turf Coverage', sub: 'higher is better', points: coverage, domain: [0, 100], accent: scoreAccent(lastVal(coverage)) },
     color && { key: 'color', title: 'Color & Vigor', sub: 'higher is better', points: color, domain: [0, 100], accent: scoreAccent(lastVal(color)) },
