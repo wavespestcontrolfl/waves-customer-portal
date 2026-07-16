@@ -237,7 +237,9 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
   const lot = resolveLotSqft({
     extraction,
     parcel,
-    lookupLotSqft: propertyRecord?.lotSizeSqFt || propertyRecord?.lotSqft,
+    // The normalized lookup record carries listing/AI lot size as `lotSize`;
+    // the other spellings cover older cached shapes.
+    lookupLotSqft: propertyRecord?.lotSize || propertyRecord?.lotSizeSqFt || propertyRecord?.lotSqft,
     profileLotSqft: customer?.lot_sqft,
   });
 
@@ -270,6 +272,10 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     lot,
     newConstruction,
     propertyType,
+    // Lookup-resolved story count — calculatePropertyProfile derives
+    // footprint/perimeter/turf from homeSqFt ÷ stories, so flattening a
+    // two-story house to 1 story doubles its assumed ground footprint.
+    stories: positive(propertyRecord?.stories) || null,
     tenant: isTenant(extraction),
     countyParcel: parcel ? {
       county: parcel.county || null,

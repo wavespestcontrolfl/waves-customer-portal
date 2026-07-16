@@ -184,9 +184,13 @@ async function buildCallContext(callLogId) {
   // from_phone too — internal numbers never key the context loads (mirrors
   // resolveCallContactPhone in the call processor).
   const outbound = String(call.direction || '').toLowerCase() === 'outbound';
+  // v1 extraction stores the caller phone at top-level `phone` (the enriched
+  // shape uses caller.phone_e164) — on forwarded-call artifacts where both
+  // legs are internal, the extracted number is the only real caller signal.
+  const extractedPhone = extraction?.caller?.phone_e164 || extraction?.phone || null;
   const phone = outbound
-    ? firstExternalPhone(call.to_phone, extraction?.caller?.phone_e164, call.from_phone)
-    : firstExternalPhone(call.from_phone, extraction?.caller?.phone_e164, call.to_phone);
+    ? firstExternalPhone(call.to_phone, extractedPhone, call.from_phone)
+    : firstExternalPhone(call.from_phone, extractedPhone, call.to_phone);
 
   // The processor's own shared-phone/slot/address disambiguation already ran
   // — when it resolved a customer for this call, that beats a phone rematch.
@@ -225,7 +229,12 @@ async function buildCallContext(callLogId) {
     lead: lead || null,
     smsThread,
     priorEstimates,
-    isExistingCustomer: !!(customer && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+    // An AMBIGUOUS shared-phone match must never unlock member pricing
+    // (setup-fee waiver, combined-tier discounts) for whoever happens to be
+    // rows[0] — ambiguous profiles inform the composer but price as a lead.
+    isExistingCustomer: !!(customer
+      && !customerMatch.ambiguous
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
   };
 }
 

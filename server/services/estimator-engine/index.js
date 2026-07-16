@@ -204,6 +204,25 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         result.lane = 'existing';
         result.reasons = ['draft already exists for this call'];
         result.estimateId = existing.id;
+        // A prior run can have created the draft but failed to notify — with
+        // the generic quote-promised bells suppressed behind the gate, that
+        // would leave a silent draft forever. notify() dedupes internally,
+        // so this is a no-op when the bell already rang.
+        const existingLane = (() => {
+          try {
+            const data = typeof existing.estimate_data === 'string'
+              ? JSON.parse(existing.estimate_data) : existing.estimate_data;
+            return data?.estimatorEngine?.lane || 'yellow';
+          } catch { return 'yellow'; }
+        })();
+        await notify({
+          call: context.call,
+          context,
+          lane: existingLane,
+          estimateId: existing.id,
+          title: `AI estimate draft ${existingLane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
+          body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingLane).toUpperCase()}). Review in admin/estimates and send.`,
+        });
         return result;
       }
     }

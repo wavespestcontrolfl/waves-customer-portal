@@ -91,7 +91,7 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(isCommercial
       ? { buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource) }
       : {}),
-    stories: 1,
+    stories: positive(propertyFacts?.stories) || 1,
     address: intent.address || null,
     leadSource: 'call_pipeline',
   };

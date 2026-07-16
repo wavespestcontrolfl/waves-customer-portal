@@ -414,19 +414,34 @@ describe('review fixes', () => {
     expect(fromExtraction.propertyType).toBe('Condo');
   });
 
-  test('engine input carries the resolved property type and prior services', () => {
+  test('engine input carries the resolved property type, stories, and prior services', () => {
     const input = buildEngineInput({
       intent: baseIntent(),
       propertyFacts: {
         home: { value: 1400, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
         lot: { value: 5000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
         propertyType: 'Condo',
+        stories: 2,
       },
       context: {},
       priorQualifyingServices: ['lawn_care'],
     });
     expect(input.propertyType).toBe('Condo');
+    expect(input.stories).toBe(2);
     expect(input.priorQualifyingServices).toEqual(['lawn_care']);
+  });
+
+  test('fresh resolved property type beats the profile saved type', () => {
+    const input = buildEngineInput({
+      intent: baseIntent(),
+      propertyFacts: {
+        home: { value: 1400, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 5000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        propertyType: 'Townhome',
+      },
+      context: { customer: { property_type: 'Single Family' } },
+    });
+    expect(input.propertyType).toBe('Townhome');
   });
 
   test('street-address comparison detects a different quoted property', () => {
