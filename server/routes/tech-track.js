@@ -46,6 +46,7 @@ const {
 } = require('../utils/service-duration-capture');
 const {
   uploadServicePhotoBuffer,
+  uploadStagedServicePhotoBuffer,
   VALID_PHOTO_TYPES,
 } = require('../services/service-photos');
 
@@ -414,9 +415,24 @@ router.post('/:id/photos', upload.single('photo'), async (req, res, next) => {
       .first('id');
 
     if (!serviceRecord) {
-      return res.status(409).json({
-        error: 'Service must be completed before attaching photos',
+      const row = await uploadStagedServicePhotoBuffer({
+        scheduledServiceId: svc.id,
+        technicianId: req.technicianId,
+        buffer: req.file.buffer,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        photoType,
+        sortOrder: req.body.sortOrder,
+        caption: req.body.caption,
+        gpsLat: req.body.gpsLat,
+        gpsLng: req.body.gpsLng,
+        capturedAt: req.body.capturedAt,
       });
+      logger.info(
+        `[tech-track] photo staged service=${svc.id} tech=${req.technicianId} ` +
+        `type=${photoType} size=${req.file.size}`
+      );
+      return res.json({ photo: { ...row, staged: true } });
     }
 
     const row = await uploadServicePhotoBuffer({
@@ -471,7 +487,21 @@ router.get('/:id/photos', async (req, res, next) => {
       .where({ scheduled_service_id: svc.id })
       .orderBy('created_at', 'desc')
       .first('id');
-    if (!serviceRecord) return res.json({ photos: [] });
+    if (!serviceRecord) {
+      const staged = await db('scheduled_service_photo_staging')
+        .where({ scheduled_service_id: svc.id })
+        .orderBy('captured_at', 'asc')
+        .orderBy('sort_order', 'asc');
+      if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+      const photos = await Promise.all(staged.map(async (p) => ({
+        ...p,
+        staged: true,
+        url: await getSignedUrl(s3, new GetObjectCommand({
+          Bucket: config.s3.bucket, Key: p.s3_key,
+        }), { expiresIn: 3600 }),
+      })));
+      return res.json({ photos, staged: true });
+    }
 
     const photos = await db('service_photos')
       .where({ service_record_id: serviceRecord.id })

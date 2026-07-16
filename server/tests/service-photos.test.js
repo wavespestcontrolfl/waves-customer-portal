@@ -168,6 +168,32 @@ describe('service photo uploads', () => {
     });
   });
 
+  test('stages a pre-completion photo against the scheduled visit', async () => {
+    const { uploadStagedServicePhotoBuffer } = require('../services/service-photos');
+    const knex = makeKnex();
+
+    const row = await uploadStagedServicePhotoBuffer({
+      scheduledServiceId: 'service-1',
+      technicianId: 'tech-1',
+      buffer: Buffer.from('before photo'),
+      originalName: 'before.jpg',
+      mimeType: 'image/jpeg',
+      photoType: 'before',
+      capturedAt: '2026-07-15T12:00:00.000Z',
+      knex,
+    });
+
+    expect(row.id).toBe('photo-1');
+    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    expect(mockS3Send.mock.calls[0][0].input.Key).toContain('service-photo-staging/service-1/');
+    expect(knex.getInsertPayload()).toMatchObject({
+      scheduled_service_id: 'service-1',
+      technician_id: 'tech-1',
+      photo_type: 'before',
+      image_sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
   test('uses the caller transaction when provided', async () => {
     const { uploadServicePhotoDataUrls } = require('../services/service-photos');
     const trx = makeKnex({ isTransaction: true });

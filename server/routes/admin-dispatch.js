@@ -46,6 +46,7 @@ const { buildNoActivityFinding } = require('../services/service-report/no-activi
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const {
   cleanupUploadedServicePhotoObjects,
+  promoteStagedServicePhotos,
   uploadServicePhotoDataUrls,
 } = require('../services/service-photos');
 const {
@@ -1091,6 +1092,23 @@ function internalOnlyProductsBlockPayload({ isInternalOnlyCompletion = false, pr
   return {
     error: 'Waves Assessment is an internal-only consultation; no treatment products can be recorded for this visit.',
     code: 'internal_only_products_not_allowed',
+  };
+}
+
+function completionOwnershipError({ role, actorTechnicianId, assignedTechnicianId }) {
+  if (role === 'admin') return null;
+  if (
+    role === 'technician'
+    && actorTechnicianId
+    && assignedTechnicianId
+    && String(actorTechnicianId) === String(assignedTechnicianId)
+  ) return null;
+  return {
+    status: 403,
+    payload: {
+      error: 'Not assigned to this service',
+      code: 'service_not_assigned',
+    },
   };
 }
 
@@ -2486,6 +2504,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // This endpoint can mint reports, invoices, inventory deductions, and
+    // customer messages. Technicians may only perform that write for their
+    // own assigned visit; admins retain office-wide dispatch authority.
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) {
+      return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+
     // Stale-recap guard: a live job force-rescheduled to a future day
     // (rebooker allowLive) is rewound to a fresh confirmed appointment —
     // a recap submit from a CompletionPanel opened before the reschedule
@@ -3764,6 +3794,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+
+        // Before/progress photos captured from Tech Home predate the immutable
+        // service_record. Attach them inside this transaction so a failed
+        // completion leaves the staged rows intact for the technician's retry.
+        await promoteStagedServicePhotos({
+          scheduledServiceId: svc.id,
+          serviceRecordId: record.id,
+          knex: trx,
+        });
 
         // Gauge reading. Both the height and the on-site lawn-length photo are
         // OPTIONAL — persist a row whenever EITHER is present (a photo-only visit
@@ -8411,6 +8450,7 @@ module.exports._test = {
   technicianPestRatingAllowedForService,
   shouldRejectPhotoCaptionBannedCopy,
   internalOnlyProductsBlockPayload,
+  completionOwnershipError,
   serviceReportEmailEligible,
   shouldAutoInvoiceCompletion,
   completionInvoiceAmount,
