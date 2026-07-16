@@ -45,6 +45,28 @@ export default function WdoSignaturePad({ projectId, signature, defaultSignerNam
     if (editing) initCanvas();
   }, [editing, initCanvas]);
 
+  // Re-size the bitmap when the rendered box changes (rotation, sheet
+  // resize): strokes drawn after a resize would otherwise map against the
+  // stale bitmap aspect and export distorted — the exact bug initCanvas
+  // fixes at mount. Re-initing clears any in-progress scribble; that beats
+  // silently stamping a stretched signature on an FDACS filing (the licensee
+  // just re-signs).
+  useEffect(() => {
+    if (!editing) return undefined;
+    const c = canvasRef.current;
+    if (!c || typeof ResizeObserver === "undefined") return undefined;
+    let lastWidth = c.getBoundingClientRect().width;
+    const ro = new ResizeObserver((entries) => {
+      const width = entries[entries.length - 1]?.contentRect?.width || 0;
+      if (width > 0 && Math.abs(width - lastWidth) > 1) {
+        lastWidth = width;
+        initCanvas();
+      }
+    });
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, [editing, initCanvas]);
+
   function pointFor(e) {
     const c = canvasRef.current;
     const rect = c.getBoundingClientRect();
