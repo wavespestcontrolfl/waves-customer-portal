@@ -25,6 +25,34 @@ import { AttachIcon } from "../../components/admin/IntelligenceBarShell";
 const BUILD_PROMPT = "Build the estimate from all available evidence. If this is a recognized customer, preserve current services and price only requested additions using the selected lead account context. Verify property facts, protocols, inventory, presentation sections, and per-line margin, then propose the draft for my confirmation.";
 const NO_FALLBACK_ACTIONS = [];
 
+// Failed-channel retry state persisted per estimate — the server does not
+// record per-channel outcomes, so without this a refresh or revisit after a
+// partial send would leave a sent/viewed draft with no way to retry the
+// failed channel from this workspace.
+const FAILED_SEND_STORAGE_PREFIX = "agent_estimate_failed_send:";
+
+function readStoredFailedChannels(estimateId) {
+  if (!estimateId) return [];
+  try {
+    const raw = sessionStorage.getItem(FAILED_SEND_STORAGE_PREFIX + estimateId);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((channel) => ["sms", "email"].includes(channel)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeFailedChannels(estimateId, channels) {
+  if (!estimateId) return;
+  try {
+    if (channels.length) {
+      sessionStorage.setItem(FAILED_SEND_STORAGE_PREFIX + estimateId, JSON.stringify(channels));
+    } else {
+      sessionStorage.removeItem(FAILED_SEND_STORAGE_PREFIX + estimateId);
+    }
+  } catch { /* storage unavailable (private mode) — retry state stays in-memory */ }
+}
+
 function money(value) {
   const amount = Number(value || 0);
   return new Intl.NumberFormat("en-US", {
@@ -540,6 +568,7 @@ export default function AgentEstimatePage() {
       if (contextRequestRef.current !== requestId) return;
       setContext(data.context || null);
       setDraft(data.context?.current_estimate || null);
+      setFailedChannels(readStoredFailedChannels(data.context?.current_estimate?.id));
     } catch (error) {
       if (contextRequestRef.current !== requestId) return;
       setContextError(error.message);
@@ -565,6 +594,7 @@ export default function AgentEstimatePage() {
     const result = data.result;
     if (!result?.success) return;
     setFailedChannels([]);
+    storeFailedChannels(result.estimate_id, []);
     setDraft((current) => ({
       ...current,
       id: result.estimate_id,
@@ -686,9 +716,11 @@ export default function AgentEstimatePage() {
       const channelIssues = Object.entries(data.channels || {})
         .filter(([, value]) => value && !value.ok)
         .map(([channel, value]) => `${channel}: ${value.error || "failed"}`);
-      setFailedChannels(channelIssues.length
+      const failed = channelIssues.length
         ? Object.entries(data.channels || {}).filter(([, value]) => value && !value.ok).map(([channel]) => channel)
-        : []);
+        : [];
+      setFailedChannels(failed);
+      storeFailedChannels(draft.id, failed);
       setSendMessage(channelIssues.length
         ? `Estimate sent with an issue — ${channelIssues.join("; ")}. Retry the failed channel below.`
         : `Estimate sent by ${label}.`);
