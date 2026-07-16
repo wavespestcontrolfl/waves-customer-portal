@@ -1050,7 +1050,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       return { skipped: true, reason: 'pr head moved past the remediation push' };
     }
   } catch (e) {
-    logger.warn(`[codex-remediation] post-push PR revalidation failed for #${prNumber}: ${e.message} — proceeding (recovery branch re-drives on the next tick)`);
+    // Fail CLOSED: proceeding could mirror a fix into portal state that
+    // never reached main (if the PR merged during the push and this fetch
+    // failed), and completing the round would record it so nothing ever
+    // re-checks. The 'remediating'-recovery branch only re-requests review —
+    // it cannot re-run the sync — so park instead: sync withheld, the lane's
+    // onPark disarms/annotates, and a human (or a re-arm on a new head)
+    // reconciles. Stamped with newHead so our own push can't self-re-arm.
+    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha);
   }
 
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into

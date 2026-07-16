@@ -1540,7 +1540,7 @@ describe('post-push PR revalidation', () => {
     expect(gh._calls.comments).toHaveLength(0);
   });
 
-  test('a transient GitHub error during revalidation proceeds (recovery re-drives next tick)', async () => {
+  test('a GitHub error during revalidation fails CLOSED — parks with sync withheld', async () => {
     const db = makeDb();
     let calls = 0;
     const gh = makeGh({
@@ -1552,8 +1552,18 @@ describe('post-push PR revalidation', () => {
         },
       },
     });
-    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
-    expect(r.remediated).toBe(true);
-    expect(gh._calls.comments).toHaveLength(1);
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    expect(r.reason).toContain('revalidation failed');
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === CTX.prNumber);
+    expect(row.status).toBe('parked');
+    // Parked on the PUSHED head so our own commit can't self-re-arm the loop.
+    expect(row.parked_head_sha).toBe('newcommit999aaa');
   });
 });
