@@ -1461,6 +1461,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY MIN — retry transactional emails that SendGrid accepted but the
+  // receiving server rejected for provider reputation/content/IP reasons.
+  // The retry service owns bounded backoff, suppression rechecks, exact-body
+  // replay, and exhaustion alerts. Hard bounces never enter this queue.
+  cron.schedule('* * * * *', async () => {
+    try {
+      await runExclusive('transactional-email-provider-retry', async () => {
+        await require('./transactional-email-provider-retry').runDueRetries();
+      });
+    } catch (err) {
+      logger.error(`[email-provider-retry] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
   // runs created by trigger-mapped email template automations.

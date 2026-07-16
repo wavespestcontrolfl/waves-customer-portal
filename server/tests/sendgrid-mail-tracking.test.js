@@ -35,4 +35,14 @@ describe('SendGrid security-email tracking controls', () => {
       subscription_tracking: { enable: false },
     });
   });
+
+  test('clearBlockedAddress deletes only the encoded SendGrid block entry', async () => {
+    const sendgrid = require('../services/sendgrid-mail');
+    await sendgrid.clearBlockedAddress('customer+tag@example.com');
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.sendgrid.com/v3/suppression/blocks/customer%2Btag%40example.com',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
 });
