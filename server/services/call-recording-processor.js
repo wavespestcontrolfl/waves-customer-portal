@@ -30,7 +30,7 @@ const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
-const { composeServiceInterest, composeWordsForV2Category, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
+const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
 const { properCase } = require('../utils/name-case');
 const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../schemas/validate-extraction');
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
@@ -5864,6 +5864,11 @@ const CallRecordingProcessor = {
             // as a fake second service (codex r13).
             if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
             const v2Cat = v2ServiceRequest.primary_service_category || null;
+            // Categories whose legacy mapping is null/coarse (stinging,
+            // exclusion) lead with their own family label — else a
+            // wasp-only call renders as two services (codex r15).
+            const catPrimary = v2PrimaryLabelForCategory(v2Cat);
+            if (catPrimary) return catPrimary;
             const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
             return v2Flat.matched_service
               && (!extracted.matched_service || preciseV2Category)

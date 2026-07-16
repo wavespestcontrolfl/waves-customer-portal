@@ -10,6 +10,7 @@
 const {
   composeServiceInterest,
   composeWordsForV2Category,
+  v2PrimaryLabelForCategory,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 } = require('../utils/lead-service-interest');
@@ -697,6 +698,35 @@ describe('composeServiceInterest', () => {
     expect(v2InexpressibleFamilyWords('pest control and lawn care')).toBeNull();
     expect(v2InexpressibleFamilyWords('raccoons in the soffit')).toBe('Wildlife Control Service');
     expect(v2InexpressibleFamilyWords(null)).toBeNull();
+  });
+
+  test('mouse exclusion-only stays one service (codex r15)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'seal entry points for mice',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'mice exclusion',
+    })).toBe('Quarterly Pest Control Service + Rodent Exclusion');
+  });
+
+  test('stinging-insect extermination is one service (codex r15)', () => {
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Lawn Care Service',
+      requested_service: 'lawn care and stinging insect extermination',
+    })).toBe('Quarterly Lawn Care Service + Bee / Wasp Nest Removal Service');
+  });
+
+  test('dirty-mapped V2 primaries lead with their family label (codex r15)', () => {
+    expect(v2PrimaryLabelForCategory('stinging_insect')).toBe('Bee / Wasp Nest Removal Service');
+    expect(v2PrimaryLabelForCategory('exclusion')).toBe('Rodent Exclusion');
+    expect(v2PrimaryLabelForCategory('pest_general')).toBeNull();
+    // matched = the family's own label covers its category words: one service
+    expect(composeServiceInterest({
+      matched_service: 'Bee / Wasp Nest Removal Service',
+      requested_service: 'wasp nest',
+    })).toBe('Bee / Wasp Nest Removal Service');
   });
 
   test('non-service chatter appends nothing', () => {

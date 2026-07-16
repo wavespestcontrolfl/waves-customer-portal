@@ -188,8 +188,8 @@ function stripNegatedClauses(s) {
 // WDO⇄termite lane check ("WDO report and termite extermination" must keep
 // the termite work — codex PR P2). A standalone "exterminator" still counts
 // as pest.
-const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wasps?|bees?|hornets?|yellow\s?jackets?|wdo)\s+exterminat\w*/gi;
-const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b)/gi;
+const SPECIFIC_EXTERMINATE_RE = /\b(termites?|rodents?|rats?|mice|mouse|bed[\s-]*bugs?|bedbugs?|mosquito(?:es|s)?|fleas?|roach(?:es)?|ants?|wasps?|bees?|hornets?|yellow\s?jackets?|stinging\s+insects?|wdo)\s+exterminat\w*/gi;
+const EXTERMINATE_FOR_RE = /\bexterminat\w*\s+(?:for\s+)?(?:the\s+)?(?=termites?\b|rodents?\b|rats?\b|mice\b|bed[\s-]*bugs?\b|bedbugs?\b|mosquito|wasps?\b|bees?\b|hornets?\b|yellow\s?jackets?\b|stinging\s+insects?\b)/gi;
 const normalizeExterminator = (s) => s.replace(SPECIFIC_EXTERMINATE_RE, '$1 treatment').replace(EXTERMINATE_FOR_RE, 'treat ');
 
 // "palm injection for my palms" / "trunk injection into the palms" — the
@@ -236,6 +236,19 @@ const V2_CATEGORY_COMPOSE_WORDS = {
 };
 function composeWordsForV2Category(category) {
   return V2_CATEGORY_COMPOSE_WORDS[category] || null;
+}
+
+// Primary LABEL for V2 categories whose legacy flatView mapping is wrong or
+// null (stinging_insect → null, exclusion → coarse "Rodent Control"): when
+// V2 approved one of these as the PRIMARY with no specific catalog pick,
+// the family's own label leads — otherwise a wasp-only call renders as
+// "General Pest Control + Bee / Wasp Nest Removal Service" (codex r15).
+const V2_CATEGORY_PRIMARY_LABELS = {
+  stinging_insect: 'Bee / Wasp Nest Removal Service',
+  exclusion: 'Rodent Exclusion',
+};
+function v2PrimaryLabelForCategory(category) {
+  return V2_CATEGORY_PRIMARY_LABELS[category] || null;
 }
 
 // opts.cueText: original caller wording consulted ONLY for the termite
@@ -285,7 +298,7 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   const scanFamilies = familiesIn(scanText);
   const exclusionPresent = scanFamilies.some((f) => f.key === 'exclusion');
   const rodentWorkEvidence = scanText
-    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b|\bmice\b/i.test(scanText)
+    ? /\btrap\w*\b|\bbait\w*\b|\brodent\s+control\b|\bremov\w*\b|\binfestation\w*\b|\bdroppings?\b/i.test(scanText)
     : false;
   let label = matched;
   for (const fam of scanFamilies) {
@@ -352,6 +365,7 @@ function v2InexpressibleFamilyWords(callerText) {
 module.exports = {
   composeServiceInterest,
   composeWordsForV2Category,
+  v2PrimaryLabelForCategory,
   primaryServiceInterest,
   v2InexpressibleFamilyWords,
 };
