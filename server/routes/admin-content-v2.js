@@ -845,6 +845,7 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
   // scheduler's alone). A crashed publish self-expires via the claim window.
   let claimStamp = null;
   let renewTimer = null;
+  let renewInFlight = null;
   try {
     assertBlogPostId(req.params.id);
     // claimStamp doubles as the release token: only the request that wrote
@@ -884,18 +885,36 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     // only a dead process stops renewing and expires. Renewal is CAS'd on
     // our current stamp — if we ever lose the lease anyway, stop renewing
     // rather than fight the new owner.
-    renewTimer = setInterval(async () => {
-      try {
-        const next = new Date();
-        const renewed = await db('blog_posts')
-          .where('id', req.params.id)
-          .where('publish_claimed_at', claimStamp)
-          .update({ publish_claimed_at: next, updated_at: new Date() });
-        if (renewed) claimStamp = next;
-        else clearInterval(renewTimer);
-      } catch (e) {
-        logger.warn(`[content] publish-astro lease renewal failed for ${req.params.id}: ${e.message}`);
-      }
+    // Serialized heartbeat: renewals never overlap each other (an in-flight
+    // renewal skips the tick) and the finally below AWAITS the last one, so
+    // the release always targets the stamp that is actually in the DB. If a
+    // renewal observes the lease lost (0 rows), we stop renewing, null the
+    // stamp so the release no-ops, and log loudly — publishAstro itself is
+    // NOT fenced mid-flight (same boundary as the scheduler lane's
+    // 'publishing' claim): reaching that state requires the DB rejecting
+    // renewals for a full window while GitHub/LLM calls kept succeeding.
+    renewTimer = setInterval(() => {
+      if (renewInFlight) return;
+      renewInFlight = (async () => {
+        try {
+          const next = new Date();
+          const renewed = await db('blog_posts')
+            .where('id', req.params.id)
+            .where('publish_claimed_at', claimStamp)
+            .update({ publish_claimed_at: next, updated_at: new Date() });
+          if (renewed) {
+            claimStamp = next;
+          } else {
+            clearInterval(renewTimer);
+            claimStamp = null;
+            logger.error(`[content] publish-astro LOST its publish lease for ${req.params.id} mid-flight — a newer publisher owns the row; this attempt's external writes are unfenced`);
+          }
+        } catch (e) {
+          logger.warn(`[content] publish-astro lease renewal failed for ${req.params.id}: ${e.message}`);
+        } finally {
+          renewInFlight = null;
+        }
+      })();
     }, Math.floor(PUBLISH_CLAIM_STALE_MS / 3));
     if (typeof renewTimer.unref === 'function') renewTimer.unref();
 
@@ -912,6 +931,10 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   } finally {
     if (renewTimer) clearInterval(renewTimer);
+    // Settle any in-flight renewal so claimStamp reflects the DB before the
+    // tokenized release (otherwise the release could CAS on a stale stamp,
+    // affect zero rows, and leave the post blocked for a full window).
+    if (renewInFlight) { try { await renewInFlight; } catch (_) { /* logged above */ } }
     if (claimStamp) {
       try {
         await db('blog_posts')
