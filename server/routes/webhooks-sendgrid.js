@@ -431,6 +431,22 @@ async function processWebhookEvent(ev, messageId, email, handler) {
 function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
   const event = String(ev?.event || '').toLowerCase();
   const reason = String(ev?.reason || ev?.response || ev?.type || '').trim().toLowerCase();
+  const providerBlocked = event === 'blocked'
+    || (event === 'bounce' && String(ev?.type || '').trim().toLowerCase() === 'blocked');
+  if (providerBlocked) {
+    return {
+      delivery: {
+        // SendGrid sometimes reports reputation/content blocks as
+        // event="bounce", type="blocked". The recipient did not bounce:
+        // keep the delivery retryable and do not damage subscriber health.
+        status: 'failed',
+        sent_at: null,
+        bounce_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
+        updated_at: now,
+      },
+      reconcileSendStatus: true,
+    };
+  }
   if (event === 'dropped' && (reason === 'group unsubscribe' || reason === 'unsubscribed address')) {
     if (delivery.unsubscribed_at) return null;
     return {
@@ -547,6 +563,20 @@ function eventOccurredAt(ev, fallback = new Date()) {
 }
 
 function computeEmailMessageEventUpdates(ev, message, now = new Date()) {
+  const event = String(ev?.event || '').toLowerCase();
+  const providerBlocked = event === 'blocked'
+    || (event === 'bounce' && String(ev?.type || '').trim().toLowerCase() === 'blocked');
+  if (providerBlocked) {
+    return {
+      // Provider/IP/content rejection, not a bad recipient address. `failed`
+      // remains retryable when the owning workflow runs again and, unlike
+      // `bounced`, does not claim that the mailbox itself is invalid.
+      status: 'failed',
+      error_message: (ev.reason || ev.response || ev.type || '').toString().slice(0, 1000),
+      updated_at: now,
+    };
+  }
+
   switch (ev.event) {
     case 'delivered':
       if (message.delivered_at) return null;
@@ -821,9 +851,11 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
 
     case 'bounce':
     case 'blocked':
-    case 'dropped':
+    case 'dropped': {
+      const providerBlocked = ev.event === 'blocked'
+        || (ev.event === 'bounce' && String(ev.type || '').trim().toLowerCase() === 'blocked');
       await client('automation_step_sends').where({ id: sendRow.id }).update({
-        status: 'bounced',
+        status: providerBlocked ? 'failed' : 'bounced',
         failure_reason: (ev.reason || ev.response || ev.type || '').toString().slice(0, 500),
         updated_at: now,
       });
@@ -837,6 +869,7 @@ async function handleAutomationEvent(ev, sendRow, client = db) {
         await cancelActiveEnrollments({ email: ev.email, reason: 'hard_bounce' }, client);
       }
       break;
+    }
 
     case 'spamreport':
       await client('automation_step_sends').where({ id: sendRow.id }).update({
