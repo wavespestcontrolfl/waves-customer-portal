@@ -1631,7 +1631,17 @@ export default function CreateProjectModal({
                   type="date"
                   value={projectDate}
                   onChange={(e) => setProjectDate(e.target.value)}
-                  style={inputStyle}
+                  // iOS WebKit gives date inputs an intrinsic shadow-DOM width
+                  // that can exceed width:100% — clamp it and drop the native
+                  // appearance so the field tracks the container like the
+                  // sibling text inputs.
+                  style={{
+                    ...inputStyle,
+                    WebkitAppearance: 'none',
+                    appearance: 'none',
+                    minWidth: 0,
+                    maxWidth: '100%',
+                  }}
                 />
               </div>
 
