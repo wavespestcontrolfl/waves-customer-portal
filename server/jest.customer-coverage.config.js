@@ -20,6 +20,7 @@ module.exports = {
     '<rootDir>/tests/customer-pricing-ai-variants.test.js',
     '<rootDir>/tests/customer-request-photo-validation.test.js',
     '<rootDir>/tests/customer-notification-native-push.test.js',
+    '<rootDir>/tests/customer-notification-push.test.js',
   ],
   collectCoverage: true,
   collectCoverageFrom: [

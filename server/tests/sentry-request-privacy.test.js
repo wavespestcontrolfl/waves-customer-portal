@@ -10,6 +10,7 @@ jest.mock('@sentry/node', () => ({
 }));
 
 const {
+  DISABLED_AI_INTEGRATIONS,
   REQUEST_DATA_INCLUDE,
   buildSentryOptions,
   stripSentryRequestData,
@@ -25,6 +26,9 @@ describe('Sentry request privacy', () => {
     const integrations = options.integrations([
       { name: 'Http' },
       { name: 'RequestData', old: true },
+      { name: 'OpenAI' },
+      { name: 'Anthropic_AI' },
+      { name: 'Google_GenAI' },
     ]);
     expect(integrations).toEqual([
       { name: 'Http' },
@@ -38,6 +42,7 @@ describe('Sentry request privacy', () => {
       query_string: false,
       url: false,
     });
+    expect([...DISABLED_AI_INTEGRATIONS]).toEqual(['OpenAI', 'Anthropic_AI', 'Google_GenAI']);
   });
 
   test('removes credentials from synthetic error and transaction events', () => {
