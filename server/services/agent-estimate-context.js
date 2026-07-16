@@ -14,7 +14,7 @@ const {
   loadCustomerByPhone,
   loadPriorEstimates,
   loadSmsThread,
-  _private: { extractionFromCall, last10 },
+  _private: { extractionFromCall, firstExternalPhone, last10 },
 } = require('./estimator-engine/context-builder');
 const { loadCurrentServiceSpendContext } = require('./estimate-membership-context');
 
@@ -72,26 +72,38 @@ async function phoneIsShared(lead) {
   const digits = last10(lead?.phone);
   if (!digits) return false;
   try {
-    const row = await db('leads')
+    const rows = await db('leads')
       .whereNull('deleted_at')
       .whereNot('id', lead.id)
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .first('id');
-    if (row) return true;
-    const customerMatches = await db('customers')
-      .whereNull('deleted_at')
-      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
-      .count('* as count').first();
-    return Number(customerMatches?.count || 0) > 1;
+      .limit(10)
+      .select('first_name', 'last_name');
+    if (!rows.length) return false;
+    // A REPEAT lead for the same person is not a shared line — suppressing
+    // it would price a returning customer as a new account and hide their
+    // own SMS/estimate history. Fail closed: only a FULL name match (both
+    // last names AND both first names present and equal) reads as the same
+    // person — a missing first name on a family line could be a different
+    // household member, so it stays shared.
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const leadFirst = norm(lead.first_name);
+    const leadLast = norm(lead.last_name);
+    return rows.some((row) => {
+      const first = norm(row.first_name);
+      const last = norm(row.last_name);
+      const samePerson = !!(leadLast && last && last === leadLast
+        && leadFirst && first && first === leadFirst);
+      return !samePerson;
+    });
   } catch (err) {
     logger.warn(`[agent-estimate] shared-phone check failed: ${err.message}`);
     return true;
   }
 }
 
-async function loadCalls(lead, sharedPhone) {
+async function loadCalls(lead, phoneKey) {
   try {
-    const digits = sharedPhone ? null : last10(lead.phone);
+    const digits = last10(phoneKey);
     if (!lead.twilio_call_sid && !digits) return [];
     const rows = await db('call_log')
       .where(function callMatch() {
@@ -153,22 +165,27 @@ async function loadCalls(lead, sharedPhone) {
   }
 }
 
-async function loadCustomer(lead, extraction, sharedPhone) {
+async function resolveCustomer(lead, extraction, phoneKey) {
   if (lead.customer_id) {
     try {
-      return await db('customers')
+      const linked = await db('customers')
         .where({ id: lead.customer_id })
         .whereNull('deleted_at')
         .first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city',
           'state', 'zip', 'pipeline_stage', 'waveguard_tier', 'lawn_type', 'property_sqft',
           'lot_sqft', 'property_type', 'company_name');
+      return { customer: linked || null, ambiguous: false };
     } catch (err) {
       logger.warn(`[agent-estimate] linked customer load failed: ${err.message}`);
     }
   }
-  if (sharedPhone) return null;
-  const match = await loadCustomerByPhone(lead.phone, extraction);
-  return match.ambiguous ? null : match.customer;
+  if (!phoneKey) return { customer: null, ambiguous: false };
+  // A phone matching multiple customer rows is ambiguous even when no other
+  // LEAD shares the number (phoneIsShared checks leads only) — the caller
+  // must treat this exactly like a shared line and suppress phone-scoped
+  // history, or one customer's SMS/estimates leak into another lead's session.
+  const match = await loadCustomerByPhone(phoneKey, extraction);
+  return { customer: match.ambiguous ? null : match.customer, ambiguous: match.ambiguous === true };
 }
 
 function suggestedPrompt(lead, currentEstimate, customerAccount = null) {
@@ -192,18 +209,46 @@ async function buildAgentEstimateContext(leadId) {
   if (!lead) return { error: 'lead_not_found' };
 
   const extractedData = parseJson(lead.extracted_data);
-  const sharedPhone = await phoneIsShared(lead);
-  const calls = await loadCalls(lead, sharedPhone);
-  const latestExtraction = calls[0]?.extraction || null;
-  const [customer, smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
-    loadCustomer(lead, latestExtraction, sharedPhone),
-    sharedPhone ? Promise.resolve([]) : loadSmsThread(lead.phone, { limit: 60 }),
-    sharedPhone ? Promise.resolve([]) : loadPriorEstimates(lead.phone, { limit: 8 }),
+  // Twilio substitutes digit sentinels for suppressed caller IDs (ANONYMOUS/
+  // RESTRICTED) and forwarded calls can store an internal tracking line —
+  // keying phone-scoped history on either merges unrelated blocked callers
+  // into this lead's evidence. Only a verified external number is usable.
+  const externalPhone = firstExternalPhone(lead.phone);
+  const sharedPhone = externalPhone ? await phoneIsShared(lead) : false;
+  const phoneKey = externalPhone && !sharedPhone ? externalPhone : null;
+  const rawCalls = await loadCalls(lead, phoneKey);
+  // Disambiguate the customer match ONLY with the extraction from THIS lead's
+  // own call (SID match) — the newest phone-matched call can belong to a
+  // different person on a shared/family line, and its caller name would
+  // confidently select the wrong customer profile. With no SID-matched call,
+  // a multi-customer phone stays ambiguous and history stays suppressed.
+  const leadCall = lead.twilio_call_sid
+    ? rawCalls.find((call) => call.call_sid === lead.twilio_call_sid)
+    : null;
+  const { customer, ambiguous: customerAmbiguous } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
+  // Phone-scoped history fails closed on BOTH suppression signals: another
+  // lead on the number (sharedPhone) or multiple customer rows on the number
+  // (customerAmbiguous). Either way the thread/estimates may belong to a
+  // different person and must not enter this lead's evidence pack.
+  const phoneHistorySuppressed = sharedPhone || customerAmbiguous;
+  // Phone-matched call rows are equally cross-contaminated on an ambiguous
+  // number; keep only calls tied to THIS lead (its twilio_call_sid or its own
+  // transcript summary).
+  const calls = customerAmbiguous
+    ? rawCalls.filter((call) => (
+      (lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid)
+      || String(call.id).startsWith('lead-summary:')
+    ))
+    : rawCalls;
+  const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
+    (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadSmsThread(phoneKey, { limit: 60 }),
+    (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadPriorEstimates(phoneKey, { limit: 8 }),
     db('lead_activities').where({ lead_id: lead.id }).orderBy('created_at', 'desc').limit(30)
       .select('activity_type', 'description', 'metadata', 'created_at').catch(() => []),
     lead.estimate_id
       ? db('estimates').where({ id: lead.estimate_id }).first('id', 'token', 'status', 'source',
-        'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'estimate_data', 'updated_at').catch(() => null)
+        'monthly_total', 'annual_total', 'onetime_total', 'service_interest', 'estimate_data',
+        'customer_phone', 'customer_email', 'updated_at').catch(() => null)
       : Promise.resolve(null),
     db('agent_estimate_memory').where({ status: 'approved' }).orderBy('reviewed_at', 'desc')
       .limit(20).select('id', 'rule_text', 'rationale', 'version', 'reviewed_at').catch(() => []),
@@ -214,10 +259,16 @@ async function buildAgentEstimateContext(leadId) {
     existingServiceKeys: [], currentServices: [], currentSpendPerVisitTotal: 0,
     currentTier: null, currentTierLabel: null, currentDiscountPct: 0,
   };
+  // A recognized customer whose service lookup FAILED must not silently price
+  // as if they had no services — that would drop the membership tier and let
+  // an active service be quoted again. The flag makes the pricing paths
+  // refuse instead of guessing.
+  let serviceContextUnavailable = false;
   if (customer?.id) {
     try {
       customerSpend = await loadCurrentServiceSpendContext(db, customer.id);
     } catch (err) {
+      serviceContextUnavailable = true;
       logger.warn(`[agent-estimate] current-service spend load failed: ${err.message}`);
     }
   }
@@ -231,10 +282,13 @@ async function buildAgentEstimateContext(leadId) {
     existing_service_keys: customerSpend.existingServiceKeys,
     current_services: customerSpend.currentServices,
     current_spend_per_visit_total: customerSpend.currentSpendPerVisitTotal,
+    service_context_unavailable: serviceContextUnavailable,
   } : {
     recognized: false,
     customer_id: null,
-    match_method: sharedPhone ? 'shared_phone_suppressed' : null,
+    match_method: sharedPhone
+      ? 'shared_phone_suppressed'
+      : (customerAmbiguous ? 'ambiguous_customer_suppressed' : null),
     active_plan: false,
     current_tier: null,
     current_discount_pct: 0,
@@ -293,6 +347,7 @@ async function buildAgentEstimateContext(leadId) {
     customer_account: customerAccount,
     is_existing_customer: profileIsExisting,
     shared_phone_history_suppressed: sharedPhone,
+    ambiguous_customer_history_suppressed: customerAmbiguous,
     prior_estimates: priorEstimates,
     current_estimate: currentEstimate ? {
       id: currentEstimate.id,
@@ -303,6 +358,12 @@ async function buildAgentEstimateContext(leadId) {
       annual_total: Number(currentEstimate.annual_total || 0),
       onetime_total: Number(currentEstimate.onetime_total || 0),
       service_interest: currentEstimate.service_interest || null,
+      // The send endpoint delivers to the contact snapshot stored ON the
+      // estimate, not the lead's current contact — the UI must display and
+      // gate on these values so a post-draft lead correction can't silently
+      // send the link to a stale phone/email.
+      customer_phone: currentEstimate.customer_phone || null,
+      customer_email: currentEstimate.customer_email || null,
       agent_origin: currentEngine.origin || null,
       lane: currentEngine.lane || null,
       lane_reasons: currentEngine.laneReasons || [],

@@ -18,12 +18,14 @@ const {
   syncConstantsFromDB,
 } = require('../pricing-engine');
 const { deriveTotals } = require('../estimator-engine/draft-builder');
+const { sameStreetAddress } = require('../estimator-engine/address-compare');
 const { normalizeGrassType, grassTypeLabel } = require('../lawn-grass-context');
 const { shortenOrPassthrough } = require('../short-url');
 const { validateEstimateDeliveryOptions } = require('../estimate-delivery-options');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
+  OPEN_ESTIMATE_STATUSES,
 } = require('../estimate-automation-duplicates');
 const { performPropertyLookup } = require('../../routes/property-lookup-v2');
 const { buildAgentEstimateContext } = require('../agent-estimate-context');
@@ -51,6 +53,7 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
       type: 'object',
       properties: {
         leadId: { type: 'string', description: 'Selected lead UUID. Required on Agent Estimate so existing-customer services and membership pricing are loaded server-side.' },
+        address: { type: 'string', description: 'Full service address being quoted. Scopes existing-customer duplicate checks to this property — a multi-property customer can be quoted the same service at a DIFFERENT property.' },
         homeSqFt: { type: 'number', description: 'Home interior square footage' },
         lotSqFt: { type: 'number', description: 'Lot size in square feet (defaults to ~4× homeSqFt if unknown)' },
         buildingSqFt: { type: 'number', description: 'Verified commercial building/treatment footprint square footage.' },
@@ -88,7 +91,6 @@ Use for: every standard residential quote (pest, lawn, mosquito, tree & shrub, t
             boraCare: { type: 'object' },
             preSlabTermiticide: { type: 'object' },
             preSlabTermidor: { type: 'object' },
-            rodent: { type: 'object' },
             rodentBait: { type: 'object' },
             oneTimePest: { type: 'object' },
             oneTimeLawn: { type: 'object' },
@@ -377,6 +379,7 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'customproductozperfinishedgallon',
   'discountoverride',
   'fixedprice',
+  'isrecurringcustomer',
   'lawnlaborminutesbase',
   'lawnlaborminutesperk',
   'lawnmaterialcostperk',
@@ -386,13 +389,26 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'priceoverride',
   'pricingconfig',
   'priorqualifyingservices',
+  'recurringcustomer',
   'routedriveminutes',
-  'servicespecificdiscounts',
   'servicespecificcredits',
+  'servicespecificdiscounts',
   'targetlawngrossmargin',
   'targetmargin',
   'uselawncostfloor',
+  // services.pest.version selects the pricing VERSION (frequency multipliers)
+  // — server-derived only.
+  'version',
 ]);
+
+// The engine's per-service options are open objects, so an exact-key list can
+// never stay complete against its price levers (customPricePerPalm,
+// customContainerCost, volumeDiscount, subcontractCost, ...). Deny the whole
+// custom*, *override*, *discount*, and *subcontract* families by pattern —
+// no legitimate agent-suppliable input uses any of these shapes, and a false
+// positive just tells the model to drop the key and let DB-authoritative
+// pricing rule.
+const AGENT_FORBIDDEN_PRICING_INPUT_PATTERN = /^custom|override|discount|subcontract/;
 
 function findForbiddenAgentPricingInputs(value, path = [], found = []) {
   if (!value || typeof value !== 'object') return found;
@@ -402,7 +418,8 @@ function findForbiddenAgentPricingInputs(value, path = [], found = []) {
   }
   for (const [key, nested] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)) {
+    if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)
+      || AGENT_FORBIDDEN_PRICING_INPUT_PATTERN.test(normalized)) {
       found.push([...path, key].join('.'));
     } else {
       findForbiddenAgentPricingInputs(nested, [...path, key], found);
@@ -481,14 +498,20 @@ function serviceTemplateKey(rawKey) {
 
 function presentationForServices(services = {}, engineResult = null) {
   const requestedKeys = Object.keys(services).map(serviceTemplateKey).filter(Boolean);
-  const requestedRawKeys = Object.keys(services);
-  const pricedKeys = (engineResult?.lineItems || []).map((line, index) => {
-    const raw = requestedRawKeys[index];
-    if (raw === 'lawnPestControl' && serviceTemplateKey(line?.service) === 'one_time_lawn') {
-      return 'lawn_pest_knockdown';
-    }
-    return serviceTemplateKey(line?.service);
-  }).filter(Boolean);
+  const requestedSet = new Set(requestedKeys);
+  // The engine prices lawnPestControl under the generic one_time_lawn service
+  // key (only the display name says Lawn Pest Knockdown), so taking priced
+  // keys verbatim would demote the approved lawn-pest template whenever the
+  // engine prices successfully. Restore the requested specific template when
+  // the generic key was not itself requested.
+  const pricedKeys = (engineResult?.lineItems || [])
+    .map((line) => serviceTemplateKey(line?.service))
+    .filter(Boolean)
+    .map((key) => (
+      key === 'one_time_lawn' && !requestedSet.has('one_time_lawn') && requestedSet.has('lawn_pest_knockdown')
+        ? 'lawn_pest_knockdown'
+        : key
+    ));
   const serviceTemplateKeys = [...new Set(pricedKeys.length ? pricedKeys : requestedKeys)];
   const hasOneTime = serviceTemplateKeys.some((key) => ONE_TIME_REACT_TEMPLATES.has(key));
   const hasRecurring = serviceTemplateKeys.some((key) => !ONE_TIME_REACT_TEMPLATES.has(key));
@@ -503,22 +526,115 @@ function presentationForServices(services = {}, engineResult = null) {
 
 function accountPricingFromContext(context = {}) {
   const account = context.customer_account || {};
+  const priorQualifyingServices = Array.isArray(account.existing_service_keys)
+    ? [...new Set(account.existing_service_keys.filter(Boolean))]
+    : [];
+  // Duplicate checks must cover EVERY active recurring service, not just the
+  // WaveGuard-qualifying set — rodent_bait / palm_injection live only in
+  // current_services (loaded for spend recognition) and would otherwise be
+  // quotable again as a duplicate draft. Pricing still uses the qualifying
+  // set only. Each entry carries the property addresses the service is
+  // active at, and commercial_* programs also match their base key so a
+  // requested `pest` collides with an active "Commercial Pest Control".
+  const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
+    .flatMap((row) => {
+      if (!row?.key) return [];
+      // Addresses are trusted for property scoping only when EVERY active row
+      // of this service carries one — a mixed known/unknown set could hide a
+      // row that covers the quoted street, so it stays account-wide.
+      const addresses = row.serviceAddressesComplete === true && Array.isArray(row.serviceAddresses)
+        ? row.serviceAddresses.filter(Boolean)
+        : [];
+      const entries = [{ key: row.key, addresses }];
+      if (row.key.startsWith('commercial_')) {
+        entries.push({ key: row.key.slice('commercial_'.length), addresses });
+      }
+      return entries;
+    });
+  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
+  for (const key of priorQualifyingServices) {
+    // Qualifying keys normally also appear in current_services with address
+    // detail; a bare leftover stays an account-wide (address-less) block.
+    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
+  }
   return {
     customerId: account.recognized ? account.customer_id : null,
     recognized: account.recognized === true,
-    priorQualifyingServices: Array.isArray(account.existing_service_keys)
-      ? [...new Set(account.existing_service_keys.filter(Boolean))]
-      : [],
-    priorActiveServices: Array.isArray(account.current_services)
-      ? [...new Set(account.current_services.map((service) => service.key).filter(Boolean))]
-      : [],
+    serviceContextUnavailable: account.service_context_unavailable === true,
+    priorQualifyingServices,
+    activeServices,
     customerAccount: account,
   };
 }
 
-function duplicateCurrentServices(services = {}, priorQualifyingServices = []) {
-  const current = new Set(priorQualifyingServices);
-  return [...new Set(Object.keys(services).map(serviceTemplateKey).filter((key) => current.has(key)))];
+// A recognized customer whose existing-service lookup failed has NO reliable
+// tier or duplicate-service basis — pricing must refuse, not silently treat
+// the account as service-free (which drops the membership discount and can
+// quote an active service a second time).
+function serviceContextUnavailableError(accountPricing) {
+  if (!accountPricing.recognized || !accountPricing.serviceContextUnavailable) return null;
+  return 'This recognized customer\'s existing-service context could not be loaded. Retry shortly — pricing without their current services could misapply the membership tier or re-quote an active service.';
+}
+
+function duplicateCurrentServices(services = {}, activeServices = [], quoteAddress = null) {
+  const requestedKeys = [...new Set(Object.keys(services).map(serviceTemplateKey).filter(Boolean))];
+  return requestedKeys.filter((key) => activeServices.some((service) => {
+    if (service.key !== key) return false;
+    // Property scoping: when the quoted address and every one of this
+    // service's stamped addresses are known and street-differ, this is a
+    // multi-property expansion, not a duplicate. An unknown address on
+    // either side keeps the conservative account-wide block.
+    if (quoteAddress && service.addresses?.length
+      && service.addresses.every((address) => !sameStreetAddress(address, quoteAddress))) {
+      return false;
+    }
+    return true;
+  }));
+}
+
+// Transient input for generateEstimate only. The forbidden-input guard rejects
+// model-supplied recurring-customer flags, so the germanRoachInitial discount
+// flag is re-derived here from the server-loaded account (the engine's own
+// definition: prior qualifying services make a recurring customer). Never
+// merge this into the echoed/stored engineInputs — a persisted copy would be
+// rejected by the guard on the next revision round-trip.
+function buildAgentPricingInput(engineInput, accountPricing) {
+  const priorQualifyingServices = accountPricing.priorQualifyingServices || [];
+  let pricingInput = priorQualifyingServices.length
+    ? { ...engineInput, priorQualifyingServices }
+    : engineInput;
+  const roachInitial = pricingInput.services?.germanRoachInitial;
+  if (roachInitial) {
+    pricingInput = {
+      ...pricingInput,
+      services: {
+        ...pricingInput.services,
+        germanRoachInitial: {
+          ...(typeof roachInitial === 'object' ? roachInitial : {}),
+          isRecurringCustomer: priorQualifyingServices.length > 0,
+        },
+      },
+    };
+  }
+  return pricingInput;
+}
+
+// Every service key generateEstimate actually consumes. The engine silently
+// ignores unrecognized keys, so a requested-but-unpriced service (e.g. a bare
+// "rodent") would pass the zero-total check, appear in service_interest and
+// the confirmation card, and never show up or charge on the customer estimate.
+const AGENT_ALLOWED_SERVICE_KEYS = new Set([
+  'pest', 'lawn', 'mosquito', 'treeShrub', 'termite', 'termiteBait', 'trenching',
+  'boraCare', 'preSlabTermiticide', 'preSlabTermidor', 'rodentBait', 'oneTimePest',
+  'oneTimeLawn', 'lawnPestControl', 'oneTimeMosquito', 'germanRoach',
+  'germanRoachInitial', 'pestInitialRoach', 'flea', 'bedBug', 'stinging',
+  'rodentTrapping', 'palm',
+]);
+
+function unknownServiceKeysError(services = {}) {
+  const unknown = Object.keys(services).filter((key) => !AGENT_ALLOWED_SERVICE_KEYS.has(key));
+  if (!unknown.length) return null;
+  return `Unknown service key(s): ${unknown.join(', ')}. The pricing engine ignores unrecognized services, which would list a service the customer is never charged for. Use the documented service keys only (rodent control is rodentBait or rodentTrapping).`;
 }
 
 function optionalBoundedNumber(value, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -534,6 +650,8 @@ function validateAgentEngineInput(input) {
     || !Object.keys(input.services).length) {
     return 'engineInputs.services must contain at least one service';
   }
+  const unknownServices = unknownServiceKeysError(input.services);
+  if (unknownServices) return unknownServices;
   const home = optionalBoundedNumber(input.homeSqFt, { min: 500, max: 10000000 });
   const building = optionalBoundedNumber(input.buildingSqFt, { min: 500, max: 10000000 });
   if (home === null || building === null || (home === undefined && building === undefined)) {
@@ -601,6 +719,8 @@ async function computeEstimate(input) {
   if (Object.keys(services).length === 0) {
     return { error: 'At least one service is required in services object' };
   }
+  const unknownServices = unknownServiceKeysError(services);
+  if (unknownServices) return { error: unknownServices };
 
   const measuredTurfSf = optionalBoundedNumber(input.measuredTurfSf ?? input.lawnSqFt, { min: 0, max: 10000000 });
   if (measuredTurfSf === null) return { error: 'measuredTurfSf must be 0-10000000 when provided' };
@@ -641,25 +761,26 @@ async function computeEstimate(input) {
     if (context?.error) return { error: 'Selected lead could not be loaded for customer recognition' };
     accountPricing = accountPricingFromContext(context);
   }
-  const duplicateServices = duplicateCurrentServices(services, [
-    ...accountPricing.priorQualifyingServices,
-    ...accountPricing.priorActiveServices,
-  ]);
+  const spendUnavailableError = serviceContextUnavailableError(accountPricing);
+  if (spendUnavailableError) return { error: spendUnavailableError };
+  const duplicateServices = duplicateCurrentServices(services, accountPricing.activeServices, input.address || null);
   if (duplicateServices.length) {
     return {
       error: `The customer already has active ${duplicateServices.join(', ')} service. Keep current services as account context and quote only requested additions.`,
       customer_account: accountPricing.customerAccount,
     };
   }
-  const pricingEngineInput = accountPricing.priorQualifyingServices.length
-    ? { ...engineInput, priorQualifyingServices: accountPricing.priorQualifyingServices }
-    : engineInput;
+  const pricingEngineInput = buildAgentPricingInput(engineInput, accountPricing);
   if (needsSync()) await syncConstantsFromDB(db);
   const estimate = generateEstimate(pricingEngineInput);
 
   const summary = estimate?.summary || {};
   const monthlyTotal = Number(summary.recurringMonthlyAfterDiscount || 0);
   const annualTotal = Number(summary.recurringAnnualAfterDiscount || 0);
+  // Specialty (german roach cleanout, flea, bed bug) and installation charges
+  // are upfront money the engine reports outside summary.oneTimeTotal — a
+  // standalone cleanout would otherwise read as a zero-price/manual scenario
+  // and a mixed quote would underreport onetime_total. Mirrors deriveTotals.
   const oneTimeTotal = Number(summary.oneTimeTotal || 0)
     + Number(summary.specialtyTotal || 0)
     + Number(summary.installationTotal || 0);
@@ -1012,8 +1133,12 @@ function compactAgentLine(line) {
   const annual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual ?? 0);
   const oneTime = Number(line.priceAfterDiscount ?? line.price ?? line.total ?? 0);
   const priceBasis = annual > 0 ? annual : oneTime;
+  // Recurring lawn lines expose their annual cost as costs.total; without it
+  // the margin falls back to line.margin, which was computed from the PRE-
+  // discount price and overstates the collected margin whenever the WaveGuard
+  // margin-floor guard caps annualAfterDiscount.
   const rawCost = annual > 0
-    ? (line.costs?.annualCost ?? line.annualCost)
+    ? (line.costs?.annualCost ?? line.annualCost ?? line.costs?.total)
     : (line.costs?.oneTimeCost ?? line.costs?.total ?? line.oneTimeCost ?? line.estimatedCost);
   const cost = Number(rawCost);
   const hasCostBasis = Number.isFinite(cost) && cost >= 0;
@@ -1051,18 +1176,19 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     return { error: 'engineInputs.services must contain at least one service' };
   }
 
+  const spendUnavailableError = serviceContextUnavailableError(accountPricing);
+  if (spendUnavailableError) return { error: spendUnavailableError };
   const duplicateServices = duplicateCurrentServices(
     input.engineInputs.services,
-    accountPricing.priorQualifyingServices,
+    accountPricing.activeServices,
+    input.address || null,
   );
   if (duplicateServices.length) {
     return { error: `The customer already has active ${duplicateServices.join(', ')} service. Quote only requested additions.` };
   }
 
   if (needsSync()) await syncConstantsFromDB(db);
-  const pricingEngineInputs = accountPricing.priorQualifyingServices.length
-    ? { ...input.engineInputs, priorQualifyingServices: accountPricing.priorQualifyingServices }
-    : input.engineInputs;
+  const pricingEngineInputs = buildAgentPricingInput(input.engineInputs, accountPricing);
   const engineResult = generateEstimate(pricingEngineInputs);
   const totals = deriveTotals(engineResult);
   if (!totals.monthly && !totals.annual && !totals.oneTime) {
@@ -1070,6 +1196,17 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
 
   const lines = (engineResult.lineItems || []).map(compactAgentLine);
+  // The aggregate check above passes as long as ANY line priced, which would
+  // let a mixed quote ship with an unpriced (quote-required/manual) service
+  // still listed in service_interest and never charged. Every line must
+  // carry a price or the whole draft is refused.
+  const unpricedLines = lines.filter((line) => line.monthly == null && line.annual == null && line.one_time == null);
+  if (unpricedLines.length) {
+    return {
+      error: `The engine returned no price for: ${unpricedLines.map((line) => line.service).join(', ')}. `
+        + 'That service needs a manual quote — remove it from this draft or quote it manually.',
+    };
+  }
   const laneReasons = [];
   const serviceKeys = Object.keys(input.engineInputs.services || {});
   const propertyFacts = input.propertyFacts && typeof input.propertyFacts === 'object'
@@ -1090,16 +1227,33 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   if (input.evidenceVerification?.unverified > 0) {
     laneReasons.push(`${input.evidenceVerification.unverified} evidence quote(s) could not be verified against the selected lead`);
   }
+  // A fact counts as VERIFIED only when it carries a usable value, a source,
+  // and an affirmative confidence — an empty `{ address: {} }` placeholder
+  // must not satisfy the key-presence checks below and green a draft whose
+  // price-driving measurements were never verified.
+  const isVerifiedFact = (fact) => {
+    if (!fact || typeof fact !== 'object') return false;
+    const hasValue = fact.value !== undefined && fact.value !== null && String(fact.value).trim() !== '';
+    const confidence = String(fact.confidence || '').trim().toLowerCase();
+    return hasValue && !!fact.source && !!confidence
+      && !['low', 'weak', 'unknown', 'unverified'].includes(confidence);
+  };
+  const verifiedFactKeys = propertyFactEntries
+    .filter(([, fact]) => isVerifiedFact(fact))
+    .map(([key]) => key);
   if (!propertyFactEntries.length) {
     laneReasons.push('property facts were not verified');
   }
-  if (!propertyFactEntries.some(([key]) => /address/i.test(key))) {
+  if (!verifiedFactKeys.some((key) => /address/i.test(key))) {
     laneReasons.push('service address was not recorded as a verified property fact');
   }
   if (input.contactVerification?.addressMismatch) {
     laneReasons.push('draft service address differs from the selected lead address');
   }
   for (const [key, fact] of propertyFactEntries) {
+    if (!isVerifiedFact(fact)) {
+      laneReasons.push(`${key} lacks a verified value, source, or confidence`);
+    }
     const confidence = String(fact?.confidence || '').toLowerCase();
     if (['low', 'weak', 'unknown', 'unverified'].includes(confidence)) {
       laneReasons.push(`${key} has ${confidence} confidence`);
@@ -1109,28 +1263,28 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     }
   }
   const hasLawnService = serviceKeys.some((key) => /lawn|turf/i.test(key));
-  if (hasLawnService && !propertyFactEntries.some(([key]) => /lawn|turf|treatable/i.test(key))) {
+  if (hasLawnService && !verifiedFactKeys.some((key) => /lawn|turf|treatable/i.test(key))) {
     laneReasons.push('treatable lawn area was not recorded as a verified property fact');
   }
   const isCommercial = input.engineInputs.isCommercial === true
     || String(input.engineInputs.propertyType || '').toLowerCase().includes('commercial');
-  if (isCommercial && !propertyFactEntries.some(([key]) => /commercial|building|unit/i.test(key))) {
+  if (isCommercial && !verifiedFactKeys.some((key) => /commercial|building|unit/i.test(key))) {
     laneReasons.push('commercial treated building or unit area was not verified');
   }
   if (serviceKeys.some((key) => /mosquito/i.test(key))
-    && !propertyFactEntries.some(([key]) => /lot|outdoor|treatable|lawn|turf/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /lot|outdoor|treatable|lawn|turf/i.test(key))) {
     laneReasons.push('mosquito treatable outdoor area was not verified');
   }
   if (serviceKeys.some((key) => /trench/i.test(key))
-    && !propertyFactEntries.some(([key]) => /perimeter|concrete|dirt|linear/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /perimeter|concrete|dirt|linear/i.test(key))) {
     laneReasons.push('trenching perimeter and concrete/dirt measurements were not verified');
   }
   if (serviceKeys.some((key) => /termite|bait/i.test(key))
-    && !propertyFactEntries.some(([key]) => /perimeter|footprint|building/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /perimeter|footprint|building/i.test(key))) {
     laneReasons.push('termite footprint or perimeter measurement was not verified');
   }
   if (serviceKeys.some((key) => /palm/i.test(key))
-    && !propertyFactEntries.some(([key]) => /palm.*count|treated.*palm/i.test(key))) {
+    && !verifiedFactKeys.some((key) => /palm.*count|treated.*palm/i.test(key))) {
     laneReasons.push('treated palm count was not operator-confirmed');
   }
   if (!protocolReview.length) {
@@ -1160,13 +1314,18 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
   }
   for (const text of input.assumptions || []) laneReasons.push(`assumption: ${text}`);
   for (const text of input.uncertainty || []) laneReasons.push(`open question: ${text}`);
+  // Pricing/margin failures are collected separately and placed FIRST in the
+  // stored/displayed list — a draft with 30+ evidence/protocol reasons must
+  // not truncate "collected margin is below 35%" out of the operator-visible
+  // approval summary.
+  const pricingLaneReasons = [];
   for (const line of lines) {
-    if (line.margin_floor_ok === false) laneReasons.push(`${line.service} collected margin is below 35%`);
-    if (line.margin_floor_ok == null) laneReasons.push(`${line.service} collected margin could not be independently verified`);
+    if (line.margin_floor_ok === false) pricingLaneReasons.push(`${line.service} collected margin is below 35%`);
+    if (line.margin_floor_ok == null) pricingLaneReasons.push(`${line.service} collected margin could not be independently verified`);
     if (line.pricing_confidence && String(line.pricing_confidence).toLowerCase() !== 'high') {
-      laneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
+      pricingLaneReasons.push(`${line.service} pricing confidence is ${line.pricing_confidence}`);
     }
-    for (const reason of line.review_reasons || []) laneReasons.push(`${line.service}: ${reason}`);
+    for (const reason of line.review_reasons || []) pricingLaneReasons.push(`${line.service}: ${reason}`);
   }
   for (const row of inventoryReview) {
     if (!row?.status) {
@@ -1179,13 +1338,14 @@ async function computeAgentDraftPreview(input, accountPricing = accountPricingFr
     if (row?.warning) laneReasons.push(`protocol: ${row.warning}`);
   }
 
+  const allLaneReasons = [...new Set([...pricingLaneReasons, ...laneReasons])];
   return {
     preview: true,
     action: input.estimateId ? 'revise_agent_draft' : 'create_or_update_lead_agent_draft',
     totals,
     lines,
-    lane: laneReasons.length ? 'yellow' : 'green',
-    lane_reasons: [...new Set(laneReasons)].slice(0, 30),
+    lane: allLaneReasons.length ? 'yellow' : 'green',
+    lane_reasons: allLaneReasons.slice(0, 30),
     engineResult,
     customer_account: accountPricing.customerAccount,
     presentation: presentationForServices(input.engineInputs.services, engineResult),
@@ -1263,9 +1423,20 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
   };
 }
 
+// Mirrors the client's open-lead statuses (LeadsTabs OPEN_FILTER_STATUSES).
+// Agent Estimate is an open-lead workflow, and the check must hold at
+// CONFIRMED-write time — the lead can be closed by another operator or an
+// automation while a confirmation card is outstanding, so a render-time
+// client check alone is not enough.
+const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed']);
+
 async function loadAgentEstimateLead(leadId, database = db) {
   const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at').first();
   if (!lead) return { error: 'Lead not found' };
+  const status = String(lead.status || 'new').toLowerCase();
+  if (!OPEN_LEAD_STATUSES.has(status)) {
+    return { error: `This lead is ${status.replace(/_/g, ' ')} — Agent Estimate drafts open leads only. Reopen the lead before drafting.` };
+  }
   return { lead };
 }
 
@@ -1296,10 +1467,17 @@ function anchorAgentEstimateContact(input, lead) {
   }
   const leadName = [lead.first_name, lead.last_name].filter(Boolean).join(' ').trim();
   const leadAddress = [lead.address, lead.city, lead.zip].filter(Boolean).join(', ');
+  const inputAddress = String(input.address || '').trim();
   const leadAddressIdentity = addressIdentity(leadAddress);
   const inputAddressIdentity = addressIdentity(input.address);
+  // Compare the FULL normalized street line when the lead has one — a
+  // number+ZIP-only identity lets "123 Main St" draft as "123 Oak St" without
+  // the yellow-lane address flag. Number+ZIP stays as the fallback when the
+  // lead carries no street line. A false positive only flags review; a false
+  // negative persists a quote against the wrong property.
   const addressMismatch = !!(
-    (leadAddressIdentity.streetNumber && inputAddressIdentity.streetNumber
+    (lead.address && inputAddress && !sameStreetAddress(leadAddress, inputAddress))
+    || (leadAddressIdentity.streetNumber && inputAddressIdentity.streetNumber
       && leadAddressIdentity.streetNumber !== inputAddressIdentity.streetNumber)
     || (leadAddressIdentity.zip && inputAddressIdentity.zip
       && leadAddressIdentity.zip !== inputAddressIdentity.zip)
@@ -1310,8 +1488,13 @@ function anchorAgentEstimateContact(input, lead) {
     input: {
       ...input,
       customerName: leadName || input.customerName,
-      customerPhone: leadPhone || input.customerPhone,
-      customerEmail: leadEmail || input.customerEmail,
+      // The LEAD is the only recipient authority. When a lead field is blank
+      // a model-supplied phone/email must NOT become the stored recipient —
+      // the send path delivers the bearer estimate link to these columns, and
+      // the confirmation card does not display them, so a hallucinated
+      // contact would be undetectable until it was already sent.
+      customerPhone: leadPhone || null,
+      customerEmail: leadEmail || null,
       contactVerification: {
         addressMismatch,
         selectedLeadHasAddress: !!leadAddress,
@@ -1320,8 +1503,61 @@ function anchorAgentEstimateContact(input, lead) {
   };
 }
 
+// Shared duplicate guard for BOTH Agent Estimate write paths. The phone
+// helper alone returns only the newest open estimate, so this checks EVERY
+// open estimate on the phone: a same-street open estimate blocks (pointing
+// at that row), the different-property bypass applies only when every open
+// estimate has a known, street-different address, and any unknown address
+// keeps the conservative block.
+async function agentEstimateDuplicateBlock(trx, phone, address, { excludeEstimateId = null } = {}) {
+  let duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx, excludeEstimateId });
+  if (duplicateBlock?.existingEstimateId && address) {
+    try {
+      const phoneLast10 = String(phone || '').replace(/\D/g, '').slice(-10);
+      let query = trx('estimates')
+        .select('id', 'address')
+        .whereRaw("right(regexp_replace(coalesce(customer_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10])
+        .whereIn('status', OPEN_ESTIMATE_STATUSES)
+        .whereNull('archived_at');
+      if (excludeEstimateId) query = query.whereNot('id', excludeEstimateId);
+      const openRows = await query;
+      const sameProperty = openRows.find((row) => row.address && sameStreetAddress(row.address, address));
+      if (sameProperty) {
+        duplicateBlock = { ...duplicateBlock, existingEstimateId: sameProperty.id };
+      } else if (openRows.length && openRows.every((row) => row.address)) {
+        logger.info('[intelligence-bar:agent-estimate] duplicate guard bypassed — every open estimate on this phone is a different property');
+        duplicateBlock = null;
+      }
+    } catch (dupErr) {
+      logger.warn(`[intelligence-bar:agent-estimate] duplicate address compare failed (keeping block): ${dupErr.message}`);
+    }
+  }
+  return duplicateBlock;
+}
+
+function duplicateBlockResult(duplicateBlock) {
+  return {
+    error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
+    blocked: true,
+    existing_estimate_id: duplicateBlock.existingEstimateId,
+  };
+}
+
 async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing = accountPricingFromContext()) {
   return db.transaction(async (trx) => {
+    // Lock the lead row and revalidate its open status INSIDE the revision
+    // transaction — the pre-transaction check goes stale while context
+    // loading, repricing, and membership queries run, and another operator
+    // can close the lead in that window (mirrors persistNewAgentDraft).
+    await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
+    const leadCheck = await loadAgentEstimateLead(input.leadId, trx);
+    if (leadCheck.error) return leadCheck;
+    // Re-anchor recipients from the LOCKED lead row: a contact correction
+    // that landed between the pre-transaction anchor and this lock must win,
+    // or the draft persists (and later sends to) the stale phone/email.
+    const reanchored = anchorAgentEstimateContact(input, leadCheck.lead);
+    if (reanchored.error) return reanchored;
+    const lockedInput = reanchored.input;
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
     if (!estimate) return { error: 'Agent Estimate draft not found' };
     if (estimate.status !== 'draft' || estimate.source !== 'estimator_engine') {
@@ -1334,12 +1570,36 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
     if (currentData.lead_id && String(currentData.lead_id) !== String(input.leadId)) {
       return { error: 'This Agent Estimate draft belongs to a different lead and will not be overwritten' };
     }
-    const payload = agentEstimatePayload(input, preview, currentData, accountPricing);
+    // A revision rewrites the stored address and recipient — recheck the
+    // phone/property duplicate guard (excluding this row) so a correction to
+    // another property can't leave two open estimates on the same
+    // phone/street.
+    const duplicateBlock = await agentEstimateDuplicateBlock(
+      trx,
+      lockedInput.customerPhone || null,
+      lockedInput.address,
+      { excludeEstimateId: estimate.id },
+    );
+    if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
+    const payload = agentEstimatePayload(lockedInput, preview, currentData, accountPricing);
+    // Merge over the existing JSON instead of replacing it: an operator can
+    // author a commercial proposal on a draft (estimate_data.proposal), and a
+    // full overwrite would silently delete it. Agent-owned OPTIONAL keys are
+    // explicitly cleared when the new payload no longer carries them, so a
+    // lapsed membership or prior-services set can't survive the merge.
+    const mergedData = { ...currentData, ...payload.data };
+    if (!payload.data.membershipSnapshot) delete mergedData.membershipSnapshot;
+    if (!payload.data.priorQualifyingServices) delete mergedData.priorQualifyingServices;
     const [updated] = await trx('estimates').where({ id: estimate.id, status: 'draft', source: 'estimator_engine' })
       .update({
-        estimate_data: JSON.stringify(payload.data),
+        estimate_data: JSON.stringify(mergedData),
         ...payload.fields,
-        customer_id: accountPricing.customerId || estimate.customer_id || null,
+        // Recognition is reloaded for every confirmation — use ONLY the
+        // current result. Falling back to the row's old customer_id would
+        // keep a stale link after the lead was unlinked or its phone became
+        // ambiguous, and acceptance would apply the quote to the wrong
+        // account.
+        customer_id: accountPricing.customerId || null,
         notes: null,
         updated_at: trx.fn.now(),
       })
@@ -1352,10 +1612,21 @@ async function reviseOwnedAgentDraft(estimateId, input, preview, accountPricing 
 
 async function persistNewAgentDraft(input, preview, actionContext, accountPricing = accountPricingFromContext()) {
   const phone = input.customerPhone || null;
-  return withAutomatedEstimatePhoneLock(phone, async (trx) => {
+  const persist = async (trx) => {
+    // Lock the lead row for the whole read-check-insert-update sequence —
+    // on the email-only path there is no phone advisory lock, so two
+    // confirmation cards for the same lead could otherwise both see no
+    // estimate and create duplicate drafts.
+    await trx('leads').where({ id: input.leadId }).forUpdate().select('id');
     const leadResult = await loadAgentEstimateLead(input.leadId, trx);
     if (leadResult.error) return leadResult;
     const lead = leadResult.lead;
+    // Re-anchor recipients from the LOCKED lead row: a contact correction
+    // that landed between the pre-transaction anchor and this lock must win,
+    // or the draft persists (and later sends to) the stale phone/email.
+    const reanchored = anchorAgentEstimateContact(input, lead);
+    if (reanchored.error) return reanchored;
+    const lockedInput = reanchored.input;
 
     if (lead.estimate_id) {
       const existing = await trx('estimates').where({ id: lead.estimate_id }).first();
@@ -1373,22 +1644,19 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
       }
     }
 
-    const duplicateBlock = await blockIfAutomatedEstimateDuplicate(phone, { database: trx });
-    if (duplicateBlock) {
-      return {
-        error: duplicateBlock.message || 'An automated estimate is already open for this phone number',
-        blocked: true,
-        existing_estimate_id: duplicateBlock.existingEstimateId,
-      };
-    }
+    const duplicateBlock = await agentEstimateDuplicateBlock(trx, lockedInput.customerPhone || null, lockedInput.address);
+    if (duplicateBlock) return duplicateBlockResult(duplicateBlock);
 
-    const payload = agentEstimatePayload(input, preview, {}, accountPricing);
+    const payload = agentEstimatePayload(lockedInput, preview, {}, accountPricing);
     const token = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
     const [estimate] = await trx('estimates').insert({
       estimate_data: JSON.stringify(payload.data),
       ...payload.fields,
-      customer_id: accountPricing.customerId || lead.customer_id || null,
+      // ONLY the recognition this confirmation priced with. A lead.customer_id
+      // fallback could adopt a customer linked AFTER pricing ran, attaching an
+      // account whose services and tier the quote never accounted for.
+      customer_id: accountPricing.customerId || null,
       notes: null,
       token,
       expires_at: expiresAt,
@@ -1398,7 +1666,16 @@ async function persistNewAgentDraft(input, preview, actionContext, accountPricin
     }).returning(['id', 'token']);
     await trx('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
     return { estimate, revised: false };
-  });
+  };
+
+  // withAutomatedEstimatePhoneLock runs the callback WITHOUT a transaction or
+  // advisory lock when there is no 10-digit phone key — an email-only lead
+  // still needs the sequence serialized, so open our own transaction (the
+  // lead-row lock above is the duplicate key in that case).
+  if (String(phone || '').replace(/\D/g, '').length >= 10) {
+    return withAutomatedEstimatePhoneLock(phone, persist);
+  }
+  return db.transaction(persist);
 }
 
 async function createAgentEstimateDraft(input, actionContext = {}) {
@@ -1419,7 +1696,17 @@ async function createAgentEstimateDraft(input, actionContext = {}) {
   if (accountPricing.customerId) {
     accountPricing.membershipSnapshot = await computeMembershipContext(db, {
       customerId: accountPricing.customerId,
-      estData: preview.engineResult || { lineItems: preview.engineResult?.lineItems || [] },
+      estData: {
+        lineItems: preview.engineResult?.lineItems || [],
+        // appliedRecurringRate reads this aggregate to detect margin-floor-
+        // capped WaveGuard discounts; with lineItems alone it falls back to
+        // the full tier rate and the public card can advertise a discount the
+        // stored total doesn't include.
+        recurring: {
+          annualBeforeDiscount: Number(preview.engineResult?.summary?.recurringAnnualBeforeDiscount || 0),
+          annualAfterDiscount: Number(preview.engineResult?.summary?.recurringAnnualAfterDiscount || 0),
+        },
+      },
     });
   }
 
