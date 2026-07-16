@@ -24,8 +24,14 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
+// Document-level key listeners are shared by every hand-rolled modal. Track
+// their mount order so only the topmost dialog can trap focus or handle
+// Escape when dialogs are stacked (for example, an error alert over a form).
+const modalStack = [];
+
 export default function useModalFocus(active = true, onEscape = null) {
   const dialogRef = useRef(null);
+  const modalEntryRef = useRef({});
   const onEscapeRef = useRef(onEscape);
   onEscapeRef.current = onEscape;
 
@@ -52,6 +58,8 @@ export default function useModalFocus(active = true, onEscape = null) {
 
     openedRef.current = true;
     const previouslyFocused = openerRef.current;
+    const modalEntry = modalEntryRef.current;
+    modalStack.push(modalEntry);
 
     const getFocusable = () =>
       Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter(
@@ -66,9 +74,10 @@ export default function useModalFocus(active = true, onEscape = null) {
     if (!dialog.contains(document.activeElement)) dialog.focus();
 
     const onKeyDown = (e) => {
+      if (modalStack[modalStack.length - 1] !== modalEntry) return;
       if (e.key === 'Escape' && onEscapeRef.current) {
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         onEscapeRef.current();
         return;
       }
@@ -96,6 +105,8 @@ export default function useModalFocus(active = true, onEscape = null) {
     document.addEventListener('keydown', onKeyDown, true);
     return () => {
       document.removeEventListener('keydown', onKeyDown, true);
+      const stackIndex = modalStack.lastIndexOf(modalEntry);
+      if (stackIndex !== -1) modalStack.splice(stackIndex, 1);
       openedRef.current = false;
       if (
         previouslyFocused &&
