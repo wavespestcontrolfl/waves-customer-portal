@@ -1303,9 +1303,20 @@ function agentEstimatePayload(input, preview, existingData = {}, accountPricing 
   };
 }
 
+// Mirrors the client's open-lead statuses (LeadsTabs OPEN_FILTER_STATUSES).
+// Agent Estimate is an open-lead workflow, and the check must hold at
+// CONFIRMED-write time — the lead can be closed by another operator or an
+// automation while a confirmation card is outstanding, so a render-time
+// client check alone is not enough.
+const OPEN_LEAD_STATUSES = new Set(['new', 'contacted', 'estimate_sent', 'estimate_viewed']);
+
 async function loadAgentEstimateLead(leadId, database = db) {
   const lead = await database('leads').where({ id: leadId }).whereNull('deleted_at').first();
   if (!lead) return { error: 'Lead not found' };
+  const status = String(lead.status || 'new').toLowerCase();
+  if (!OPEN_LEAD_STATUSES.has(status)) {
+    return { error: `This lead is ${status.replace(/_/g, ' ')} — Agent Estimate drafts open leads only. Reopen the lead before drafting.` };
+  }
   return { lead };
 }
 

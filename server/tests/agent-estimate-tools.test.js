@@ -978,3 +978,42 @@ describe('Agent Estimate recurring-customer flag control', () => {
     expect(engineArg.services.germanRoachInitial.isRecurringCustomer).toBe(false);
   });
 });
+
+describe('Agent Estimate open-lead enforcement', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGenerateEstimate.mockReturnValue(ENGINE_RESULT);
+    mockDuplicateBlock.mockResolvedValue(null);
+  });
+
+  test.each(['won', 'lost', 'unresponsive', 'duplicate'])(
+    'rejects a confirmed draft write for a %s lead server-side',
+    async (status) => {
+      const { database, writes } = makeDatabase({
+        lead: { id: 'lead-1', customer_id: null, estimate_id: null, status },
+      });
+      mockDb.mockImplementation(database);
+      mockTransactionDb = database;
+
+      const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+      expect(result.error).toMatch(new RegExp(status.replace(/_/g, ' '), 'i'));
+      expect(result.error).toMatch(/open leads only/i);
+      expect(mockGenerateEstimate).not.toHaveBeenCalled();
+      expect(writes).toEqual([]);
+    },
+  );
+
+  test('an open contacted lead still drafts normally', async () => {
+    const { database, writes } = makeDatabase({
+      lead: { id: 'lead-1', customer_id: null, estimate_id: null, status: 'contacted' },
+    });
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_agent_estimate_draft', INPUT, { confirmed: true });
+
+    expect(result.success).toBe(true);
+    expect(writes.find((write) => write.table === 'estimates' && write.op === 'insert')).toBeTruthy();
+  });
+});
