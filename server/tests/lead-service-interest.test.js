@@ -314,10 +314,12 @@ describe('composeServiceInterest', () => {
   });
 
   test('"X extermination" is one service, standalone exterminator is pest (codex P2)', () => {
+    // r12: an inspection-only match no longer swallows requested termite
+    // WORK — the extermination request surfaces as Termite Service.
     expect(composeServiceInterest({
       matched_service: 'Termite Inspection',
       requested_service: 'termite extermination',
-    })).toBe('Termite Inspection');
+    })).toBe('Termite Inspection + Termite Service');
     expect(composeServiceInterest({
       matched_service: 'Quarterly Lawn Care Service',
       requested_service: 'lawn care and an exterminator',
@@ -603,6 +605,34 @@ describe('composeServiceInterest', () => {
       { matched_service: 'Quarterly Pest Control Service', requested_service: 'pest control and termite' },
       { cueText: 'pest control and a termite inspection for the sale' },
     )).toBe('Quarterly Pest Control Service + Termite Inspection');
+  });
+
+  test('inspection match + work cue appends the work (codex r12)', () => {
+    expect(composeServiceInterest(
+      { matched_service: 'Termite Inspection', requested_service: 'termite' },
+      { cueText: 'termite monitoring and protection' },
+    )).toBe('Termite Inspection + Termite Service');
+    // work-cued match stays covered — no double tail
+    expect(composeServiceInterest(
+      { matched_service: 'Liquid Termite Perimeter', requested_service: 'termite' },
+      { cueText: 'termite treatment' },
+    )).toBe('Liquid Termite Perimeter');
+  });
+
+  test('stinging work is its own family, not generic pest (codex r12)', () => {
+    expect(composeWordsForV2Category('stinging_insect')).toBe('wasp nest');
+    expect(composeServiceInterest({
+      matched_service: 'Quarterly Pest Control Service',
+      requested_service: 'quarterly pest and a wasp nest',
+    })).toBe('Quarterly Pest Control Service + Bee / Wasp Nest Removal Service');
+  });
+
+  test('exclusion is its own family, not generic rodent (codex r12)', () => {
+    expect(composeWordsForV2Category('exclusion')).toBe('exclusion');
+    expect(composeServiceInterest({
+      matched_service: 'Rodent Control',
+      requested_service: 'rodent trapping and exclusion',
+    })).toBe('Rodent Control + Rodent Exclusion');
   });
 
   test('non-service chatter appends nothing', () => {

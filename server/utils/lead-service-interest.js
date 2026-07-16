@@ -51,7 +51,13 @@ const cleanText = (v) => {
 // distinct billable deliverables (project-types.js routes real-estate
 // transactions to WDO).
 const SERVICE_FAMILIES = [
-  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  { key: 'pest', label: 'Pest Control Service', re: /\bpests?\b|(?<!\bbed[\s-])\bbugs?\b|(?<!\bstinging\s)\binsects?\b|\broach(?:es)?\b|\bcockroach(?:es)?\b|\bants?\b|\bspiders?\b|\bfleas?\b|\bticks?\b|\bsilverfish\b|\bearwigs?\b|\bmillipedes?\b|\bcentipedes?\b|\bpalmetto\s+bugs?\b|\bscorpions?\b|\bflies\b|\bfly\b|\bgnats?\b|\bcrickets?\b|\bexterminat/i },
+  // Stinging work is its own catalog/pricing lane (Bee / Wasp Nest Removal)
+  // — "quarterly pest plus a wasp nest" must surface it, not vanish into
+  // the already-covered generic pest family (codex r12).
+  { key: 'stinging', label: 'Bee / Wasp Nest Removal Service', re: /\bwasps?\b|\bhornets?\b|\byellow\s?jackets?\b|\bbees?\b|\bstinging\s+insects?\b/i },
+  // Exclusion work is selected and priced separately from rodent control.
+  { key: 'exclusion', label: 'Rodent Exclusion', re: /\bexclusions?\b|\bseal(?:ing)?\s+(?:up\s+)?entry\s+points?\b/i },
   { key: 'bed_bug', label: 'Bed Bug Treatment', re: /\bbed[\s-]*bugs?\b|\bbedbugs?\b/i },
   { key: 'lawn', label: 'Lawn Care Service', re: /\blawns?\b|\bturf\b|\bgrass\b|\bfertili[sz](?:e|er|ation|ing)?\b|\bweeds?\b|\bchinch\b|\bsod\b|\bfungus\b(?!\s*gnats?)|\bfungal\b/i },
   // palm(?! rat| injection): "palm rats" are roof rats (rodent) and palm
@@ -220,12 +226,12 @@ const V2_CATEGORY_COMPOSE_WORDS = {
   termite: 'termite',
   rodent: 'rodent control',
   mosquito: 'mosquito control',
-  stinging_insect: 'wasps',
+  stinging_insect: 'wasp nest',
   lawn_care: 'lawn care',
   palm_injection: 'palm injection',
   bed_bug: 'bed bugs',
   wdo: 'WDO inspection',
-  exclusion: 'rodent control',
+  exclusion: 'exclusion',
   bundled_waveguard: 'pest control',
 };
 function composeWordsForV2Category(category) {
@@ -264,9 +270,18 @@ function composeServiceInterest(extracted = {}, opts = {}) {
   const cueText = cleanText(opts.cueText);
   const termiteWorkCue = (scanText && TERMITE_TREATMENT_RE.test(scanText))
     || (cueText && TERMITE_TREATMENT_RE.test(cueText));
+  // An inspection-only legacy match ("Termite Inspection") covers the
+  // termite FAMILY but not requested termite WORK — a caller asking for
+  // monitoring/protection on top of it gets the work appended, not
+  // silently swallowed by the covered-family skip (codex r12).
+  const matchedTermiteWorkCue = TERMITE_TREATMENT_RE.test(
+    [matched, cleanText(extracted.specific_service_name)].filter(Boolean).join(' '),
+  );
   let label = matched;
   for (const fam of familiesIn(scanText)) {
-    if (covered.has(fam.key)) continue;
+    if (covered.has(fam.key)) {
+      if (!(fam.key === 'termite' && termiteWorkCue && !matchedTermiteWorkCue)) continue;
+    }
     if (fam.key === 'termite' && wdoPresent && !termiteWorkCue) continue;
     covered.add(fam.key);
     // Inspection-only termite wording ("pest control and termite inspection

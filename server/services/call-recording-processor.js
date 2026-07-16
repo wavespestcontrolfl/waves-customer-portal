@@ -5832,33 +5832,50 @@ const CallRecordingProcessor = {
           // token ("pest_general"), which drops V2's secondaries and scans
           // as nothing (codex r10). matched_service stays V1 here — the
           // recurring-default backfill below re-asserts it post-merge.
+          const v2ServiceRequest = v2ApprovedExtraction?.service_request || null;
           const v2RequestedForCompose = (() => {
-            const sr = v2ApprovedExtraction?.service_request;
-            if (!sr) return null;
+            if (!v2ServiceRequest) return null;
             // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
             // legacy map collapses palm_injection into Tree & Shrub and
             // hard-labels termite as inspection (codex r11).
-            const cats = [sr.primary_service_category,
-              ...(Array.isArray(sr.secondary_categories) ? sr.secondary_categories : [])];
-            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
-            return words.length ? words.join(' and ') : null;
+            const cats = [v2ServiceRequest.primary_service_category,
+              ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
+            // Null-mapped categories (other/inspection_only/future enums)
+            // yield an EMPTY category-authoritative request — never fall
+            // back to V1 caller text under V2 approval (codex r12).
+            return cats.map((c) => composeWordsForV2Category(c)).filter(Boolean).join(' and ');
+          })();
+          // Prefix with the primary the V2 merge will adopt (same adoption
+          // rule as the merge below: V2 anchored a specific service, V1 had
+          // no label, or the category maps one-to-one) — a V1 primary V2
+          // rejected must not lead the label (codex r12).
+          const matchedForCompose = (() => {
+            if (v2ServiceRequest === null) return extracted.matched_service;
+            const v2Flat = flatView(v2ApprovedExtraction);
+            const v2Cat = v2ServiceRequest.primary_service_category || null;
+            const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
+            return v2Flat.matched_service
+              && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)
+              ? v2Flat.matched_service
+              : extracted.matched_service;
           })();
           const serviceInterestLabel = composeServiceInterest(
-            v2RequestedForCompose
-              ? { ...extracted, requested_service: v2RequestedForCompose }
+            v2ServiceRequest !== null
+              ? { ...extracted, matched_service: matchedForCompose, requested_service: v2RequestedForCompose }
               : extracted,
             // Caller wording still decides termite work-vs-inspection —
             // families stay category-authoritative under V2 approval.
-            v2RequestedForCompose ? { cueText: extracted.requested_service } : {},
+            v2ServiceRequest !== null ? { cueText: extracted.requested_service } : {},
           );
           if (serviceInterestLabel && isEmpty(current?.service_interest)) {
             leadUpdates.service_interest = serviceInterestLabel;
             persistedServiceInterestLabel = serviceInterestLabel;
             // composeServiceInterest always prefixes the label with the
-            // matched service verbatim, so the slice is exactly the extras.
-            persistedServiceInterestExtras = serviceInterestLabel === extracted.matched_service
+            // matched service it composed with (matchedForCompose under V2
+            // approval), so the slice is exactly the extras.
+            persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
               ? null
-              : serviceInterestLabel.slice(String(extracted.matched_service).length);
+              : serviceInterestLabel.slice(String(matchedForCompose || '').length);
           }
           // Urgency is a triage signal, not a hand-edited field — and the
           // leads schema defaults it to 'normal' at insert (migration
