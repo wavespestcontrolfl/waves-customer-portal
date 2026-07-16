@@ -315,6 +315,42 @@ const SERVICE_HUB_LINKS = {
   specialty: ['/pest-control-services/'],
 };
 
+// The SEO completion gate P1s a supporting-blog draft whose body has no
+// conversion link (/contact | *quote* | *estimate* | calculator), but the
+// checklist below never carried one — the writer only passed when it
+// improvised. Lawn/tree-shrub have no calculator flow, so they use /contact/.
+const SERVICE_CONVERSION_LINK = {
+  pest: '/pest-control-calculator/',
+  termite: '/pest-control-calculator/',
+  mosquito: '/pest-control-calculator/',
+  rodent: '/pest-control-calculator/',
+  specialty: '/pest-control-calculator/',
+  lawn: '/contact/',
+  'tree-shrub': '/contact/',
+};
+
+// Verbatim facts-bank service ids the miner may emit unmapped
+// (facts-sufficiency KNOWN_SERVICE_IDS). Normalized ONCE in
+// _internalLinksFor so ALL three link maps (hubs, city slug, conversion)
+// resolve — aliasing only the conversion map left those opportunities
+// missing their mandatory service/city checklist links.
+// commercial-lawn / commercial-pest are DELIBERATELY absent: commercial is
+// a different funnel (no residential calculator, its own pricing rules) —
+// mapping it to residential hubs needs an owner call, not a default.
+const SERVICE_ID_ALIASES = {
+  'pest-control': 'pest',
+  'lawn-care': 'lawn',
+  'tree-shrub-care': 'tree-shrub',
+  'bed-bug': 'pest',
+  'cockroach': 'pest',
+  'pest-inspection': 'pest',
+  'termite-inspection': 'termite',
+  'lawn-aeration': 'lawn',
+  'lawn-fertilization': 'lawn',
+  'lawn-weed-control': 'lawn',
+  'lawn-pest-control': 'lawn',
+};
+
 // ── main API ────────────────────────────────────────────────────────
 
 class ContentBriefBuilder {
@@ -690,20 +726,31 @@ class ContentBriefBuilder {
 
   _internalLinksFor(opportunity, pageType) {
     if (['metadata', 'links', 'gbp', 'none'].includes(pageType)) return [];
+    // One normalization for ALL three maps below — a verbatim facts-bank id
+    // ('pest-control') previously missed the hub AND city links too, and the
+    // gate P1s drafts on exactly those mandatory checklist links.
+    const service = SERVICE_ID_ALIASES[opportunity.service] || opportunity.service;
     const links = new Set();
-    const hubs = SERVICE_HUB_LINKS[opportunity.service] || [];
+    const hubs = SERVICE_HUB_LINKS[service] || [];
     for (const h of hubs) links.add(h);
     // City-service link uses the canonical service slug, NOT
     // `${service}-control-` (lawn would produce /lawn-control-…-fl/
     // which isn't a real page; the real slug is /lawn-care-…-fl/).
     // Services without a canonical city-service slug pattern (e.g.
     // tree-shrub, specialty) get only the hub link.
-    if (opportunity.city && opportunity.service) {
-      const slug = SERVICE_CITY_SLUG[opportunity.service];
+    if (opportunity.city && service) {
+      const slug = SERVICE_CITY_SLUG[service];
       if (slug) {
         const citySlug = opportunity.city.toLowerCase().replace(/\s+/g, '-');
         links.add(`/${slug}-${citySlug}-fl/`);
       }
+    }
+    // Only supporting-blog carries the conversion-CTA gate requirement;
+    // other page types (customer-question's "one internal link" contract,
+    // city pages' own CTA rules) keep their existing link shape.
+    if (pageType === 'supporting-blog') {
+      const conversion = SERVICE_CONVERSION_LINK[service];
+      if (conversion) links.add(conversion);
     }
     return Array.from(links).slice(0, 5);
   }
