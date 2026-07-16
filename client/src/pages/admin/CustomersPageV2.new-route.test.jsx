@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,12 +9,19 @@ vi.mock("../../hooks/useIsMobile", () => ({ default: () => true }));
 vi.mock("../../components/AddressAutocomplete", () => ({
   default: (props) => <input {...props} />,
 }));
+vi.mock("../../components/admin/Customer360ProfileV2", () => ({
+  default: ({ onClose }) => (
+    <div role="dialog" aria-label="Customer profile">
+      <button type="button" onClick={onClose}>Close profile</button>
+    </div>
+  ),
+}));
 
 import CustomersPageV2 from "./CustomersPageV2";
 
 function LocationProbe() {
   const location = useLocation();
-  return <output data-testid="location">{location.pathname}</output>;
+  return <output data-testid="location">{location.pathname}{location.search}</output>;
 }
 
 describe("CustomersPageV2 new-customer route", () => {
@@ -49,5 +56,51 @@ describe("CustomersPageV2 new-customer route", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
+  });
+
+  it("keeps customer profile selection and close state in the URL", async () => {
+    fetch.mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({
+        customers: [{
+          id: "cust-1",
+          firstName: "Ada",
+          lastName: "Lovelace",
+          address: {},
+        }],
+        total: 1,
+        totalPages: 1,
+      }),
+    }));
+
+    render(
+      <MemoryRouter initialEntries={["/admin/customers"]}>
+        <Routes>
+          <Route
+            path="/admin/customers"
+            element={(
+              <>
+                <CustomersPageV2 />
+                <LocationProbe />
+              </>
+            )}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", {
+      name: "Open Ada Lovelace customer profile",
+    }));
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        "/admin/customers?customerId=cust-1",
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close profile" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent("/admin/customers");
+    });
   });
 });

@@ -973,7 +973,7 @@ export default function CustomersPageV2() {
   const [pipelineError, setPipelineError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
   const [view, setView] = useState(() => {
@@ -1026,6 +1026,25 @@ export default function CustomersPageV2() {
     setQuickAddPreset(null);
     if (isNewCustomerRoute) navigate("/admin/customers", { replace: true });
   };
+
+  const openCustomerProfile = (customerId) => {
+    if (!customerId) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("customerId", String(customerId));
+    setSearchParams(next);
+    setSelected360Id(customerId);
+  };
+
+  const closeCustomerProfile = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("customerId");
+    setSearchParams(next, { replace: true });
+    setSelected360Id(null);
+  };
+
+  useEffect(() => {
+    setSelected360Id(searchParams.get("customerId") || null);
+  }, [searchParams]);
 
   const startEdit = (c) => {
     setEditingId(c.id);
@@ -1592,7 +1611,17 @@ export default function CustomersPageV2() {
                       const addr = formatCustomerAddress(c.address);
                       return (
                         <div
-                          onClick={() => setSelected360Id(c.id)}
+                          onClick={() => openCustomerProfile(c.id)}
+                          onKeyDown={(event) => {
+                            if (event.target !== event.currentTarget) return;
+                            if (event.key === "Enter" || event.key === " ") {
+                              event.preventDefault();
+                              openCustomerProfile(c.id);
+                            }
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
                           className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3 cursor-pointer hover:bg-zinc-50"
                           style={{ height: 64 }}
                         >
@@ -1672,7 +1701,17 @@ export default function CustomersPageV2() {
                     })()
                   ) : (
                     <div
-                      onClick={() => setSelected360Id(c.id)}
+                      onClick={() => openCustomerProfile(c.id)}
+                      onKeyDown={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openCustomerProfile(c.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
                       className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
                       style={{ gridTemplateColumns: TABLE_COLS }}
                     >
@@ -2006,7 +2045,7 @@ export default function CustomersPageV2() {
           {" "}
           <LegacyCustomersPanel
             exportName="CustomerMap"
-            props={{ customers, onSelect: (c) => setSelected360Id(c.id) }}
+            props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
           />{" "}
         </div>
       )}
@@ -2100,7 +2139,7 @@ export default function CustomersPageV2() {
           onCreated={(customer) => {
             loadCustomers();
             if (view === "pipeline") loadPipeline();
-            if (customer?.id) setSelected360Id(customer.id);
+            if (customer?.id) openCustomerProfile(customer.id);
           }}
         />
       )}
@@ -2113,7 +2152,7 @@ export default function CustomersPageV2() {
             loadCustomers();
             if (view === "pipeline") loadPipeline();
             // Deep-link into the newly created profile (parity with desktop QuickAdd).
-            if (customer?.id) setSelected360Id(customer.id);
+            if (customer?.id) openCustomerProfile(customer.id);
           }}
         />
       )}
@@ -2122,9 +2161,9 @@ export default function CustomersPageV2() {
       {selected360Id && (
         <Customer360Profile
           customerId={selected360Id}
-          onSelectCustomer={(id) => setSelected360Id(id)}
+          onSelectCustomer={openCustomerProfile}
           onAddProperty={(customer) => {
-            setSelected360Id(null);
+            closeCustomerProfile();
             openAddCustomer({
               firstName: customer.firstName || "",
               lastName: customer.lastName || "",
@@ -2146,7 +2185,7 @@ export default function CustomersPageV2() {
                 : "",
             });
           }}
-          onClose={() => setSelected360Id(null)}
+          onClose={closeCustomerProfile}
         />
       )}
     </div>

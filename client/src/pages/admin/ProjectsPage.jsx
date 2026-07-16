@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
@@ -1122,10 +1123,8 @@ function CustomerProjectReportPreview({
 }
 
 export default function ProjectsPage() {
-  const initialProjectId =
-    typeof window !== "undefined"
-      ? new URLSearchParams(window.location.search).get("projectId")
-      : null;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialProjectId = searchParams.get("projectId");
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
@@ -1173,11 +1172,33 @@ export default function ProjectsPage() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!initialProjectId || selectedId) return;
-    if (projects.some((p) => p.id === initialProjectId)) {
-      setSelectedId(initialProjectId);
+    if (!initialProjectId) {
+      setSelectedId(null);
+      return;
     }
-  }, [initialProjectId, projects, selectedId]);
+    const match = projects.find(
+      (project) => String(project.id) === String(initialProjectId),
+    );
+    setSelectedId(match?.id || null);
+  }, [initialProjectId, projects]);
+
+  const selectProject = useCallback(
+    (projectId) => {
+      if (!projectId) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("projectId", String(projectId));
+      setSearchParams(next);
+      setSelectedId(projectId);
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const closeProject = useCallback(() => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("projectId");
+    setSearchParams(next, { replace: true });
+    setSelectedId(null);
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     adminFetch("/admin/projects/types")
@@ -1266,7 +1287,7 @@ export default function ProjectsPage() {
                   key={p.id}
                   project={p}
                   active={selectedId === p.id}
-                  onSelect={() => setSelectedId(p.id)}
+                  onSelect={() => selectProject(p.id)}
                 />
               ))
             ))}
@@ -1275,7 +1296,7 @@ export default function ProjectsPage() {
             <WdoReportsSection
               projects={wdoProjects}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={selectProject}
             />
           )}
         </div>
@@ -1287,7 +1308,7 @@ export default function ProjectsPage() {
             key={selected.id}
             projectId={selected.id}
             typesRegistry={typesRegistry}
-            onClose={() => setSelectedId(null)}
+            onClose={closeProject}
             onChanged={loadProjects}
             canAdminActions={isAdmin}
           />
@@ -1316,7 +1337,7 @@ export default function ProjectsPage() {
           onCreated={(p) => {
             setCreateMode(null);
             loadProjects();
-            if (p?.id) setSelectedId(p.id);
+            if (p?.id) selectProject(p.id);
           }}
         />
       )}
