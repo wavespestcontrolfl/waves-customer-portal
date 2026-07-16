@@ -277,7 +277,10 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
     return <div className="p-4 text-[14px] leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
   const canSend = draft.status === "draft" && draft.editable_here === true;
-  const retryChannels = draft.status === "sent" ? failedChannels : [];
+  // A partial send can settle as "viewed" (the customer opened the successful
+  // channel before delivery finalized) — the backend still permits resending,
+  // so the failed-channel retry must survive that transition too.
+  const retryChannels = ["sent", "viewed"].includes(draft.status) ? failedChannels : [];
   // The send endpoint delivers to the contact snapshot stored ON the
   // estimate, not the lead's current contact — display and gate on the
   // draft recipient so a post-draft lead correction can't silently send
@@ -285,9 +288,12 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   const recipientPhone = draft.customer_phone || null;
   const recipientEmail = draft.customer_email || null;
   const phoneDigits = (value) => String(value || "").replace(/\D/g, "").slice(-10);
+  // A cleared lead field counts as a mismatch too — the snapshot then points
+  // at a contact the lead no longer carries, which is exactly the stale-
+  // recipient case. Mismatch DISABLES delivery until the draft is revised.
   const recipientMismatch = !!(
-    (recipientPhone && contact?.phone && phoneDigits(recipientPhone) !== phoneDigits(contact.phone))
-    || (recipientEmail && contact?.email && String(recipientEmail).toLowerCase() !== String(contact.email).toLowerCase())
+    (recipientPhone && phoneDigits(recipientPhone) !== phoneDigits(contact?.phone))
+    || (recipientEmail && String(recipientEmail).toLowerCase() !== String(contact?.email || "").toLowerCase())
   );
   return (
     <div className="space-y-4 p-4">
@@ -338,7 +344,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           <div>{recipientPhone || "No phone on draft"} · {recipientEmail || "No email on draft"}</div>
           {recipientMismatch && (
             <div className="mt-1">
-              The lead's contact info changed after this draft was created — revise the draft to re-anchor it before sending.
+              The lead's contact info changed after this draft was created — sending is disabled until you revise the draft to re-anchor it.
             </div>
           )}
         </div>
@@ -347,7 +353,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
           <button
             type="button"
-            disabled={!recipientPhone || sending}
+            disabled={!recipientPhone || recipientMismatch || sending}
             onClick={() => onSend("sms")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -355,7 +361,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           </button>
           <button
             type="button"
-            disabled={!recipientEmail || sending}
+            disabled={!recipientEmail || recipientMismatch || sending}
             onClick={() => onSend("email")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -363,7 +369,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           </button>
           <button
             type="button"
-            disabled={!recipientPhone || !recipientEmail || sending}
+            disabled={!recipientPhone || !recipientEmail || recipientMismatch || sending}
             onClick={() => onSend("both")}
             className="flex h-12 items-center justify-center gap-2 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -376,7 +382,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           {retryChannels.includes("sms") && (
             <button
               type="button"
-              disabled={!recipientPhone || sending}
+              disabled={!recipientPhone || recipientMismatch || sending}
               onClick={() => onSend("sms")}
               className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -386,7 +392,7 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           {retryChannels.includes("email") && (
             <button
               type="button"
-              disabled={!recipientEmail || sending}
+              disabled={!recipientEmail || recipientMismatch || sending}
               onClick={() => onSend("email")}
               className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -656,9 +662,10 @@ export default function AgentEstimatePage() {
   const sendDraft = async (sendMethod) => {
     if (!draft?.id || sending) return;
     // A partial "both" send marks the estimate sent server-side while one
-    // channel failed — the backend permits resending, so keep a retry path
-    // for exactly the channels that failed.
-    const isRetry = draft.status === "sent" && failedChannels.includes(sendMethod);
+    // channel failed — and can settle as "viewed" if the customer opens the
+    // successful channel first. The backend permits resending both, so keep
+    // a retry path for exactly the channels that failed.
+    const isRetry = ["sent", "viewed"].includes(draft.status) && failedChannels.includes(sendMethod);
     if (!(draft.status === "draft" && draft.editable_here === true) && !isRetry) return;
     // Capture the lead this send belongs to — if the operator switches leads
     // before the request resolves, the completion must not mark the newly
