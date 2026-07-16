@@ -473,6 +473,49 @@ describe('review fixes', () => {
     expect(idxPriv.sameStreetAddress('123 N Palm Ave', '123 North Palm Avenue')).toBe(true);
   });
 
+  test('composer adding locality to a bare street triggers a re-gather', () => {
+    expect(idxPriv.addressAddsLocality('123 Palm Ave, Bradenton FL 34209', '123 Palm Ave')).toBe(true);
+    expect(idxPriv.addressAddsLocality('123 Palm Ave', '123 Palm Ave, Bradenton FL')).toBe(false);
+    expect(idxPriv.addressAddsLocality('123 Palm Ave, Bradenton', '123 Palm Ave, Sarasota')).toBe(false);
+  });
+
+  test('an all-provisional draft is yellow, not red-suppressed', () => {
+    const { lane, reasons } = classifyLane({
+      intent: { ...baseIntent(), services: { lawn: { track: 'st_augustine', tier: 'enhanced' } } },
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+        lot: { value: 45000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      },
+      engineResult: {
+        summary: {},
+        lineItems: [{ service: 'lawn_care', monthly: 260, annual: 3120, customQuoteFlag: true }],
+      },
+      totals: { monthly: 260, annual: 3120, oneTime: 0 },
+      comps: null,
+      calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched', transcript: 'looking for quarterly pest control', smsThread: [] },
+    });
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.join(' ')).toMatch(/PROVISIONAL/);
+  });
+
+  test('verified sqft overrides count as authoritative, listing evidence does not', () => {
+    const verified = resolvePropertyFacts({
+      extraction: { property: {} },
+      propertyRecord: {
+        squareFootage: 2450,
+        yearBuilt: 2012,
+        _fieldEvidence: { squareFootage: { sourceType: 'verified' } },
+        _parcel: countyParcel(),
+      },
+      customer: null,
+      isCommercial: false,
+      subdivisionMedian: null,
+    });
+    expect(verified.home.value).toBe(2450);
+    expect(verified.home.source).toBe(SQFT_SOURCES.COUNTY_ASSESSED);
+  });
+
   test('street comparison treats a city or ZIP change as a different parcel', () => {
     expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL', '123 Palm Avenue, Sarasota FL')).toBe(false);
     expect(idxPriv.sameStreetAddress('123 Palm Ave, Bradenton FL 34209', '123 Palm Ave, Bradenton FL 34211')).toBe(false);

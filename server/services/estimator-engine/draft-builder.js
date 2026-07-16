@@ -258,11 +258,18 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   const lines = engineResult?.lineItems || [];
   const pricedLines = lines.filter((l) => !lineRequiresReview(l));
   const manualLines = lines.filter(lineRequiresReview);
+  // RED only when NO line carries money at all — a priced-but-custom-quote
+  // line (oversize lawn) still deserves a provisional yellow draft; that is
+  // exactly what the PROVISIONAL flag below surfaces for the operator.
+  const carriesMoney = (l) => Number(l.monthlyAfterDiscount ?? l.monthly)
+    || Number(l.annualAfterDiscount ?? l.annual)
+    || Number(l.priceAfterDiscount ?? l.price ?? l.total);
+  const moneyLines = lines.filter(carriesMoney);
 
   if (!lines.length) {
     return { lane: LANES.RED, reasons: ['pricing engine produced no line items for the selected services'] };
   }
-  if (!pricedLines.length) {
+  if (!moneyLines.length) {
     return { lane: LANES.RED, reasons: [`nothing auto-priceable: ${manualLines.map((l) => l.manualReviewReasons?.[0] || l.reason || l.service).join('; ')}`] };
   }
   if (intent.is_commercial && positive(propertyFacts?.home?.value) > COMMERCIAL_FOOTPRINT_RED_SQFT) {
@@ -272,7 +279,9 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     return { lane: LANES.RED, reasons: ['engine produced zero totals'] };
   }
 
-  // Yellow triggers — draft still lands, with the gaps spelled out.
+  // Yellow triggers — draft still lands, with the gaps spelled out. A draft
+  // whose ONLY money is provisional (every priced line review-flagged) is
+  // still yellow, never green — enforced by the manualLines reason below.
   const usesHomeSqft = lines.some((l) => l.footprintUsed || l.footprint || !intent.is_commercial);
   if (usesHomeSqft && FALLBACK_SQFT_SOURCES.has(propertyFacts?.home?.source)) {
     reasons.push(`home/building sqft from fallback source (${propertyFacts.home.source}${propertyFacts.home.sampleCount ? `, n=${propertyFacts.home.sampleCount}` : ''})`);

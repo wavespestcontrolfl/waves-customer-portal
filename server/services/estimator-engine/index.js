@@ -86,6 +86,17 @@ const STREET_TOKEN_ALIASES = {
   highway: 'hwy', north: 'n', south: 's', east: 'e', west: 'w',
   northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
 };
+// The composer ADDING locality to a bare street is re-gather-worthy even
+// when the street segment matches — the bare-street lookup can have resolved
+// the wrong parcel on SWFL's repeated street names.
+function addressAddsLocality(candidate, baseline) {
+  const hasLocality = (s) => {
+    const tail = String(s || '').split(',').slice(1).join(' ');
+    return /\d{5}/.test(tail) || /[a-z]/i.test(tail.replace(/\bfl(orida)?\b/gi, ''));
+  };
+  return hasLocality(candidate) && !hasLocality(baseline);
+}
+
 function sameStreetAddress(a, b) {
   const normSegment = (s) => String(s || '')
     .toLowerCase()
@@ -174,9 +185,13 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   };
   try {
     if (callSid) {
+      // Any prior bell for this call counts: the generic promised bell OR a
+      // prior estimator bell (request-only bells carry quote_promised=false
+      // but still have the estimator_engine marker — matching only promised
+      // bells would duplicate on every reprocess).
       const existing = await db('notifications')
         .whereRaw("metadata->>'callSid' = ?", [callSid])
-        .whereRaw("metadata->>'quote_promised' = 'true'")
+        .whereRaw("(metadata->>'quote_promised' = 'true' OR metadata->>'estimator_engine' = 'true')")
         .orderBy('created_at', 'desc')
         .first();
       if (existing) {
@@ -184,7 +199,10 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         try {
           existingMeta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
         } catch { existingMeta = {}; }
-        if (existingMeta.estimator_engine === true) return; // engine already spoke for this call
+        // A prior estimator bell stands UNLESS this call now has a draft the
+        // old bell doesn't know about (transient red → later success): the
+        // stale "send it manually" text must upgrade to the draft link.
+        if (existingMeta.estimator_engine === true && (!estimateId || existingMeta.estimateId)) return;
         await db('notifications')
           .where({ id: existing.id })
           .update({
@@ -192,6 +210,9 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             body,
             link,
             metadata: JSON.stringify({ ...existingMeta, ...metadata }),
+            // The content changed materially — an already-read bell must
+            // come back unread or the upgrade is invisible.
+            read_at: null,
           });
         return;
       }
@@ -318,7 +339,8 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // the draft is priced off the wrong (or no) parcel.
     let effectiveSignals = { propertyRecord, parcelView, subdivisionMedian };
     let addressRegathered = false;
-    if (intent.address && (!address || !sameStreetAddress(intent.address, address))) {
+    if (intent.address
+      && (!address || !sameStreetAddress(intent.address, address) || addressAddsLocality(intent.address, address))) {
       logger.info('[estimator-engine] composer-final address differs from gathered address — re-gathering property signals');
       const regathered = await gatherPropertySignals(
         { ...context, extraction: null, lead: { address: intent.address }, customer: null },
@@ -433,14 +455,18 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
 
     if (draft.blocked) {
       result.blocked = true;
-      await notify({
-        call: context.call,
-        context,
-        lane,
-        quotePromised,
-        title: 'Quote promised on call — estimate already open',
-        body: `${callerLabel(intent, context)}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
-      });
+      // Request-only + already-open estimate = nothing is owed and nothing
+      // new exists — a "quote promised" bell here would mint a false task.
+      if (quotePromised) {
+        await notify({
+          call: context.call,
+          context,
+          lane,
+          quotePromised,
+          title: 'Quote promised on call — estimate already open',
+          body: `${callerLabel(intent, context)}: quote promised on a new call, but an automated estimate is already open for this phone number. Review and send the existing one.`,
+        });
+      }
       return result;
     }
 
@@ -489,5 +515,5 @@ function generateEstimateSafely(engineInput) {
 module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
-  _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress },
+  _private: { addressFromContext, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality },
 };

@@ -201,13 +201,15 @@ const FALLBACK_SQFT_SOURCES = new Set([
  * detectUnassessedVacantParcel (the #2749 lane) already handles. Reuse it
  * rather than re-deriving.
  */
-// squareFootage provenance off the lookup's field-evidence trail. Missing
-// evidence (legacy cached rows) counts as county when the parcel matched —
-// the pre-evidence behavior; explicit non-county evidence downgrades.
+// squareFootage provenance off the lookup's field-evidence trail. County and
+// tech-VERIFIED overrides both count as authoritative (a saved field-verify
+// correction supersedes the stale county roll); missing evidence (legacy
+// cached rows) counts as county when the parcel matched — the pre-evidence
+// behavior. Explicit AI/listing evidence downgrades.
 function sqftEvidenceIsCounty(propertyRecord) {
   const evidence = propertyRecord?._fieldEvidence?.squareFootage;
   if (!evidence) return true;
-  return evidence.sourceType === 'county';
+  return evidence.sourceType === 'county' || evidence.sourceType === 'verified';
 }
 
 function normalizeParcelView(propertyRecord) {
@@ -233,7 +235,12 @@ function normalizeParcelView(propertyRecord) {
     // sqft is AI/listing evidence, which must stay a lookup-estimate. Legacy
     // cached rows without field evidence keep the parcel-matched behavior.
     livingAreaSqft: (!vacantEvidence && countyBacked)
-      ? (positive(parcel.livingAreaSqft)
+      // A tech-VERIFIED override supersedes everything — including the
+      // aggregate parcel figure, which stays the stale county value after a
+      // field-verify correction.
+      ? ((propertyRecord._fieldEvidence?.squareFootage?.sourceType === 'verified'
+        ? positive(propertyRecord.squareFootage) : null)
+        || positive(parcel.livingAreaSqft)
         || (sqftEvidenceIsCounty(propertyRecord) ? positive(propertyRecord.squareFootage) : null))
       : null,
     landUseDescription: vacantEvidence?.landUseDescription

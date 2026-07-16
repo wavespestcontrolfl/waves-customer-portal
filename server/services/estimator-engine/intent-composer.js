@@ -103,20 +103,27 @@ function buildUserContent(context, propertyFacts) {
   // ambiguous address would draft the wrong property. The name stays so the
   // model can note the mismatch.
   const ambiguous = context.customerPhoneAmbiguous === true;
+  // An AMBIGUOUS shared-phone profile contributes ONLY its name (so the
+  // model can note the mismatch) — tier, lawn type, property type, and
+  // company would steer category/track/option choices toward the wrong
+  // person on a shared line, and those intent fields drive pricing.
   const profile = context.customer
-    ? {
-      type: context.isExistingCustomer ? 'existing_customer' : 'lead_profile',
-      ...(ambiguous ? { ambiguous_shared_phone: true } : {}),
-      name: `${context.customer.first_name || ''} ${context.customer.last_name || ''}`.trim() || null,
-      email: ambiguous ? null : (context.customer.email || null),
-      address: ambiguous
-        ? null
-        : ([context.customer.address_line1, context.customer.city, context.customer.zip].filter(Boolean).join(', ') || null),
-      waveguard_tier: context.customer.waveguard_tier || null,
-      lawn_type: context.customer.lawn_type || null,
-      property_type: context.customer.property_type || null,
-      company_name: context.customer.company_name || null,
-    }
+    ? (ambiguous
+      ? {
+        type: 'unverified_shared_phone_profile',
+        ambiguous_shared_phone: true,
+        name: `${context.customer.first_name || ''} ${context.customer.last_name || ''}`.trim() || null,
+      }
+      : {
+        type: context.isExistingCustomer ? 'existing_customer' : 'lead_profile',
+        name: `${context.customer.first_name || ''} ${context.customer.last_name || ''}`.trim() || null,
+        email: context.customer.email || null,
+        address: [context.customer.address_line1, context.customer.city, context.customer.zip].filter(Boolean).join(', ') || null,
+        waveguard_tier: context.customer.waveguard_tier || null,
+        lawn_type: context.customer.lawn_type || null,
+        property_type: context.customer.property_type || null,
+        company_name: context.customer.company_name || null,
+      })
     : null;
 
   const lead = context.lead
