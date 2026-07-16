@@ -216,6 +216,18 @@ describe('check 2 — saved method auto-secures instead of texting', () => {
     expect(inserts).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
+
+  test('auto-secure heals a stranded pending row to satisfied (page shows secured)', async () => {
+    mockFindConsentedChargeableCard.mockResolvedValueOnce(SAVED);
+    mockTableHandlers.appointment_card_requests.returning = () => [];
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.action).toBe('auto_secured');
+    const update = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'satisfied');
+    expect(update).toMatchObject({ payment_method_id: 'pm-row-1' });
+  });
 });
 
 describe('checks 3+4 — dedup and the one-text-ever claim', () => {
@@ -315,8 +327,8 @@ describe('the send', () => {
     expect(dels).toHaveLength(0);
   });
 
-  test('a post-claim THROW releases the claim (the one text stays available)', async () => {
-    mockSendCustomerMessage.mockRejectedValueOnce(new Error('provider exploded'));
+  test('an insert THROW (pre-provider) releases the claim — certainly unsent', async () => {
+    mockTableHandlers.appointment_card_requests.returning = () => { throw new Error('db down'); };
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.action).toBe('skipped');
     expect(res.reason).toMatch(/^error:/);
@@ -325,6 +337,46 @@ describe('the send', () => {
       .map(([, patch]) => patch);
     expect(ssUpdates.some((p) => p.card_link_sent_at instanceof Date)).toBe(true);
     expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(true);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a send THROW is an UNCERTAIN outcome — claim kept, maybe-sent marker stamped', async () => {
+    mockSendCustomerMessage.mockRejectedValueOnce(new Error('audit crashed after provider accept'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_outcome_uncertain');
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    // Claim consumed and NEVER released — two bearer links is the worse failure.
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(false);
+    // The maybe-sent marker blocks the stale-claim lease from re-texting.
+    const reqUpdates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(reqUpdates.some((p) => p.sent_at instanceof Date)).toBe(true);
+  });
+
+  test('a stale send claim with no sent marker is reclaimed by one retrier', async () => {
+    const oldStamp = new Date(Date.now() - 60 * 60 * 1000);
+    mockTableHandlers.scheduled_services = {
+      first: () => ({ ...VISIT, card_link_sent_at: oldStamp }),
+      // The whereNull claim loses (stamp already set); the value-guarded
+      // reclaim wins.
+      update: (chain) => (chain.calls.some(([op]) => op === 'whereNull') ? 0 : 1),
+    };
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.action).toBe('sent');
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a FRESH claim (not stale) never gets adopted', async () => {
+    mockTableHandlers.scheduled_services = {
+      first: () => ({ ...VISIT, card_link_sent_at: new Date() }),
+      update: (chain) => (chain.calls.some(([op]) => op === 'whereNull') ? 0 : 1),
+    };
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('link_already_sent');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('blocked send releases the claim and the pending row', async () => {
@@ -532,6 +584,31 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     expect(mockSavePaymentMethod).not.toHaveBeenCalled();
   });
 
+  test('a stale completing claim (dead worker) is adopted by one retrier', async () => {
+    const oldStamp = new Date(Date.now() - 60 * 60 * 1000);
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      return reads === 1 ? { ...REQUEST } : { ...REQUEST, status: 'completing', updated_at: oldStamp };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    expect(mockSavePaymentMethod).toHaveBeenCalled();
+  });
+
+  test('a FRESH completing claim stays in-progress (never adopted)', async () => {
+    let reads = 0;
+    mockTableHandlers.appointment_card_requests.first = () => {
+      reads += 1;
+      return reads === 1 ? { ...REQUEST } : { ...REQUEST, status: 'completing', updated_at: new Date() };
+    };
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'completion_in_progress' });
+    expect(mockSavePaymentMethod).not.toHaveBeenCalled();
+  });
+
   test('a side-effect failure reverts the claim so retries can complete', async () => {
     mockSavePaymentMethod.mockRejectedValueOnce(new Error('stripe down'));
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
@@ -672,6 +749,13 @@ describe('loadSecureCardPageData — page state machine', () => {
 
   test('cancelled or past visit → closed (no intent minted)', async () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, status: 'cancelled' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('closed');
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('a payer attached after the link was minted → closed before the form renders', async () => {
+    mockResolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-3' });
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('closed');
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();

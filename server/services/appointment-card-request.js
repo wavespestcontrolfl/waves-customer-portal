@@ -47,6 +47,11 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
 const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
+// Lease for both claim mechanics (the visit's card_link_sent_at send claim
+// and the request row's pending → completing completion claim): a claim
+// older than this with no durable outcome marker belongs to a dead worker
+// and may be adopted by exactly one retrier (age-guarded atomic UPDATE).
+const STALE_CLAIM_MS = 10 * 60 * 1000;
 
 function isAppointmentCardRequestEnabled() {
   const flag = process.env.APPOINTMENT_CARD_REQUEST;
@@ -141,7 +146,7 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
     logger.warn(`[appt-card-request] auto-secure enrollment failed for visit ${visit.id} — left retryable: ${err.message}`);
     return skip('enrollment_failed');
   }
-  await db('appointment_card_requests')
+  const inserted = await db('appointment_card_requests')
     .insert({
       scheduled_service_id: visit.id,
       customer_id: visit.customer_id,
@@ -152,7 +157,23 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       completed_at: new Date(),
     })
     .onConflict('scheduled_service_id')
-    .ignore();
+    .ignore()
+    .returning('id');
+  if (!inserted || !inserted.length) {
+    // A pending row already exists (abandoned inline/SMS link) — flip it
+    // to satisfied (Codex #2771 r4) or the /secure page keeps rendering a
+    // live card form for a visit the saved method already covers.
+    // Pending-only: a completed/satisfied row is already terminal.
+    await db('appointment_card_requests')
+      .where({ scheduled_service_id: visit.id, status: 'pending' })
+      .update({
+        status: 'satisfied',
+        payment_method_id: savedMethod.id,
+        stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+  }
   return { requested: false, action: 'auto_secured', reason: 'saved_method_satisfied' };
 }
 
@@ -283,11 +304,35 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
 
     // 4. One text, ever — atomic claim on the visit row.
     const stamp = new Date();
-    const claimed = await db('scheduled_services')
+    let claimed = await db('scheduled_services')
       .where({ id: visit.id })
       .whereNull('card_link_sent_at')
       .update({ card_link_sent_at: stamp, updated_at: stamp });
-    if (claimed !== 1) return skip('link_already_sent');
+    if (claimed !== 1) {
+      // Stale-claim lease (Codex #2771 r4): a worker that died between
+      // this claim and the send leaves the stamp set with no text out —
+      // and every later trigger would skip forever. The request row's
+      // sent_at is the durable outcome marker (stamped on success AND on
+      // uncertain outcomes below), so an old stamp with no marker may be
+      // adopted by exactly one retrier via the value-guarded UPDATE. A
+      // row whose token differs from the one this run rendered means a
+      // concurrent run owns it — never adopt that.
+      const current = await db('scheduled_services')
+        .where({ id: visit.id })
+        .first('card_link_sent_at');
+      const row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: visit.id })
+        .first('status', 'token', 'sent_at');
+      const priorStamp = current?.card_link_sent_at ? new Date(current.card_link_sent_at) : null;
+      const stale = priorStamp && (Date.now() - priorStamp.getTime()) > STALE_CLAIM_MS;
+      const rowBlocks = row && (row.sent_at || row.status !== 'pending' || (row.token && row.token !== token));
+      if (!stale || rowBlocks) return skip('link_already_sent');
+      claimed = await db('scheduled_services')
+        .where({ id: visit.id, card_link_sent_at: priorStamp })
+        .update({ card_link_sent_at: stamp, updated_at: stamp });
+      if (claimed !== 1) return skip('link_already_sent');
+      logger.warn(`[appt-card-request] reclaimed stale send claim for visit ${visit.id}`);
+    }
 
     const releaseClaim = async () => {
       try {
@@ -308,7 +353,10 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       }
     };
 
-    let result;
+    // Fresh rows insert WITHOUT sent_at — sent_at is the durable "a text
+    // (probably) left" marker, stamped only once the provider outcome is
+    // known or uncertain, so the stale-claim lease above can tell
+    // died-before-send from sent (Codex #2771 r4).
     try {
       if (!reuseToken) {
         const inserted = await db('appointment_card_requests')
@@ -318,7 +366,6 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
             status: 'pending',
             trigger,
             token,
-            sent_at: stamp,
           })
           .onConflict('scheduled_service_id')
           .ignore()
@@ -329,6 +376,21 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           return skip('request_exists');
         }
       }
+    } catch (insertErr) {
+      // Certainly unsent — nothing reached the provider yet. Release the
+      // claim or the one-text-ever stamp permanently strands the visit
+      // with no card request and no retry (Codex #2771 P1).
+      await releaseClaim();
+      throw insertErr;
+    }
+
+    const markSendOutcome = () => db('appointment_card_requests')
+      .where({ scheduled_service_id: visit.id, status: 'pending' })
+      .update({ sent_at: stamp, updated_at: stamp })
+      .catch((err) => logger.warn(`[appt-card-request] sent_at marker failed for visit ${visit.id}: ${err.message}`));
+
+    let result;
+    try {
       result = await sendCustomerMessage({
         to: smsTo,
         body,
@@ -343,29 +405,25 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
           original_message_type: TEMPLATE_KEY,
         },
       });
-    } catch (postClaimErr) {
-      // A post-claim THROW (row-insert hiccup, an error escaping the send
-      // path) means the text never left — release the claim or the
-      // one-text-ever stamp permanently strands the visit with no card
-      // request and no retry (Codex #2771 P1).
-      await releaseClaim();
-      throw postClaimErr;
+    } catch (sendErr) {
+      // UNCERTAIN outcome (Codex #2771 r4): sendCustomerMessage dispatches
+      // to the provider BEFORE persisting its audit row, so a throw here
+      // can follow a Twilio-ACCEPTED send. Two bearer card links is the
+      // worse failure mode — keep the claim consumed and stamp the
+      // maybe-sent marker so the stale-claim lease never re-texts.
+      logger.error(`[appt-card-request] send outcome UNCERTAIN for visit ${visit.id} — keeping the one-text claim: ${sendErr.message}`);
+      await markSendOutcome();
+      return skip('send_outcome_uncertain');
     }
     if (!result?.sent) {
-      // Blocked or provider-failed: the text never left, so the claim and
-      // the pending row release — a later trigger may retry once.
+      // A definitive not-sent RESULT (policy block, provider rejection
+      // reported as an outcome): the text never left, so the claim and
+      // the fresh pending row release — a later trigger may retry once.
       await releaseClaim();
       return skip(`send_blocked:${result?.code || result?.reason || 'unknown'}`);
     }
 
-    if (reuseToken) {
-      // The reused inline row finally got its text — stamp it for
-      // observability (Phase 4's abandonment queries key on sent state).
-      await db('appointment_card_requests')
-        .where({ scheduled_service_id: visit.id, status: 'pending' })
-        .update({ sent_at: stamp, updated_at: stamp })
-        .catch((err) => logger.warn(`[appt-card-request] sent_at stamp failed for visit ${visit.id}: ${err.message}`));
-    }
+    await markSendOutcome();
     logger.info(`[appt-card-request] secure-card link sent for visit ${visit.id} (trigger ${trigger})`);
     return { requested: true, action: 'sent', reason: 'sent' };
   } catch (err) {
@@ -538,13 +596,29 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   // fresh status and either acks (already done) or retries
   // (completion_in_progress → the webhook branch throws so Stripe's retry
   // schedule re-runs it; the page returns a retryable 409).
-  const claimed = await db('appointment_card_requests')
+  let claimed = await db('appointment_card_requests')
     .where({ id: request.id, status: 'pending' })
     .update({ status: 'completing', updated_at: new Date() });
   if (claimed !== 1) {
-    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status');
+    const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status', 'updated_at');
     if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
-    return { ok: false, code: 'completion_in_progress' };
+    // Stale-claim lease (Codex #2771 r4): a worker killed between the
+    // claim and the completed/revert write strands the row 'completing'
+    // forever, and both retry paths would spin on completion_in_progress.
+    // updated_at is the lease clock — a claim older than the lease is a
+    // dead worker's, and the age-guarded UPDATE lets exactly one retrier
+    // adopt it.
+    if (fresh?.status === 'completing' && fresh.updated_at
+      && (Date.now() - new Date(fresh.updated_at).getTime()) > STALE_CLAIM_MS) {
+      claimed = await db('appointment_card_requests')
+        .where({ id: request.id, status: 'completing' })
+        .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS))
+        .update({ updated_at: new Date() });
+      if (claimed !== 1) return { ok: false, code: 'completion_in_progress' };
+      logger.warn(`[appt-card-request] reclaimed stale completion claim for request ${request.id}`);
+    } else {
+      return { ok: false, code: 'completion_in_progress' };
+    }
   }
   // Any failure below puts the row back so a retry (page re-POST or
   // webhook redelivery) can complete — a stranded 'completing' would ack
@@ -657,6 +731,23 @@ async function loadSecureCardPageData(token) {
     || !LIVE_VISIT_STATUSES.includes(visit.status)
     || (dateOnly && dateOnly < etDateString(new Date()))) {
     return { state: 'closed', ...base };
+  }
+
+  // Payer re-check before rendering the form (Codex #2771 r4 P3): a payer
+  // attached AFTER the link was minted means the homeowner should never be
+  // asked for a card — show "nothing needed" now instead of letting them
+  // enter a card that completion will refuse. Lookup failure renders the
+  // form (completion's own re-check is the enforcement point).
+  try {
+    const PayerService = require('./payer');
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(request.customer_id),
+      scheduledServiceId: String(request.scheduled_service_id),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return { state: 'closed', ...base };
+  } catch (err) {
+    logger.warn(`[appt-card-request] page payer re-check failed — rendering the form (completion enforces): ${err.message}`);
   }
 
   const intent = await createSecureCardSetupIntent(request);
