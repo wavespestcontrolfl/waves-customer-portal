@@ -3148,7 +3148,9 @@ function normalizeCoverageStatus(status, actionTypes = []) {
   if (/\b(follow up|follow-up|return visit)\b/.test(raw)) return 'needs_follow_up';
   if (/\b(skip|skipped|weather)\b/.test(raw)) return 'skipped';
   if (/\b(not serviced|not included)\b/.test(raw)) return 'not_serviced';
-  if (/\b(inspect|inspection|no activity found|entry point found)\b/.test(raw)) return 'inspected';
+  // inspect(?:ed|ion)? — bare \binspect\b never matched the plain status
+  // "inspected" (word boundary fails before "ed"), mirroring service-coverage.js
+  if (/\b(inspect(?:ed|ion)?|no activity found|entry point found)\b/.test(raw)) return 'inspected';
   if (/\b(station checked|device checked|checked|monitor)\b/.test(raw)) return 'checked';
   if (/\b(treat|treated|spot treated)\b/.test(raw)) return 'treated';
   return 'completed';
@@ -3396,14 +3398,18 @@ function serviceCoverageDescription(location, { areaName, status, serviceLine })
   const areaKey = coverageAreaKey(areaName);
   if (status === 'inaccessible') return reason ? `Technician could not access this area because ${reason}.` : 'Technician could not access this area.';
   if (status === 'needs_attention') return 'Technician noted an issue that may need attention.';
+  if (status === 'needs_follow_up') return 'Technician flagged this area for follow-up.';
   if (status === 'skipped') return reason ? `Service was skipped because ${reason}.` : 'Service was skipped for this area.';
+  if (status === 'not_serviced') return 'This area was not serviced on this visit.';
+  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
+  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
+  // mirrors service-coverage.js: inspected/checked never fall through to
+  // the line-specific "…treatment completed" copy
+  if (status === 'inspected' || status === 'checked') return `${areaName} inspected.`;
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'perimeter') return 'Exterior perimeter service completed.';
   if ((serviceLine === 'pest' || serviceLine === 'rodent' || serviceLine === 'mosquito') && areaKey === 'entry_points') return 'Entry points inspected and treated.';
   if (serviceLine === 'lawn') return String(location.status || '').toLowerCase().includes('weed') ? 'Weed control applied.' : 'Lawn treatment completed.';
-  if (serviceLine === 'termite' && (areaKey === 'station' || status === 'checked')) return 'Station checked.';
-  if (serviceLine === 'termite' && status === 'inspected') return 'Inspection completed.';
   if (serviceLine === 'tree_shrub') return 'Plant health treatment completed.';
-  if (status === 'inspected') return `${areaName} inspected.`;
   if (status === 'treated') return `${areaName} treatment completed.`;
   return `${areaName} service completed.`;
 }
@@ -3413,6 +3419,8 @@ function serviceCoverageSummary(items = []) {
     if (item.status === 'inspected' || item.status === 'checked') summary.inspectedCount += 1;
     else if (item.status === 'inaccessible') summary.inaccessibleCount += 1;
     else if (item.status === 'needs_attention' || item.status === 'needs_follow_up') summary.needsAttentionCount += 1;
+    // skipped / not-serviced areas are NOT completed work (mirrors service-coverage.js)
+    else if (item.status === 'skipped' || item.status === 'not_serviced') summary.skippedCount += 1;
     else summary.completedCount += 1;
     return summary;
   }, {
@@ -3420,6 +3428,7 @@ function serviceCoverageSummary(items = []) {
     inspectedCount: 0,
     inaccessibleCount: 0,
     needsAttentionCount: 0,
+    skippedCount: 0,
   });
 }
 
@@ -3820,6 +3829,9 @@ function ServiceCoverageSummary({ summary = {} }) {
     ['Inspected', summary.inspectedCount || 0, 'blue'],
     ['Inaccessible', summary.inaccessibleCount || 0, 'orange'],
     ['Needs Attention', summary.needsAttentionCount || 0, 'orange'],
+    // only when present — the usual four-chip layout is unchanged for
+    // reports with nothing skipped
+    ...(summary.skippedCount ? [['Skipped', summary.skippedCount, 'orange']] : []),
   ];
   return (
     <div className="service-coverage-summary" aria-label="Service coverage summary">
