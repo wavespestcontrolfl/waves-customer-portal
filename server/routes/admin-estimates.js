@@ -1329,6 +1329,17 @@ router.get('/', async (req, res, next) => {
           isCommercialProposal: estData?.proposal?.enabled === true,
           confirmedAppointment,
           automation: leadEstimateAutomationSummary(estData),
+          // Estimator-engine drafts keep their operator review material in
+          // estimate_data (the notes COLUMN is customer-visible via the
+          // public endpoint) — surface it here so the admin list can render
+          // the lane + review reasons.
+          estimatorEngine: estData?.estimatorEngine
+            ? {
+              lane: estData.estimatorEngine.lane || null,
+              laneReasons: estData.estimatorEngine.laneReasons || [],
+              reviewNotes: estData.estimatorEngine.reviewNotes || null,
+            }
+            : null,
           pricingRisk: pricingRiskById.get(e.id) || null,
           riskTypeNeedsReview: commercialRiskTypeReviewNeeded(estData),
           lawnServiceOutline: outlineByEstimateId.get(e.id) || null,

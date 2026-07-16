@@ -59,11 +59,13 @@ function lineRequiresReview(line = {}) {
 }
 
 // ── Engine input ──────────────────────────────────────────────
-function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], addressRegathered = false }) {
-  // A re-gathered address means the quote is for a DIFFERENT property than
-  // the matched profile — its saved turf measurement and property type
-  // describe the old home and must not leak into the new one's pricing.
-  const profileDescribesQuotedProperty = !addressRegathered && !context?.customerPhoneAmbiguous;
+function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false }) {
+  // profileDescribesQuotedProperty is POSITIVELY established by the caller
+  // (the trusted profile's saved address street-matches the final quoted
+  // address) — an extraction-supplied different address never re-gathers,
+  // so absence-of-regather is not proof the profile describes this home.
+  // Only then may the profile's saved turf measurement / property type
+  // steer pricing.
   const isCommercial = intent.is_commercial === true;
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);

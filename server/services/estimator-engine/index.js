@@ -44,13 +44,17 @@ function addressFromContext(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
     // Street-only extractions (city/ZIP nullable in the schema) borrow the
-    // TRUSTED profile's city/ZIP — a bare street would geocode ambiguously
-    // and, because the comparison treats missing city/ZIP as matching, a
-    // composer-completed address would never trigger a re-gather.
+    // TRUSTED profile's city/ZIP — a bare street would geocode ambiguously.
+    // But when the extraction supplies its OWN city (possibly a different
+    // property than the profile), never graft the profile's ZIP onto it —
+    // a mixed "Sarasota, FL 34209" locates the wrong parcel.
     const trusted = (!context.customerPhoneAmbiguous && context.customer) || null;
-    const city = sa.city || trusted?.city || context.lead?.city || null;
-    const stateZip = [sa.state || (city ? 'FL' : null), sa.postal_code || trusted?.zip || context.lead?.zip]
-      .filter(Boolean).join(' ');
+    if (sa.city || sa.postal_code) {
+      return [sa.street_line_1, sa.city, [sa.state || 'FL', sa.postal_code].filter(Boolean).join(' ')]
+        .filter(Boolean).join(', ');
+    }
+    const city = trusted?.city || context.lead?.city || null;
+    const stateZip = [city ? 'FL' : null, trusted?.zip || context.lead?.zip].filter(Boolean).join(' ');
     return [sa.street_line_1, city, stateZip].filter(Boolean).join(', ');
   }
   const leadAddress = context.lead?.address
@@ -393,7 +397,15 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
     if (intent.decision === 'draft' && Object.keys(intent.services || {}).length) {
-      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices, addressRegathered });
+      // The profile's saved measurements may steer pricing ONLY when its
+      // saved address street-matches the property actually being quoted.
+      const quotedAddress = intent.address || result.addressUsed || address;
+      const customerSavedAddress = trustedCustomer?.address_line1
+        ? [trustedCustomer.address_line1, trustedCustomer.city, trustedCustomer.zip].filter(Boolean).join(', ')
+        : null;
+      const profileDescribesQuotedProperty = !addressRegathered
+        && !!(customerSavedAddress && quotedAddress && sameStreetAddress(customerSavedAddress, quotedAddress));
+      engineInput = buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices, profileDescribesQuotedProperty });
       try {
         engineResult = generateEstimateSafely(engineInput);
         totals = deriveTotals(engineResult);

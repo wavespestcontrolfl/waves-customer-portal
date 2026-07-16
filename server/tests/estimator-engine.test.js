@@ -636,27 +636,29 @@ describe('review fixes', () => {
     expect(facts.home.source).toBe(SQFT_SOURCES.NONE);
   });
 
-  test('trusted profile lawn sqft feeds the engine as measured turf, not home sqft', () => {
-    const input = buildEngineInput({
+  test('profile lawn sqft feeds measured turf ONLY when the profile describes the quoted property', () => {
+    const facts = {
+      home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
+    };
+    const matched = buildEngineInput({
       intent: baseIntent(),
-      propertyFacts: {
-        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
-        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
-      },
-      context: { customer: { property_sqft: 6000 }, customerPhoneAmbiguous: false },
+      propertyFacts: facts,
+      context: { customer: { property_sqft: 6000 } },
+      profileDescribesQuotedProperty: true,
     });
-    expect(input.measuredTurfSf).toBe(6000);
-    expect(input.homeSqFt).toBe(2100);
-    const ambiguous = buildEngineInput({
+    expect(matched.measuredTurfSf).toBe(6000);
+    expect(matched.homeSqFt).toBe(2100);
+    // Different quoted property (extraction-supplied address, re-gather, or
+    // ambiguous match) → the saved home's turf/type never leak in.
+    const differentProperty = buildEngineInput({
       intent: baseIntent(),
-      propertyFacts: {
-        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
-        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, rejected: [] },
-      },
-      context: { customer: { property_sqft: 6000, property_type: 'Condo' }, customerPhoneAmbiguous: true },
+      propertyFacts: facts,
+      context: { customer: { property_sqft: 6000, property_type: 'Condo' } },
+      profileDescribesQuotedProperty: false,
     });
-    expect(ambiguous.measuredTurfSf).toBeUndefined();
-    expect(ambiguous.propertyType).toBe('Single Family');
+    expect(differentProperty.measuredTurfSf).toBeUndefined();
+    expect(differentProperty.propertyType).toBe('Single Family');
   });
 
   test('pricing-safe property type keys reach the pest normalizer alias table', () => {
