@@ -59,12 +59,45 @@ async function listRecent(limit) {
   if (!rows.length) console.log('No quote-flavored calls in the last 7 days.');
 }
 
+// PII redaction (AGENTS.md non-card PII logging rule): replays run against
+// REAL production calls, and console output lands in captured logs. Contact
+// fields and addresses are masked unless --reveal is passed explicitly.
+const REVEAL = args.includes('--reveal');
+function mask(value, keepStart = 0) {
+  const s = String(value || '');
+  if (!s) return '(none)';
+  if (REVEAL) return s;
+  return `${s.slice(0, keepStart)}…[${s.length} chars redacted]`;
+}
+function redactResult(result) {
+  if (REVEAL) return result;
+  const clone = JSON.parse(JSON.stringify(result));
+  if (clone.addressUsed) clone.addressUsed = mask(clone.addressUsed, 4);
+  if (clone.intent) {
+    for (const field of ['customer_name', 'customer_phone', 'customer_email', 'address']) {
+      if (clone.intent[field]) clone.intent[field] = mask(clone.intent[field], 2);
+    }
+    for (const e of clone.intent.evidence || []) {
+      if (e.quote) e.quote = mask(e.quote, 6);
+    }
+  }
+  if (clone.propertyFacts?.countyParcel) {
+    const p = clone.propertyFacts.countyParcel;
+    if (p.parcelId) p.parcelId = mask(p.parcelId, 0);
+    if (p.subdivision) p.subdivision = mask(p.subdivision, 0);
+  }
+  if (clone.engineInput?.address) clone.engineInput.address = mask(clone.engineInput.address, 4);
+  delete clone.engineResult;
+  return clone;
+}
+
 function printSummary(result) {
   const facts = result.propertyFacts || {};
   console.log('\n══ ESTIMATOR REPLAY (dryRun — nothing written) ══');
+  if (!REVEAL) console.log('(PII masked — pass --reveal for full values; unsuitable for captured logs)');
   console.log(`Lane: ${String(result.lane || 'unknown').toUpperCase()}`);
   if (result.reasons?.length) console.log(`Reasons:\n${result.reasons.map((r) => `  - ${r}`).join('\n')}`);
-  console.log(`Address used: ${result.addressUsed || '(none)'}`);
+  console.log(`Address used: ${mask(result.addressUsed, 4)}`);
   if (facts.home) console.log(`Home/building sqft: ${facts.home.value ?? '(unresolved)'} [${facts.home.source}]${facts.home.sampleCount ? ` n=${facts.home.sampleCount}` : ''}`);
   if (facts.lot) console.log(`Lot sqft: ${facts.lot.value ?? '(unresolved)'} [${facts.lot.source}]`);
   if (facts.newConstruction) console.log('New construction: YES');
@@ -108,7 +141,7 @@ function printSummary(result) {
   });
 
   if (args.includes('--json')) {
-    console.log(JSON.stringify(result, null, 2));
+    console.log(JSON.stringify(redactResult(result), null, 2));
   } else {
     printSummary(result);
   }

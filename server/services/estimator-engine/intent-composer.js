@@ -43,7 +43,7 @@ SERVICE VOCABULARY (the only keys allowed in "services"):
 - flea: flea/tick treatment program.
 - bedBug: bed bug treatment. Options: method (CHEMICAL|HEAT), rooms (1-12), severity (light|moderate|severe), prepStatus (ready|partial|poor|refused — how prepared the home is for treatment), occupancyType (singleFamily|apartment|hotel|studentHousing — default singleFamily for a house).
 - rodentBait: exterior rodent bait-station program. Rodent TRAPPING/exclusion/remediation is out of scope — skip with reason.
-- stinging: wasp/hornet/bee treatment. Options: species (PAPER_WASP|YELLOW_JACKET|HORNET|HONEY_BEE), tier (1-3), removal (NONE | SMALL small-nest removal | LARGE large-nest removal | HONEYCOMB honeycomb extraction | RELOCATE live bee relocation — pick the specific removal discussed, never leave a discussed removal at NONE).
+- stinging: wasp/hornet/bee treatment. Options: species (PAPER_WASP|YELLOW_JACKET|HORNET|HONEY_BEE), tier (1-3), removal (NONE | SMALL small-nest removal | LARGE large-nest removal | HONEYCOMB honeycomb extraction — pick the specific removal discussed, never leave a discussed removal at NONE). LIVE BEE RELOCATION is out of scope — skip with reason.
 
 COMMERCIAL: set is_commercial=true and category=COMMERCIAL for business properties. Choose commercial_risk_type from: ${COMMERCIAL_RISK_TYPE_VALUES.join(', ')}. Set commercial_subtype (e.g. restaurant, office, warehouse). Commercial pest/lawn/tree/mosquito still use the same service keys — the engine routes them.
 

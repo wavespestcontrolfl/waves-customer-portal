@@ -90,6 +90,22 @@ describe('intent schema', () => {
     expect(validateIntent(intent).valid).toBe(false);
   });
 
+  test('category and is_commercial must agree', () => {
+    const contradictory = baseIntent();
+    contradictory.is_commercial = true; // category stays RESIDENTIAL
+    expect(validateIntent(contradictory).valid).toBe(false);
+    const agreeing = baseIntent();
+    agreeing.is_commercial = true;
+    agreeing.category = 'COMMERCIAL';
+    expect(validateIntent(agreeing).valid).toBe(true);
+  });
+
+  test('live bee relocation is not an autonomous removal option', () => {
+    const intent = baseIntent();
+    intent.services = { stinging: { species: 'HONEY_BEE', tier: 2, removal: 'RELOCATE' } };
+    expect(validateIntent(intent).valid).toBe(false);
+  });
+
   test('a skip with empty evidence is still valid', () => {
     const intent = baseIntent();
     intent.decision = 'skip';
@@ -411,6 +427,16 @@ describe('review fixes', () => {
     ];
     const result = ctxPriv.pickCustomerMatch(rows, { caller: { first_name: 'Sam', last_name: 'Visitor' } });
     expect(result.ambiguous).toBe(true);
+  });
+
+  test('shared phone: MULTIPLE rows with the same full name (multi-property customer) stay ambiguous', () => {
+    const rows = [
+      { id: 'home-a', first_name: 'Sam', last_name: 'Caller' },
+      { id: 'home-b', first_name: 'Sam', last_name: 'Caller' },
+    ];
+    const result = ctxPriv.pickCustomerMatch(rows, { caller: { first_name: 'Sam', last_name: 'Caller' } });
+    expect(result.ambiguous).toBe(true);
+    expect(result.customer.id).toBe('home-a');
   });
 
   test('property type resolves from lookup record, then extraction', () => {

@@ -81,8 +81,11 @@ const SERVICE_OPTION_SCHEMAS = {
       species: { enum: ['PAPER_WASP', 'YELLOW_JACKET', 'HORNET', 'HONEY_BEE'] },
       tier: { type: 'integer', minimum: 1, maximum: 3 },
       // priceStingingInsect's removal add-on vocab — a generic 'NEST' fell
-      // through with removalPrice = 0 (silent underquote).
-      removal: { enum: ['NONE', 'SMALL', 'LARGE', 'HONEYCOMB', 'RELOCATE'] },
+      // through with removalPrice = 0 (silent underquote). RELOCATE (live
+      // bee relocation) is deliberately absent: relocation is specialist,
+      // out-of-scope work per the skip rules — pricing it here contradicted
+      // that policy.
+      removal: { enum: ['NONE', 'SMALL', 'LARGE', 'HONEYCOMB'] },
     },
     additionalProperties: false,
   },
@@ -153,10 +156,18 @@ const INTENT_SCHEMA = {
   // A draft with no supporting quotes defeats the operator-verification
   // design (the notes' evidence section is the 10-second review path) — a
   // schema-valid `evidence: []` draft must fail and trigger the repair retry.
+  // category and is_commercial must also AGREE: pricing branches on
+  // is_commercial while persistence/downstream flows read category, so a
+  // contradictory pair would store a commercial price as residential.
   allOf: [
     {
       if: { properties: { decision: { const: 'draft' } } },
       then: { properties: { evidence: { type: 'array', minItems: 1 } } },
+    },
+    {
+      if: { properties: { is_commercial: { const: true } } },
+      then: { properties: { category: { const: 'COMMERCIAL' } } },
+      else: { properties: { category: { const: 'RESIDENTIAL' } } },
     },
   ],
 };

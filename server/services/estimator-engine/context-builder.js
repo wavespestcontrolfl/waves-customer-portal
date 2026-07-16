@@ -85,14 +85,17 @@ function pickCustomerMatch(rows, extraction) {
   // FULL-name agreement: the last name must match, and when both sides carry
   // a first name it must match too — a same-first-name-different-last-name
   // row on a shared line is a different person, not a confident match.
-  const byName = rows.find((r) => {
+  // MULTIPLE rows matching the same full name (one customer, several
+  // properties) are still ambiguous — picking the newest would green-draft
+  // the wrong property.
+  const byName = rows.filter((r) => {
     const last = String(r.last_name || '').trim().toLowerCase();
     const first = String(r.first_name || '').trim().toLowerCase();
     if (!callerLast || last !== callerLast) return false;
     return !callerFirst || !first || first === callerFirst;
   });
-  if (byName) return { customer: byName, ambiguous: false };
-  return { customer: rows[0], ambiguous: true };
+  if (byName.length === 1) return { customer: byName[0], ambiguous: false };
+  return { customer: byName[0] || rows[0], ambiguous: true };
 }
 
 async function loadCustomerByPhone(phone, extraction) {
